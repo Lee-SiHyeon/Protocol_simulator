@@ -72,7 +72,34 @@ def load_tcs(conn):
     return [dict(zip(cols, r)) for r in rows]
 
 
-def build_html(tcs):
+def load_steps(conn):
+    """tc_steps 테이블 → tc_id별 딕셔너리 {tc_id: [steps]}"""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT tc_id, step_no, from_entity, to_entity, message, direction, layer,
+               timer_start, timer_stop, note
+        FROM tc_steps
+        ORDER BY tc_id, step_no
+    """)
+    steps = {}
+    for row in cur.fetchall():
+        tc_id = row[0]
+        step = {
+            'no': row[1],
+            'from': row[2],
+            'to': row[3],
+            'msg': row[4],
+            'dir': row[5],
+            'layer': row[6],
+            'timerStart': row[7],
+            'timerStop': row[8],
+            'note': row[9],
+        }
+        steps.setdefault(tc_id, []).append(step)
+    return steps
+
+
+def build_html(tcs, steps=None):
     # 세대/카테고리 집계
     gen_counts = {}
     cat_counts = {}
@@ -84,6 +111,9 @@ def build_html(tcs):
         gen_counts[g] = gen_counts.get(g, 0) + 1
         cat_counts[c] = cat_counts.get(c, 0) + 1
 
+    if steps is None:
+        steps = {}
+
     # TC 데이터 JSON (검색/필터용)
     tc_json = json.dumps([
         {
@@ -94,6 +124,7 @@ def build_html(tcs):
             'spec': t['conf_spec'],
             'err': bool(t['is_error_case']),
             'auth': t['usim_interface'],
+            'steps': steps.get(t['id'], []),
         }
         for t in tcs
     ], ensure_ascii=False)
@@ -136,6 +167,8 @@ def build_html(tcs):
 
     total = len(tcs)
     with_title = sum(1 for t in tcs if t['short_name'])
+    total_steps = sum(len(v) for v in steps.values())
+    tc_with_steps = len(steps)
 
     return f'''<!DOCTYPE html>
 <html lang="ko">
@@ -209,8 +242,34 @@ input[type=text]::placeholder {{ color: var(--text2); }}
 .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
 .info-item label {{ font-size: 0.75rem; color: var(--text2); display: block; margin-bottom: 4px; }}
 .info-item span {{ font-size: 0.875rem; }}
-.steps-title {{ font-weight: 700; margin-bottom: 12px; color: var(--text2); font-size: 0.875rem; }}
+/* Steps sequence */
+.seq-wrap {{ margin-top: 8px; }}
+.seq-entities {{ display: flex; gap: 0; margin-bottom: 0; }}
+.seq-entity {{ flex: 1; text-align: center; font-size: 0.7rem; font-weight: 700; padding: 6px 4px;
+               background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }}
+.seq-entity.ue {{ background: #1e3a5f; color: #93c5fd; }}
+.seq-entity.enb {{ background: #1a3a1a; color: #86efac; }}
+.seq-entity.core {{ background: #3a1a1a; color: #fca5a5; }}
+.seq-rows {{ }}
+.seq-row {{ display: flex; align-items: center; gap: 4px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); position: relative; }}
+.seq-row:hover {{ background: rgba(255,255,255,0.04); border-radius: 4px; }}
+.seq-stepno {{ font-size: 0.65rem; color: var(--text2); min-width: 40px; text-align: right; padding-right: 6px; flex-shrink: 0; }}
+.seq-arrow {{ flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }}
+.seq-line {{ flex: 1; height: 1px; background: var(--border); position: relative; }}
+.seq-line.dl {{ background: linear-gradient(90deg, #3b82f6, #60a5fa); }}
+.seq-line.ul {{ background: linear-gradient(90deg, #10b981, #34d399); }}
+.seq-line.int {{ background: var(--bg3); border-top: 1px dashed var(--border); }}
+.seq-arrowhead {{ font-size: 0.8rem; color: inherit; }}
+.seq-msg {{ font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }}
+.seq-msg.dl {{ color: #60a5fa; }}
+.seq-msg.ul {{ color: #34d399; }}
+.seq-msg.int {{ color: var(--text2); font-style: italic; }}
+.seq-note {{ font-size: 0.65rem; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; cursor: help; }}
+.seq-timer {{ font-size: 0.65rem; background: #fbbf24; color: #000; border-radius: 3px; padding: 0 4px; margin-left: 4px; }}
+.steps-title {{ font-weight: 700; margin-bottom: 12px; color: var(--text2); font-size: 0.875rem; display: flex; justify-content: space-between; align-items: center; }}
+.steps-badge {{ font-size: 0.7rem; background: var(--bg3); padding: 2px 8px; border-radius: 10px; }}
 .step-placeholder {{ color: var(--text2); font-size: 0.875rem; padding: 16px; background: var(--bg); border-radius: 6px; text-align: center; }}
+.no-steps {{ color: var(--text2); font-size: 0.8rem; padding: 12px; text-align: center; background: var(--bg); border-radius: 6px; }}
 </style>
 </head>
 <body>
@@ -224,6 +283,8 @@ input[type=text]::placeholder {{ color: var(--text2); }}
   <div class="stat"><div class="stat-num">{total}</div><div class="stat-label">전체 TC</div></div>
   <div class="stat"><div class="stat-num">{with_title}</div><div class="stat-label">제목 확보</div></div>
   <div class="stat"><div class="stat-num">{error_count}</div><div class="stat-label">에러 케이스</div></div>
+  <div class="stat"><div class="stat-num">{tc_with_steps}</div><div class="stat-label">시퀀스 있는 TC</div></div>
+  <div class="stat"><div class="stat-num">{total_steps}</div><div class="stat-label">총 스텝 수</div></div>
   <div class="stat"><div class="stat-num">{gen_counts.get('4G', 0)}</div><div class="stat-label">4G LTE</div></div>
   <div class="stat"><div class="stat-num">{gen_counts.get('5G', 0)}</div><div class="stat-label">5G NR SA</div></div>
   <div class="stat"><div class="stat-num">{gen_counts.get('5G-NSA', 0)}</div><div class="stat-label">5G EN-DC</div></div>
@@ -263,7 +324,10 @@ input[type=text]::placeholder {{ color: var(--text2); }}
     </div>
     <div class="modal-spec" id="modalSpec"></div>
     <div class="info-grid" id="modalInfo"></div>
-    <div class="steps-title">메시지 시퀀스</div>
+    <div class="steps-title">
+      메시지 시퀀스
+      <span class="steps-badge" id="stepsCountBadge"></span>
+    </div>
     <div id="modalSteps"></div>
   </div>
 </div>
@@ -381,11 +445,61 @@ function showTcDetail(id) {{
     `<div class="info-item"><label>${{l}}</label><span>${{v}}</span></div>`
   ).join('');
   
-  document.getElementById('modalSteps').innerHTML =
-    `<div class="step-placeholder">메시지 시퀀스 데이터를 로드하려면 tc_steps 테이블을 채워야 합니다.<br>
-     <code style="font-size:0.8rem;color:var(--accent)">python tools/extract_procedures.py</code> 실행 후 재생성하세요.</div>`;
+  // 메시지 시퀀스 렌더링
+  const stepsEl = document.getElementById('modalSteps');
+  const badgeEl = document.getElementById('stepsCountBadge');
+  const steps = tc.steps || [];
+  
+  if (steps.length === 0) {{
+    badgeEl.textContent = '0 steps';
+    stepsEl.innerHTML = '<div class="no-steps">이 TC의 시퀀스 데이터가 없습니다.<br><small>공통 절차 참조 또는 파싱 불가 케이스일 수 있습니다.</small></div>';
+  }} else {{
+    badgeEl.textContent = `${{steps.length}} steps`;
+    stepsEl.innerHTML = renderSteps(steps);
+  }}
   
   document.getElementById('modalOverlay').classList.add('open');
+}}
+
+function renderSteps(steps) {{
+  // 참여 엔티티 파악
+  const entities = [];
+  const seen = new Set();
+  steps.forEach(s => {{
+    if (s.from && !seen.has(s.from)) {{ entities.push(s.from); seen.add(s.from); }}
+    if (s.to && !seen.has(s.to)) {{ entities.push(s.to); seen.add(s.to); }}
+  }});
+  
+  // 엔티티 헤더
+  const entityHeader = entities.map(e => {{
+    const cls = e.includes('UE') ? 'ue' : e.includes('gNB') || e.includes('eNB') ? 'enb' : 'core';
+    return `<div class="seq-entity ${{cls}}">${{e}}</div>`;
+  }}).join('');
+
+  // 스텝 행
+  const rows = steps.map(s => {{
+    const dir = s.dir || 'int';
+    const dirLabel = dir === 'dl' ? '▼' : dir === 'ul' ? '▲' : '•';
+    const dirColor = dir === 'dl' ? '#60a5fa' : dir === 'ul' ? '34d399' : '';
+    const timerBadge = s.timerStart ? `<span class="seq-timer">⏱ ${{s.timerStart}}</span>` : 
+                       s.timerStop ? `<span class="seq-timer" style="background:#6b7280;color:#fff">⏹ ${{s.timerStop}}</span>` : '';
+    const note = s.note ? `<span class="seq-note" title="${{s.note.replace(/"/g,'&quot;')}}">${{s.note.slice(0,80)}}${{s.note.length>80?'…':''}}</span>` : '';
+    const msg = (s.msg || '').replace(/_/g, ' ');
+    
+    return `<div class="seq-row">
+      <span class="seq-stepno">${{s.no}}</span>
+      <div class="seq-arrow">
+        <span class="seq-msg ${{dir}}">${{dirLabel}} ${{msg || '—'}}</span>
+        ${{timerBadge}}
+        ${{note}}
+      </div>
+    </div>`;
+  }}).join('');
+
+  return `<div class="seq-wrap">
+    <div class="seq-entities">${{entityHeader}}</div>
+    <div class="seq-rows">${{rows}}</div>
+  </div>`;
 }}
 
 function closeModal(e) {{
@@ -412,9 +526,10 @@ def main():
 
     conn = sqlite3.connect(DB_PATH)
     tcs = load_tcs(conn)
+    steps = load_steps(conn)
     conn.close()
 
-    html = build_html(tcs)
+    html = build_html(tcs, steps)
 
     with open(OUT_PATH, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -422,6 +537,7 @@ def main():
     size_kb = os.path.getsize(OUT_PATH) // 1024
     print(f"✅ index.html 생성 완료")
     print(f"   TC 수: {len(tcs)}개")
+    print(f"   시퀀스 있는 TC: {len(steps)}개 ({sum(len(v) for v in steps.values())}개 스텝)")
     print(f"   파일 크기: {size_kb}KB")
     print(f"   경로: {OUT_PATH}")
 

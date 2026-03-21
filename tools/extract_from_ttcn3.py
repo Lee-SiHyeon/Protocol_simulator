@@ -40,6 +40,53 @@ TESTSUITE_CONFIGS = [
         'generation': '3G',
         'suffix_strip': '',        # TC_12_2_1_13 → 34123-1-12.2.1.13
     },
+    # TS 34.229-3 — IMS/VoLTE 전용 TTCN-3 ATS
+    {
+        'path': 'specs/34229-3/34229-3-i10_TTCN3/34229-3-i10_TTCN3_IMS_EUTRA/IMS_Testsuite_EUTRA.ttcn',
+        'spec_prefix': '34229-1-EUTRA',
+        'generation': 'IMS-LTE',
+        'suffix_strip': '',
+        'category_override': 'IMS',
+    },
+    {
+        'path': 'specs/34229-3/34229-3-i10_TTCN3/34229-3-i10_TTCN3_IMS_NR5GC/IMS_Testsuite_NR5GC.ttcn',
+        'spec_prefix': '34229-1-NR5GC',
+        'generation': 'IMS-NR',
+        'suffix_strip': '',
+        'category_override': 'IMS',
+    },
+    {
+        'path': 'specs/34229-3/34229-3-i10_TTCN3/34229-3-i10_TTCN3_IMS_IRAT/IMS_IRAT_Testsuite.ttcn',
+        'spec_prefix': '34229-1-IRAT',
+        'generation': 'IMS-IRAT',
+        'suffix_strip': '',
+        'category_override': 'IMS',
+    },
+    {
+        'path': 'specs/34229-3/34229-3-i10_TTCN3/34229-3-i10_TTCN3_IMS_WLAN/IMS_Testsuite_WLAN.ttcn',
+        'spec_prefix': '34229-1-WLAN',
+        'generation': 'IMS-WLAN',
+        'suffix_strip': '',
+        'category_override': 'IMS',
+    },
+    # TS 36.579-5 — MCPTT/MCS (공공안전)
+    {
+        'path': 'specs/36579-5/36579-5-i10_TTCN3/36579-5-i10_TTCN3_MCX_IPCAN/MCX_Testsuite_IPCAN.ttcn',
+        'spec_prefix': '36579-1',
+        'generation': 'MCPTT',
+        'suffix_strip': '',
+        'category_override': 'MCPTT',
+        'tc_pattern': r'^\s*testcase\s+(TC_[\w]+)\s*\(',   # TC_5_1_MCPTT 형식
+    },
+    # TS 37.571-4 — Positioning
+    {
+        'path': 'specs/37571-4/37571-4-i10_TTCN3/37571-4-i10_TTCN3_POS/POS_Testsuite.ttcn',
+        'spec_prefix': '37571-1',
+        'generation': 'Positioning',
+        'suffix_strip': '',
+        'category_override': 'Positioning',
+        'tc_pattern': r'^\s*testcase\s+(TC_[\w]+)\s*\(',   # TC_6_2_1_1_4s 형식 (suffix 4s 등 포함)
+    },
 ]
 
 # 섹션 번호 → 카테고리 분류
@@ -129,10 +176,11 @@ def extract_from_file(cfg: dict, cur: sqlite3.Cursor) -> int:
     spec_prefix = cfg['spec_prefix']
     generation = cfg['generation']
     suffix_strip = cfg['suffix_strip']
+    category_override = cfg.get('category_override')  # IMS/MCPTT/Positioning 등 고정 카테고리
 
     count = 0
-    # testcase TC_xxx() runs on ... 패턴
-    tc_pattern = re.compile(r'^\s*testcase\s+(TC_[\w]+)\s*\(')
+    # 커스텀 패턴 또는 기본 패턴
+    tc_pattern = re.compile(cfg.get('tc_pattern', r'^\s*testcase\s+(TC_[\w]+)\s*\('))
 
     with open(filepath, encoding='utf-8', errors='replace') as f:
         for line in f:
@@ -140,12 +188,17 @@ def extract_from_file(cfg: dict, cur: sqlite3.Cursor) -> int:
             if not m:
                 continue
 
-            raw_id = m.group(1)  # 'TC_8_1_2_2'
+            raw_id = m.group(1)  # 'TC_8_1_2_2' | 'TC_10_1' | 'TC_5_1_MCPTT'
             section = raw_id_to_spec_section(raw_id, suffix_strip)
             tc_id = f'{spec_prefix}-{section}'
-            category = get_category(section, raw_id, generation)
 
-            # 에러 케이스 판별 (TC 이름 기반)
+            # 카테고리 결정
+            if category_override:
+                category = category_override
+            else:
+                category = get_category(section, raw_id, generation)
+
+            # 에러 케이스 판별
             is_error = 1 if ERROR_KEYWORDS.search(raw_id) else 0
 
             # generation override for NTN
@@ -161,7 +214,7 @@ def extract_from_file(cfg: dict, cur: sqlite3.Cursor) -> int:
                 tc_id,
                 gen,
                 category,
-                f'TS {spec_prefix.replace("-ENDC", "")} §{section}',
+                f'TS {spec_prefix.replace("-ENDC","").replace("-EUTRA","").replace("-NR5GC","").replace("-IRAT","").replace("-WLAN","")} §{section}',
                 is_error,
                 raw_id,
                 cfg['path'],

@@ -14,13 +14,19 @@ OUT_PATH = os.path.join(BASE, 'index.html')
 
 # 세대별 색상
 GEN_COLORS = {
-    '2G':     '#6b7280',
-    '3G':     '#7c3aed',
-    '4G':     '#2563eb',
-    '5G':     '#059669',
-    '5G-NSA': '#0891b2',
-    'NTN':    '#dc2626',
-    'USIM':   '#d97706',
+    '2G':         '#6b7280',
+    '3G':         '#7c3aed',
+    '4G':         '#2563eb',
+    '5G':         '#059669',
+    '5G-NSA':     '#0891b2',
+    'NTN':        '#dc2626',
+    'USIM':       '#d97706',
+    'IMS-LTE':    '#e11d48',   # VoLTE (LTE 기반 IMS)
+    'IMS-NR':     '#c026d3',   # VoNR (NR 기반 IMS)
+    'IMS-IRAT':   '#9333ea',   # IMS IRAT
+    'IMS-WLAN':   '#0ea5e9',   # IMS over WLAN
+    'MCPTT':      '#b45309',   # 공공안전 PTT
+    'Positioning':'#16a34a',   # GPS/LTE Positioning
 }
 
 # 카테고리 한국어
@@ -45,6 +51,9 @@ CAT_KO = {
     'eCall':      'eCall',
     'eDRX':       'eDRX',
     'UECap':      'UE 능력',
+    'IMS':        'IMS/VoLTE/VoNR',
+    'MCPTT':      'MCPTT (공공안전)',
+    'Positioning':'Positioning (측위)',
     'Other':      '기타',
     'Unknown':    '미분류',
 }

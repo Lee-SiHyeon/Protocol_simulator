@@ -468,22 +468,21 @@ function renderSteps(steps) {{
   usedSet.forEach(e => {{ if (!ENTITY_ORDER.includes(e)) entities.push(e); }});
 
   // ── SVG 레이아웃 상수 ──────────────────────────────
-  const COL_W   = 200;   // 엔티티 열 폭 (넓게)
+  const COL_W   = 220;   // 엔티티 열 폭
   const PAD_L   = 44;    // 좌측 여백 (스텝 번호)
   const PAD_R   = 20;    // 우측 여백
   const BOX_H   = 48;    // 엔티티 박스 높이
-  const BOX_W   = 120;   // 엔티티 박스 너비
-  // 각 행 레이아웃 (ROW_H 내 y 오프셋):
-  //   +4  : 메시지 라벨 top
-  //   +16 : 메시지 라벨 baseline
-  //   +26 : 레이어 뱃지 top (있을 때만)
-  //   +38 : 화살표 y
-  //   +48 : 행 끝
-  const ROW_H   = 52;    // 스텝 행 높이
+  const BOX_W   = 130;   // 엔티티 박스 너비
+  // 각 행 수직 레이아웃 (완전 분리):
+  //   +14 : 메시지 라벨 baseline  ← 화살표 위
+  //   +28 : 화살표 y
+  //   +40 : 레이어 뱃지 y baseline ← 화살표 아래
+  //   +52 : 행 끝
+  const ROW_H   = 56;    // 스텝 행 높이
   const NOTE_H  = 16;    // 노트 줄 높이
-  const ARROW_Y = 38;    // 행 내 화살표 y
-  const MSG_Y   = 16;    // 행 내 메시지 baseline y
-  const LAYER_Y = 28;    // 행 내 레이어 뱃지 baseline y
+  const ARROW_Y = 28;    // 행 내 화살표 y
+  const MSG_Y   = 14;    // 행 내 메시지 baseline y (화살표 위)
+  const BADGE_Y = 40;    // 행 내 레이어 뱃지 baseline y (화살표 아래)
 
   const N = entities.length;
   const SVG_W = PAD_L + N * COL_W + PAD_R;
@@ -491,8 +490,25 @@ function renderSteps(steps) {{
   // 각 엔티티 중심 x
   const cx = i => PAD_L + i * COL_W + COL_W / 2;
 
+  // int step인지 판별하는 함수
+  const isIntStep = s => {{
+    const fi = entities.indexOf(s.from);
+    const ti = entities.indexOf(s.to);
+    return (s.dir || 'int') === 'int' || fi === ti || fi < 0 || ti < 0;
+  }};
+
   // 각 스텝의 실제 높이 계산
-  const rowHeights = steps.map(s => ROW_H + (s.note ? NOTE_H : 0));
+  // - 메시지/노트 없는 int step: 축소 (32px)
+  // - 노트 있는 step: ROW_H + NOTE_H
+  const rowHeights = steps.map(s => {{
+    const isInt = isIntStep(s);
+    const hasMsg = !!(s.msg || '').trim();
+    const hasNote = !!(s.note || '').trim();
+    // note가 msg와 동일하면 중복 표시 안 함
+    const showNote = hasNote && s.note !== s.msg;
+    if (isInt && !hasMsg && !showNote) return 32;   // 빈 int step
+    return ROW_H + (showNote ? NOTE_H : 0);
+  }});
   const totalRows = rowHeights.reduce((a, b) => a + b, 0);
   const SVG_H = BOX_H + totalRows + 20;
 
@@ -538,8 +554,8 @@ function renderSteps(steps) {{
   steps.forEach((s, idx) => {{
     const rh = rowHeights[idx];
     const ay = y + ARROW_Y;    // 화살표 y
-    const my = y + MSG_Y;      // 메시지 baseline y
-    const ly = y + LAYER_Y;    // 레이어 뱃지 baseline y
+    const my = y + MSG_Y;      // 메시지 baseline y (화살표 위)
+    const by = y + BADGE_Y;    // 레이어 뱃지 baseline y (화살표 아래)
 
     const fromIdx = entities.indexOf(s.from);
     const toIdx   = entities.indexOf(s.to);
@@ -550,40 +566,41 @@ function renderSteps(steps) {{
     const rowFill = idx % 2 === 0 ? 'rgba(255,255,255,0.025)' : 'transparent';
     svg += `<rect x="0" y="${{y}}" width="${{SVG_W}}" height="${{rh}}" fill="${{rowFill}}"/>`;
 
-    // 스텝 번호 (화살표 y에 맞춤)
+    // 스텝 번호
     svg += `<text x="38" y="${{ay + 4}}" text-anchor="end" font-family="monospace"
       font-size="10" fill="#475569">${{s.no}}</text>`;
 
     if (dir === 'int' || fromIdx === toIdx || fromIdx < 0 || toIdx < 0) {{
-      // 내부/unknown → 가로 점선 + 메시지
-      const bx = PAD_L + (fromIdx >= 0 ? fromIdx : 0) * COL_W + 8;
-      svg += `<line x1="${{bx}}" y1="${{ay}}" x2="${{SVG_W - PAD_R}}" y2="${{ay}}"
-        stroke="#334155" stroke-width="1" stroke-dasharray="4,3"/>`;
+      // 내부/unknown → 전폭 점선 (항상 왼쪽에서 오른쪽까지)
+      const lineX1 = PAD_L;
+      const lineX2 = SVG_W - PAD_R;
+      svg += `<line x1="${{lineX1}}" y1="${{ay}}" x2="${{lineX2}}" y2="${{ay}}"
+        stroke="#2d4a5e" stroke-width="1" stroke-dasharray="4,3"/>`;
       if (msg) {{
-        // 메시지는 화살표 위에 표시
-        svg += `<text x="${{bx + 6}}" y="${{ay - 6}}" font-family="'Segoe UI',system-ui,sans-serif"
-          font-size="10" fill="#64748b" font-style="italic">${{escXml(truncate(msg, 55))}}</text>`;
+        // 메시지는 항상 왼쪽 정렬 — 오버플로우 방지
+        const maxIntChars = Math.max(10, Math.floor((SVG_W - PAD_L - PAD_R - 12) / 6.3));
+        svg += `<text x="${{lineX1 + 4}}" y="${{ay - 6}}"
+          font-family="'Segoe UI',system-ui,sans-serif"
+          font-size="10" fill="#94a3b8" font-style="italic">${{escXml(truncate(msg, maxIntChars))}}</text>`;
       }}
     }} else {{
       const x1 = cx(fromIdx);
       const x2 = cx(toIdx);
       const arrowColor = dir === 'dl' ? '#60a5fa' : '#34d399';
       const markerId   = dir === 'dl' ? 'arr-dl' : 'arr-ul';
-      const layerColor = dir === 'dl' ? '#1e3a5f' : '#14532d';
+      const layerBg    = dir === 'dl' ? '#1e3a5f' : '#14532d';
       const spanPx     = Math.abs(x2 - x1);
+      const midX       = (x1 + x2) / 2;
 
-      // 레이어 뱃지 — 화살표 위, 오른쪽에 밀착 배치
-      if (s.layer && s.layer !== 'internal') {{
-        const bw = 36; const bh = 12;
-        const bx = Math.max(x1, x2) - (dir === 'dl' ? bw + 4 : -4);
-        svg += `<rect x="${{bx}}" y="${{ay - bh - 4}}" width="${{bw}}" height="${{bh}}"
-          rx="3" fill="${{layerColor}}" stroke="${{arrowColor}}" stroke-width="0.5"/>`;
-        svg += `<text x="${{bx + bw/2}}" y="${{ay - 4 - 1}}" text-anchor="middle"
-          dominant-baseline="middle"
-          font-family="monospace" font-size="9" font-weight="700" fill="${{arrowColor}}">${{s.layer}}</text>`;
+      // ① 메시지 이름 — 화살표 위 전체 너비 사용
+      if (msg) {{
+        const maxChars = Math.max(6, Math.floor((spanPx - 16) / 6.8));
+        svg += `<text x="${{midX}}" y="${{my}}" text-anchor="middle"
+          font-family="'Segoe UI',system-ui,sans-serif" font-size="11" font-weight="600"
+          fill="${{arrowColor}}">${{escXml(truncate(msg, maxChars))}}</text>`;
       }}
 
-      // 화살표 선 (마커 때문에 끝점 조정)
+      // ② 화살표 선
       const MARKER_INSET = 8;
       const [lx1, lx2] = x1 < x2
         ? [x1, x2 - MARKER_INSET]
@@ -591,28 +608,29 @@ function renderSteps(steps) {{
       svg += `<line x1="${{lx1}}" y1="${{ay}}" x2="${{lx2}}" y2="${{ay}}"
         stroke="${{arrowColor}}" stroke-width="2" marker-end="url(#${{markerId}})"/>`;
 
-      // 메시지 이름 (화살표 위 중앙, 레이어 뱃지 없는 반대편)
-      if (msg) {{
-        // 레이어 뱃지 있으면 왼쪽(dl) / 오른쪽(ul) 공간에 배치
-        const hasLayer = s.layer && s.layer !== 'internal';
-        const midX = hasLayer
-          ? (dir === 'dl' ? (x1 + x2) / 2 - 20 : (x1 + x2) / 2 + 20)
-          : (x1 + x2) / 2;
-        // 가용 너비 (레이어 뱃지 공간 제외 시 약 60% 활용)
-        const availPx = hasLayer ? spanPx * 0.55 : spanPx - 16;
-        const maxChars = Math.max(6, Math.floor(availPx / 6.8));
-        svg += `<text x="${{midX}}" y="${{my}}" text-anchor="middle"
-          font-family="'Segoe UI',system-ui,sans-serif" font-size="11" font-weight="600"
-          fill="${{arrowColor}}">${{escXml(truncate(msg, maxChars))}}</text>`;
+      // ③ 레이어 뱃지 — 화살표 아래, 화살촉 쪽에 배치
+      if (s.layer && s.layer !== 'internal') {{
+        const bw = 38; const bh = 12;
+        // 화살촉이 있는 쪽(x2) 근처에 배치
+        const badgeX = x1 < x2 ? x2 - bw - 4 : x2 + 4;
+        svg += `<rect x="${{badgeX}}" y="${{by - bh}}" width="${{bw}}" height="${{bh}}"
+          rx="3" fill="${{layerBg}}" stroke="${{arrowColor}}" stroke-width="0.5"/>`;
+        svg += `<text x="${{badgeX + bw/2}}" y="${{by - 2}}" text-anchor="middle"
+          dominant-baseline="auto"
+          font-family="monospace" font-size="9" font-weight="700" fill="${{arrowColor}}">${{s.layer}}</text>`;
       }}
     }}
 
-    // 노트 (행 하단 별도 줄)
-    if (s.note) {{
-      const noteY = y + ROW_H + NOTE_H - 4;
-      const maxNoteChars = Math.max(20, Math.floor((SVG_W - PAD_L - PAD_R) / 6.2));
-      svg += `<text x="${{PAD_L + 4}}" y="${{noteY}}" font-family="'Segoe UI',system-ui,sans-serif"
-        font-size="9" fill="#4b5563" font-style="italic">${{escXml(truncate(s.note, maxNoteChars))}}</text>`;
+    // 노트 (행 하단 별도 줄) — msg와 동일한 내용은 생략
+    const showNote = !!(s.note || '').trim() && s.note !== s.msg;
+    if (showNote) {{
+      const noteStartY = y + ROW_H + 2;
+      const noteBaseline = noteStartY + 11;
+      // 9.5px/char (font-size 10 기준) 으로 가용 너비 계산
+      const maxNoteChars = Math.max(20, Math.floor((SVG_W - PAD_L - PAD_R - 8) / 5.9));
+      svg += `<text x="${{PAD_L + 4}}" y="${{noteBaseline}}"
+        font-family="'Segoe UI',system-ui,sans-serif"
+        font-size="10" fill="#475569" font-style="italic">${{escXml(truncate(s.note, maxNoteChars))}}</text>`;
     }}
 
     // 타이머 표시 (우측 끝, 화살표 y)

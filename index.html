@@ -71,29 +71,15 @@ input[type=text]::placeholder { color: var(--text2); }
 .info-item label { font-size: 0.75rem; color: var(--text2); display: block; margin-bottom: 4px; }
 .info-item span { font-size: 0.875rem; }
 /* Steps sequence */
-.seq-wrap { margin-top: 8px; }
-.seq-entities { display: flex; gap: 0; margin-bottom: 0; }
-.seq-entity { flex: 1; text-align: center; font-size: 0.7rem; font-weight: 700; padding: 6px 4px;
-               background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
-.seq-entity.ue { background: #1e3a5f; color: #93c5fd; }
-.seq-entity.enb { background: #1a3a1a; color: #86efac; }
-.seq-entity.core { background: #3a1a1a; color: #fca5a5; }
-.seq-rows { }
-.seq-row { display: flex; align-items: center; gap: 4px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); position: relative; }
-.seq-row:hover { background: rgba(255,255,255,0.04); border-radius: 4px; }
-.seq-stepno { font-size: 0.65rem; color: var(--text2); min-width: 40px; text-align: right; padding-right: 6px; flex-shrink: 0; }
-.seq-arrow { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
-.seq-line { flex: 1; height: 1px; background: var(--border); position: relative; }
-.seq-line.dl { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
-.seq-line.ul { background: linear-gradient(90deg, #10b981, #34d399); }
-.seq-line.int { background: var(--bg3); border-top: 1px dashed var(--border); }
-.seq-arrowhead { font-size: 0.8rem; color: inherit; }
-.seq-msg { font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-.seq-msg.dl { color: #60a5fa; }
-.seq-msg.ul { color: #34d399; }
-.seq-msg.int { color: var(--text2); font-style: italic; }
-.seq-note { font-size: 0.65rem; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; cursor: help; }
-.seq-timer { font-size: 0.65rem; background: #fbbf24; color: #000; border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+.seq-diagram-wrap {
+  overflow-x: auto;
+  background: #0a0f1e;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  padding: 0;
+  margin-top: 4px;
+}
+.seq-svg { display: block; }
 .steps-title { font-weight: 700; margin-bottom: 12px; color: var(--text2); font-size: 0.875rem; display: flex; justify-content: space-between; align-items: center; }
 .steps-badge { font-size: 0.7rem; background: var(--bg3); padding: 2px 8px; border-radius: 10px; }
 .step-placeholder { color: var(--text2); font-size: 0.875rem; padding: 16px; background: var(--bg); border-radius: 6px; text-align: center; }
@@ -2890,44 +2876,179 @@ function showTcDetail(id) {
 }
 
 function renderSteps(steps) {
-  // 참여 엔티티 파악
-  const entities = [];
-  const seen = new Set();
-  steps.forEach(s => {
-    if (s.from && !seen.has(s.from)) { entities.push(s.from); seen.add(s.from); }
-    if (s.to && !seen.has(s.to)) { entities.push(s.to); seen.add(s.to); }
+  // ── 엔티티 정규화 ──────────────────────────────────
+  const ENTITY_ORDER = ['UE', 'eNB/gNB', 'SS', 'MME/AMF', 'P-CSCF', 'Server'];
+  const ENTITY_STYLE = {
+    'UE':      { fill: '#1e3a5f', stroke: '#3b82f6', text: '#93c5fd', label: 'UE' },
+    'eNB/gNB': { fill: '#1a3a1a', stroke: '#22c55e', text: '#86efac', label: 'eNB/gNB' },
+    'SS':      { fill: '#2a2a1a', stroke: '#eab308', text: '#fde047', label: 'SS' },
+    'MME/AMF': { fill: '#3a1a1a', stroke: '#ef4444', text: '#fca5a5', label: 'MME/AMF' },
+    'P-CSCF':  { fill: '#2a1a3a', stroke: '#a855f7', text: '#d8b4fe', label: 'P-CSCF' },
+    'Server':  { fill: '#1a2a3a', stroke: '#06b6d4', text: '#67e8f9', label: 'Server'  },
+  };
+  const DEFAULT_STYLE = { fill: '#1e293b', stroke: '#64748b', text: '#94a3b8', label: '?' };
+
+  // 참여 엔티티 수집 (순서 고정)
+  const usedSet = new Set();
+  steps.forEach(s => { usedSet.add(s.from); usedSet.add(s.to); });
+  const entities = ENTITY_ORDER.filter(e => usedSet.has(e));
+  // 미등록 엔티티 뒤에 추가
+  usedSet.forEach(e => { if (!ENTITY_ORDER.includes(e)) entities.push(e); });
+
+  // ── SVG 레이아웃 상수 ──────────────────────────────
+  const COL_W   = 160;   // 엔티티 열 폭
+  const PAD_L   = 40;    // 좌측 여백 (스텝 번호)
+  const PAD_R   = 16;    // 우측 여백
+  const BOX_H   = 44;    // 엔티티 박스 높이
+  const BOX_W   = 110;   // 엔티티 박스 너비
+  const ROW_H   = 46;    // 스텝 행 높이
+  const NOTE_H  = 14;    // 노트 줄 높이 (노트 있을 때 추가)
+  const ARROW_Y = 22;    // 행 내 화살표 y 위치
+  const MSG_Y   = 14;    // 행 내 메시지 라벨 y 위치
+
+  const N = entities.length;
+  const SVG_W = PAD_L + N * COL_W + PAD_R;
+
+  // 각 엔티티 중심 x
+  const cx = i => PAD_L + i * COL_W + COL_W / 2;
+
+  // 각 스텝의 실제 높이 계산
+  const rowHeights = steps.map(s => ROW_H + (s.note ? NOTE_H : 0));
+  const totalRows = rowHeights.reduce((a, b) => a + b, 0);
+  const SVG_H = BOX_H + totalRows + 20;
+
+  // ── SVG 생성 ──────────────────────────────────────
+  let svg = `<svg class="seq-svg" width="${SVG_W}" height="${SVG_H}" viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="arr-dl" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#60a5fa"/>
+  </marker>
+  <marker id="arr-ul" markerWidth="8" markerHeight="8" refX="1" refY="3" orient="auto">
+    <path d="M8,0 L8,6 L0,3 z" fill="#34d399"/>
+  </marker>
+  <marker id="arr-int" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L6,3 z" fill="#64748b"/>
+  </marker>
+</defs>`;
+
+  // 배경
+  svg += `<rect width="${SVG_W}" height="${SVG_H}" fill="#0a0f1e"/>`;
+
+  // 엔티티 박스 + 라이프라인
+  entities.forEach((e, i) => {
+    const style = ENTITY_STYLE[e] || DEFAULT_STYLE;
+    const x = cx(i);
+    const boxX = x - BOX_W / 2;
+
+    // 라이프라인 (세로 점선)
+    svg += `<line x1="${x}" y1="${BOX_H}" x2="${x}" y2="${SVG_H - 10}"
+      stroke="${style.stroke}" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>`;
+
+    // 엔티티 박스
+    svg += `<rect x="${boxX}" y="4" width="${BOX_W}" height="${BOX_H - 8}"
+      rx="6" fill="${style.fill}" stroke="${style.stroke}" stroke-width="1.5"/>`;
+
+    // 엔티티 레이블
+    svg += `<text x="${x}" y="${BOX_H / 2 + 2}" text-anchor="middle" dominant-baseline="middle"
+      font-family="'Segoe UI',system-ui,sans-serif" font-size="12" font-weight="700"
+      fill="${style.text}">${style.label}</text>`;
   });
-  
-  // 엔티티 헤더
-  const entityHeader = entities.map(e => {
-    const cls = e.includes('UE') ? 'ue' : e.includes('gNB') || e.includes('eNB') ? 'enb' : 'core';
-    return `<div class="seq-entity ${cls}">${e}</div>`;
-  }).join('');
 
-  // 스텝 행
-  const rows = steps.map(s => {
-    const dir = s.dir || 'int';
-    const dirLabel = dir === 'dl' ? '▼' : dir === 'ul' ? '▲' : '•';
-    const dirColor = dir === 'dl' ? '#60a5fa' : dir === 'ul' ? '34d399' : '';
-    const timerBadge = s.timerStart ? `<span class="seq-timer">⏱ ${s.timerStart}</span>` : 
-                       s.timerStop ? `<span class="seq-timer" style="background:#6b7280;color:#fff">⏹ ${s.timerStop}</span>` : '';
-    const note = s.note ? `<span class="seq-note" title="${s.note.replace(/"/g,'&quot;')}">${s.note.slice(0,80)}${s.note.length>80?'…':''}</span>` : '';
-    const msg = (s.msg || '').replace(/_/g, ' ');
-    
-    return `<div class="seq-row">
-      <span class="seq-stepno">${s.no}</span>
-      <div class="seq-arrow">
-        <span class="seq-msg ${dir}">${dirLabel} ${msg || '—'}</span>
-        ${timerBadge}
-        ${note}
-      </div>
-    </div>`;
-  }).join('');
+  // ── 스텝 행 ──────────────────────────────────────
+  let y = BOX_H;
+  steps.forEach((s, idx) => {
+    const rh = rowHeights[idx];
+    const ay = y + ARROW_Y;   // 화살표 y
+    const my = y + MSG_Y;     // 메시지 라벨 y
 
-  return `<div class="seq-wrap">
-    <div class="seq-entities">${entityHeader}</div>
-    <div class="seq-rows">${rows}</div>
-  </div>`;
+    const fromIdx = entities.indexOf(s.from);
+    const toIdx   = entities.indexOf(s.to);
+    const dir     = s.dir || 'int';
+    const msg     = (s.msg || '').replace(/_/g, ' ');
+
+    // 줄무늬 배경 (짝수/홀수)
+    const rowFill = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent';
+    svg += `<rect x="0" y="${y}" width="${SVG_W}" height="${rh}" fill="${rowFill}"/>`;
+
+    // 스텝 번호
+    svg += `<text x="28" y="${ay + 4}" text-anchor="end" font-family="monospace"
+      font-size="10" fill="#475569">${s.no}</text>`;
+
+    if (dir === 'int' || fromIdx === toIdx || fromIdx < 0 || toIdx < 0) {
+      // 내부/unknown → 점선 self-loop 또는 note box
+      const bx = PAD_L + (fromIdx >= 0 ? fromIdx : 0) * COL_W + 10;
+      svg += `<line x1="${bx}" y1="${ay}" x2="${SVG_W - PAD_R}" y2="${ay}"
+        stroke="#334155" stroke-width="1" stroke-dasharray="3,3"/>`;
+      if (msg) {
+        svg += `<text x="${bx + 6}" y="${my}" font-family="'Segoe UI',system-ui,sans-serif"
+          font-size="10" fill="#64748b" font-style="italic"
+          clip-path="url(#clipRow)">${escXml(truncate(msg, 50))}</text>`;
+      }
+    } else {
+      // 실제 화살표
+      const x1 = cx(fromIdx);
+      const x2 = cx(toIdx);
+      const arrowColor = dir === 'dl' ? '#60a5fa' : '#34d399';
+      const markerId  = dir === 'dl' ? 'arr-dl' : 'arr-ul';
+      const layerColor = dir === 'dl' ? '#1e3a5f' : '#14532d';
+
+      // 화살표 선
+      svg += `<line x1="${x1}" y1="${ay}" x2="${x2}" y2="${ay}"
+        stroke="${arrowColor}" stroke-width="2" marker-end="url(#${markerId})"/>`;
+
+      // 레이어 뱃지 (RRC/NAS/PDCP)
+      if (s.layer && s.layer !== 'internal') {
+        const midX = (x1 + x2) / 2;
+        const bw = 36;
+        svg += `<rect x="${midX - bw/2}" y="${ay - 17}" width="${bw}" height="13"
+          rx="3" fill="${layerColor}" stroke="${arrowColor}" stroke-width="0.5" opacity="0.8"/>`;
+        svg += `<text x="${midX}" y="${ay - 7}" text-anchor="middle"
+          font-family="monospace" font-size="9" font-weight="700" fill="${arrowColor}">${s.layer}</text>`;
+      }
+
+      // 메시지 이름 (화살표 위)
+      if (msg) {
+        const midX = (x1 + x2) / 2;
+        const available = Math.abs(x2 - x1) - 20;
+        const truncMsg = truncatePx(msg, available);
+        svg += `<text x="${midX}" y="${my}" text-anchor="middle"
+          font-family="'Segoe UI',system-ui,sans-serif" font-size="11" font-weight="600"
+          fill="${arrowColor}">${escXml(truncMsg)}</text>`;
+      }
+    }
+
+    // 노트 (하단 작은 글씨)
+    if (s.note) {
+      const noteY = y + ROW_H + 2;
+      svg += `<text x="${PAD_L + 8}" y="${noteY + 10}" font-family="'Segoe UI',system-ui,sans-serif"
+        font-size="9.5" fill="#475569" font-style="italic">${escXml(truncate(s.note, 90))}</text>`;
+    }
+
+    // 타이머 표시
+    if (s.timerStart) {
+      const tx = SVG_W - PAD_R - 4;
+      svg += `<text x="${tx}" y="${ay + 4}" text-anchor="end" font-family="monospace"
+        font-size="9" fill="#fbbf24">⏱ ${s.timerStart.split(',')[0]}</text>`;
+    }
+
+    y += rh;
+  });
+
+  svg += `</svg>`;
+  return `<div class="seq-diagram-wrap">${svg}</div>`;
+}
+
+// 유틸리티
+function escXml(s) {
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function truncate(s, n) {
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function truncatePx(s, px) {
+  // 대략 1자 = 6.5px (11px font) 기준
+  const maxChars = Math.max(4, Math.floor(px / 6.5));
+  return truncate(s, maxChars);
 }
 
 function closeModal(e) {

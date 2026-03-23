@@ -1,0 +1,123 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-02-24 13:24:37 +0100 (Tue, 24 Feb 2026) $
+// $Rev: 42906 $
+/******************************************************************************/
+
+module EUTRA_CapabilityFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_AuxiliaryCapCheckFunctions all;
+  import from EUTRA_Component all;
+  import from EUTRA_Parameters all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+
+  template (present) UE_EUTRA_Capability.interRAT_Parameters cr_UE_EUTRA_Capability_InterRAT_Parameters :=
+  { /* @status    APPROVED (LTE, LTE_A_R10_R11, UTRAN) */
+    utraFDD := *,  // @sic R5s140135 sic@
+    utraTDD128 := *,
+    utraTDD384 := *,
+    utraTDD768 := *,
+    geran := *,
+    cdma2000_HRPD := *,
+    cdma2000_1xRTT := *
+  };
+
+  /*
+   * @desc      To decode the EUTRA UE-CapabilityRAT-Container
+   * @param     p_Octetstring
+   * @return    UE_EUTRA_Capability
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_EUTRA_DecodeEutraCapMsg(octetstring p_Octetstring) return UE_EUTRA_Capability
+  {
+    var UE_EUTRA_Capability v_Ue_Eutra_Capability;
+    var bitstring v_Bitstring := oct2bit(p_Octetstring);
+    var integer v_Result := decvalue(v_Bitstring, v_Ue_Eutra_Capability);
+    if (v_Result != 0) {
+      FatalError(__FILE__, __LINE__, "UE EUTRA Capability cannot be decoded");
+    }
+    return v_Ue_Eutra_Capability;
+  }
+
+  /*
+   * @desc      Subsequent to preceding UECapabilityEnquiry this function retrieves the UECapabilityInformation which cna be received in 2 flavours:
+   *            - one container
+   *            - several segments which make up the container (possible from Rel16 onwards)
+   *            The conatiner is decoded and returned to the caller.
+   * @param     p_CellId
+   * @param     p_RRC_TI
+   * @return    UE_EUTRA_Capability
+   * @status    APPROVED (ENDC, LTE, LTE_A_R10_R11)
+   */
+  function f_EUTRA_GetCaps(EUTRA_CellId_Type p_CellId,
+                            RRC_TransactionIdentifier p_RRC_TI) runs on EUTRA_PTC return UE_EUTRA_Capability
+  { // @sic R5-217903 sic@
+    var SRB_COMMON_IND v_ReceivedAspForUeCapabilityInfo;
+    var UE_EUTRA_Capability v_RxEutraCapability;
+    var UL_DCCH_Message v_RxSegEutraCapability; // @sic R5s230454 sic@
+    var SRB_COMMON_IND v_Received_DedicatedMessageSegment;
+    var octetstring v_Rx_SegmentOct := ''O;
+    var boolean v_Completed_AllSegments := false;
+    var ULDedicatedMessageSegment_r16_IEs.segmentNumber_r16 v_MessageSegmentRx := 0; //INTEGER (0..15)
+
+    // Rx UE Capability Information in segments or in one container
+    // IF pc_LTE_UL_Segmentation and UE's encoded UECapabilityInformation message >= Max PDCP SDU size then segments will be handled else one container
+    alt {
+      // EXCEPTION: Segment handling is repeated a maximum of 16 times or till rrc-MessageSegmentType-16 IE within the UlDedicatedMessageSegment message indicate rrc-MessageSegmentType-r16 = lastSegment.
+      [pc_LTE_UL_Segmentation] SRB.receive( car_SRB1_RrcPdu_IND(p_CellId, cr_508_ULDedicatedMessageSegment_r16(cr_ULDedicatedMessageSegment_r16_enabled(v_MessageSegmentRx))) ) -> value v_Received_DedicatedMessageSegment
+      {
+        v_Rx_SegmentOct := v_Rx_SegmentOct & v_Received_DedicatedMessageSegment.Signalling.Rrc.Dcch.message_.messageClassExtension.c2.ulDedicatedMessageSegment_r16.criticalExtensions.ulDedicatedMessageSegment_r16.rrc_MessageSegmentContainer_r16;   //compact segment
+        if (v_Received_DedicatedMessageSegment.Signalling.Rrc.Dcch.message_.messageClassExtension.c2.ulDedicatedMessageSegment_r16.criticalExtensions.ulDedicatedMessageSegment_r16.rrc_MessageSegmentType_r16 == lastSegment){ // no more segments to receive
+          v_Completed_AllSegments := true;
+        }
+        else { // notLastSegment received
+          if (v_MessageSegmentRx == 15) { f_EUTRA_SetVerdictFailOrInconc(__FILE__,__LINE__, "Step 2a1: Received a notLastSegment as 16th segment from the UE");}
+          v_MessageSegmentRx := v_MessageSegmentRx + 1;
+          repeat;
+        }
+      }
+      [not pc_LTE_UL_Segmentation] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_ULDedicatedMessageSegment_r16(?))) // VerdictFail case
+      {
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "pc_LTE_UL_Segmentation not set for segmentation when UECapabilityInformation message >= Max PDCP SDU size");
+      }
+      // The UE transmits a UECapabilityInformation message including UE radio access capability information as per the ue-CapabilityRequest variable
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_UeCapabilityInformation(p_RRC_TI, cr_EutraCapInfo))) -> value v_ReceivedAspForUeCapabilityInfo
+      {
+        if (v_MessageSegmentRx>0) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE radio access capability information reived after a segment"); // VerdictFail case: step 2b1 is mutually exclusive with 2ax
+        }
+      }
+    };//end alt
+        
+    // Decode and store the UE-CapabilityRAT-Container
+    if (v_Completed_AllSegments){ //UECapabilityInformation Rx. in segments
+      if (lengthof(v_Rx_SegmentOct) < tsc_Max_LTE_PDCP_SDU_size) {//Set to <8188 by default - @sic R5s220330 sic@
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE segmented the UECapabilityInformation message being smaller than Max PDCP SDU size");
+      }
+      v_RxSegEutraCapability := f_EUTRA_DecodeULDcchMsg(v_Rx_SegmentOct); // @sic R5s230454 sic@
+      v_RxEutraCapability := f_EUTRA_DecodeEutraCapMsg(v_RxSegEutraCapability.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[0].ueCapabilityRAT_Container); // @sic R5s230454 sic@
+      if (match (v_RxEutraCapability.accessStratumRelease, (rel8, rel9, rel10, rel11, rel12, rel13, rel14, rel15))) { // accessStratumRelease < rel16
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "AccessStratumRelease < release16 so segmentation is not allowed");
+      }
+    }
+    else{ //UECapabilityInformation Rx. in one message
+      v_Rx_SegmentOct  := v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[0].ueCapabilityRAT_Container;
+      if (lengthof(v_Rx_SegmentOct) > tsc_Max_LTE_PDCP_SDU_size){
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE sent one segment of size > tsc_Max_LTE_PDCP_SDU_size");
+      }
+      v_RxEutraCapability := f_EUTRA_DecodeEutraCapMsg(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[0].ueCapabilityRAT_Container);
+    }
+        
+    return v_RxEutraCapability;
+  }
+
+}

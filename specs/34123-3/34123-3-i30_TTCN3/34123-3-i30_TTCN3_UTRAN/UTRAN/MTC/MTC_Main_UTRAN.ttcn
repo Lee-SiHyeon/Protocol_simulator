@@ -1,0 +1,161 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2016-11-02 17:56:50 +0100 (Wed, 02 Nov 2016) $
+// $Rev: 17118 $
+/******************************************************************************/
+
+module MTC_Main_UTRAN {
+
+  import from CommonDefs all;
+  import from EUTRA_Component all;
+  import from GERAN_Component all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Main all;
+  import from MTC_Base all;
+  import from MTC_Component_UTRAN all;
+  import from MTC_UpperTester all;
+  import from NasEmu_Component_EUTRA all;
+  import from NasEmu_Main_EUTRA all;
+  import from UTRAN_Component all;
+  import from UTRAN_IRAT_Component all;
+  import from UpperTesterSystemCmds all;
+
+  /*
+   * @desc      Connect all PTCs (positioning test cases)
+   * @param     p_System
+   * @param     p_Utran
+   * @param     p_Geran
+   * @param     p_Eutra
+   * @status    APPROVED (UTRAN)
+   */
+  function f_MTC_ConnectPTCs_UTRAN(SYSTEM_UTRAN p_System,
+                                   UTRAN_IRAT_PTC p_Utran,
+                                   GERAN_PTC p_Geran,
+                                   EUTRA_PTC p_Eutra) runs on MTC_UTRAN
+  {
+    var IP_PTC v_IP_PTC;
+    var NASEMU_EUTRA_PTC v_NASEMU_PTC;
+
+    vc_Components.Utran := p_Utran;
+    vc_Components.Geran := p_Geran;
+    vc_Components.Eutra := p_Eutra;
+
+    if (p_Utran == null) {
+      FatalError (__FILE__, __LINE__, "invalid configuration");
+      mtc.stop;
+    }
+
+    // ***** MTC *****
+    f_MTC_BASE_Map(p_System);
+
+    // ***** UTRAN PTC *****
+    f_UTRAN_PTC_Map(p_System, p_Utran);
+
+    // ***** GERAN PTC *****
+    if (p_Geran != null) {
+      f_GERAN_PTC_Map(p_System, p_Geran);
+    }
+
+    // ***** E-UTRA PTC *****
+    if (p_Eutra != null) {
+      f_EUTRA_PTC_Map(p_System, p_Eutra);                                     // map EUTRA system ports
+      v_NASEMU_PTC := f_NasEmu_CreateConnectAndMap_EUTRA(p_System, p_Eutra);  // create NasEmu, map system ports and connect with EUTRA PTC
+      v_NASEMU_PTC.start(f_NASEMU_MainLoop_EUTRA());                          // start NASEMU
+    }
+
+    // ***** Create, map, connect and start IP PTC *****
+    v_IP_PTC := f_IP_PTC_CreateAndMap(p_System);
+    connect(p_Utran:IP, v_IP_PTC:UTRAN_CTRL);
+    if (p_Eutra != null)     {connect(p_Eutra:IP, v_IP_PTC:EUTRA_CTRL);}
+    if (p_Geran != null)     {connect(p_Geran:IP, v_IP_PTC:GERAN_CTRL);}
+    v_IP_PTC.start(f_IP_PTC_MainLoop());
+
+    // ***** Connect PTCs to MTC *****
+    connect(mtc:PTC_Ut[tsc_MTC_PortIndex_UTRAN], p_Utran:UT);
+    if (p_Eutra != null)     {connect(mtc:PTC_Ut[tsc_MTC_PortIndex_EUTRA],    p_Eutra:UT);}
+    if (p_Geran != null)     {connect(mtc:PTC_Ut[tsc_MTC_PortIndex_GERAN],    p_Geran:UT);}
+
+    // ***** Connect UTRAN PTC to other PTCs *****
+    if (p_Eutra != null)     {connect(p_Utran:EUTRA,    p_Eutra:UTRAN);}
+    if (p_Geran != null)     {connect(p_Utran:GERAN,    p_Geran:UTRAN);}
+
+    f_UT_InitialPowerOffUE(Ut);
+  }
+
+  /*
+   * @desc      stop mtc, NAS emulator, IP PTC etc. when all test case components have finished
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_MTC_StopIfFinished_UTRAN() runs on MTC_UTRAN
+  {
+    if ((vc_Components.Utran == null) and
+        (vc_Components.Geran == null) and
+        (vc_Components.Eutra == null)) {
+      f_MTC_Stop(pass);                      // 'pass' will overrule 'none' only
+    }
+  }
+
+  /*
+   * @desc      Interface to control the other components
+   * @status    APPROVED (UTRAN)
+   */
+  altstep a_PTC_Control_UTRAN() runs on MTC_UTRAN
+  { /* NOTEs:
+       - acc. to ES 201 873-1 Annex F.1.1 an error verdict shall be assignd when "running" is applied on any uninitialised component
+       - it seems that "running" cannot be used in the "[]" */
+    
+    [] any component.killed
+      { // at a component something's gone wrong and it killed itself, so have to stop everything else
+        all component.kill;
+        mtc.stop;
+      }
+    
+    [vc_Components.Utran != null] vc_Components.Utran.done
+      {
+        vc_Components.Utran := null;
+        fl_MTC_StopIfFinished_UTRAN();
+      }
+    [vc_Components.Geran != null] vc_Components.Geran.done
+      {
+        vc_Components.Geran := null;
+        fl_MTC_StopIfFinished_UTRAN();
+      }
+    [vc_Components.Eutra != null] vc_Components.Eutra.done
+      {
+        vc_Components.Eutra := null;
+        fl_MTC_StopIfFinished_UTRAN();
+      }
+  }
+
+  /*
+   * @desc      Main loop of the MTC
+   * @param     p_GuardTimer timer
+   * @status    APPROVED (UTRAN)
+   */
+  function f_MTC_MainLoop_UTRAN(timer p_GuardTimer) runs on MTC_UTRAN
+  { /* @sic R5s120520: f_UT_InitialPowerOffUE moved to f_MTC_ConnectPTCs_POS sic@ */
+
+    f_MTC_BASE_Init();
+
+    while (true) {      /* mtc will be stopped by a_PTC_Control_UTRAN or due to timeout of the guard timer;
+                           => neither a_PTC_Control_UTRAN nor a_UpperTester needs to use 'repeat' */
+      alt {
+        [] a_PTC_Control_UTRAN();             // handle 'done' and 'killed' of PTCs: MTC will be stopped, when all PTCs are terminated or a fatal error occurs
+        
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_UTRAN);    // handle upper tester for PTC 1 (UTRAN)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_GERAN);    // handle upper tester for PTC 2 (GERAN)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_EUTRA);    // handle upper tester for PTC 0 (EUTRA)
+        [] a_MTC_ReceiveFromUT_SendToPTC();
+ 
+        [] p_GuardTimer.timeout {f_MTC_Stop(fail);}    /* acc. to the assumption that preamble and postamble are short compared to the testbody
+                                                          a FAIL verdict is assigned (rather than an INCONC) */
+      }
+    }
+  }
+
+}

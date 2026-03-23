@@ -1,0 +1,137 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-09-17 14:51:47 +0200 (Wed, 17 Sep 2025) $
+// $Rev: 42045 $
+/******************************************************************************/
+
+module EUTRA_IdleMode {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SysInfo_Templates all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+
+  const float tsc_IdleMode_GenericTimer := 360.0;               /* @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT) */
+
+  const TrackingAreaCode tsc_IdleMode_TAC_Cell2  := int2bit (2, 16);    /* @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT) */
+
+  const TrackingAreaCode tsc_IdleMode_TAC_Cell4  := int2bit (4, 16);    /* @status    APPROVED (LTE, LTE_A_R10_R11) */
+
+  const TrackingAreaCode tsc_IdleMode_TAC_Cell12 := int2bit (12, 16);   /* @status    APPROVED (LTE, LTE_A_R10_R11, LTE_IRAT) */
+
+  const TrackingAreaCode tsc_IdleMode_TAC_Cell13 := int2bit (13, 16);   /* @status    APPROVED (LTE, LTE_A_R10_R11, LTE_IRAT) */
+
+  template (value) SystemInformationBlockType4 cs_SIB4_NeighCellList(template (value) IntraFreqNeighCellList p_IntraFreqNeighCellList) :=
+  /* @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11) */
+    cs_508_SystemInformationBlockType4_Def (p_IntraFreqNeighCellList, omit, omit);
+
+  template (value) SystemInformationBlockType4 cs_SIB4_ThreeNeighCellEntries(PhysCellId p_PhysCellId1,
+                                                                             Q_OffsetRange p_Q_OffsetRange1,
+                                                                             PhysCellId p_PhysCellId2,
+                                                                             Q_OffsetRange p_Q_OffsetRange2,
+                                                                             PhysCellId p_PhysCellId3,
+                                                                             Q_OffsetRange p_Q_OffsetRange3) :=
+    /* @status    APPROVED (LTE, LTE_A_R10_R11) */
+    cs_SIB4_NeighCellList( { cs_IntraFreqNeighCellInfo(p_PhysCellId1, p_Q_OffsetRange1),
+                             cs_IntraFreqNeighCellInfo(p_PhysCellId2, p_Q_OffsetRange2),
+                             cs_IntraFreqNeighCellInfo(p_PhysCellId3, p_Q_OffsetRange3) } );
+
+  template (value) SystemInformationBlockType4 cs_508_Cell1_DefSIB4_IntraFreqCellList :=
+    /* @status    APPROVED (LTE, LTE_A_R10_R11) */
+    cs_SIB4_ThreeNeighCellEntries(2, dB0,//q-OffsetCell = 0 dB for cell 2
+                                  4, dB0,//q-OffsetCell = 0 dB for cell 4
+                                  11, dB0);//q-OffsetCell = 0 dB for cell 11)
+
+  template (value) SystemInformationBlockType4 cs_508_Cell2_DefSIB4_IntraFreqCellList :=
+    /* @status    APPROVED (LTE, LTE_A_R10_R11) */
+    cs_SIB4_ThreeNeighCellEntries(1, dB0,//q-OffsetCell = 0 dB for cell 1
+                                  4, dB0,//q-OffsetCell = 0 dB for cell 4
+                                  11, dB0);//q-OffsetCell = 0 dB for cell 11)
+
+  /*
+   * @desc      Tracking area update behaviour according to 36.508 cl. 6.4.2.7
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_SelectedPlmnId    (default value: 1)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_TrackingAreaUpdate_WithoutRrcConnReq(EUTRA_CellId_Type         p_CellId,
+                                                        RRC_TransactionIdentifier p_RRC_TI := tsc_RRC_TI_Def,
+                                                        EUTRA_ATTACH_Type         p_ForcedAttach := NORMAL,
+                                                        integer                   p_SelectedPlmnId := 1) runs on EUTRA_PTC //@sic R5s110511 change 3 sic@
+  { /* @sic R5s100707 additional MCC160 comments sic@ */
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NAS_KsiValue v_KsiValue := f_EUTRA_SecurityKSIasme_Get();
+    var GutiParameters_Type v_GutiParams:= f_EUTRA_CellInfo_GetGuti(p_CellId);
+    var B3_Type v_EpsUpdate_TypeValue := f_GetEPSTAUType (p_ForcedAttach); // @sic R5s110176 sic@
+    var template (omit) EPS_BearerContextStatus v_EPS_ContextStatus; // @sic R5s100608 sic@
+    var template AdditionalUpdateType v_AdditionalUpdateType_Expected := f_GetAdditionalUpdateType (p_ForcedAttach); // @sic R5s110176 sic@
+
+    //Step 2: Send RRC Connection Setup on SRB0 (CCCH) and switch on UL grant assignments:
+    f_EUTRA_RRC_ConnectionSetup_Def(p_CellId, -, p_RRC_TI);
+
+    // UE shall establish SRB1 acc. to 36.331 cl. 5.3.3.4 and 5.3.9
+    // UE enters RRC_CONNECTED state
+    // SRB1 is established: no ciphering, no integrity protection for NAS/RRC
+
+    //Step 3: Receive RRCConnectionSetupComplete which includes a TRACKING AREA UPDATE REQUEST message
+    v_NasInd := f_EUTRA_RRCConnectionSetupComplete_Def(p_CellId,                                       // @sic R5s120121 MCC160 implementation sic@
+                                                       cr_508_RRCConnectionSetupComplete (p_RRC_TI, ?, -, p_SelectedPlmnId), //@sic R5s110511 change 3 sic@
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                         cr_508_TAU_Request(v_EpsUpdate_TypeValue,
+                                                                                            v_KsiValue,
+                                                                                            cr_DRXparameter_Any ('5C'O) ifpresent, // @sic R5s120210, R5-123117 sic@
+                                                                                            v_AdditionalUpdateType_Expected)));
+    v_EPS_ContextStatus := v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus; // Send this back in the Accept
+
+    /* Step 4 - 5: send TAU ACCEPT and receive TAU COMPLETE; @sic R5s110078 sic@ */
+    f_EUTRA_TrackingAreaUpdate_Accept_Complete(p_CellId, v_GutiParams, v_EpsUpdate_TypeValue, v_EPS_ContextStatus, v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType, p_ForcedAttach);
+
+    //Step 6: Release RRC connection
+    f_EUTRA_RRC_ConnectionRelease(p_CellId, p_RRC_TI);
+  }
+
+  /*
+   * @desc      This procedure aims at checking whether the UE is camping on a new E-UTRAN cell with different TAI of a test case or not.
+   *            The procedure is similar as the one defined in 36.508 cl. 6.4.2.7 table 6.4.2.7-1 with the exception
+   *            that the parameterised list of PLMNs are indicated to UE as Equivalent PLMN in the Tracking Area Update Accept message
+   * @param     p_CellId
+   * @param     p_RRC_TI
+   * @param     p_EPLMNlist
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @status    APPROVED (LTE, LTE_A_R10_R11)
+   */
+  function f_EUTRA_TrackingAreaUpdate_WithEplmn(EUTRA_CellId_Type          p_CellId,
+                                                RRC_TransactionIdentifier  p_RRC_TI,
+                                                template (value) PLMN_List p_EPLMNlist,
+                                                EUTRA_ATTACH_Type p_ForcedAttach := NORMAL) runs on EUTRA_PTC
+  {
+    var template (present) EstablishmentCause v_EstablishmentCause := cr_EstablishmentCause_MoSignalling;
+
+    /* Step 1..5: */
+    f_EUTRA_TrackingAreaUpdate_Step1_5(p_CellId, p_RRC_TI, p_ForcedAttach, v_EstablishmentCause, p_EPLMNlist);
+
+    //* @verdict pass UE transmits a TRACKING AREA UPDATE COMPLETE
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "UE transmits a TRACKING AREA UPDATE COMPLETE");
+
+    //Step 6: Release RRC connection
+    f_EUTRA_RRC_ConnectionRelease(p_CellId, p_RRC_TI);
+  }
+
+}

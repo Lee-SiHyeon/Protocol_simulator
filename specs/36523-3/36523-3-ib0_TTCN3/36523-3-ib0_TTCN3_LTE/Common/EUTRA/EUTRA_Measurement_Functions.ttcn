@@ -1,0 +1,315 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2023-12-12 16:08:11 +0100 (Tue, 12 Dec 2023) $
+// $Rev: 37733 $
+/******************************************************************************/
+
+module EUTRA_Measurement_Functions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_Measurement_Templates all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_SRB_Templates all;
+
+  /*
+   * @desc      Check that Measurement report is received within a certain time and assign verdicts
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_MeasurementReport
+   * @status    APPROVED (LTE, LTE_IRAT)
+   */
+  function f_EUTRA_Check_Timer_MeasurementReport(EUTRA_CellId_Type p_CellId,
+                                                 float p_Timer,
+                                                 template (present) UL_DCCH_Message p_MeasurementReport ) runs on EUTRA_PTC
+  {
+    timer t_Wait;
+    t_Wait.start(p_Timer);
+    alt {
+      [] t_Wait.timeout
+        {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Check failed: No MeasurementReport message received within certain time");
+        }
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport))
+        {
+          t_Wait.stop; //@sic R5s100580 Change2 sic@
+          f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Preliminary pass: MeasurementReport message received within a certain time" );
+        }
+    }
+  }
+
+  /*
+   * @desc      Check that no uplink message is received within certain time
+   * @param     p_Timer
+   * @param     p_SRB_COMMON_IND    (default value: ?)
+   * @status    APPROVED (ENDC, LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_Check_NoUplinkMessage(float p_Timer,
+                                         template (present) SRB_COMMON_IND p_SRB_COMMON_IND := ?) runs on EUTRA_PTC
+  {
+    timer t_Wait;
+    t_Wait.start(p_Timer);
+    alt {
+      [] t_Wait.timeout
+        {
+        }
+      [] SRB.receive(p_SRB_COMMON_IND)
+        {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Check failed: Uplink message received within a certain time");
+        }
+    }
+  }
+
+  /*
+   * @desc      Check that no measurement report is received within certain time1
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_MeasurementReport
+   * @status    APPROVED (ENDC, LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_NoMeasurementReport(EUTRA_CellId_Type p_CellId,
+                                       float p_Timer,
+                                       template (present) UL_DCCH_Message p_MeasurementReport) runs on EUTRA_PTC
+  {
+    f_EUTRA_Check_NoUplinkMessage(p_Timer, car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport));
+  }
+
+  /*
+   * @desc      Wait for the given time and ignore measurement reports
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_MeasurementReport
+   * @status    APPROVED (ENDC, LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_WaitAndIgnoreMeasurementReport(EUTRA_CellId_Type p_CellId,
+                                                  float p_Timer,
+                                                  template (present) UL_DCCH_Message p_MeasurementReport) runs on EUTRA_PTC
+  {
+    timer t_Wait;
+    t_Wait.start(p_Timer);
+    alt {
+      [] t_Wait.timeout
+        {
+        }
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport))
+        {
+          repeat;
+        }
+    }
+  }
+
+  /*
+   * @desc      Receive periodical measurement report and check every report interval within a certain period
+   *            (Only applicable to high frequency report (report interval less than or equal to ms1024))
+   * @param     p_CellId
+   * @param     p_TotalTimer
+   * @param     p_MeasurementReport
+   * @param     p_ReportInterval
+   * @status    APPROVED (ENDC, LTE, LTE_IRAT)
+   */
+  function f_Check_EUTRA_HighFreq_PeriodicalMeasurmentReport(EUTRA_CellId_Type p_CellId,
+                                                             float p_TotalTimer,
+                                                             template (present) UL_DCCH_Message p_MeasurementReport,
+                                                             float p_ReportInterval) runs on EUTRA_PTC
+  {
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var integer v_PreviousSFN := 0;
+    var integer v_CurrentSFN := 0;
+    var integer v_SFNLapse;
+    var boolean v_MeasRpt1stFlag := true;
+    
+    timer t_TotalTimer;
+    timer t_TimeoutTimer;
+    
+    t_TotalTimer.start(p_TotalTimer);
+    t_TimeoutTimer.start(5.0);
+    
+    alt {
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport)) -> value v_ReceivedAsp
+        {
+          t_TimeoutTimer.stop;
+          t_TimeoutTimer.start(2.0);
+          v_CurrentSFN := v_ReceivedAsp.Common.TimingInfo.SubFrame.SFN.Number;
+          
+          if (v_MeasRpt1stFlag == true) //the 1st MeasurementReport message
+            {
+              v_MeasRpt1stFlag := false;
+            }
+          else //subsequent MeasurementReport messages
+            {
+              v_SFNLapse := (v_CurrentSFN - v_PreviousSFN) mod 1024;
+              
+              if ((int2float(v_SFNLapse) > p_ReportInterval * 110.0) or //v_SFNLapse * 10 > p_ReportInterval * 110% * 1000
+                  (int2float(v_SFNLapse) < p_ReportInterval * 90.0))    //v_SFNLapse * 10 < p_ReportInterval * 90% * 1000
+                {
+                  f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Abnormal report interval!");
+                }
+              else
+                {
+                  f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Preliminary pass: periodical MeasurementReport message received");
+                }
+            }
+          
+          v_PreviousSFN := v_CurrentSFN;
+          repeat;
+        }
+      
+      [] t_TimeoutTimer.timeout
+        {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Timeout when receiving periodical MeasurementReport message!");
+        }
+      
+      [] t_TotalTimer.timeout
+        {
+          t_TimeoutTimer.stop;
+          f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Periodical MeasurementReport test pass!");
+        }
+    }
+  }
+
+  /*
+   * @desc      Receive two periodical measurement reports and check every report interval within a certain period
+   *            (Only applicable to high frequency report (report interval less than or equal to ms1024) for TC8.3.1.13)
+   * @param     p_CellId
+   * @param     p_TotalTimer
+   * @param     p_MeasurementReport_1
+   * @param     p_MeasurementReport_2
+   * @param     p_MeasurementReport_1Alt (default value: omit)
+   * @param     p_ReportInterval_1  (default value: 1.024)
+   * @param     p_ReportInterval_2  (default value: 1.024)
+   * @status    APPROVED (LTE, LTE_IRAT)
+   */
+  function f_Check_EUTRA_HighFreq_PeriodicalMeasurmentReport_2Meas(EUTRA_CellId_Type p_CellId,
+                                                                   float p_TotalTimer,
+                                                                   template (present) UL_DCCH_Message p_MeasurementReport_1,
+                                                                   template (present) UL_DCCH_Message p_MeasurementReport_2,
+                                                                   template UL_DCCH_Message p_MeasurementReport_1Alt := omit,
+                                                                   float p_ReportInterval_1 := 1.024,
+                                                                   float p_ReportInterval_2 := 1.024) runs on EUTRA_PTC
+  {
+    var SRB_COMMON_IND v_ReceivedAsp_1;
+    var integer v_PreviousSFN_1 := 0;
+    var integer v_CurrentSFN_1 := 0;
+    var integer v_SFNLapse_1;
+    var boolean v_MeasRpt1stFlag_1 := true;
+    
+    var SRB_COMMON_IND v_ReceivedAsp_2;
+    var integer v_PreviousSFN_2 := 0;
+    var integer v_CurrentSFN_2 := 0;
+    var integer v_SFNLapse_2;
+    var boolean v_MeasRpt1stFlag_2 := true;
+    
+    timer t_TotalTimer;
+    timer t_TimeoutTimer_1;
+    timer t_TimeoutTimer_2;
+
+    t_TotalTimer.start(p_TotalTimer);
+    t_TimeoutTimer_1.start(5.0);
+    t_TimeoutTimer_2.start(5.0);
+
+    alt {
+      //Accept p_MeasurementReport_1Alt template first time only - no runtime error with check of ispresent(p_MeasurementReport_1Alt)
+      [(v_MeasRpt1stFlag_1) and (ispresent(p_MeasurementReport_1Alt))] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport_1Alt)) -> value v_ReceivedAsp_1    // compiler warning for p_MeasurementReport_1Alt cannot be avoided
+        {
+          t_TimeoutTimer_1.stop;
+          t_TimeoutTimer_1.start(2.0);
+          v_CurrentSFN_1 := v_ReceivedAsp_1.Common.TimingInfo.SubFrame.SFN.Number;
+          
+          // this is the 1st MeasurementReport message
+          v_MeasRpt1stFlag_1 := false;
+     
+          v_PreviousSFN_1 := v_CurrentSFN_1;
+          repeat;
+        } //@sic R5s130695 sic@
+
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport_1)) -> value v_ReceivedAsp_1
+        {
+          t_TimeoutTimer_1.stop;
+          t_TimeoutTimer_1.start(2.0);
+          v_CurrentSFN_1 := v_ReceivedAsp_1.Common.TimingInfo.SubFrame.SFN.Number;
+          
+          if (v_MeasRpt1stFlag_1 == true) {      // the 1st MeasurementReport message
+            v_MeasRpt1stFlag_1 := false;
+          }
+          else {                                 // subsequent MeasurementReport messages
+            v_SFNLapse_1 := (v_CurrentSFN_1 - v_PreviousSFN_1) mod 1024;
+            
+            if ((int2float(v_SFNLapse_1) > p_ReportInterval_1 * 110.0) or   // v_SFNLapse * 10 > p_ReportInterval * 110% * 1000
+                (int2float(v_SFNLapse_1) < p_ReportInterval_1 * 90.0)) {    // v_SFNLapse * 10 < p_ReportInterval * 90% * 1000
+              f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Abnormal report interval of MeasurementReport_1!");
+            }
+            else {
+              f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Preliminary pass: periodical MeasurementReport_1 message received");
+            }
+          }
+          v_PreviousSFN_1 := v_CurrentSFN_1;
+          repeat;
+        }
+      [] SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, p_MeasurementReport_2)) -> value v_ReceivedAsp_2
+        {
+          t_TimeoutTimer_2.stop;
+          t_TimeoutTimer_2.start(2.0);
+          v_CurrentSFN_2 := v_ReceivedAsp_2.Common.TimingInfo.SubFrame.SFN.Number;
+          
+          if (v_MeasRpt1stFlag_2 == true) {      // the 1st MeasurementReport message
+            v_MeasRpt1stFlag_2 := false;
+          }
+          else {                                 //subsequent MeasurementReport messages
+            v_SFNLapse_2 := (v_CurrentSFN_2 - v_PreviousSFN_2) mod 1024;
+            
+            if ((int2float(v_SFNLapse_2) > p_ReportInterval_2 * 110.0) or   // v_SFNLapse * 10 > p_ReportInterval * 110% * 1000
+                (int2float(v_SFNLapse_2) < p_ReportInterval_2 * 90.0)) {    // v_SFNLapse * 10 < p_ReportInterval * 90% * 1000
+              f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Abnormal report interval of MeasurementReport_2!");
+            }
+            else {
+              f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Preliminary pass: periodical MeasurementReport_2 message received");
+            }
+          }
+          v_PreviousSFN_2 := v_CurrentSFN_2;
+          repeat;
+        }
+      [] t_TimeoutTimer_1.timeout
+        {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Timeout when receiving periodical MeasurementReport_1 message!");
+        }
+      [] t_TimeoutTimer_2.timeout
+        {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Timeout when receiving periodical MeasurementReport_2 message!");
+        }
+      [] t_TotalTimer.timeout
+        {
+          t_TimeoutTimer_1.stop;
+          t_TimeoutTimer_2.stop;
+          f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Periodical MeasurementReport test pass!");
+        }
+    }
+  } //end of f_Check_EUTRA_HighFreq_PeriodicalMeasurmentReport_2Meas
+
+  /*
+   * @desc      Return MeasGapConfig parameter to be used in intra freq measurement TCs for supported bands
+   *            If not (pc_ue_CategoryDL_M1 or pc_CEmodeA or pc_CEmodeB) => return MeasGapConfig => return cs_508_MeasGapConfig_GP1
+   *            If (pc_ue_CategoryDL_M1 or pc_CEmodeA or pc_CEmodeB) => return MeasGapConfig initialised with cs_508_MeasGapConfig_CE
+   * @return    template (omit) MeasGapConfig
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_SS_MeasGapConfigIntraFreqOverrideCE()
+    return template (omit) MeasGapConfig
+  {
+    var template (omit) MeasGapConfig v_MeasGapConfig := f_EUTRA_SS_InitialiseMeasGapConfig();
+    
+    if (isvalue(v_MeasGapConfig)){
+      return v_MeasGapConfig;
+    }
+    else {
+      return cs_508_MeasGapConfig_GP1;
+    }
+  }
+
+}

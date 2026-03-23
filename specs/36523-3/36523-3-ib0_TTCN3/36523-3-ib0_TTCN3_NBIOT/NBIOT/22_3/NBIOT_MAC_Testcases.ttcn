@@ -1,0 +1,2468 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-05-27 10:07:39 +0200 (Tue, 27 May 2025) $
+// $Rev: 41074 $
+/******************************************************************************/
+
+module NBIOT_MAC_Testcases {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_ASP_TypeDefs all;
+  import from EUTRA_NB_CommonL2 all;
+  import from EUTRA_NB_CommonMAC all;
+  import from NBIOT_ASP_L2DataDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_L2_Common all;
+  import from NBIOT_MAC_Common all;
+  import from NBIOT_Paging all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SysInfo_Templates all;
+  import from NBIOT_Timing all;
+
+  const integer tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay := 200;  /* 200ms to be used for f_NBIOT_GetNextSearchSpace in case of f_NBIOT_MAC_CPMode_SendRlcSdus to have enough time
+                                                                        for handing over and processing of message at NAS emulator
+                                                                        @status    APPROVED (NBIOT) */
+
+  template (value) NB_RA_NPDCCH_Order_Type cs_NB_RA_NPDCCH_Order(integer p_SubcarrierIndex) :=
+  { /* @status    APPROVED (NBIOT) */
+    NprachRepetitions := 0,
+    SubcarrierIndex := p_SubcarrierIndex
+  };
+
+  template (value) NB_SYSTEM_CTRL_REQ cas_NB_RA_NPDCCH_Order(NBIOT_CellId_Type p_CellId,
+                                                             template (value) TimingInfo_Type p_TimingInfo,
+                                                             template (value) NB_RA_NPDCCH_Order_Type p_NpdcchOrder) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := cs_NB_ReqAspCommonPart_CellCfg(p_CellId, p_TimingInfo, tsc_NoCnfReq),
+    Request := {
+      NpdcchOrder := p_NpdcchOrder
+    }
+  };
+
+  /*
+   * @desc      enable/disable reporting of DPR control elements
+   * @param     p_CellId
+   * @param     p_Mode
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigDPR_IndMode(NBIOT_CellId_Type p_CellId,
+                                        IndicationAndControlMode_Type p_Mode)  runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_NB_Common_IndConfig_REQ(p_CellId, cs_NB_EnableDPR_Req(p_Mode)));
+  }
+
+ /*
+   * @desc      wrapper function to receive HARQ ACK/NACK
+   * @param     p_CellId
+   * @param     p_HARQ_Type
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_Msg
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NBIOT_MAC_ReceiveAckNack(NBIOT_CellId_Type p_CellId,
+                                       HARQ_Type p_HARQ_Type,
+                                       charstring p_FileName,
+                                       LineNo_Type p_LineNo,
+                                       charstring p_Msg) runs on NBIOT_PTC
+  {
+    SYSIND.receive(car_NB_UL_HARQ_IND(p_CellId, p_HARQ_Type));
+    f_NBIOT_PreliminaryPass(p_FileName, p_LineNo, p_Msg);
+  }
+
+  type enumerated NBIOT_NPRACH_PreambleGroup_Type {singleToneMsg3, multiToneMsg3};    /* @status    APPROVED (NBIOT) */
+
+  template (value) NB_RandomAccessResponseConfig_Type cs_NB_RandomAccessResponseConfig_None :=
+  { /* @status    APPROVED (NBIOT) */
+    Ctrl  := {
+      DciInfo := cs_NB_DciInfo_RandomAccessResponse,
+      Rar := {
+        None := true
+      },
+      BackoffInd := cs_BI_None
+    }
+  };
+
+  template (value) NB_RarList_Type cs_NB_RarList_DifferentRAPID :=
+  { /* @status    APPROVED (NBIOT) */
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_SameAsC_RNTI)
+  };
+
+  template (value) NB_RarList_Type cs_NB_RarList_MultiRAR_UnMatched :=
+  { /* 5 RARS included all with unmatching RAPID: C-RNTIs arbitrarily selected to be not equal to configured and different from each other */
+    /* @status    APPROVED (NBIOT) */
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001000000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1101000000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1011000000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001100000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001010000110100'B))
+  };
+
+  template (value) NB_RarList_Type cs_NB_RarList_MultiRAR_1Matched :=
+  { /* 5 RARS included all with unmatching RAPID except one with a matching RAPID */
+    /* @status    APPROVED (NBIOT) */
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001000000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1101000000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_Auto, cs_TempC_RNTI_SameAsC_RNTI),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001100000110100'B)),
+    cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_UnMatched, cs_TempC_RNTI_Explicit ('1001010000110100'B))
+  };
+
+  template (value) NB_ContentionResolutionCtrl_Type cs_NB_ContentionResolutionCtrl_TCRNTI_Fail(template (value) ContentionResolution_ContainedDlschSdu_Type p_ContentionResolution_RlcPdu) :=
+  { /* results in no Contention resolution for T-CRNTI */
+    /* @status    APPROVED (NBIOT) */
+    TCRNTI_Based := {
+      MacPdu := {
+        ContainedId := {XorMask := tsc_ContentionResolutionId_Unmatch},
+        ContainedRlcPdu := p_ContentionResolution_RlcPdu       /* @sic R5s180401: p_ContentionResolution_RlcPdu sic@ */
+      }
+    }
+  };
+
+  template (present) NB_DPR_Type cr_NB_DPR(template (present) NB_DPR_DataVolumnIndex_Type p_DataVolumnIndex := ?,
+                                           template (present) NB_DPR_PowerHeadroomLevel_Type p_PowerHeadroomLevel := ?) :=
+  { /* @status    APPROVED (NBIOT) */
+    DataVolumnIndex := p_DataVolumnIndex,
+    PowerHeadroomLevel := p_PowerHeadroomLevel
+  };
+
+  template (present) NB_SYSTEM_IND car_NB_DPR_IND(NBIOT_CellId_Type p_CellId,
+                                                  template NB_DPR_Type p_DPR) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := cr_NB_IndAspCommonPart_SysInd(p_CellId, cr_TimingInfo_Any),
+    Indication := {
+      DPR := p_DPR
+    }
+  };
+
+  /*
+   * @desc      return preamble group to which the received NPRACH preamble belongs: preamble group indicates whether or not the UE supports multi-tone Msg3 transmission (36.211 clause 10.1.6.1)
+   *            calculations are according to 36.331 clause 6.7.3.2 - NPRACH-ConfigSIB-NB;
+   *            NOTE: 36.331-d30 introduces a new parameter nprach-NumCBRA-StartSubcarriers which is not considered in the calculations below
+   * @param     p_NPRACH_Parameters_NB
+   * @param     p_SubcarrierIndex
+   * @return    NBIOT_NPRACH_PreambleGroup_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_1_NprachPreambleGroup(NPRACH_Parameters_NB_r13 p_NPRACH_Parameters_NB,
+                                              integer p_SubcarrierIndex) runs on NBIOT_PTC return NBIOT_NPRACH_PreambleGroup_Type
+  {
+    var integer v_SubcarrierOffset;
+    var integer v_NumSubcarriers;
+    var integer v_NumSingleToneSubcarriers;
+
+    select (p_NPRACH_Parameters_NB.nprach_SubcarrierOffset_r13) {
+      case (n0)  { v_SubcarrierOffset := 0;}
+      case (n12) { v_SubcarrierOffset := 12;}
+      case (n24) { v_SubcarrierOffset := 24;}
+      case (n36) { v_SubcarrierOffset := 36;}
+      case (n2)  { v_SubcarrierOffset := 2;}
+      case (n18) { v_SubcarrierOffset := 18;}
+      case (n34) { v_SubcarrierOffset := 34;}
+      case else  { FatalError(__FILE__, __LINE__, ""); }
+    }
+    select (p_NPRACH_Parameters_NB.nprach_NumSubcarriers_r13) {
+      case (n12) { v_NumSubcarriers := 12;}
+      case (n24) { v_NumSubcarriers := 24;}
+      case (n36) { v_NumSubcarriers := 36;}
+      case (n48) { v_NumSubcarriers := 48;}
+      case else  { FatalError(__FILE__, __LINE__, ""); }
+    }
+    if ((p_SubcarrierIndex < v_SubcarrierOffset) or (p_SubcarrierIndex >= v_SubcarrierOffset + v_NumSubcarriers)) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid subcarrier index in NPRACH preamble");
+    }
+    select (p_NPRACH_Parameters_NB.nprach_SubcarrierMSG3_RangeStart_r13) {
+      case (zero)     { v_NumSingleToneSubcarriers := 0; }
+      case (oneThird) { v_NumSingleToneSubcarriers := v_NumSubcarriers / 3; }
+      case (twoThird) { v_NumSingleToneSubcarriers := (2 * v_NumSubcarriers) / 3; }
+      case (one)      { v_NumSingleToneSubcarriers := v_NumSubcarriers; }
+    }
+    if (p_SubcarrierIndex < v_SubcarrierOffset + v_NumSingleToneSubcarriers) {
+      return singleToneMsg3;
+    }
+    return multiToneMsg3;
+  }
+
+  /*
+   * @desc      convert enumerated numRepetitionsPerPreambleAttempt_r13 into integer
+   * @param     p_NPRACH_Parameters_NB
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_1_RepetitionsPerPreambleAttempt(NPRACH_Parameters_NB_r13 p_NPRACH_Parameters_NB) return integer
+  {
+    return bit2int('0000000000000001'B << enum2int(p_NPRACH_Parameters_NB.numRepetitionsPerPreambleAttempt_r13));
+  }
+
+  /*
+   * @desc      receive RACH preamble and check that
+   *            - preamble group matches as expected
+   *            - number of preamble repetitions are according to the CE level corresponding to p_NPRACH_Parameters_NB
+   * @param     p_CellId
+   * @param     p_NPRACH_Parameters_NB
+   * @param     p_ExpectedPreambleGroup (default value: *)
+   * @param     p_PassVerdictString
+   * @return    NBIOT_NPRACH_PreambleGroup_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_1_PreambleAttempt(NBIOT_CellId_Type p_CellId,
+                                          NPRACH_Parameters_NB_r13 p_NPRACH_Parameters_NB,
+                                          template NBIOT_NPRACH_PreambleGroup_Type p_ExpectedPreambleGroup := *,
+                                          charstring p_PassVerdictString) runs on NBIOT_PTC return NBIOT_NPRACH_PreambleGroup_Type
+  {
+    var NB_SYSTEM_IND v_NB_SYSTEM_IND;
+    var integer v_ReceivedRAPID;
+    var NBIOT_NPRACH_PreambleGroup_Type v_PreambleGroup;
+    var integer v_RepetitionsPerPreambleAttempt;
+    
+    SYSIND.receive(car_NB_RachPreamble_IND(p_CellId)) -> value v_NB_SYSTEM_IND;
+    v_RepetitionsPerPreambleAttempt := v_NB_SYSTEM_IND.Indication.RachPreamble.RepetitionsPerPreambleAttempt;
+    v_ReceivedRAPID := v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID;
+    v_PreambleGroup := fl_TC_22_3_1_1_NprachPreambleGroup(p_NPRACH_Parameters_NB, v_ReceivedRAPID);
+    if (not match(v_PreambleGroup, p_ExpectedPreambleGroup)) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "received RAPID does not belong to the expected preamble group");
+    } else if (v_RepetitionsPerPreambleAttempt != fl_TC_22_3_1_1_RepetitionsPerPreambleAttempt(p_NPRACH_Parameters_NB)) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "number of preambles per NPRACH attempt not as expected");
+    } else {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, p_PassVerdictString);
+    }
+    return v_PreambleGroup;
+  }
+
+  /*
+   * @desc      Receive RRCConnectionRequest and (in parallel) system indication for DPR
+   * @param     p_CellId
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_NB_DPR            (default value: omit)
+   * @param     p_PassVerdictString
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_1_ReceiveRRCConnectionRequest(NBIOT_CellId_Type p_CellId,
+                                                      template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                                      template NB_DPR_Type p_NB_DPR := omit,
+                                                      charstring p_PassVerdictString) runs on NBIOT_PTC
+  {
+    var template (present) NB_SRB_COMMON_IND v_SRB0_RrcPdu_IND_Template := car_NB_SRB0_RrcPdu_IND(p_CellId, cr_RRCConnectionRequest_NB(p_EstablishmentCause));
+    var NB_SRB_COMMON_IND v_NB_SRB_COMMON_IND;
+    var NB_SYSTEM_IND v_NB_SYSTEM_IND;
+
+    if (ispresent(p_NB_DPR)) {
+      interleave {
+        [] SRB.receive(v_SRB0_RrcPdu_IND_Template) -> value v_NB_SRB_COMMON_IND {}
+        [] SYSIND.receive(car_NB_DPR_IND(p_CellId, p_NB_DPR)) -> value v_NB_SYSTEM_IND {}
+      }
+      if (v_NB_SRB_COMMON_IND.Common.TimingInfo != v_NB_SYSTEM_IND.Common.TimingInfo) {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "DPR not received in the same MAC PDU as RRCConnectionRequest");
+      }
+    } else {
+      SRB.receive(v_SRB0_RrcPdu_IND_Template);
+    }
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, p_PassVerdictString);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.1
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_1_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var template (value) SystemInformationBlockType1_NB v_SIB1;
+    var template (value) SystemInformationBlockType2_NB_r13 v_SIB2;
+    var template (value) RSRP_ThresholdsNPRACH_InfoList_NB_r13 v_RSRP_ThresholdsNPRACH_InfoList_NB := {61, 41};    /* @sic R5-177119 sic@ */
+    var IntegerList_Type v_PowerLevelList := {-70, -90, -110};    /* @sic R5-177119 sic@ */
+    var template (value) NPRACH_ParametersList_NB_r13 v_NPRACH_ParametersList_NB;
+    var NPRACH_Parameters_NB_r13.nprach_Periodicity_r13 v_Periodicity;
+    var template (value) RACH_InfoList_NB_r13 v_RACH_InfoList := { cs_RACH_Info_NB_Default, cs_RACH_Info_NB_Default, cs_RACH_Info_NB_Default };
+    var template (value) NPUSCH_ACK_NACK_NumRepetitions_Msg4_Type v_NPUSCH_ACK_NACK_NumRepetitions_Msg4 := { r8, r8, r8 };
+    var NPRACH_Parameters_NB_r13 v_NPRACH_Parameters_NB;
+    var RACH_TimingAdvance_Type v_RAR_TA := tsc_RACH_TA_Def;
+    var template (value) DL_CCCH_Message_NB v_RRCConnectionSetup := f_NBIOT_508_RRCConnectionSetup();
+    var template (value) ContentionResolution_ContainedDlschSdu_Type v_ContentionResolution_RlcPdu := cs_ContentionResolution_DlschSdu(f_RRC_DL_CCCH_NB_Encvalue(v_RRCConnectionSetup));
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList := {
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(cs_NB_RarList_DifferentRAPID),      cs_NB_ContentionResolutionCtrl_TCRNTI_None), // NPRACH Preamble at step 2 -> step 3
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(cs_NB_RarList_MultiRAR_UnMatched),  cs_NB_ContentionResolutionCtrl_TCRNTI_None), // NPRACH Preamble at step 4 -> step 5
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(cs_NB_RarList_MultiRAR_1Matched),   cs_NB_ContentionResolutionCtrl_TCRNTI_None), // NPRACH Preamble at step 6 -> step 7
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(cs_NB_RarList_MultiRAR_1Matched),   cs_NB_ContentionResolutionCtrl_TCRNTI_Fail(v_ContentionResolution_RlcPdu)), /* NPRACH Preamble at step 9 -> step 10, 12
+                                                                                                                                                                                     @sic R5s180401: v_ContentionResolution_RlcPdu sic@ */
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_None,           cs_NB_ContentionResolutionCtrl_TCRNTI_None), // NPRACH Preamble at step 13
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_None,           cs_NB_ContentionResolutionCtrl_TCRNTI_None), // NPRACH Preamble at step 15
+      cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Def(v_RAR_TA),  cs_NB_ContentionResolutionCtrl_Def(v_ContentionResolution_RlcPdu)) // NPRACH Preamble at step 16 -> step 17, 17B @sic R5-177119 sic@
+    };
+    var NBIOT_NPRACH_PreambleGroup_Type v_PreambleGroup;
+    var integer v_CE_Level;
+    var template (present) NAS_MSG_Indication_Type v_ExpectedNasMsg;
+    var float v_WaitForUEtoMeasurePowerLevel := 15.0;
+    
+    f_NBIOT_Init(c1);
+    
+    f_NBIOT_CellInfo_InitMaxReferencePower(v_CellId, -70);    // for T0   @sic R5s180024 sic@
+    
+    // modify system information
+    v_SIB1 := f_NBIOT_CellInfo_GetSIB1(v_CellId);
+    v_SIB1.cellSelectionInfo_r13.q_RxLevMin_r13 := -70;     /* Table 22.3.1.1.3.3-4   @sic R5-177119 sic@ */
+    f_NBIOT_CellInfo_SetSIB1(nbiot_Cell1, v_SIB1);
+
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(v_CellId);
+    if(f_NBIOT_MobileInfo_IsNTN())
+    {/*@sic R5-251351, R5s250056, R5s250172, R5-252160 sic@*/
+        v_SIB2.ue_TimersAndConstants_r13.t300_r13 := ms25000;
+        v_Periodicity := ms1280;
+    }
+    else
+   {
+       v_Periodicity := ms640;
+   }
+    v_NPRACH_ParametersList_NB := {//@sic R5s250172 sic@
+      cs_NPRACH_Parameters_Default(v_Periodicity, ms8,   -, n3, n1),  // CE level 0: nprach-StartTime := 8,   maxNumPreambleAttemptCE := 3, numRepetitionsPerPreambleAttempt := 1
+      cs_NPRACH_Parameters_Default(v_Periodicity, ms32,  -, n3, n2),  // CE level 1: nprach-StartTime := 32,  maxNumPreambleAttemptCE := 3, numRepetitionsPerPreambleAttempt := 2
+      cs_NPRACH_Parameters_Default(v_Periodicity, ms128, -, n3, n4)   // CE level 2: nprach-StartTime := 128, maxNumPreambleAttemptCE := 3, numRepetitionsPerPreambleAttempt := 4
+    };
+    v_SIB2.radioResourceConfigCommon_r13.nprach_Config_r13 := cs_508_NPRACH_ConfigSIB_NB(v_RSRP_ThresholdsNPRACH_InfoList_NB, v_NPRACH_ParametersList_NB);   /* Table 22.3.1.1.3.3-1 */
+    v_SIB2.radioResourceConfigCommon_r13.rach_ConfigCommon_r13 := cs_508_RACH_ConfigCommon_NB_Default(n7, v_RACH_InfoList);                                  /* Table 22.3.1.1.3.3-2 */
+    v_SIB2.radioResourceConfigCommon_r13.npusch_ConfigCommon_r13 := cs_508_NPUSCH_ConfigCommon_NB_Default(v_NPUSCH_ACK_NACK_NumRepetitions_Msg4);            /* Table 22.3.1.1.3.3-3 */
+    
+      
+    f_NBIOT_CellInfo_SetSIB2(v_CellId, v_SIB2);
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(v_CellId, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true);     // no "layer2" mode as test case does not expect any data on L2DATA port in UL
+    
+    for (v_CE_Level := 0; v_CE_Level < 3; v_CE_Level := v_CE_Level + 1) {
+      v_NPRACH_Parameters_NB := valueof(v_NPRACH_ParametersList_NB[v_CE_Level]);
+      f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+      f_NBIOT_SetCellPower(v_CellId, v_PowerLevelList[v_CE_Level]);
+      f_NBIOT_SS_ConfigDPR_IndMode(v_CellId, enable);      // @sic R5s180024 sic@
+      
+      //@siclog "Step 0" siclog@
+      f_Delay(v_WaitForUEtoMeasurePowerLevel);    // @sic R5-177119 sic@
+
+      //@siclog "Step 1" siclog@
+      f_NBIOT_UE_Page(v_CellId);
+      
+      //@siclog "Step 2" siclog@
+      v_PreambleGroup := fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, -, "Step 2");
+      
+      //@siclog "Step 3" siclog@
+      // Random Access Response sent according to SS configuration (v_RachProcedureList)
+      
+      //@siclog "Step 4" siclog@
+      fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, v_PreambleGroup, "Step 4");
+      
+      //@siclog "Step 5" siclog@
+      // Random Access Response sent according to SS configuration (v_RachProcedureList)
+      
+      //@siclog "Step 6" siclog@
+      fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, v_PreambleGroup, "Step 6");
+      
+      //@siclog "Step 7" siclog@
+      // Random Access Response sent according to SS configuration (v_RachProcedureList)
+      
+      //@siclog "Step 8" siclog@
+      fl_TC_22_3_1_1_ReceiveRRCConnectionRequest(v_CellId, -, cr_NB_DPR, "Step 8");
+      
+      //@siclog "Step 9" siclog@
+      fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, v_PreambleGroup, "Step 9");
+      
+      //@siclog "Step 10" siclog@
+      // Random Access Response sent according to SS configuration (v_RachProcedureList)
+      
+      //@siclog "Step 11" siclog@
+      fl_TC_22_3_1_1_ReceiveRRCConnectionRequest(v_CellId, -, cr_NB_DPR, "Step 11");
+      
+      //@siclog "Step 12" siclog@
+      // Contention Resolution sent according to SS configuration (v_RachProcedureList)
+      
+      f_NBIOT_SS_ConfigDPR_IndMode(v_CellId, disable);      // @sic R5s180024 sic@
+
+      //@siclog "Step 13" siclog@
+      fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, v_PreambleGroup, "Step 13");
+      
+      if (v_CE_Level < 2) {
+        v_NPRACH_Parameters_NB := valueof(v_NPRACH_ParametersList_NB[v_CE_Level + 1]);
+      }
+       
+      //@siclog "Step 15" siclog@
+      v_PreambleGroup := fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, -, "Step 15");
+      
+      //@siclog "Step 16" siclog@
+      fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, v_PreambleGroup, "Step 16");
+      
+      //@siclog "Step 17" siclog@
+      // Random Access Response sent according to SS configuration (v_RachProcedureList)
+
+      //@siclog "Step 17A - 17D" siclog@
+      f_NBIOT_508Check_CP_ResponseToPagingForMTAccess_Step2_5(v_CellId);    // @sic R5-177119 sic@
+      
+      //@siclog "Step 17E" siclog@
+      f_NBIOT_RRC_ConnectionRelease(v_CellId);    // @sic R5-177119 sic@
+    }
+    v_CE_Level := 0;
+    v_RAR_TA := 600;
+    v_NPRACH_Parameters_NB := valueof(v_NPRACH_ParametersList_NB[v_CE_Level]);
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RRCConnectionSetup, -, v_RAR_TA);         // step 21, 23, 24 @sic R5-172053: 'merge' steps 23 and 24 sic@
+
+    //@siclog "Step 18" siclog@
+    f_NBIOT_SetCellPower(v_CellId, v_PowerLevelList[v_CE_Level]);
+
+    //@siclog "Step 18A" siclog@
+    f_Delay(v_WaitForUEtoMeasurePowerLevel);    // @sic R5-177119 sic@
+      
+    //@siclog "Step 19" siclog@
+    f_NBIOT_UE_Page(v_CellId);
+    
+    //@siclog "Step 20" siclog@
+    fl_TC_22_3_1_1_PreambleAttempt(v_CellId, v_NPRACH_Parameters_NB, -, "Step 20");
+    
+    //@siclog "Step 21" siclog@
+    // Random Access Response sent according to SS configuration (v_RachProcedureList: RAR_TA=600)
+    
+    //@siclog "Step 22" siclog@
+    fl_TC_22_3_1_1_ReceiveRRCConnectionRequest(v_CellId, -, -, "Step 22");
+
+    //@siclog "Step 23" siclog@
+    // Random Access Response sent according to SS configuration (v_RachProcedureList)
+
+    //@siclog "Step 24" siclog@
+    // @sic R5-172053: void sic@
+
+    //@siclog "Step 25" siclog@
+    v_ExpectedNasMsg := ?;
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant));
+    SRB.receive(car_NB_SRB_RrcNasPdu_IND(v_CellId, tsc_SRB1bis, cr_508_RRCConnectionSetupComplete_NB, v_ExpectedNasMsg));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 25");
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    
+    f_NBIOT_RRC_ConnectionRelease(v_CellId);
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+    f_NBIOT_Postamble(v_CellId, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      send Timing Advance Command and wait for HARQ ACK
+   * @param     p_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_TimingAdvancePDU
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_2_TimeAlignment(NBIOT_CellId_Type p_CellId,
+                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                        template (value) MAC_PDU_Type p_TimingAdvancePDU)  runs on NBIOT_PTC
+  {
+    var MAC_CTRL_TimingAdvance_Type v_MacCtrlTimingAdvanceValue := valueof(p_TimingAdvancePDU.CtrlElementList.TimingAdvance);
+    var TimingAdvanceIndex_Type v_TimingAdvanceIndex;
+    var SS_TimingAdvanceConfig_Type v_TimingAdvanceConfig;
+
+    if (v_MacCtrlTimingAdvanceValue != tsc_MAC_CTRL_TimingAdvance_0) {
+      v_TimingAdvanceIndex := bit2int(v_MacCtrlTimingAdvanceValue) mod 64;
+      v_TimingAdvanceConfig := { Relative := v_TimingAdvanceIndex };
+      f_NBIOT_SS_ConfigActiveCellInfo(p_CellId, p_TimingInfo, cds_NB_ActiveCellConfig_PhysicalLayerConfigUL(cs_NB_PhysicalLayerConfigUL(-, v_TimingAdvanceConfig)));  // @sic R5s210039: MCC160 Implementation sic@
+    }
+    f_NBIOT_MAC_CPMode_SendMacPdu(p_CellId, p_TimingInfo, p_TimingAdvancePDU);
+    SYSIND.receive(car_NB_UL_HARQ_IND(p_CellId, ack));
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.2
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_2_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                                   // RLC status to be maintained by Send/Receive functions
+    var EUTRA_ASN1_C_RNTI_Type v_C_RNTI;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var template (value) MAC_PDU_Type v_MAC_PDU;
+    var template (value) NB_DciDlInfo_Type v_DciDlInfo;
+    var MAC_SDUList_Type v_MAC_SDUList;
+    var SubFrameTiming_Type v_TimingStart;
+    var SubFrameTiming_Type v_TimingStart_Step8a;
+    var SubFrameTiming_Type v_TimingStart_Step21;
+    var SubFrameTiming_Type v_TimingStart_Step24;
+    var integer v_RlcSduSizeDL;
+    var integer v_TBS;
+    var integer v_Imcs;
+    var integer v_Isf;
+    var integer v_RepetitionNumber;
+    var integer v_IncrementVTS;
+    var integer v_TestLoopModeRepetitions := 0;                                       // according to test case preamble
+    var NB_SYSTEM_IND v_NB_SYSTEM_IND;
+    var template (value) NB_RarList_Type v_NB_RarList;
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList;
+    var integer v_RAPID;
+    var integer v_RA_PreambleIndex;
+    var boolean v_NtnEnvironment;
+    var integer v_NpdcchBundleOffset;
+    timer t_Timer;
+    
+    
+    v_MAC_MainConfig.timeAlignmentTimerDedicated_r13 := sf5120;
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig);
+    f_NBIOT_L2_Preamble_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode, v_RrcConnSetup, v_TestLoopModeRepetitions);
+
+    v_NtnEnvironment := f_NBIOT_MobileInfo_IsNTN(); //@sic R5s240285, R5-241564, R5s240589 sic@
+    
+    v_NpdcchBundleOffset := f_NBIOT_GetNPDCCH_PeriodsInBundle(nbiot_Cell1); //@sic R5s240285, R5s240266, R5-241564 sic@
+
+    //@siclog "Step 0" siclog@
+    //The SS transmits a Timing Advance Command without any additional padding (i.e. TBS=16). Start Timer_1 = Time Alignment timer value. The Timing Advance Command indicates a TA index of 31 resulting in no change of timing advance (see TS 36.213 clause 4.2.3)
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, -, cs_MAC_PDU_TimingAdvance_0);    /* @sic R5s170886 change 1: ensure timeAlignmentTimer(5.12s) not to time out before step 20 sic@ */
+    
+    if(v_NtnEnvironment){
+        f_Delay(int2float(f_NBIOT_NTN_Get_T_NTNoffset(v_CellId))/500.0); // 2 * NTN message delay (550ms * 2) @sic R5s240589 sic@
+    }else
+    {
+        f_Delay(0.5);   /* @sic R5s170886 change 1: to be sure that TA is acknowledged before HARQ_IndMode gets enabled sic@ */
+    }
+
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, enable);
+    v_C_RNTI := f_NBIOT_CellInfo_GetC_RNTI(v_CellId);
+
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+
+    // build MAC PDU to be used at steps 1, 3, 5
+    v_RlcSduSizeDL := 38; // 38 bytes
+    v_TBS := 328;         // 41 bytes
+    v_MAC_SDUList := { fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL)) };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList, v_TBS);
+
+    //@siclog "Step 1" siclog@
+    f_NBIOT_SS_ConfigActiveCellInfo(v_CellId, cs_TimingInfo_Now, cds_NB_NewC_RNTI_ConfigReq(tsc_C_RNTI_Def2));
+    t_Timer.start(0.5);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, cs_TimingInfo_Now, v_MAC_PDU);
+
+    //@siclog "Step 2" siclog@
+    alt {
+      [] SYSIND.receive(car_NB_UL_HARQ_IND(v_CellId)) {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+      }
+      [] t_Timer.timeout {
+      }
+    }
+
+    f_NBIOT_SS_ConfigActiveCellInfo(v_CellId, cs_TimingInfo_Now, cds_NB_NewC_RNTI_ConfigReq(v_C_RNTI));
+
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId);
+    
+    //@siclog "Step 3" siclog@
+    v_Imcs := 10;
+    v_Isf := 1;
+    v_RepetitionNumber := 2;
+    v_DciDlInfo := cs_NB_DciDlInfo_Explicit(v_Imcs, v_Isf, v_RepetitionNumber, crcErrorWithRetransmission);
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, v_DciDlInfo));
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+    
+    // schedule change of DCI before start of the next search space
+    v_RepetitionNumber := 1;
+    v_DciDlInfo := cs_NB_DciDlInfo_Explicit(v_Imcs, v_Isf, v_RepetitionNumber);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, 0.8));
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, v_TimingInfo, -, v_DciDlInfo));
+    
+    //@siclog "Step 4" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, nack, __FILE__, __LINE__, "Step 4");
+    
+    //@siclog "Step 5" siclog@
+    /* HARQ restransmission is done automatically by the SS; the SS shall apply the new DCI */
+    
+    //@siclog "Step 6" siclog@
+    alt {     /* @sic R5s170813 change 1.1: repeated receiption of nack until ack is received sic@ */
+      [] SYSIND.receive(car_NB_UL_HARQ_IND(v_CellId, ack))
+        {
+          f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+        }
+      [] SYSIND.receive(car_NB_UL_HARQ_IND(v_CellId, nack))
+        {
+          repeat;
+        }
+    }
+
+    //@siclog "Step 7" siclog@
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant));    /* @sic R5s170813 change 1.2 sic@ */
+
+    //@siclog "Step 8" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_ReceiveAndCheck(v_RLC_CountsInfoListByRef, v_CellId);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+      
+    //@siclog "Step 8a - 8b" siclog@
+    if(v_NtnEnvironment){ //@sic R5s240589, R5-246224 sic@
+        v_TimingStart_Step8a := f_NBIOT_GetNextSearchSpace(v_CellId);
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart_Step8a);
+        fl_TC_22_3_1_2_TimeAlignment(v_CellId, v_TimingInfo, cs_MAC_PDU_TimingAdvance_0);
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 8a");
+    }
+    
+    //@siclog "Step 9" siclog@
+    v_TBS := 504;         // 63 bytes: 4 * 2 bytes subheader + 1 byte subheader + 4 * 11 bytes MAC SDU + 1 * 10 bytes MAC SDU
+    v_Imcs := 10;
+    v_Isf := 2;
+    v_RepetitionNumber := 3;
+    v_DciDlInfo := cs_NB_DciDlInfo_Explicit(v_Imcs, v_Isf, v_RepetitionNumber);
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, v_DciDlInfo));
+    
+    v_MAC_SDUList := {
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(16)),   /* 16 bytes RLC SDU -> 18 bytes MAC SDU    @sic R5-172860 sic@ */
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(17)),   /* 17 bytes RLC SDU -> 19 bytes MAC SDU    @sic R5-172860 sic@ */
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(19))    /* 19 bytes RLC SDU -> 21 bytes MAC SDU    @sic R5-172860 sic@ */
+    };                                                                                                  /*                      4 bytes 2 x R/R/E/LCID/L MAC SDU sub-header
+                                                                                                         *                      1 byte      R/R/E/LCID   MAC SDU sub-header
+                                                                                                         *                  =>  TBS=504 (Isf=2, Itbs=10) */
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList, v_TBS);
+    
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+    
+    // schedule UL grant of step 11 in advance
+    //In the third (next for NTN) NPDCCH period bundle after the transmission at step 9 the SS allocates an UL grant for the UE to send the RLC status PDU (NOTE 3, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));
+    }
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);
+
+    //@siclog "Step 10" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 10");
+    
+    //@siclog "Step 11" siclog@
+    /* UL grant as scheduled before step 10 */
+
+    //@siclog "Step 12" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_ReceiveAndCheck(v_RLC_CountsInfoListByRef, v_CellId);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+    
+    //@siclog "Step 13" siclog@
+    v_TBS := 224;         // 28 bytes: 2 bytes SDU subheader + 1 byte padding subheader + 18 bytes MAC SDU + 7 bytes padding
+    v_Imcs := 7;
+    v_Isf := 1;
+    v_RepetitionNumber := 4;
+    v_DciDlInfo := cs_NB_DciDlInfo_Explicit(v_Imcs, v_Isf, v_RepetitionNumber);
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, v_DciDlInfo));
+    
+    v_RlcSduSizeDL := 16;  // 16 bytes   => MAC SDU size = 18
+    v_MAC_SDUList := {
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL))
+    };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList, v_TBS);
+    
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+    
+    // schedule UL grant of step 15 in advance
+    //In the third (next for NTN) NPDCCH period bundle after the transmission at step 13 the SS allocates an UL grant for the UE to send the RLC status PDU (NOTE 3, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));
+    }
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);
+
+    //@siclog "Step 14" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 14");
+
+    //@siclog "Step 15" siclog@
+    /* UL grant as scheduled before step 14 */
+
+    //@siclog "Step 16" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_ReceiveAndCheck(v_RLC_CountsInfoListByRef, v_CellId);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+
+    //@siclog "Step 17" siclog@
+    v_TBS := 144;         // 18 bytes: 1 byte padding subheader + 1 byte SDU subheader + 16 bytes MAC SDU
+    v_Imcs := 10;
+    v_Isf := 0;
+    v_RepetitionNumber := 5;
+    v_DciDlInfo := cs_NB_DciDlInfo_Explicit(v_Imcs, v_Isf, v_RepetitionNumber);
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, v_DciDlInfo));
+    
+    v_RlcSduSizeDL := 14;  // 14 bytes   => MAC SDU size = 16
+    v_MAC_SDUList := {
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL))
+    };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList, v_TBS);
+    
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+    
+    // schedule UL grant of step 19 in advance
+    //In the third (next for NTN) NPDCCH period bundle after the transmission at step 13 the SS allocates an UL grant for the UE to send the RLC status PDU (NOTE 3, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));
+    }
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);
+
+    //@siclog "Step 18" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 18");
+
+    //@siclog "Step 19" siclog@
+    /* UL grant as scheduled before step 18 */
+
+    //@siclog "Step 20" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_ReceiveAndCheck(v_RLC_CountsInfoListByRef, v_CellId);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 20");
+
+    v_DciDlInfo := cs_NB_DciDlInfo_Auto;
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, v_DciDlInfo));
+
+    //@siclog "Step 21 - 22" siclog@
+    //SS sets DL assignment for TBS of 16 bits, automatically taken care of
+    v_TimingStart_Step21 := f_NBIOT_GetNextSearchSpace(v_CellId); //@sic R5-241564 sic@ Timing from step 21 is referenced in step 32
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart_Step21);
+    fl_TC_22_3_1_2_TimeAlignment(v_CellId, v_TimingInfo, cs_MAC_PDU_TimingAdvance_0);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+
+    //@siclog "Step 23" siclog@
+    //The SS waits for 39 (4 for NTN) NPDCCH periods bundles.(NOTE 8, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step21, int2float(5 * v_NpdcchBundleOffset))); // 4 for step 23 + 1 for step 24: In the 40th (5th for NTN) NPDCCH period bundle after the transmission at step 21
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step21, int2float(40 * v_NpdcchBundleOffset))); /* with TA timer of 5.12s, half of the timer is expired after 40 * 64ms = 2.56s */
+    }
+    
+    //@siclog "Step 24 - 25" siclog@
+    fl_TC_22_3_1_2_TimeAlignment(v_CellId, v_TimingInfo, cs_MAC_PDU_TimingAdvance_1Padding(tsc_MAC_CTRL_TimingAdvance_Max));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 25");
+
+    //@siclog "Step 26" siclog@
+    //The SS waits for 55 (5 for NTN) NPDCCH periods bundles.(NOTE 9, NOTE 4)
+    v_TimingStart_Step24 := valueof(v_TimingInfo.SubFrame); //@sic R5-241564 sic@
+     
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564, R5s240589, R5-246224 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(6 * v_NpdcchBundleOffset))); // 5 for step 26 + 1 for step 27: In the 56th (7th for NTN)NPDCCH period bundle after the transmission at step 24
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(56 * v_NpdcchBundleOffset))); /* with TA timer of 5.12s: 56 * 64ms = 3.584s; i.e. 70% of 5.12s */
+    }
+    
+    //@siclog "Step 27" siclog@
+    //In the 56th (5th for NTN)NPDCCH period bundle after the transmission at step 24 the SS transmits MAC PDU containing one RLC SDU in an AMD PDU with polling field 'P' set to '1'.(NOTE 9, NOTE 4)
+    v_RlcSduSizeDL := 16;  /* 16 bytes   => MAC SDU size = 18 resulting in TBS=176
+                              @sic R5s170482 change 1.1: 16 bytes instead of 12 bytes sic@ */
+    v_MAC_SDUList := {
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL))
+    };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+    
+    // schedule UL grant of step 29 in advance
+    //In the 58th (7th for NTN)NPDCCH period bundle after the transmission at step 24 the SS allocates an UL grant for UE to send the RLC status PDU.(NOTE 3, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564, R5s240589, R5-246224 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(7 * v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(58 * v_NpdcchBundleOffset)));
+    }
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);
+
+    //@siclog "Step 28" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 28");
+
+    //@siclog "Step 29" siclog@
+    /* UL grant as scheduled before step 28 */
+
+    //@siclog "Step 30" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_ReceiveAndCheck(v_RLC_CountsInfoListByRef, v_CellId);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 30");
+
+    t_Timer.start(2.0);  /* at step 30 we are in the 59th NPDCCH cycle after sending the TA command at step 24;
+                            UL grant at step 34 is scheduled for the 89th NPDCCH cycle => 2s should be sufficient */
+    
+    //@siclog "Step 31" siclog@
+    //In the 88th (9th for NTN) NPDCCH period bundle after the transmission at step 24 SS transmits a downlink assignment to C-RNTI assigned to the UE on NPDCCH and transmits in the indicated downlink assignment a RLC PDU with polling field 'P' set to '0' in a MAC PDU on NPDSCH. (NOTE 10, NOTE 13, , NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564, R5s240365, R5-242524 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(9 * v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(88 * v_NpdcchBundleOffset)));
+    }
+    
+    //@siclog "Step 32" siclog@
+    v_IncrementVTS := 1;    /* @sic R5-185020: DL RLC Sequence number incremented after step 32 sic@ */
+    v_MAC_SDUList := {
+      fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL), tsc_NoPoll, v_IncrementVTS)  /* @sic R5s170813 change 1.3: polling field set to 0 sic@
+                                                                                                                                                 @sic R5s180063 change 2.1: v_IncrementVTS := 0 sic@
+                                                                                                                                                 @sic R5-185020: v_IncrementVTS := 1 sic@ */
+    };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList);
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, v_MAC_PDU);
+
+    //@siclog "Step 34" siclog@
+    //In the 90th (10th for NTN) NPDCCH period bundle after the transmission at step 24 the SS allocates an UL grant for the UE.(NOTE 3, NOTE 4)
+    if (v_NtnEnvironment)
+    {//@sic R5s240266, R5-241564 sic@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(10 * v_NpdcchBundleOffset)));
+    }
+    else
+    {
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart_Step24, int2float(90 * v_NpdcchBundleOffset)));
+    }
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);
+    
+    alt {
+      //@siclog "Step 33" siclog@
+      [] SYSIND.receive(car_NB_UL_HARQ_IND(v_CellId)) {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 33");
+      }
+      //@siclog "Step 35" siclog@
+      [] L2DATA.receive(car_NB_L2_DATA_IND(cr_NB_IndAspCommonPart_RB(?, ?), ?)) {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 35");
+      }
+      [] t_Timer.timeout {
+      }
+    }
+
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);
+    v_NB_RarList := { cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_Auto, cs_TempC_RNTI_Explicit(tsc_C_RNTI_Def2)) };                     /* @sic R5-176659, R5s170886 change 2: T-CRNTI different from CRNTI for step 38 sic@ */
+    v_RachProcedureList := { cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(v_NB_RarList), cs_NB_ContentionResolutionCtrl_CRNTI) };  // step 38, 39
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+
+    f_NBIOT_L2_CPMode_RestoreSRBs(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR); /* @sic R5s170482 change 1.3 sic@ */
+
+    //@siclog "Step 36" siclog@
+    v_RA_PreambleIndex := 13;         /* ra-PreambleIndex (acc. to 36.321 cl. 5.1.2) as indicated in subcarrier indication field of the DCI (36.213 cl. 16.3.2 and 36.213 cl. 6.4.3.2) */
+    v_RAPID := 13;                    /* RAPID corresponding to ra-PreambleIndex for CBRA according to 36.321 cl. 5.1.2: RAPID := nprach-SubcarrierOffset + (ra-PreambleIndex modulo nprach-NumSubcarriers)
+                                         with NPRACH_Parameters_NB_r13.nprach_SubcarrierOffset_r13 = n12; NPRACH_Parameters_NB_r13.nprach_NumSubcarriers_r13 = n12
+                                         => RAPID := 12 + (ra-PreambleIndex % 12) = 13 */
+    SYS.send(cas_NB_RA_NPDCCH_Order(v_CellId, cs_TimingInfo_Now, cs_NB_RA_NPDCCH_Order(v_RA_PreambleIndex)));
+
+    //@siclog "Step 37" siclog@
+    SYSIND.receive(car_NB_RachPreamble_IND(v_CellId)) -> value v_NB_SYSTEM_IND;
+    if (v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID != v_RAPID) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 37: RAPID is not as per NPDCCH order");
+    }
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+
+    //@siclog "Step 38" siclog@
+    // Random Access Response sent according to SS configuration
+
+    //@siclog "Step 39" siclog@
+    // contention resolution  according to SS configuration
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, disable);
+    f_Delay(0.5);                                                               /* @sic @sic R5s170886 change 3: to ensure that contention resolution has happened sic@
+                                                                                   NOTE: in R13 NBIOT does not support non-contention based random access procedure */
+
+    f_NBIOT_RRC_ConnectionRelease(v_CellId);                                    /* @sic R5s190172 sic@ */
+
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup();                         /* @sic R5s190172 sic@ */
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RrcConnSetup);               /* @sic R5s190172 sic@ */
+
+    f_NBIOT_Postamble(v_CellId, CONTROL_PLANE, N1_IDLE);                        /* @sic R5s170482 change 1.4 sic@ @sic R5s190172: N1_IDLE sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.3
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_3_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                         // RLC status to be maintained by Send/Receive functions
+    var template (value) RLC_SDU_Type v_RlcSdu;
+    var template (value) RLC_SDUList_Type v_RlcSduList;
+    var EUTRA_ASN1_C_RNTI_Type v_C_RNTI;
+    var NB_L2_DATA_IND v_NB_L2_DATA_IND;
+    var TimingInfo_Type v_Timestamp;
+    var SubFrameTiming_Type v_SearchSpaceForULTransmission;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var template (value) NB_DciUlInfo_Type v_DciUlInfo;
+    var template (value) NB_UL_TransRetransmissionList_Type v_TransRetransmissionList;
+    var SubFrameTiming_Type v_TimingStart;
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX;
+    var template (present) MAC_SDUList_Type v_MAC_SDUList_RX;
+    var template (value) NB_DciUlInfo_Type v_ULGrant;
+    var integer v_IncrementVRR;
+    var integer v_NpdcchBundleOffset;
+    var boolean v_IsNTN;
+      
+    f_NBIOT_L2_Preamble_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode);
+    v_NpdcchBundleOffset := f_NBIOT_GetNPDCCH_PeriodsInBundle(nbiot_Cell1); //@sic R5s240285, R5s240266, R5-241564 sic@
+    
+
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+    v_C_RNTI := f_NBIOT_CellInfo_GetC_RNTI(v_CellId);
+    v_IsNTN := f_NBIOT_MobileInfo_IsNTN(); /*@sic R5s250057 sic@*/
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);    /* @sic R5s170236 change 2: 200ms offset sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    
+    // NOTE: steps 1 - 6 correspond to LTE test case 7.1.4.1
+
+    //@siclog "Step 1" siclog@
+    v_RlcSdu := crs_PDCP_SDU_16B;                // same as in TC_7_1_4_1 step 2
+    v_RlcSduList := { v_RlcSdu };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+
+    //@siclog "Step 2 - 3" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, 0.5));
+    f_NBIOT_SS_ConfigActiveCellInfo(v_CellId, v_TimingInfo, cds_NB_NewC_RNTI_ConfigReq(tsc_C_RNTI_Def2));
+    
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(v_NpdcchBundleOffset)));  //@sic R5s240266, R5-241564 sic@
+
+    v_ULGrant := cs_NB_DciInfo_CcchDcchDtchUL(0, 10);  /* @sic R5s170970: to avoid timing issues grants shall take just one RU => 144 bits sic@ */
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_PeriodicGrant(v_ULGrant, 10)), v_TimingInfo);  /* 10 times grant of 144 bits */
+                                                                                                                                                          
+    //@siclog "Step 4" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, 10.5 * int2float(v_NpdcchBundleOffset))); //@sic R5s240266, R5-241564 sic@
+    f_NBIOT_SS_ConfigActiveCellInfo(v_CellId, v_TimingInfo, cds_NB_NewC_RNTI_ConfigReq(v_C_RNTI));
+
+    v_SearchSpaceForULTransmission := f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(11 * v_NpdcchBundleOffset)); //@sic R5s240266, R5-241564 sic@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SearchSpaceForULTransmission);
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant), v_TimingInfo);            // one default grant
+
+    if(v_IsNTN){//@sic R5s240442, R5s25057 sic@
+        v_SearchSpaceForULTransmission := f_NBIOT_IncrementSearchSpace(v_SearchSpaceForULTransmission, int2float(v_NpdcchBundleOffset) - 1.0);
+    }
+
+    //@siclog "Step 5" siclog@
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_SingleRlcAmdPdu_RX(-, v_RlcSdu);
+    v_NB_L2_DATA_IND := f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    v_Timestamp := v_NB_L2_DATA_IND.Common.TimingInfo;
+    if (not f_NBIOT_TimeStamp_CheckSearchSpace(v_SearchSpaceForULTransmission, v_Timestamp.SubFrame)) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 3 - MAC PDU not received within search space corresponding to UL grant of step 4");
+    } else {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    }
+
+    //@siclog "Step 6" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*@sic R5s250057 sic@*/
+
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);                                      // @sic R5-181306: scheduled transmission sic@
+
+    //@siclog "Step 7" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+
+    //@siclog "Step 8, 10" siclog@
+    v_TransRetransmissionList := {
+      cs_NB_UL_TransRetransmission_NewTransmission,             // step 8
+      cs_NB_UL_TransRetransmission_ReTransmission(1)            // step 10
+    };
+
+    v_DciUlInfo := cs_NB_DciInfo_CcchDcchDtchUL(2, 4, v_TransRetransmissionList);                   /* @sic R5-181306: Iru := 2, Imcs := 5 => TBS=224 sic@
+                                                                                                       @sic R5-182584: Iru := 2, Imcs := 4 => TBS=208 sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3*v_NpdcchBundleOffset)));   // @sic R5s240266, R5-241564, R5-181306: scheduled transmission sic@
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant(v_DciUlInfo)), v_TimingInfo);
+
+    // MAC PDU as expected for step 9 and 11
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_SingleRlcAmdPdu_RX(-, v_RlcSdu);
+
+    //@siclog "Step 9" siclog@
+    v_IncrementVRR := 0; /* AM_VRR shall not be incremented for this step as there is an adaptive HARQ restransmission at step 11 */
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX, v_IncrementVRR);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+
+    //@siclog "Step 11" siclog@
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+
+    //@siclog "Step 12" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*@sic R5s250057 sic@*/
+
+    //@siclog "Step 13" siclog@
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);                                      // @sic R5-181306: scheduled transmission sic@
+    v_RlcSduList := { crs_PDCP_SDU_15B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList, tsc_Poll);
+
+    //@siclog "Step 14" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3*v_NpdcchBundleOffset)));   // @sic R5s240266, R5-241564, R5-181306: scheduled transmission sic@
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 2, 3, v_TimingInfo);  // UL grant of 176 bits (ITBS=3, IRU=2)
+
+    //@siclog "Step 15" siclog@
+    f_NBIOT_MAC_CPMode_RlcStatusPdu_RlcAmdPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_RlcSduList);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+
+    //@siclog "Step 16" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*@sic R5s250057 sic@*/
+
+    //@siclog "Step 17" siclog@
+    // Void
+
+    //@siclog "Step 18" siclog@
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);                                      // @sic R5-181306: scheduled transmission sic@
+    v_RlcSdu := crs_PDCP_SDU_8B;
+    v_RlcSduList := { v_RlcSdu };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+
+    //@siclog "Step 19" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));   // @sic R5s240266, R5-241564, R5-181306: scheduled transmission sic@
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 2, 3, v_TimingInfo);  // UL grant of 176 bits (ITBS=3, IRU=2)
+
+    //@siclog "Step 20" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, normalPadding, anyBSR, v_MAC_SDUList_RX);
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 20");
+
+    //@siclog "Step 20A" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN);  /* @sic R5-172834/R5s170236 change 6, R5s250057 sic@ */
+
+    //@siclog "Step 21" siclog@
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);                                      // @sic R5-181306: scheduled transmission sic@
+    v_RlcSdu := crs_PDCP_SDU_11B;            // RLC SDU of 11 bytes results in AM RLC PDU of 13 bytes
+    v_RlcSduList := { v_RlcSdu };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+
+    //@siclog "Step 22" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));   // @sic R5s240266, R5-2415646, R5-181306: scheduled transmission sic@
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 4, 0, v_TimingInfo);  // UL grant of 120 bits (ITBS=0, IRU=4)   @sic R5s170236 change 7: IRU=4 sic@
+
+    //@siclog "Step 23" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, singleBytePadding, noBSR, v_MAC_SDUList_RX);  // @sic R5s170236 change 8: noBSR sic@
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 23");
+
+    //@siclog "Step 23A" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN);  /* @sic R5-172834/R5s170236 change 6, R5s250027  sic@ */
+
+    //@siclog "Step 24" siclog@
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);                                      // @sic R5-181306: scheduled transmission sic@
+    v_RlcSdu := crs_PDCP_SDU_8B;
+    v_RlcSduList := { v_RlcSdu };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+
+    //@siclog "Step 25" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_TimingStart, int2float(3 * v_NpdcchBundleOffset)));   // @sic R5s240266, R5-241564, R5-181306: scheduled transmission sic@
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 4, 0, v_TimingInfo);  // UL grant of 120 bits (ITBS=0, IRU=4)   @sic R5s170236 change 7: IRU=4 sic@
+
+    //@siclog "Step 26" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };
+    v_MAC_PDU_RX := (f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, twoBytePadding, anyBSR, v_MAC_SDUList_RX),
+                     f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, normalPadding,  anyBSR, v_MAC_SDUList_RX));
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 26");
+
+    //@siclog "Step 27" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId);  /* @sic R5-172834/R5s170236 change 6 sic@ */
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);
+  }
+
+  /*
+   * @desc      Convert ASN.1 type RetxBSR-Timer-NB-r13 to integer
+   * @param     p_RetxBSR_Timer
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_4_RetxBSR_Timer_NpdcchPeriods(RetxBSR_Timer_NB_r13 p_RetxBSR_Timer) return integer
+  {
+    var integer v_NpdcchPeriods;
+
+    select (p_RetxBSR_Timer) {
+      case (pp4)   { v_NpdcchPeriods := 4; }
+      case (pp16)  { v_NpdcchPeriods := 16; }      /* @sic R5s180252 8 -> 16 sic@ */
+      case (pp64)  { v_NpdcchPeriods := 64; }      /* @sic R5s180252 16 -> 64 sic@ */
+      case (pp128) { v_NpdcchPeriods := 128; }
+      case (pp256) { v_NpdcchPeriods := 256; }
+      case (pp512) { v_NpdcchPeriods := 512; }
+    }
+    return v_NpdcchPeriods;
+  }
+
+  /*
+   * @desc      Convert ASN.1 type PeriodicBSR-Timer-NB-r13 to integer
+   * @param     p_PeriodicBSR_Timer
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_4_PeriodicBSR_Timer_NpdcchPeriods(PeriodicBSR_Timer_NB_r13 p_PeriodicBSR_Timer) return integer
+  {
+    var integer v_NpdcchPeriods;
+
+    select (p_PeriodicBSR_Timer) {
+      case (pp2)   { v_NpdcchPeriods := 2; }
+      case (pp4)   { v_NpdcchPeriods := 4; }
+      case (pp8)   { v_NpdcchPeriods := 8 }
+      case (pp16)  { v_NpdcchPeriods := 16; }
+      case (pp64)  { v_NpdcchPeriods := 64; }
+      case (pp128) { v_NpdcchPeriods := 128; }
+    }
+    return v_NpdcchPeriods;
+  }
+
+  /*
+   * @desc      check that BSR of the given MAC PDU indicates a buffer size >= given value
+   * @param     p_MacPdu
+   * @param     p_BufferSizeIndexMin
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_MAC_PDU_BSR_CheckGreaterThanOrEqual(MAC_PDU_Type p_MacPdu,
+                                                  integer p_BufferSizeIndexMin) runs on NBIOT_PTC
+  {
+    var integer v_BufferSizeIndex := bit2int(p_MacPdu.CtrlElementList.ShortBSR.Value);
+
+    if (v_BufferSizeIndex < p_BufferSizeIndexMin) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "buffer size in BSR is to small");
+    }
+  }
+
+  /*
+   * @desc      Assign UL grant of 32 bits to the UE to allow sending of BSR (only);
+   *            returns buffer size reported by the UE
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_SubFrameTiming
+   * @param     p_BSR_Index_Min
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_4_TriggerBSR(inout NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                     NBIOT_CellId_Type p_CellId,
+                                     SubFrameTiming_Type p_SubFrameTiming,
+                                     integer p_BSR_Index_Min) runs on NBIOT_PTC
+  {
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_SubFrameFull(p_SubFrameTiming);
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX;
+    var NB_L2_DATA_IND v_NB_L2_DATA_IND;
+    var integer v_IncrementVRR := 0;  /* @sic R5s170238 change 1: no RLC PDU => nothing to be incremented sic@ */
+
+    // SS allocates UL grant of 32 bits
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(p_CellId, 0, 2, v_TimingInfo);  // UL grant of 32 bits (ITBS=2, IRU=0)
+
+    // UE transmits short BSR
+    v_MAC_PDU_RX := (f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, twoBytePadding, anyBSR),  /* two byte padding at the beginning of the MAC PDU
+                                                                                           (two byte padding sub header + BSR subheader + short BSR => 4 bytes) */
+                     f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, normalPadding, anyBSR));  /* short BSR sub header + padding sub header + BSR + padding */
+
+    v_NB_L2_DATA_IND := f_NBIOT_MAC_CPMode_MacPdu_Receive(p_RLC_CountsInfoList, p_CellId, v_MAC_PDU_RX, v_IncrementVRR);
+    
+    fl_MAC_PDU_BSR_CheckGreaterThanOrEqual(v_NB_L2_DATA_IND.L2Data.SubframeData.PduSduList.MacPdu[0], p_BSR_Index_Min);
+  }
+
+  /*
+   * @desc      helper function: C-RNTI and BSR may occur in any order if both are contained in a single MAC PDU => this function shall be used to generate the different variants
+   * @param     p_LchId_CRNTIorBSR
+   * @param     p_LchId_BSRorCRNTI
+   * @param     p_LchId_MacSdu
+   * @return    template (present) MAC_Header_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_MacPduHeaderWithCRNTIandBSR(B5_Type p_LchId_CRNTIorBSR,
+                                          B5_Type p_LchId_BSRorCRNTI,
+                                          B5_Type p_LchId_MacSdu) return template (present) MAC_Header_Type
+  {
+    var template (present) MAC_Header_Type v_MacPduHeader := {};
+    
+    v_MacPduHeader := f_NBIOT_MacPduHeader_AddSubheader_RX(v_MacPduHeader, p_LchId_CRNTIorBSR, tsc_ExtensionMoreHeaders);
+    v_MacPduHeader := f_NBIOT_MacPduHeader_AddSubheader_RX(v_MacPduHeader, p_LchId_BSRorCRNTI, tsc_ExtensionMoreHeaders);
+    v_MacPduHeader := f_NBIOT_MacPduHeader_AddSubheader_RX(v_MacPduHeader, p_LchId_MacSdu, tsc_ExtensionNoMoreHeaders);
+    return v_MacPduHeader;
+  }
+
+  /*
+   * @desc      Msg3 of the RACH procedure containing C-RNTI, BSR and a portion of loop backed first RLC SDU:
+   *              3 bytes  MAC subheader: 1 byte CRNTI, 1 byte BSR, 1 byte SDU subheader
+   *              3 bytes  MAC CE: 2 bytes CRNTI, 1 byte BSR
+   *              5 bytes  MAC SDU: AMD PDU with 2 bytes header and a portion of 1 RLC SDU (3 bytes)
+   *            => 11 bytes (TBS = 88)
+   * @param     p_C_RNTI            (default value: tsc_C_RNTI_Def)
+   * @param     p_LCID              (default value: tsc_LchId_SIB1bis)
+   * @param     p_RlcSduList
+   * @return    template (present) MAC_PDU_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_Msg3MacPduWithCRNTIandBSR(MAC_CTRL_C_RNTI_Type p_C_RNTI := tsc_C_RNTI_Def,
+                                        B5_Type p_LCID := tsc_LchId_SIB1bis,
+                                        template (value) RLC_SDUList_Type p_RlcSduList) return template (present) MAC_PDU_Type
+  { /* Msg3 of the RACH procedure containing C-RNTI, BSR and a portion of loop backed first RLC SDU:
+     *     3 bytes  MAC subheader: 1 byte CRNTI, 1 byte BSR, 1 byte SDU subheader
+     *     3 bytes  MAC CE: 2 bytes CRNTI, 1 byte BSR
+     *     5 bytes  MAC SDU: AMD PDU with 2 bytes header and a portion of 1 RLC SDU (3 bytes)
+     * => 11 bytes (TBS = 88)
+     * NOTE: as shown above there is only one MAC SDU which contains RLC AM PDU with the first 3 bytes of an RLC SDU (=> lengthof(p_RlcSduList) == 1) */
+
+    var template (present) MAC_Header_Type v_MacPduHeader := ( fl_MacPduHeaderWithCRNTIandBSR(tsc_LchId_CRNTI, tsc_LchId_ShortBSR, p_LCID),
+                                                               fl_MacPduHeaderWithCRNTIandBSR(tsc_LchId_ShortBSR, tsc_LchId_CRNTI, p_LCID) );
+    var template (present) MAC_CTRL_ElementList_Type v_CtrlElementList := cr_MAC_CTRL_ElementList_CRNTI_BSR(p_C_RNTI, cr_NBIOT_MAC_CTRL_ShortBSR);
+    var template (present) MAC_SDUList_Type v_MacSduList := { f_NBIOT_MacSdu_RlcAmdPdu_RX(p_RlcSduList) };
+    var template octetstring v_Padding := omit;
+
+    return cr_MAC_PDU(v_MacPduHeader, v_CtrlElementList, v_MacSduList, v_Padding);
+  }
+
+  /*
+   * @desc      Receive and check MAC PDU send by the UE as Msg3 of the RACH procedure at step 5c of 22.3.1.4
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_RlcSduList
+   * @param     p_BSR_Index_Min
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_4_Step5c_ReceiveAndCheckMsg3MacPdu(inout NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                                           NBIOT_CellId_Type p_CellId,
+                                                           template (value) RLC_SDUList_Type p_RlcSduList,
+                                                           integer p_BSR_Index_Min) runs on NBIOT_PTC
+  {
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX := fl_Msg3MacPduWithCRNTIandBSR(-, -, p_RlcSduList);
+    var NB_L2_DATA_IND v_NB_L2_DATA_IND := f_NBIOT_MAC_CPMode_MacPdu_Receive(p_RLC_CountsInfoList, p_CellId, v_MAC_PDU_RX);
+   
+    fl_MAC_PDU_BSR_CheckGreaterThanOrEqual(v_NB_L2_DATA_IND.L2Data.SubframeData.PduSduList.MacPdu[0], p_BSR_Index_Min);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.4
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_4_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var RetxBSR_Timer_NB_r13 v_RetxBSR_Timer_Preamble := pp16;                  /* @sic R5-176882, R5s170821 change 7: pp4 -> pp16 sic@ */
+    var PeriodicBSR_Timer_NB_r13 v_PeriodicBSR_Timer := pp64;                   /* @sic R5-176882, R5s170821 change 7: pp4 -> pp64 sic@ */
+    var RetxBSR_Timer_NB_r13 v_RetxBSR_Timer_Step21C := pp64;                   /* @sic R5-176882, R5s170821 change 7 sic@ */
+    var PeriodicBSR_Timer_NB_r13 v_PeriodicBSR_Timer_Step21C := pp16;           /* @sic R5-176882, R5s170821 change 7 sic@ */
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                          // RLC status to be maintained by Send/Receive functions
+    var SubFrameTiming_Type v_SubFrameTiming;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var template (value) RLC_SDUList_Type v_RlcSduList;
+    var template (value) RLC_SDUList_Type v_RlcSduList_Step5C;
+    var template (value) RLC_SDUList_Type v_RlcSduList_Step7;
+    var template (present) MAC_SDUList_Type v_MAC_SDUList_RX;
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX;
+    var integer v_NoOfNpdcchPeriods;
+    var integer v_BSR_Index_Min;
+    var template (value) NB_RarList_Type v_NB_RarList;
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList;
+    var float v_RetxBSRTimerValueMin;
+    var integer i;
+    var integer v_NpdcchBundleOffset;
+    var float v_SchedulingOffset;
+    var boolean v_IsNTN;
+
+    v_MAC_MainConfig.ul_SCH_Config_r13.periodicBSR_Timer_r13 := v_PeriodicBSR_Timer;
+    v_MAC_MainConfig.ul_SCH_Config_r13.retxBSR_Timer_r13 := v_RetxBSR_Timer_Preamble;
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig);
+
+    f_NBIOT_L2_Preamble_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode, v_RrcConnSetup);
+        
+    v_NpdcchBundleOffset := f_NBIOT_GetNPDCCH_PeriodsInBundle(nbiot_Cell1); //@sic R5s240285, R5s240266, R5-241564 sic@
+    v_IsNTN := f_NBIOT_MobileInfo_IsNTN();
+    if(v_IsNTN)
+    {//@sic R5s240285, R5s240266, R5-241564, R5250057 sic@
+       v_SchedulingOffset := int2float(v_NpdcchBundleOffset);
+    }
+    else
+    {
+        v_SchedulingOffset := int2float(3 * v_NpdcchBundleOffset);
+    }
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);                     /* @sic R5-176882, R5s170821 sic@ */
+
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+
+    //@siclog "Step 1 (void)" siclog@
+
+    //@siclog "Step 2" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);    /* @sic R5s170238 change 2.1: 200ms offset sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    v_RlcSduList := { crs_PDCP_SDU_10B, crs_PDCP_SDU_10B };
+    v_RlcSduList_Step5C := { substr(v_RlcSduList[0], 0, 3) };
+    v_RlcSduList_Step7  := { substr(v_RlcSduList[0], 3, 7), v_RlcSduList[1] };
+
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+    
+    v_BSR_Index_Min := 6;
+
+    //@siclog "Step 3 - 4" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset);     /* @sic R5-241564, R5-172835/R5s170238 change 2.1: three NPDCCH cycles to give the UE time for processing the data sic@ */
+    fl_TC_22_3_1_4_TriggerBSR(v_RLC_CountsInfoListByRef, v_CellId, v_SubFrameTiming, v_BSR_Index_Min);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    // schedule RAR and Msg4 at the SS
+    v_NB_RarList := { cs_NB_RandomAccessResponseParameters_Def(cs_RapIdCtrl_Auto, cs_TempC_RNTI_Explicit(tsc_C_RNTI_Def2)) }; /* @sic R5-176882 change 10: different values for CRNTI and T-CRNTI sic@ */
+    v_RachProcedureList := { cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Common(v_NB_RarList), cs_NB_ContentionResolutionCtrl_CRNTI(1, 6)) }; /* (1, 6) -> 176 bits */
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));    /* @sic R5-176882, R5s170821: RACH procedure sic@ */
+
+    //@siclog "Step 5" siclog@
+    v_NoOfNpdcchPeriods := fl_TC_22_3_1_4_RetxBSR_Timer_NpdcchPeriods(v_RetxBSR_Timer_Preamble);
+    v_RetxBSRTimerValueMin := f_NBIOT_SetTimerToleranceMin(rrcTimer, int2float(v_NoOfNpdcchPeriods * f_NBIOT_SearchSpace_GetPdcchPeriod()) / 1000.0);
+    f_Delay(v_RetxBSRTimerValueMin);      //Wait for retxBSR-Timer expiry on UE side
+
+    //@siclog "Step 5A" siclog@
+    SYSIND.receive(car_NB_RachPreamble_IND(v_CellId));                                                                          /* @sic R5-176882, R5s170821: RACH procedure sic@ */
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5A");
+    
+    //@siclog "Step 5B" siclog@
+    // RAR scheduled at the SS
+
+    //@siclog "Step 5C" siclog@
+    v_BSR_Index_Min := 4;   //10-3+10=17 bytes -> Index=4
+    fl_TC_22_3_1_4_Step5c_ReceiveAndCheckMsg3MacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_RlcSduList_Step5C, v_BSR_Index_Min); /* @sic R5-176882, R5s170821: RACH procedure sic@ */
+    
+    //@siclog "Step 6" siclog@
+    // Msg4  scheduled at the SS: C-RNTI based contention resolution with UL grant of 176
+    
+    //@siclog "Step 7" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList_Step7) };                                                    /* @sic R5-176882, R5s170821: RACH procedure sic@ */
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, noPadding, noBSR, v_MAC_SDUList_RX);
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    
+    //@siclog "Step 7A" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*//@sic R5s240593, R5s240706, R5s250057 sic@*/                                                /* @sic R5-176882, R5s170821: RLC STATUS PDU  sic@ */
+              
+    //@siclog "Step 8" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);                                                               /* @sic R5-176882, R5s170821: timing sic@ */
+    v_RlcSduList := { crs_PDCP_SDU_10B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+    
+    //@siclog "Step 9 - 10" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset);    /* 3 NPDCCH cycles after sending of the additional RLC SDU at step 8
+                                                                                                  @sic R5-172835/R5s170238 change 2.3: 2 cycles instead of 1 sic@
+                                                                                                  @sic R5-176882, R5s170821: 3 cycles instead of 2 sic@
+                                                                                                * @sic R5-241564 3 bundles for TN, 1 bundle for NTN  sic@ */
+    v_BSR_Index_Min := 1;                                                       /* @sic R5-176882, R5s170821: 1 instead of 8 sic@ */
+    fl_TC_22_3_1_4_TriggerBSR(v_RLC_CountsInfoListByRef, v_CellId, v_SubFrameTiming, v_BSR_Index_Min);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+    
+    //@siclog "Step 10A" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset); //@sic R5-241564 sic@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 0, 7, v_TimingInfo);    /* @sic R5-176882, R5s170821: sic@
+                                                                                   UL grant of 104 bits (ITBS=7, IRU=0) -> 13 bytes */
+    //@siclog "Step 10B" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };          /* 2 bytes RLC AM header fixed part, 10 bytes data */
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, noPadding, noBSR, v_MAC_SDUList_RX);  /* 1 byte SDU sub-header, 12 bytes MAC SDU */
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);          /* @sic R5-176882, R5s170821: sic@ */
+    
+    //@siclog "Step 10C" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN);      /* @sic R5-176882, R5s170821, R5s250057 sic@ */
+    
+    //@siclog "Step 11" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    v_RlcSduList := { crs_PDCP_SDU_10B, crs_PDCP_SDU_10B, crs_PDCP_SDU_10B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);     /* @sic R5-176882, R5s170821 sic@ */
+    
+    //@siclog "Step 12" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset);    /* @sic R5-241564, R5-176882, R5s170821 sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 1, 9, v_TimingInfo);    /* UL grant of 296 bits (ITBS=9, IRU=1) -> 37 bytes */
+    
+    //@siclog "Step 13" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };          /* 2 bytes RLC AM header fixed part, 3 bytes for 2 LIs, 3 * 10 bytes data */
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, singleBytePadding, noBSR, v_MAC_SDUList_RX);  /* 1 byte padding, 1 byte SDU sub-header, 35 bytes MAC SDU */
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+    
+    //@siclog "Step 14" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*@sic R5s250057 sic@*/
+    
+    //@siclog "Step 15" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);              /* @sic R5s170238 change 2.5: 200ms offset sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    v_RlcSduList := { crs_PDCP_SDU_8B, crs_PDCP_SDU_7B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+    
+    //@siclog "Step 16" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset);    /* @sic R5-241564, R5-172835/R5s170238 change 2.5: three NPDCCH cycles to give the UE time for processing the data sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 1, 8, v_TimingInfo);    /* UL grant of 256 bits (ITBS=8, IRU=1)  @sic R5s170238 change 2.6: ITBS=8 sic@ */
+    
+    //@siclog "Step 17" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };          /* 2 bytes RLC AM header fixed part, 2 bytes for 1 LI, 8 + 7 bytes data */
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, normalPadding, zeroBSR, v_MAC_SDUList_RX);
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 17");
+    
+    //@siclog "Step 18" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN); /*@sic R5s250057 sic@*/
+    
+    //@siclog "Step 19" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId, tsc_NBIOT_CPModeSendRlcSdus_SchedulingDelay);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);               /* @sic R5s170821 sic@ */
+    v_RlcSduList := { crs_PDCP_SDU_12B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_TimingInfo, v_RlcSduList);
+    
+    //@siclog "Step 20" siclog@
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset);    /* @sic R5-241564, R5-176882, R5s170785: scheduled grant rather than "now" sic@ */
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 0, 9, v_TimingInfo);    /* UL grant of 136 bits (ITBS=9, IRU=0) */
+
+    //@siclog "Step 21" siclog@
+    v_MAC_SDUList_RX := { f_NBIOT_MacSdu_RlcAmdPdu_RX(v_RlcSduList) };
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, noPadding, zeroBSR, v_MAC_SDUList_RX);            /* @sic R5s170238 change 2.8 - MMC160 implementation: zeroBSR instead of anyBSR sic@ */
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 21");
+    
+    //@siclog "Step 21A" siclog@
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, -, v_IsNTN);   /* @sic R5-172835/R5s170238 change 2.9, R5s250057 sic@ */
+    
+    //@siclog "Step 21B": leave test mode and release RRC connection siclog@
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+    f_NBIOT_L2_CPMode_RestoreSRBs(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start);
+    f_NBIOT_RRC_ConnectionRelease(v_CellId);                                    /* @sic R5-176882, R5s170821: RRC Connecntion Release sic@ */
+
+    //@siclog "Step 21C" siclog@
+    /* 'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed:
+       Get UE back to connected mode but with changed BSR timer values */
+    v_MAC_MainConfig.ul_SCH_Config_r13.periodicBSR_Timer_r13 := v_PeriodicBSR_Timer_Step21C;
+    v_MAC_MainConfig.ul_SCH_Config_r13.retxBSR_Timer_r13 := v_RetxBSR_Timer_Step21C;
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig);
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RrcConnSetup);
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(v_CellId);                  /* @sic R5-176882, R5s170821: 'Generic Test Procedure acc. to 8.1.5A.2.3 (check Idle state) sic@ */
+
+    // return to test mode
+    v_RLC_CountsInfoListByRef := f_NBIOT_L2_CPMode_StopULGrant_EnableSrbTestMode(v_CellId, TransparentMode_RLC_MAC);   /* @sic R5s180148 sic@ */
+
+    //@siclog "Step 22" siclog@
+    v_RlcSduList := { crs_PDCP_SDU_14B };
+    f_NBIOT_MAC_CPMode_SendRlcSdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, -, v_RlcSduList);
+    
+    //@siclog "Step 23 - 24" siclog@
+    v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId);
+    v_BSR_Index_Min := 1;
+    fl_TC_22_3_1_4_TriggerBSR(v_RLC_CountsInfoListByRef, v_CellId, v_SubFrameTiming, v_BSR_Index_Min);
+
+    for (i := 0; i < 2; i := i + 1) {
+      //@siclog "Step 25" siclog@
+      v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(v_CellId); //@sic R5s240593 sic@
+      v_BSR_Index_Min := 1;
+      v_NoOfNpdcchPeriods := fl_TC_22_3_1_4_PeriodicBSR_Timer_NpdcchPeriods(v_PeriodicBSR_Timer_Step21C) + v_NpdcchBundleOffset;  // @sic R5s240266, R5-241564 sic@ "+1" (Npdcch period bundle) to be sure that PeriodicBSR-Timer has been expired
+      v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, int2float(v_NoOfNpdcchPeriods));
+      //@siclog "Step 26 - 27" siclog@
+      fl_TC_22_3_1_4_TriggerBSR(v_RLC_CountsInfoListByRef, v_CellId, v_SubFrameTiming, v_BSR_Index_Min);
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 27 - " & int2str(i));
+    }
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+
+    // give default grant to the UE to allow transmission of pending data
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant));   /* @sic R5s170238 change 2.11: single grant sic@ */
+    v_MAC_PDU_RX := ?;     // any MAC PDU containing pending data
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId);
+
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);
+  }
+
+  /*
+   * @desc      Send valid MAC PDU with MAC SDU containing ESM DATA TRANSPORT or CP DATA
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_TestLoopMode
+   * @param     p_NpdcchPeriod
+   * @param     p_SearchSpaceCandidateOffset
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_5_SendValidMacPdu(inout NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                          NBIOT_CellId_Type p_CellId,
+                                          NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                          SubFrameTiming_Type p_NpdcchPeriod,
+                                          integer p_SearchSpaceCandidateOffset) runs on NBIOT_PTC
+  {
+    var template (value) RLC_SDU_Type v_RlcSdu := crs_PDCP_SDU_16B;
+    var MAC_SDUList_Type v_MAC_SDUList := { f_NBIOT_MAC_CPMode_EncodeMacSdu(p_TestLoopMode, v_RlcSdu, p_RLC_CountsInfoList.AM_VTS) };    // NAS/RRC PDU gets encoded by NAS emulator and packed into RLC PDU
+    var template (value) MAC_PDU_Type v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList);
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_SubFrameFull(p_NpdcchPeriod);
+
+    f_NBIOT_MAC_CPMode_SendMacPdu(p_CellId, v_TimingInfo, v_MAC_PDU, p_SearchSpaceCandidateOffset);
+    p_RLC_CountsInfoList.AM_VTS := p_RLC_CountsInfoList.AM_VTS + 1;
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.5
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_5_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig;
+    var template (value) NPDCCH_ConfigDedicated_NB_r13 v_NPDCCH_ConfigDedicated;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var integer v_TestLoopModeRepetitions := 0;                                       // according to test case preamble: no data to be returned in UL
+    var SubFrameTiming_Type v_NpdcchPeriod;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var NBIOT_SearchSpaceParameters_Type v_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def;
+    var NPdcchSearchSpaceCandidateIndex_Type v_SearchSpaceCandidateForULGrant;
+    var template (value) NPdcchUESpecificSearchSpace_Type v_NPdcchUESpecificSearchSpace;
+    var integer v_IncrementVRR;
+
+    f_NBIOT_Init(c1);
+
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+
+    // configure RRC Connection Setup being used during RACH procedure: Message modified according to Table 22.3.1.5.3.3-1
+    v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    v_MAC_MainConfig.ul_SCH_Config_r13.periodicBSR_Timer_r13 := infinity_;
+    v_MAC_MainConfig.drx_Config_r13 := cs_DRX_Config_NB_Setup;
+
+    v_NPDCCH_ConfigDedicated := cs_NPDCCH_ConfigDedicated_NB_DEFAULT;
+    v_NPDCCH_ConfigDedicated.npdcch_NumRepetitions_r13 := r64;
+    v_SearchSpaceParameters.Rmax := 64;      // to be used for timing calculations
+
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig, v_NPDCCH_ConfigDedicated);
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RrcConnSetup);
+
+
+    // Modify cell configuration for UE specific search space according to Table 22.3.1.5.3.3-1 and UL grants to be scheduled in the last search space candidate as needed for step 15:
+    v_SearchSpaceCandidateForULGrant := tsc_LastSearchSpaceCandidate;    /* as we have a NPDCCH period of 256ms (instead of 64ms), there is no issue always to use the last search space candidate during the test case */
+    v_NPdcchUESpecificSearchSpace := cs_NPdcchUESpecificSearchSpace(v_NPDCCH_ConfigDedicated.npdcch_NumRepetitions_r13,
+                                                                    v_NPDCCH_ConfigDedicated.npdcch_StartSF_USS_r13,
+                                                                    v_NPDCCH_ConfigDedicated.npdcch_Offset_USS_r13,
+                                                                    -,
+                                                                    v_SearchSpaceCandidateForULGrant);
+
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CellConfig_REQ(v_CellId, -, -, cds_NB_BasicCellConfig_NPDCCH(cs_NPdcchConfig(v_NPdcchUESpecificSearchSpace))));  // @sic R5s210039: MCC160 Implementation sic@
+    f_NBIOT_SS_DrxCtrlConfig(v_CellId, cs_NB_DrxCtrl(cs_DRX_Config_NB_Setup));     /* @sic R5s170484 change 1.2 sic@ */
+
+    // NBIOT preamble, Test mode:
+    f_NBIOT_L2_Enter_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode, v_TestLoopModeRepetitions);
+
+    f_Delay(5.0);  /* @sic R5s170484 change 1.4: wait for at least one DRX cycle to ensure that e.g. RLC Status PDU has been has been transmitted before UL_HARQ_IndMode gets activated sic@ */
+
+    // enable reporting of HARQ ACK/NACK:
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, enable);
+
+    f_NBIOT_SS_DrxCtrlConfig(v_CellId, cs_NB_DrxCtrl_None);                        /* @sic R5s170484 change 1.2 - MCC160: SS shall not do anything with DRX during the test body sic@ */
+
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+    
+    //@siclog "Step 1" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, tsc_FirstNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_FirstSearchSpaceCandidate);
+    
+    //@siclog "Step 2" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 2");
+    
+    //@siclog "Step 3" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate);
+    
+    //@siclog "Step 4" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 4");
+    
+    //@siclog "Step 5" siclog@
+    v_NpdcchPeriod := f_NBIOT_IncrementSearchSpace(v_NpdcchPeriod, 4.0, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate);
+    
+    //@siclog "Step 6" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 6");
+    
+    //@siclog "Step 7" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendInvalidMacPdu(v_CellId, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate, v_SearchSpaceParameters);
+    
+    //@siclog "Step 8" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, nack, __FILE__, __LINE__, "Step 8");
+    
+    //@siclog "Step 9" siclog@
+    v_NpdcchPeriod := f_NBIOT_IncrementSearchSpace(v_NpdcchPeriod, 1.0, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_FirstSearchSpaceCandidate);
+    
+    //@siclog "Step 10" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 10");
+
+    //@siclog "Step 11" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendInvalidMacPdu(v_CellId, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate, v_SearchSpaceParameters);
+    
+    //@siclog "Step 12" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, nack, __FILE__, __LINE__, "Step 12");
+    
+    //@siclog "Step 13" siclog@
+    v_NpdcchPeriod := f_NBIOT_IncrementSearchSpace(v_NpdcchPeriod, 6.0, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate);
+    
+    //@siclog "Step 14" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 14");
+    
+    //@siclog "Step 15" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, 4, 0, cs_TimingInfo_SubFrameFull(v_NpdcchPeriod));  // UL grant of 56 bits (ITBS=0, IRU=4)
+    
+    //@siclog "Step 16" siclog@
+    v_IncrementVRR := 0; // there is no RLC AMD PDU therefore VRR shall not be incremented
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, f_NBIOT_MacPdu_BSR_MacSdus_Padding_RX(-, normalPadding, anyBSR), v_IncrementVRR);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    
+    //@siclog "Step 17" siclog@
+    v_NpdcchPeriod := f_NBIOT_IncrementSearchSpace(v_NpdcchPeriod, 24.0, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendValidMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate);
+    
+    //@siclog "Step 18" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 18");
+    
+    //@siclog "Step 19" siclog@
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(v_CellId, 2, v_SearchSpaceParameters);    /* @sic R5s170484 change 1.3: third Npdcch period is 2, not 3 sic@ */
+    fl_TC_22_3_1_5_SendInvalidMacPdu(v_CellId, v_NpdcchPeriod, tsc_FirstSearchSpaceCandidate, v_SearchSpaceParameters);
+
+    //@siclog "Step 20" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, nack, __FILE__, __LINE__, "Step 20");
+
+    //@siclog "Step 21" siclog@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_NpdcchPeriod, 1.0, v_SearchSpaceParameters));      /* @sic R5-176041: next NPDCCH period after step 19 sic@ */
+    f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, v_TimingInfo, cs_MAC_PDU_DRX_Command_10Padding, tsc_FirstSearchSpaceCandidate);      /* @sic R5-176041: first search space candidate sic@ */
+
+    //@siclog "Step 22" siclog@
+    fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 22");
+
+    //@siclog "Step 23 - 30 Void" siclog@
+    /* @sic R5-176041: Void sic@ */
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    
+    f_NBIOT_SS_DrxCtrlConfig(v_CellId, cs_NB_DrxCtrl(cs_DRX_Config_NB_Setup));     /* @sic R5s170484 change 1.2 - MCC160: configure SS to automatically apply DRX during the postamble sic@ */
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, disable);
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR, noDelay);
+  }
+
+  type record Table_22_3_1_6_3_2__2_Entry_Type { /* @status    APPROVED (NBIOT) */
+    integer DL_Isf,
+    integer DL_Itbs,
+    integer DL_TBS,
+    integer UL_Iru,
+    integer UL_Itbs,
+    integer UL_TBS
+  };
+
+  type record of Table_22_3_1_6_3_2__2_Entry_Type Table_22_3_1_6_3_2__2_Type; /* @status    APPROVED (NBIOT) */
+
+  const Table_22_3_1_6_3_2__2_Type tsc_Table_22_3_1_6_3_2__2 := { /* @status    APPROVED (NBIOT) */
+    { 0, 0,  16,  0, 0,  16  },
+    { 0, 1,  24,  0, 1,  24  },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 0, 2,  32,  0, 2,  32  },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 0, 3,  40,  0, 3,  40  },
+    { 0, 4,  56,  0, 4,  56  },
+    { 0, 5,  72,  0, 5,  72  },
+    { 0, 6,  88,  0, 6,  88  },
+    { 0, 7,  104, 0, 7,  104 },
+    { 0, 8,  120, 0, 8,  120 },
+    { 0, 9,  136, 0, 9,  136 },
+    { 0, 10, 144, 0, 10, 144 },
+    { 0, 11, 176, 0, 10, 144 },
+    { 0, 12, 208, 0, 10, 144 },
+    { 1, 0,  32,  1, 0,  32  },
+    { 1, 1,  56,  1, 1,  56  },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 1, 2,  72,  1, 2,  72  },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 1, 3,  104, 1, 3,  104 },
+    { 1, 4,  120, 1, 4,  120 },
+    { 1, 5,  144, 1, 5,  144 },
+    { 1, 6,  176, 1, 6,  176 },
+    { 1, 7,  224, 1, 7,  224 },
+    { 1, 8,  256, 1, 8,  256 },
+    { 1, 9,  296, 1, 9,  296 },
+    { 1, 10, 328, 1, 10, 328 },
+    { 1, 11, 376, 1, 10, 328 },
+    { 1, 12, 440, 1, 10, 328 },
+    { 2, 0,  56,  2, 0,  56  },
+    { 2, 1,  88,  2, 1,  88  },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 2, 2,  144, 2, 2,  144 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 2, 3,  176, 2, 3,  176 },
+    { 2, 4,  208, 2, 4,  208 },
+    { 2, 5,  224, 2, 5,  224 },
+    { 2, 6,  256, 2, 6,  256 },
+    { 2, 7,  328, 2, 7,  328 },
+    { 2, 8,  392, 2, 8,  392 },
+    { 2, 9,  456, 2, 9,  456 },
+    { 2, 10, 504, 2, 10, 504 },
+    { 2, 11, 584, 2, 10, 504 },
+    { 2, 12, 680, 2, 10, 504 },
+    { 3, 0,  88,  3, 0,  88  },
+    { 3, 1,  144, 3, 1,  144 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 3, 2,  176, 3, 2,  176 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 3, 3,  208, 3, 3,  208 },
+    { 3, 4,  256, 3, 4,  256 },
+    { 3, 5,  328, 3, 5,  328 },
+    { 3, 6,  392, 3, 6,  392 },
+    { 3, 7,  472, 3, 7,  472 },
+    { 3, 8,  536, 3, 8,  536 },
+    { 3, 9,  616, 3, 9,  616 },
+    { 3, 10, 680, 3, 10, 680 },
+    { 4, 0,  120, 4, 0,  120 },
+    { 4, 1,  176, 4, 1,  176 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 4, 2,  208, 4, 2,  208 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 4, 3,  256, 4, 3,  256 },
+    { 4, 4,  328, 4, 4,  328 },
+    { 4, 5,  424, 4, 5,  424 },
+    { 4, 6,  504, 4, 6,  504 },
+    { 4, 7,  584, 4, 7,  584 },
+    { 4, 8,  680, 4, 8,  680 },
+    { 4, 8,  680, 4, 9,  776 },
+    { 4, 8,  680, 4, 10, 872 },
+    { 5, 0,  152, 5, 0,  152 },
+    { 5, 1,  208, 5, 1,  208 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 5, 2,  256, 5, 2,  256 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 5, 3,  328, 5, 3,  328 },
+    { 5, 4,  408, 5, 4,  408 },
+    { 5, 5,  504, 5, 5,  504 },
+    { 5, 6,  600, 5, 6,  600 },
+    { 5, 7,  680, 5, 7,  712 },
+    { 5, 7,  680, 5, 8,  808 },
+    { 5, 7,  680, 5, 9,  936 },
+    { 5, 7,  680, 5, 10, 1000 },
+    { 6, 0,  208, 6, 0,  208 },
+    { 6, 1,  256, 6, 1,  256 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 6, 2,  328, 6, 2,  328 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 6, 3,  440, 6, 3,  440 },
+    { 6, 4,  552, 6, 4,  552 },
+    { 6, 5,  680, 6, 5,  680 },
+    { 6, 5,  680, 6, 6,  808 },
+    { 6, 5,  680, 6, 7,  1000 },
+    { 7, 0,  256, 7, 0,  256 },
+    { 7, 1,  344, 7, 1,  344 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 7, 2,  424, 7, 2,  424 },    /* @sic R5-172833/R5s170240 Change 1 sic@ */
+    { 7, 3,  568, 7, 3,  568 },
+    { 7, 4,  680, 7, 4,  680 },
+    { 7, 4,  680, 7, 5,  872 },
+    { 7, 4,  680, 7, 6,  1000 }
+  };
+
+  /*
+   * @desc      encode RLC PDU being used as MAC SDU in test case 22.3.1.6
+   * @param     p_SN
+   * @param     p_Poll
+   * @param     p_FramingInfo
+   * @param     p_Data
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_6_RLC_AMD_Encvalue(integer p_SN,
+                                           B1_Type p_Poll,
+                                           RLC_FramingInfo_Type p_FramingInfo,
+                                           RLC_DataField_Type p_Data) return octetstring
+  {
+    var template (value) RLC_PDU_Type v_RLC_PDU := {
+      AMD := cs_AMD_PDU_NoLIs(p_SN, p_Poll, p_FramingInfo, p_Data)     /* @sic R5s170240 change 2: cs_AMD_PDU_NoLIs instead of cs_AMD_PDU_seg_NoLIs sic@ */
+    };
+    return f_RLC_PDU_Encvalue(v_RLC_PDU);
+  }
+
+  /*
+   * @desc      in test case 22.3.1.6 the DL RLC SDU needs to be split and send in two or three MAC PDUs to cope with
+   *            the RRC/NAS overhead and the fact that maximum DL TBS is less than maximium UL TBS
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_TestLoopMode
+   * @param     p_RlcSdu
+   * @param     p_DL_Isf
+   * @param     p_DL_Itbs
+   * @param     p_DL_TBS
+   * @param     p_SchedulingOffset
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_6_SendTwoOrThreeMacPdus(inout NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                                NBIOT_CellId_Type p_CellId,
+                                                NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                                RLC_SDU_Type p_RlcSdu,
+                                                integer p_DL_Isf,
+                                                integer p_DL_Itbs,
+                                                integer p_DL_TBS,
+                                                float p_SchedulingOffset //@sic R5-241564 sic@
+    ) runs on NBIOT_PTC return SubFrameTiming_Type
+  {
+    var template (value) NAS_MSG_Request_Type v_NasRequest := f_NBIOT_L2_CPMode_DL_NAS_Message(p_TestLoopMode, p_RlcSdu);
+    var octetstring v_EncodedL3Msg := f_NBIOT_L2_CPMode_EncodeL3Message(v_NasRequest);
+    var integer v_L3MsgLength := lengthof(v_EncodedL3Msg);
+    var SubFrameTiming_Type v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(p_CellId, 200);      /* @sic R5s170240 change 2 sic@  @sic R5s180066: 200ms sic@ */
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    var template (value) NB_DciDlInfo_Type v_DciDlInfo := cs_NB_DciDlInfo_Explicit(p_DL_Itbs, p_DL_Isf);
+    var octetstring v_EncodedRlcPdu;
+    var integer v_NoOfSegments := 2;
+    var RLC_DataField_Type v_Segment;
+    var integer v_SegmentLength;
+    var integer v_SegmentOffset;
+    var RLC_FramingInfo_Type v_FramingInfo;
+    var B1_Type v_Poll;
+    var MAC_SDUList_Type v_MacSduList;
+    var template (value) MAC_PDU_Type v_MAC_PDU;
+    var integer i;
+    
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(p_CellId, v_TimingInfo, -, v_DciDlInfo));
+ 
+    if (p_DL_TBS < 100) {                  // @sic R5-172833/R5s170240 change 3.2 - MCC160 implementation sic@
+      v_NoOfSegments := v_NoOfSegments + 1;
+    }
+    v_SegmentLength := v_L3MsgLength / v_NoOfSegments;
+
+    for (i := 0; i < v_NoOfSegments; i := i + 1) {
+
+      //@siclog "Step 3" siclog@
+      v_SegmentOffset := i * v_SegmentLength;
+
+      if (i < v_NoOfSegments - 1) {
+        v_Poll := tsc_NoPoll;
+        if (i == 0) {                                // first segment
+          v_FramingInfo := tsc_FI_StartOfSDU;
+        } else {                                     // mid segment
+          v_FramingInfo := tsc_FI_MiddleOfSDU;
+        }
+      } else {                                       // last segment
+        v_Poll := tsc_Poll;
+        v_FramingInfo := tsc_FI_EndOfSDU;
+        v_SegmentLength := v_L3MsgLength - v_SegmentOffset;
+      }
+      v_Segment := substr(v_EncodedL3Msg, v_SegmentOffset, v_SegmentLength);
+      v_EncodedRlcPdu := fl_TC_22_3_1_6_RLC_AMD_Encvalue(p_RLC_CountsInfoList.AM_VTS, v_Poll, v_FramingInfo, v_Segment);
+      p_RLC_CountsInfoList.AM_VTS := p_RLC_CountsInfoList.AM_VTS + 1;
+
+      v_MacSduList := { v_EncodedRlcPdu };
+      v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MacSduList, p_DL_TBS);
+
+      //@siclog "Step 4, 4A, 4B" siclog@
+      v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, p_SchedulingOffset); //@sic R5-241564 sic@
+      v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+      L2DATA.send(cas_NB_L2_DATA_REQ(cs_NB_ReqAspCommonPart_RB(p_CellId, tsc_NB_RbId_SRB1bis, v_TimingInfo), cs_NBIOT_L2Data_Request_MacPdu(v_MAC_PDU)));
+    }
+    return v_SubFrameTiming;  /* @sic R5s170240 change 2 - MCC160 implementation: time of the last segment sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.6
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_6_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                         // RLC status to be maintained by Send/Receive functions
+    var SubFrameTiming_Type v_SubFrameTiming;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var Table_22_3_1_6_3_2__2_Entry_Type v_TestData;
+    var RLC_SDU_Type v_RlcSdu;
+    var RLC_SDUList_Type v_RlcSduList;
+    var integer v_RlcSduSize;
+    var integer v_Start := 0;
+    var integer i;
+    var integer v_NpdcchBundleOffset;
+    var float v_SchedulingOffset;
+    
+    f_NBIOT_Init(c1);  //@sic R5s240707 sic@
+      
+    if(f_NBIOT_MobileInfo_IsNTN()){//@sic R5s240579, R5-246574 sic@
+        f_NBIOT_CellInfo_ModifySIB31_UL_SyncValidityDuration_r17(v_CellId,s900);
+    }
+   
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+
+    f_NBIOT_L2_Enter_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode); //@sic R5s240579, R5s240707 sic@
+
+    v_NpdcchBundleOffset := f_NBIOT_GetNPDCCH_PeriodsInBundle(nbiot_Cell1); //@sic R5s240285, R5s240266, R5-241564 sic@
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()!= ntn_None)
+    {//@sic R5240285, R5s240266, R5-241564 sic@
+       v_SchedulingOffset := int2float(v_NpdcchBundleOffset);
+    }
+    else
+    {
+        v_SchedulingOffset := int2float(3 * v_NpdcchBundleOffset);
+    }
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+
+    //@siclog "Step 1 - Void" siclog@
+
+    for (i := 0; i < lengthof(tsc_Table_22_3_1_6_3_2__2); i := i + 1) {
+
+      //@siclog "Step 2" siclog@
+      v_TestData := tsc_Table_22_3_1_6_3_2__2[i];
+      v_RlcSduSize := (v_TestData.UL_TBS - 56) / 8;
+
+      if (v_RlcSduSize > 0) {
+        v_RlcSdu := f_GetN_OctetsFromPRBS(v_Start, v_RlcSduSize);
+        v_RlcSduList := { v_RlcSdu };
+        v_Start := v_Start + v_RlcSduSize;
+        
+        //@siclog "Step 3 - 4" siclog@
+        v_SubFrameTiming := fl_TC_22_3_1_6_SendTwoOrThreeMacPdus(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_RlcSdu, v_TestData.DL_Isf, v_TestData.DL_Itbs, v_TestData.DL_TBS, int2float(v_NpdcchBundleOffset)); //@sic R5s240266, R5-241564 sic@
+        
+        //@siclog "Step 5" siclog@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset));      /* @sic R5-241564, R5-172833/R5s170240 change 3.3: 3 NPDCCH cycles after the llast segment has been sent out sic@ */
+        f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, v_TestData.UL_Iru, v_TestData.UL_Itbs, v_TimingInfo);
+        
+        //@siclog "Step 6" siclog@
+        f_NBIOT_MAC_CPMode_RlcStatusPdu_RlcAmdPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_RlcSduList);
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6: Received UL data");                              /* @sic R5s170240 change 3.4 sic@ */
+
+        //@siclog "Step 7" siclog@
+        f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, v_TestData.DL_TBS);          /* @sic R5-172833/R5s170240 change 3.5 sic@ */
+
+        //@siclog "Step 8 - Void" siclog@
+      }
+    }
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto));    /* @sic R5s170978: restore DL allocation to automatic mode sic@ */
+    
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);    /* @sic R5s191059: 500ms delay as per default sic@ */
+  }
+
+  const Table_22_3_1_6_3_2__2_Type tsc_Table_22_3_1_6a_3_2__2 := { /* @status    APPROVED (NBIOT) */
+    { 0, 13, 224,  0, 10, 144  },
+    { 1, 13, 488,  1, 10, 328  },
+    { 2, 13, 744,  2, 10, 504  },
+    { 3, 11, 776,  3, 10, 680  },
+    { 3, 12, 904,  3, 10, 680  },
+    { 3, 13, 1032, 3, 10, 680  },
+    { 4, 9,  776,  4, 8,  680  },
+    { 4, 10, 872,  4, 9,  776  },
+    { 4, 11, 1000, 4, 10, 872  },
+    { 4, 12, 1128, 4, 10, 872  },
+    { 4, 13, 1256, 4, 10, 872  },
+    { 5, 8,  808,  5, 7,  712  },
+    { 5, 9,  936,  5, 8,  808  },
+    { 5, 10, 1032, 5, 9,  936  },
+    { 5, 11, 1192, 5, 10, 1000 },
+    { 5, 12, 1352, 5, 10, 1000 },
+    { 5, 13, 1544, 5, 10, 1000 },
+    { 6, 6,  808,  6, 5,  680  },
+    { 6, 7,  968,  6, 6,  808  },
+    { 6, 8,  1096, 6, 7,  1000 },
+    { 6, 9,  1256, 6, 8,  1096 },
+    { 6, 10, 1384, 6, 9,  1256 },
+    { 6, 11, 1608, 6, 10, 1384 },
+    { 6, 12, 1800, 6, 10, 1384 },
+    { 6, 13, 2024, 6, 10, 1384 },
+    { 7, 5,  872,  7, 4,  680  },
+    { 7, 6,  1032, 7, 5,  872  },
+    { 7, 7,  1224, 7, 6,  1000 },
+    { 7, 8,  1352, 7, 7,  1224 },
+    { 7, 9,  1544, 7, 8,  1384 },
+    { 7, 10, 1736, 7, 9,  1544 },
+    { 7, 11, 2024, 7, 10, 1736 },
+    { 7, 12, 2280, 7, 10, 1736 },
+    { 7, 13, 2536, 7, 10, 1736 }
+  };
+
+  /*
+   * @desc      Send single MAC PDU as needed for 4 of test case 22.3.1.6a
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_TestLoopMode
+   * @param     p_RlcSdu
+   * @param     p_DL_Isf
+   * @param     p_DL_Itbs
+   * @param     p_DL_TBS
+   * @param     p_NpdcchPeriodBundle
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_3_1_6a_SendOneMacPdu(inout NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                         NBIOT_CellId_Type p_CellId,
+                                         NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                         RLC_SDU_Type p_RlcSdu,
+                                         integer p_DL_Isf,
+                                         integer p_DL_Itbs,
+                                         integer p_DL_TBS,
+                                         float p_NpdcchPeriodBundle  //@sic R5-241564 sic@
+    ) runs on NBIOT_PTC return SubFrameTiming_Type
+  {
+    var template (value) NAS_MSG_Request_Type v_NasRequest := f_NBIOT_L2_CPMode_DL_NAS_Message(p_TestLoopMode, p_RlcSdu);
+    var octetstring v_EncodedL3Msg := f_NBIOT_L2_CPMode_EncodeL3Message(v_NasRequest);
+    var SubFrameTiming_Type v_SubFrameTiming := f_NBIOT_GetNextSearchSpace(p_CellId, 200);
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    var template (value) NB_DciDlInfo_Type v_DciDlInfo := cs_NB_DciDlInfo_Explicit(p_DL_Itbs, p_DL_Isf);
+    var octetstring v_EncodedRlcPdu;
+
+    var MAC_SDUList_Type v_MacSduList;
+    var template (value) MAC_PDU_Type v_MAC_PDU;
+
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(p_CellId, v_TimingInfo, -, v_DciDlInfo));
+ 
+    v_EncodedRlcPdu := fl_TC_22_3_1_6_RLC_AMD_Encvalue(p_RLC_CountsInfoList.AM_VTS, tsc_Poll, tsc_FI_FullSDU, v_EncodedL3Msg);
+    p_RLC_CountsInfoList.AM_VTS := p_RLC_CountsInfoList.AM_VTS + 1;
+
+    //@siclog "Step 4" siclog@
+    v_MacSduList := { v_EncodedRlcPdu };
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MacSduList, p_DL_TBS);
+
+    v_SubFrameTiming := f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, p_NpdcchPeriodBundle);  //@sic R5-241564 sic@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_SubFrameTiming);
+    L2DATA.send(cas_NB_L2_DATA_REQ(cs_NB_ReqAspCommonPart_RB(p_CellId, tsc_NB_RbId_SRB1bis, v_TimingInfo), cs_NBIOT_L2Data_Request_MacPdu(v_MAC_PDU)));
+    
+    return v_SubFrameTiming;
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.6a
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_6a_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                         // RLC status to be maintained by Send/Receive functions
+    var SubFrameTiming_Type v_SubFrameTiming;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var Table_22_3_1_6_3_2__2_Entry_Type v_TestData;
+    var RLC_SDU_Type v_RlcSdu;
+    var RLC_SDUList_Type v_RlcSduList;
+    var integer v_RlcSduSize;
+    var integer v_Start := 0;
+    var integer i;
+    var integer v_NpdcchBundleOffset;
+    var float v_SchedulingOffset;
+    
+    f_NBIOT_L2_Preamble_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode);
+
+    v_NpdcchBundleOffset := f_NBIOT_GetNPDCCH_PeriodsInBundle(nbiot_Cell1); //@sic R5s240285, R5s240266, R5-241564 sic@
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()!= ntn_None)
+    {//@sic R5s240285, R5s240266, R5-241564 sic@
+       v_SchedulingOffset := int2float(2 * v_NpdcchBundleOffset);
+    }
+    else
+    {
+        v_SchedulingOffset := int2float(3 * v_NpdcchBundleOffset);
+    }
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+
+    for (i := 0; i < lengthof(tsc_Table_22_3_1_6a_3_2__2); i := i + 1) {
+
+      //@siclog "Step 1" siclog@
+      v_TestData := tsc_Table_22_3_1_6a_3_2__2[i];     // @sic R5s190041 sic@
+      v_RlcSduSize := (v_TestData.UL_TBS - 56) / 8;
+
+      if (v_RlcSduSize > 0) {    // is always the case but anyway ...
+        v_RlcSdu := f_GetN_OctetsFromPRBS(v_Start, v_RlcSduSize);
+        v_RlcSduList := { v_RlcSdu };
+        v_Start := v_Start + v_RlcSduSize;
+        
+        //@siclog "Step 2 - 4" siclog@
+        v_SubFrameTiming := fl_TC_22_3_1_6a_SendOneMacPdu(v_RLC_CountsInfoListByRef, v_CellId, v_TestLoopMode, v_RlcSdu, v_TestData.DL_Isf, v_TestData.DL_Itbs, v_TestData.DL_TBS, int2float(v_NpdcchBundleOffset)); //@sic R5s240266, R5-241564 sic@
+        
+        //@siclog "Step 5" siclog@
+        v_TimingInfo := cs_TimingInfo_SubFrameFull(f_NBIOT_IncrementSearchSpace(v_SubFrameTiming, v_SchedulingOffset)); //@sic R5-241564 sic@
+        f_NBIOT_ULGrantTransmission_ExplicitGrant(v_CellId, v_TestData.UL_Iru, v_TestData.UL_Itbs, v_TimingInfo);
+        
+        //@siclog "Step 6" siclog@
+        f_NBIOT_MAC_CPMode_RlcStatusPdu_RlcAmdPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_RlcSduList);
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6: Received UL data");
+
+        //@siclog "Step 7" siclog@
+        f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId, -, v_TestData.DL_TBS);
+      }
+    }
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto));
+    
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);    /* @sic R5s191059: 500ms delay as per default sic@ */
+  }
+
+  template (value) NB_ContentionResolutionCtrl_Type cs_NB_ContentionResolutionCtrl_CFRA :=
+  { /* results in no Contention resolution for T-CRNTI */
+    /* @status    APPROVED (NBIOT) */
+    CRNTI_Based := {
+      None := true
+    }
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.7
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_7_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var template (value) SystemInformationBlockType2_NB_r13 v_SIB2;
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList;
+    var integer v_RA_PreambleIndex;
+    var integer v_RAPID;
+
+    f_NBIOT_Init(c1);
+    
+    // modify system information
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(v_CellId);
+    v_SIB2.radioResourceConfigCommon_r13.nprach_Config_v1330.nprach_ParametersList_v1330[0].nprach_NumCBRA_StartSubcarriers_r13 := n8;   /* Table 22.3.1.7.3.3-1 */
+    f_NBIOT_CellInfo_SetSIB2(v_CellId, v_SIB2);
+
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    
+    // configure modified RRC Connection Setup according to Table 22.3.1.7.3.3-2
+    v_MAC_MainConfig.timeAlignmentTimerDedicated_r13 := infinity_;  /* @sic R5s190129, R5-194244: sf10240 instead of sf2560, R5-247528: default sic@ */
+    v_MAC_MainConfig.ra_CFRA_Config_r14 := true_;
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig);
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RrcConnSetup);
+
+    //Bring UE to initial state
+    f_NBIOT_Preamble(v_CellId, CONTROL_PLANE);
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true);     // no "layer2" mode as test case does not expect any data on L2DATA port in UL
+
+    //@siclog "Step 1-2" siclog@
+    /* Void */
+
+    v_RachProcedureList := { cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Def, cs_NB_ContentionResolutionCtrl_CFRA) };  // step 5
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);
+
+    //@siclog "Step 3" siclog@
+    v_RA_PreambleIndex := 5;      /* ra-PreambleIndex (acc. to 36.321 cl. 5.1.2) as indicated in subcarrier indication field of the DCI (36.213 cl. 16.3.2 and 36.213 cl. 6.4.3.2) */
+    v_RAPID := 21;                /* RAPID corresponding to ra-PreambleIndex for CFRA according to 36.321 cl. 5.1.2:
+                                     RAPID := nprach-SubcarrierOffset + nprach-NumCBRA-StartSubcarriers + (ra-PreambleIndex modulo (nprach-NumSubcarriers - nprach-NumCBRA-StartSubcarriers));
+                                     with NPRACH_Parameters_NB_r13.nprach_SubcarrierOffset_r13 = n12; NPRACH_Parameters_NB_r13.nprach_NumSubcarriers_r13 = n12; NPRACH_Parameters_NB_v1330.nprach_NumCBRA_StartSubcarriers_r13 = n8
+                                     => RAPID := 12 + 8 + (ra-PreambleIndex % (12 - 8))) = 21 */
+    SYS.send(cas_NB_RA_NPDCCH_Order(v_CellId, cs_TimingInfo_Now, cs_NB_RA_NPDCCH_Order(v_RA_PreambleIndex)));
+
+    //@siclog "Step 4" siclog@
+    SYSIND.receive(car_NB_RachPreamble_IND(v_CellId, cr_NB_RachPreamble(v_RAPID)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+
+    //@siclog "Step 6" siclog@
+    f_NBIOT_508Check_ConnectedState(v_CellId, CONTROL_PLANE);
+
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  template (value) UL_ConfigCommon_NB_r14 cs_UL_ConfigCommon_NB_r14(template (value) CarrierFreq_NB_r13 p_CarrierFreq_NB_r13,
+                                                                    template (omit) NPRACH_ParametersList_NB_r14 p_NPRACH_ParametersList_NB_r14) :=
+  { /* @status    APPROVED (NBIOT) */
+    ul_CarrierFreq_r14 := p_CarrierFreq_NB_r13,
+    nprach_ParametersList_r14 := p_NPRACH_ParametersList_NB_r14,
+    nprach_ParametersListEDT_r15 := omit,
+    rsrp_ThresholdsPrachInfoList_r16 := omit    /* @sic R5s221178 BASELINE MOVING 2022 rel-17 sic@ */
+  };
+
+  template (value) NPRACH_Parameters_NB_r14 cs_NPRACH_Parameters_NB_r14 :=
+  { /* @status    APPROVED (NBIOT) */
+    nprach_Parameters_r14 := {
+      nprach_Periodicity_r14 := ms640,
+      nprach_StartTime_r14 := ms8,
+      nprach_SubcarrierOffset_r14 := n12,
+      nprach_NumSubcarriers_r14 := n12,
+      nprach_SubcarrierMSG3_RangeStart_r14 := oneThird,
+      npdcch_NumRepetitions_RA_r14 := r16,
+      npdcch_StartSF_CSS_RA_r14 := v4,
+      npdcch_Offset_RA_r14 := zero,
+      nprach_NumCBRA_StartSubcarriers_r14 := n8,
+      npdcch_CarrierIndex_r14 := omit
+    }
+  };
+
+  template (value) NPRACH_ProbabilityAnchor_NB_r14 cs_NPRACH_ProbabilityAnchor_NB_r14(NPRACH_ProbabilityAnchor_NB_r14.nprach_ProbabilityAnchor_r14 p_ProbabilityAnchor := zero) :=
+  { /* @status    APPROVED (NBIOT) */
+    // @sic R5s190880: p_ProbabilityAnchor sic@
+    nprach_ProbabilityAnchor_r14 := p_ProbabilityAnchor
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.8
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_8_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var template (value) SystemInformationBlockType22_NB_r14 v_SIB22;
+    var template (value) NPRACH_ParametersList_NB_r14 v_NPRACH_ParametersList_NB_r14;
+    var template (value) UL_ConfigCommon_NB_r14 v_UL_ConfigCommon;
+    var template (value) DL_ConfigCommon_NB_r14 v_DL_ConfigCommon;
+    var template (value) NB_NonAnchorCarrierCommonUL_List_Type v_NB_NonAnchorCarrierCommonUL_List;
+    var template (value) NB_NonAnchorCarrierCommonDL_List_Type v_NB_NonAnchorCarrierCommonDL_List;
+
+    var NB_CarrierFreq_Type v_NB_CarrierFreq;
+    var CarrierFreq_NB_r13 v_CarrierFreqUL;
+    var template (present) NAS_MSG_Indication_Type v_ExpectedNasMsg;
+    var integer v_NonAnchorCarrierId := 1;
+
+    f_NBIOT_Init(c6);
+    
+    v_NB_CarrierFreq := f_NBIOT_CellInfo_GetEARFCN(v_CellId);
+    v_CarrierFreqUL := v_NB_CarrierFreq.UL;
+
+    // modify system information
+    v_SIB22 := f_NBIOT_CellInfo_GetSIB22(v_CellId);
+    v_DL_ConfigCommon := cs_DL_ConfigCommon_NB_r14(cs_DL_CarrierConfigCommon_NB_r14(v_NB_CarrierFreq.DL.carrierFreq_r13 + 2, v_0dot5), cs_PCCH_Config_NB_r14(omit, w1));
+    v_SIB22.dl_ConfigList_r14 := { v_DL_ConfigCommon };                       // @sic R5s190880 sic@
+    v_SIB22.pagingWeightAnchor_r14 := w1;                                     // @sic R5s190880 sic@
+    v_CarrierFreqUL.carrierFreq_r13 := v_CarrierFreqUL.carrierFreq_r13 + 2;   // @sic R5s190880: 2 instead of 1 sic@
+    v_NPRACH_ParametersList_NB_r14 := { cs_NPRACH_Parameters_NB_r14 };
+    v_UL_ConfigCommon := cs_UL_ConfigCommon_NB_r14(v_CarrierFreqUL, v_NPRACH_ParametersList_NB_r14);
+    v_SIB22.ul_ConfigList_r14 := { v_UL_ConfigCommon };
+    v_SIB22.nprach_ProbabilityAnchorList_r14 := { cs_NPRACH_ProbabilityAnchor_NB_r14(oneHalf) };   // @sic R5s190880: oneHalf sic@
+    f_NBIOT_CellInfo_SetSIB22(v_CellId, v_SIB22);
+
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    v_NB_NonAnchorCarrierCommonUL_List := { cs_NB_NonAnchorCarrierCommonUL(v_NonAnchorCarrierId, v_UL_ConfigCommon) };
+    v_NB_NonAnchorCarrierCommonDL_List := { cs_NB_NonAnchorCarrierCommonDL(v_NonAnchorCarrierId, v_DL_ConfigCommon) };
+    f_NBIOT_SS_ConfigActiveCellInfo(v_CellId, cs_TimingInfo_Now, cds_NB_ActiveCellConfig_CarrierConfigCommon_Config (v_NB_NonAnchorCarrierCommonDL_List, v_NB_NonAnchorCarrierCommonUL_List)); //@sic R5s221226 sic@
+
+    f_NBIOT_Preamble(v_CellId, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true);     // no "layer2" mode as test case does not expect any data on L2DATA port in UL
+    
+    //@siclog "Step 0A" siclog@
+    v_SIB22.nprach_ProbabilityAnchorList_r14 := { cs_NPRACH_ProbabilityAnchor_NB_r14(zero) };
+    f_NBIOT_CellInfo_SetSIB22(v_CellId, v_SIB22);
+    f_NBIOT_ModifySysinfo (v_CellId, true, true);    // @sic R5s190880 sic@
+    
+    //@siclog "Step 0B" siclog@
+    f_Delay(90.0);                                   // @sic R5s190880 sic@
+
+    //@siclog "Step 1" siclog@
+    f_NBIOT_UE_Page(v_CellId);
+    
+    //@siclog "Step 2" siclog@
+    SYSIND.receive(car_NB_RachPreamble_IND(v_CellId, cr_NB_RachPreamble(-, -, v_NonAnchorCarrierId)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    //@siclog "Step 3" siclog@
+    // Random Access Response autonatically sent by the SS according to configured RachProcedureList
+
+    //@siclog "Step 4" siclog@
+    f_NBIOT_RRC_ConnectionRequest_Def(v_CellId);
+    
+    //@siclog "Step 5" siclog@
+    f_NBIOT_RRC_ConnectionSetup_Def();     // dummy function; contention resolution and RRC connection setup as configured at the SS
+    
+    //@siclog "Step 6" siclog@
+    v_ExpectedNasMsg := ?;
+    SRB.receive(car_NB_SRB_RrcNasPdu_IND(v_CellId, tsc_SRB1bis, cr_508_RRCConnectionSetupComplete_NB, v_ExpectedNasMsg));
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    f_NBIOT_RRC_ConnectionRelease(v_CellId);
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+
+    f_NBIOT_Postamble(v_CellId, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.9
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_9_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var NBIOT_IDLEUPDATED_STATE_Type v_TestLoopMode := STATE2A_NB_TESTLOOP_ModeG;
+    var PhysicalConfigDedicated_NB_r13.twoHARQ_ProcessesConfig_r14 v_TwoHARQ_ProcessesConfig_r14 := true_;
+    var template (value) SRB_ToAddModList_NB_r13 v_SRBList := { cs_SRB_ToAddMod_NB_DEFAULT(cs_RLC_Config_NB_v1430) };    /* @sic R5-188200: cs_RLC_Config_NB_v1430 sic@ */
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, v_SRBList, -, -, v_TwoHARQ_ProcessesConfig_r14);
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;                          // RLC status to be maintained by Send/Receive functions
+    var template (value) NB_DciUlInfo_Type v_DciUlInfo;
+    var integer v_ProcessNumber := 0;
+    var integer v_RlcSduSizeDL := 38; // 38 bytes
+    var integer v_TBS := 328;         // 41 bytes
+    var octetstring v_UserData := fl_ESM_DATA_TRANSPORT_UserData(v_RlcSduSizeDL);
+    var MAC_SDUList_Type v_MAC_SDUList;
+    var template (value) MAC_PDU_Type v_MAC_PDU_TX;
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX;
+
+    f_NBIOT_Init(c1);
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    
+    f_NBIOT_CellInfo_SetNumberOfHarqProcesses(v_CellId, 2);   /* two HARQ processes => UL grant configuration with UL DCI containing  additional bit for HARQ process to be used (see f_NBIOT_RRC_ConnectionRequest_Common) */
+    v_ProcessNumber := 0;                                     /* HARQ process 0 to be used in DL DCI during preamble */
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto(v_ProcessNumber)));
+    f_NBIOT_SS_ConfigRachProcedureMsg4(v_CellId, v_RrcConnSetup);
+
+    f_NBIOT_L2_Enter_State2B_NB(v_RLC_CountsInfoListByRef, v_CellId, TransparentMode_RLC_MAC, v_TestLoopMode);
+
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, enable);
+
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true, layer2);
+
+    for (v_ProcessNumber := 0; v_ProcessNumber < 2; v_ProcessNumber := v_ProcessNumber + 1) {
+      
+      // build MAC PDU to be used at steps 1
+      v_MAC_SDUList := { fl_NBIOT_MAC_EncodedRlcAmPdu_TX(v_RLC_CountsInfoListByRef, v_UserData, tsc_NoPoll) };
+      v_MAC_PDU_TX := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList, v_TBS);
+      
+      //@siclog "Step 1" siclog@
+      f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto(v_ProcessNumber)));
+      f_NBIOT_MAC_CPMode_SendMacPdu(v_CellId, cs_TimingInfo_Now, v_MAC_PDU_TX);
+
+      //@siclog "Step 2" siclog@
+      fl_NBIOT_MAC_ReceiveAckNack(v_CellId, ack, __FILE__, __LINE__, "Step 2");
+    
+      //@siclog "Step 3" siclog@
+      v_DciUlInfo := cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, v_ProcessNumber);
+      f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant(v_DciUlInfo)));
+
+      //@siclog "Step 4" siclog@
+      v_MAC_PDU_RX := f_NBIOT_MacPdu_SingleRlcAmdPdu_RX(-, v_UserData);
+      f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, v_CellId, v_MAC_PDU_RX);
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+      //@siclog "Step 5" siclog@
+      f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, v_CellId);
+
+      //@siclog "Step 6" siclog@
+      SYSIND.receive(car_NB_UL_HARQ_IND(v_CellId, ack));
+    }
+
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(v_CellId, disable);
+    v_ProcessNumber := 0;                                     /* HARQ process 0 to be used in DL DCI during postamble */
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(v_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto(v_ProcessNumber)));
+
+    f_NBIOT_L2_Postamble_State2B_NB(v_CellId, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR, noDelay);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.10
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_10_NBIOT() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var RACH_TimingAdvance_Type v_RAR_TA := tsc_RACH_TA_Def;
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList;
+    var template (present) UL_CCCH_Message_NB v_RRCConnectionRequest;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var octetstring v_EncodedRrcConnSetup;
+    var template (present) NAS_MSG_Indication_Type v_ExpectedNasMsg;
+    
+    f_NBIOT_Init(c1);
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(v_CellId, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, enable);
+    
+    //------------------------------------
+    f_NBIOT_TestBody_Set(true);     // no "layer2" mode as test case does not expect any data on L2DATA port in UL
+    
+    v_RachProcedureList := cs_NB_RachProcedureList_Def(v_RAR_TA, cs_ContentionResolution_DlschSdu_None);
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+    
+    //@siclog "Step 1" siclog@
+    f_NBIOT_UE_Page(v_CellId);
+    
+    //@siclog "Step 2" siclog@
+    SYSIND.receive(car_NB_RachPreamble_IND(v_CellId));
+    
+    //@siclog "Step 3" siclog@
+    // Random Access Response autonatically sent by the SS according to configured RachProcedureList
+    
+    //@siclog "Step 4" siclog@
+    v_RRCConnectionRequest := cr_508_RRCConnectionRequest_NB;
+    v_RRCConnectionRequest.message_.c1.rrcConnectionRequest_r13.criticalExtensions.rrcConnectionRequest_r13.earlyContentionResolution_r14 := true;
+    SRB.receive(car_NB_SRB0_RrcPdu_IND(v_CellId, v_RRCConnectionRequest));
+    
+    //@siclog "Step 5" siclog@
+    // MAC PDU (UE Contention Resolution Identity) autonatically sent by the SS according to configured RachProcedureList
+
+    f_NBIOT_ULGrantTransmission(v_CellId, cs_NB_UL_GrantScheduling_Start);
+    
+    //@siclog "Step 6" siclog@
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup();
+    SRB.send(cas_NB_SRB0_RrcPdu_REQ(v_CellId, cs_TimingInfo_Now, v_RrcConnSetup));
+    
+    //@siclog "Step 7" siclog@
+    v_ExpectedNasMsg := ?;
+    SRB.receive(car_NB_SRB_RrcNasPdu_IND(v_CellId, tsc_SRB1bis, cr_508_RRCConnectionSetupComplete_NB, v_ExpectedNasMsg));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+    
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+
+    f_NBIOT_RRC_ConnectionRelease(v_CellId);
+    f_NBIOT_SS_ConfigRachPreambleIndMode(v_CellId, disable);
+
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup();
+    v_EncodedRrcConnSetup := f_RRC_DL_CCCH_NB_Encvalue(v_RrcConnSetup);
+    v_RachProcedureList := cs_NB_RachProcedureList_Def(v_RAR_TA, cs_ContentionResolution_DlschSdu(v_EncodedRrcConnSetup));
+    f_NBIOT_SS_CommonCellConfig(v_CellId, cas_NB_RachProcedure_Config_REQ(v_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+
+    f_NBIOT_Postamble(v_CellId, CONTROL_PLANE, N1_IDLE);
+  }
+
+}

@@ -1,0 +1,320 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2021-04-28 17:21:30 +0200 (Wed, 28 Apr 2021) $
+// $Rev: 30488 $
+/******************************************************************************/
+
+module NasEmu5G_Main_NRNG {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NasEmu_Common all;
+  import from NG_SecurityDefinitionsAndExternalFunctions all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_CommonDefs all;
+  import from NR_RRC_Templates all;
+  import from NasEmu5G_AspTypes_NR all;
+  import from NasEmu5G_Component_NRNG all;
+  import from NasEmu5G_Component_NR_BASE all;
+  import from NasEmu_Common4G5G all;
+
+  template (present) NR_SRB_COMMON_REQ car_NRNG_SignallingAspFromTC :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := ?,
+    Signalling := {
+      Rrc := *,
+      Nas := *
+    }
+  };
+
+  template (value) NR_SRB_COMMON_IND cas_NRNG_SignallingAspToTC(template (value) NR_IndAspCommonPart_Type p_Common,
+                                                                template (omit) NR_RRC_MSG_Indication_Type p_RrcMsg := omit,
+                                                                template (omit) NG_NAS_MSG_IndicationList_Type p_NasMsg := omit) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := p_Common,
+    Signalling := {
+      Rrc := p_RrcMsg,
+      Nas := p_NasMsg
+    }
+  };
+
+  template (present) NR_RRC_PDU_IND car_NRNG_PduFromSYS  :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := ?,
+    RrcPdu := ?
+  };
+
+  template (value) NR_RRC_PDU_REQ cas_NRNG_PduToSYS(template (value) NR_ReqAspCommonPart_Type p_Common,
+                                                    template (value) NR_RRC_MSG_Request_Type  p_RRC_MSG_Request) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := p_Common,
+    RrcPdu := p_RRC_MSG_Request
+  };
+
+  template (value) NR_RRC_MSG_Request_Type cs_NR_RRC_MSG_RequestDCCH(template (value) DL_DCCH_Message p_DcchRrcPdu) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Dcch := p_DcchRrcPdu
+  };
+
+  template (value) DL_DCCH_Message cs_NR_DLInformationTransfer(RRC_TransactionIdentifier p_RRC_TI,
+                                                               template (value) DedicatedNAS_Message  p_NAS_DedicatedMsg)  :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    message_ := {
+      c1 := {
+        dlInformationTransfer := {
+          rrc_TransactionIdentifier := p_RRC_TI,
+          criticalExtensions := {
+            dlInformationTransfer := {
+              dedicatedNAS_Message :=  p_NAS_DedicatedMsg,
+              lateNonCriticalExtension := omit,
+              nonCriticalExtension := omit
+            }
+          }
+        }
+      }
+    }
+  };
+
+  template (value) RRCReconfiguration_v1530_IEs cs_38508_RRCReconfiguration_NonCriticalExtension_AllOmit :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    masterCellGroup                         := omit,
+    fullConfig                              := omit,
+    dedicatedNAS_MessageList                := omit,
+    masterKeyUpdate                         := omit,
+    dedicatedSIB1_Delivery                  := omit,
+    dedicatedSystemInformationDelivery      := omit,
+    otherConfig                             := omit,
+    nonCriticalExtension                    := omit
+  };
+
+  /*
+   * @desc      Handling of ASPs coming from the test cases
+   * @param     p_NG_NasSecurityByRef (by reference)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_AspFromTestcaseHandler_NRNG(inout NG_NasSecurity_Type p_NG_NasSecurityByRef) runs on NASEMU_NR_BASE_PTC
+  {
+    var NR_SRB_COMMON_REQ v_AspFromTC;
+    var NR_ReqAspCommonPart_Type v_ReqAspCommonPart;
+    var template (value) NR_RRC_MSG_Request_Type v_RrcPduToSYS;
+    var NG_NAS_MSG_Request_Type v_NG_NasPduFromTC;
+    var template (value) DL_DCCH_Message v_DL_DCCH_Message;
+    var DedicatedNAS_Message v_NAS_DedicatedMsg[maxDRB];   // we use an array as long as this is an inline type definition in ASN.1
+    var integer v_NoOfNasPdus := 0;
+    var boolean v_RrcPduIsPresent;
+    var boolean v_NasPduIsPresent;
+    var integer I;
+
+    [] TC_SRB.receive(car_NRNG_SignallingAspFromTC) -> value v_AspFromTC {
+
+      v_ReqAspCommonPart := v_AspFromTC.Common;
+      v_RrcPduIsPresent := ispresent(v_AspFromTC.Signalling.Rrc);
+      v_NasPduIsPresent := ispresent(v_AspFromTC.Signalling.Nas);
+
+      if (v_NasPduIsPresent) {
+        // Note: in case of RRCReconfiguration there may be more than one NAS PDUs
+        v_NoOfNasPdus := lengthof(v_AspFromTC.Signalling.Nas);       // Note: per ASN.1 definition length is restricted to maxDRB
+        for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+          v_NG_NasPduFromTC := v_AspFromTC.Signalling.Nas[I];
+          v_NAS_DedicatedMsg[I] := f_EncodeAndCipher_NG_NasPdu(p_NG_NasSecurityByRef, v_NG_NasPduFromTC);   // encode NAS PDU; apply NAS security (if reqired)
+        }
+      }
+      if (v_RrcPduIsPresent) {
+        // ******* RRC PDU (containing RRC control information)
+        v_RrcPduToSYS := v_AspFromTC.Signalling.Rrc;
+
+        if (v_NasPduIsPresent) {
+          // ***** NAS PDU BEING PIGGY BACKED
+          if (not ischosen(v_RrcPduToSYS.Dcch)) {
+            // ***** SRB0
+            f_NasEmulationError(__FILE__, __LINE__, "no piggy-backing possible for CCCH message");
+            return;     /* don't send anything */
+
+          } else {
+            // ***** SRB1/2/3
+            v_DL_DCCH_Message := v_RrcPduToSYS.Dcch;  /* extract RRC message;
+                                                         Note: since v_RrcPduToSYS is a union v_RrcPduToSYS.Dcch is never omit */
+
+            if (ischosen(v_DL_DCCH_Message.message_.c1.rrcReconfiguration)) {     /* RRC message is RRCConnectionReconfiguration */
+              // *** RRC RECONFIGURATION:
+              if ((v_NoOfNasPdus > 0) and not isvalue(v_DL_DCCH_Message.message_.c1.rrcReconfiguration.criticalExtensions.rrcReconfiguration.nonCriticalExtension)) { // @sic R5s210463 sic@
+                v_DL_DCCH_Message.message_.c1.rrcReconfiguration.criticalExtensions.rrcReconfiguration.nonCriticalExtension := cs_38508_RRCReconfiguration_NonCriticalExtension_AllOmit;
+              }
+              for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+                v_DL_DCCH_Message.message_.c1.rrcReconfiguration.criticalExtensions.rrcReconfiguration.nonCriticalExtension.dedicatedNAS_MessageList[I] :=
+                  v_NAS_DedicatedMsg[I];
+              }
+
+            } else if (ischosen(v_DL_DCCH_Message.message_.c1.dlInformationTransfer)) {     // RRC message is DLInformationTransfer
+              // *** DL INFORMATION TRANSFER:
+              if (v_NoOfNasPdus > 1) {
+                f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+                return;     // don't send anything
+              } else {
+                v_DL_DCCH_Message.message_.c1.dlInformationTransfer.criticalExtensions.dlInformationTransfer.dedicatedNAS_Message :=
+                  v_NAS_DedicatedMsg[0];
+              }
+            } else {
+              // *** OTHER RRC PDU:
+              f_NasEmulationError(__FILE__, __LINE__, "RRC message can not carry piggy-backed NAS PDU");
+              return;    /* don't do anything else */
+            }
+            v_RrcPduToSYS := cs_NR_RRC_MSG_RequestDCCH(v_DL_DCCH_Message);
+          }
+        }
+      } else {
+        // ******* NAS PDU only:
+        if (not v_NasPduIsPresent) {
+          f_NasEmulationError(__FILE__, __LINE__, "neither RRC nor NAS PDU to be sent");
+          return;     /* don't send anything */
+        } else {
+          if (v_NoOfNasPdus > 1) {
+            f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+            return;     /* don't send anything */
+          } else {
+            v_RrcPduToSYS := cs_NR_RRC_MSG_RequestDCCH(cs_NR_DLInformationTransfer(tsc_NR_RRC_TI_Def, v_NAS_DedicatedMsg[0]));
+          }
+        }
+      }
+
+      SYS_SRB.send(cas_NRNG_PduToSYS(v_ReqAspCommonPart, v_RrcPduToSYS));
+    }
+  }
+
+  /*
+   * @desc      handling of ASPs containing an RRC PDU from the system adaptor
+   * @param     p_NG_NasSecurityByRef (by reference)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_AspFromSystemAdaptorHandler_NRNG(inout NG_NasSecurity_Type p_NG_NasSecurityByRef) runs on NASEMU_NR_BASE_PTC
+  {
+    var NR_RRC_PDU_IND v_AspFromSYS;
+    var NR_RRC_MSG_Indication_Type v_RrcIndication;
+    var UL_DCCH_Message v_RrcPdu;
+    var ULInformationTransfer_IEs v_ULInformationTransfer;
+    var template (value) NR_SRB_COMMON_IND v_SRB_COMMON_IND;
+    var template (value) NG_NasEmu_DecodingInfo_Type v_DecodingInfo;
+    var DedicatedNAS_Message v_NAS_DedicatedMsg[maxDRB];   // even though there is always only one we use an array
+    var integer v_NoOfNasPdus;
+    var boolean v_RrcPduPresent;
+    var boolean v_IntegrityError;
+    var integer I;
+
+    [] SYS_SRB.receive(car_NRNG_PduFromSYS) -> value v_AspFromSYS {
+      v_RrcIndication := v_AspFromSYS.RrcPdu;
+      v_SRB_COMMON_IND := cas_NRNG_SignallingAspToTC(v_AspFromSYS.Common);
+
+      if (ischosen(v_RrcIndication.Ccch) or ischosen(v_RrcIndication.Ccch1)) { /* CCCH -> SRB0 */
+        //@sic R5s191051 sic@
+        v_SRB_COMMON_IND.Signalling.Rrc := v_RrcIndication;
+
+      } else {                                                                  /* DCCH -> SRB1/2/3 */
+        v_RrcPdu := v_RrcIndication.Dcch;
+        v_RrcPduPresent := true;
+        v_NoOfNasPdus := 0;
+        v_IntegrityError := false;
+
+        if (ischosen(v_RrcPdu.message_.c1)) {
+
+          if (ischosen(v_RrcPdu.message_.c1.rrcSetupComplete)) {
+            // RRC SETUP COMPLETE
+            if (ischosen(v_RrcPdu.message_.c1.rrcSetupComplete.criticalExtensions.rrcSetupComplete)) {
+              v_NAS_DedicatedMsg[0] := v_RrcPdu.message_.c1.rrcSetupComplete.criticalExtensions.rrcSetupComplete.dedicatedNAS_Message;
+              v_NoOfNasPdus := 1;
+            }
+
+          } else if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer)) {
+            // UL INFORMATION TRANSFER
+            if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer.criticalExtensions.ulInformationTransfer)) {
+              v_ULInformationTransfer := v_RrcPdu.message_.c1.ulInformationTransfer.criticalExtensions.ulInformationTransfer;
+              v_NAS_DedicatedMsg[0] := v_ULInformationTransfer.dedicatedNAS_Message;
+              v_RrcPduPresent := false;
+              v_NoOfNasPdus := 1;
+            }
+          } else if (ischosen(v_RrcPdu.message_.c1.rrcResumeComplete)) {
+            // RRC RESUME COMPLETE
+            if (ispresent(v_RrcPdu.message_.c1.rrcResumeComplete.criticalExtensions.rrcResumeComplete.dedicatedNAS_Message)) { // @sic R5s190214 sic@
+              v_NAS_DedicatedMsg[0] := v_RrcPdu.message_.c1.rrcResumeComplete.criticalExtensions.rrcResumeComplete.dedicatedNAS_Message;
+              v_NoOfNasPdus := 1;
+            }
+          } else {
+            // OTHER RRC PDU
+          }
+        } else { // c1 only option at the moment
+        }
+
+        if (v_RrcPduPresent) {
+          v_SRB_COMMON_IND.Signalling.Rrc := v_RrcIndication;
+        }
+        if (v_NoOfNasPdus > 0) {
+          for (I := 0; I < v_NoOfNasPdus; I := I + 1) {
+            v_DecodingInfo := f_NG_DecipherAndDecodeNasPdu(p_NG_NasSecurityByRef, v_NAS_DedicatedMsg[I]);
+            v_SRB_COMMON_IND.Signalling.Nas[I] := v_DecodingInfo.NasIndication;         // omit if message cannot be decoded => shall lead to a test case error
+            v_IntegrityError := v_IntegrityError or valueof(v_DecodingInfo.IntegrityError);    // valueof cannot be avoided here
+          }
+          if (v_IntegrityError) {                                                       // set Error choice of common part only if there is an error
+            if (ischosen(v_SRB_COMMON_IND.Common.Status.Error)) {     /* there is already an error flagged by the SA */
+              v_SRB_COMMON_IND.Common.Status.Error.Integrity.Nas := true;
+            } else {                                                  /* the error needs to be set */
+              v_SRB_COMMON_IND.Common.Status := cs_IndicationStatus_NasIntegrityError;
+            }
+          }
+        }
+      }
+      TC_SRB.send(v_SRB_COMMON_IND);
+    }
+  }
+
+  /*
+   * @desc      Handling of NAS integrity returning the calculated MAC
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_Check4GIntegrity (inout NG_NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_NRNG_PTC
+  {
+    var NASEmu_CoOrd_REQ v_ReceivedMsg;
+    var NasCount_Type v_CountUL;
+    var MessageAuthenticationCode v_CalculatedMac;
+    
+    [] EPS.receive(cr_NASEmu_CoOrd_REQ) -> value v_ReceivedMsg
+    {
+       v_CountUL := f_NG_NasSecurity_EstimateCOUNT(p_NasSecurityByRef.NasCount.UL, v_ReceivedMsg.SequenceNumber);
+       v_CalculatedMac := fx_NG_NasIntegrityAlgorithm(v_ReceivedMsg.IntegrityProtectedOctets,
+                                              p_NasSecurityByRef.Integrity.Algorithm,
+                                              p_NasSecurityByRef.Integrity.K_NAS,
+                                              v_CountUL,
+                                              p_NasSecurityByRef.BearerId,
+                                              tsc_DirectionUL);
+       EPS.send(cs_NASEmu_CoOrd_CNF (v_CalculatedMac));
+    }
+  }
+
+  /*
+   * @desc      NAS emulation main loop (started by the MTC)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NASEMU_MainLoop_NRNG() runs on NASEMU_NRNG_PTC
+  {
+    var NG_NasSecurity_Type v_NG_NasSecurityByRef := f_NG_NasEmu_NasSecurity_Init();
+    while (true) {
+      alt {
+        [] a_NG_NasEmu_ConfigurationHandler(CTRL, v_NG_NasSecurityByRef);
+        [] a_AspFromTestcaseHandler_NRNG(v_NG_NasSecurityByRef);
+        [] a_AspFromSystemAdaptorHandler_NRNG(v_NG_NasSecurityByRef);
+        [] a_Check4GIntegrity(v_NG_NasSecurityByRef);                              //  @sic 5G Integrity in 4G sic@
+        [] any port.receive {
+          f_NasEmulationError(__FILE__, __LINE__, "unexpected message (skipped)");
+          repeat;
+        }
+      }
+    }
+  }
+
+}

@@ -1,0 +1,102 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2022-05-03 17:41:29 +0200 (Tue, 03 May 2022) $
+// $Rev: 33201 $
+/******************************************************************************/
+module IMS_CC_TestcaseImplementation_11 {
+
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_Component all;
+  import from IMS_IP_Config all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_Templates all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      Common Test body of test case 11.2
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NetworkInitiatedReAuthentication() runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_REGISTER_REQ;
+    var REGISTER_Request v_RegisterReq;
+    var SecurityClientParams_Type v_SecurityClientParams;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+    var SipUrl v_ContactUrl;
+    var template (value) Reginfo_Type v_XmlMessage;
+    var template (value) RegInfo_RegistrationList_Type v_Registrations;
+    var charstring v_PublicUserIdentity;
+    var integer v_NonceCount;
+    var boolean v_WaitForPublish := true;
+    var integer v_ExpirationTime := 60;
+    var float v_ReRegistrationTime := int2float(v_ExpirationTime / 2);
+
+    timer t_TRegExpireMin := f_IMS_SetTimerToleranceMin(v_ReRegistrationTime);
+    timer t_TRegExpireMax := f_IMS_SetTimerToleranceMax(v_ReRegistrationTime);
+    
+    f_IMS_CC_StartSignalling(IPCAN_InitialRegistration);
+    v_IMS_REGISTER_REQ := f_IMS_Register_NonGIBA();
+    f_IMS_Register_SubscribeNotify(v_IMS_REGISTER_REQ, v_WaitForPublish);
+    v_RegisterReq := v_IMS_REGISTER_REQ.Request.Register;
+     
+    f_IMS_TestBody_Set(true);
+
+    v_PublicUserIdentity := f_IMS_PTC_ImsInfo_GetUriString(firstId);
+    v_ContactUrl := f_MessageHeader_GetContactSipUrl(v_RegisterReq.msgHeader);
+    
+    f_IMS_PTC_NW_Address_GetAddrStr();    /* @sic R5s130133 change 6: f_IMS_PTC_NW_Address_GetHostFormat replaced by f_IMS_PTC_NW_Address_GetAddrStr sic@ */
+    
+    // Set the 60 seconds expiration time in the XML body
+    v_Registrations[0] := f_XML_RegistrationInfo(v_RegisterReq, v_PublicUserIdentity, "a100", "980", active, shortened, v_ExpirationTime);
+    v_XmlMessage := f_XML_RegInfo(partial, 1, v_Registrations);
+    // @siclog "Step 1 - 2" siclog@
+    f_IMS_Register_Notify(v_ContactUrl, v_XmlMessage);    /* @sic R5-153756, R5-153986: p_SubscribeRequest and p_CseqValue removed sic@ */
+    
+    t_TRegExpireMin.start;  // @sic R5s130266 change 1.2 - MCC160 Implementation sic@
+    t_TRegExpireMax.start;  // @sic R5s130266 change 1.2 - MCC160 Implementation sic@
+    
+    f_IMS_CC_ReleaseConnection(IPCAN_InitialRegistration);     /* @sic R5s140561: needs to be after starting the timers sic@ */
+    
+    f_IMS_CC_StartSignalling(IPCAN_MO_IMS_Signalling);
+    
+    // @siclog "Step 3" siclog@
+    v_NonceCount := 2;
+    v_IMS_REGISTER_REQ := f_IMS_PTC_ReRegistration_WaitForRegistration(t_TRegExpireMin, t_TRegExpireMax, v_NonceCount);
+    v_RegisterReq := v_IMS_REGISTER_REQ.Request.Register;
+    
+    v_SecurityClientParams := f_IMS_PTC_ReRegistration_SecurityClientParamsGet();
+    f_IMS_PTC_ReRegistration_SecurityClientParamsCheck(v_RegisterReq, v_SecurityClientParams);
+    
+    // @siclog "Step 4" siclog@
+    f_IMS_Register_SecurityInit(v_RegisterReq, not4b tsc_IMS_AuthRAND);    /* generate a new RAND */
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_REGISTER_REQ.RoutingInfo), cs_Response(c_statusLine401, f_IMS_RegisterResponse_401_MessageHeaderTX(v_RegisterReq))));
+    
+    // @siclog "Step 5" siclog@
+    v_NonceCount := 1;             // nonce counter is reset to 1 due to re-authentication @sic R5s130266 change 2 - MCC160 Implementation sic@
+    v_IMS_REGISTER_REQ := f_IMS_REGISTER_SubsequentRequest(-, -, -, v_NonceCount);
+    v_RegisterReq := v_IMS_REGISTER_REQ.Request.Register;
+    
+    f_IMS_Register_SecurityRelease(oldestProtectedContextOnly); /* @sic R5s130900 - MCC160 implementation sic@
+                                                                   @sic R5-145732: for the part 3 model it is not necessary anymore to hand over v_SecurityInfo but it is kept for backward compatibility with the part 4 model sic@
+                                                                   @sic R5w150015: v_SecurityInfo is removed sic@ */
+    // @siclog "Step 6" siclog@
+    v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_REGISTER_REQ.RoutingInfo); /* @sic R5s141326 sic@ */
+    v_RoutingInfo.Security := protectedContext1;    /* @sic R5s141326: by releasing the old security context the new one becomes context 1 sic@ */
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_RegisterReq))));
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    f_IMS_TestBody_Set(false);
+  }
+
+}

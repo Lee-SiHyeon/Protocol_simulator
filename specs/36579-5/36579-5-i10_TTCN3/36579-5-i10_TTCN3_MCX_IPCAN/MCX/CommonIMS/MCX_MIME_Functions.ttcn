@@ -1,0 +1,869 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-02 20:25:22 +0100 (Mon, 02 Dec 2024) $
+// $Rev: 40016 $
+/******************************************************************************/
+
+module MCX_MIME_Functions {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_SecurityParameters all;
+  import from MCX_XML_PIDF all;
+  import from MCX_XML_Signature all;
+  import from MCX_XML_affiliationCommand all;
+  import from MCX_XML_conference_info all;
+  import from MCX_XML_mcdataLocationInfo all;
+  import from MCX_XML_mcdata_info all;
+  import from MCX_XML_mcpttLocationInfo all;
+  import from MCX_XML_mcptt_info all;
+  import from MCX_XML_mcpttregroup all;
+  import from MCX_XML_mcvideoLocationInfo all;
+  import from MCX_XML_mcvideo_info all;
+  import from MCX_XML_poc_settings all;
+  import from MCX_XML_resource_lists all;
+  import from MCX_XML_simple_filter all;
+  import from MCX_XML_xcap_diff all;
+  import from MIKEY_MCX_Extension_TypeDefs all;
+  import from MIKEY_TypeDefs all;
+  import from XSD all;
+
+  const charstring tsc_MCX_MIME_Boundary := "MCX-MIME-Boundary--";              /* @status    APPROVED (MCX) */
+
+  type record MCX_MIME_XmlBodies_Type {                                         /* @status    APPROVED (MCX) */
+    MCPTT_Info_Type                     McpttInfo         optional,
+    McpttInfoExt_ElementList_Type       McpttInfoExt      optional,
+    MCVideo_Info_Type                   McvideoInfo       optional,
+    McvideoInfoExt_ElementList_Type     McvideoInfoExt    optional,
+    MCData_Info_Type                    McdataInfo        optional,
+    McdataInfoExt_ElementList_Type      McdataInfoExt     optional,
+    MCPTT_LocationInfo_Type             McpttLocationInfo optional,
+    MCVideo_LocationInfo_Type           McvideoLocationInfo optional,
+    MCData_LocationInfo_Type            McdataLocationInfo optional,
+    ResourceLists_Type                  ResourceLists     optional,
+    MCX_SimpleFilter_Type               SimpleFilter      optional,
+    MCX_PIDF_Type                       PIDF              optional,
+    MCX_Affiliation_CommandList_Type    AffiliationCmd    optional,             /* NOTE: schemata for MCPTT, MCVideo and MCData are effectively the same => urn_3gpp_ns_affiliationCommand_1_0 is used for all services
+                                                                                 *       => MCX_Affiliation_CommandList_Type is common for MCPTT, MCVideo and MCData */
+    PocSettings_Type                    PocSettings       optional
+  };
+
+  template (value) MCX_MIME_XmlBodies_Type cs_MCX_MIME_XmlBodies_AllOmit :=
+  { /* @status    APPROVED (MCX) */
+    McpttInfo         := omit,
+    McpttInfoExt      := omit,
+    McvideoInfo       := omit,
+    McvideoInfoExt    := omit,
+    McdataInfo        := omit,
+    McdataInfoExt     := omit,
+    McpttLocationInfo := omit,
+    McvideoLocationInfo := omit,
+    McdataLocationInfo := omit,
+    ResourceLists     := omit,
+    SimpleFilter      := omit,
+    PIDF              := omit,
+    AffiliationCmd    := omit,
+    PocSettings       := omit
+  };
+
+  /*
+   * @desc      Get body part for SDP message, decode and match the SDP message
+   * @param     p_MIME_Message
+   * @param     p_SdpTemplate
+   * @return    template (omit) SDP_Message
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_DecodeMatchAndCheckSDP(MIME_Message p_MIME_Message,
+                                             template SDP_Message p_SdpTemplate) runs on IMS_PTC return template (omit) SDP_Message
+  {
+    var boolean v_IsRequired := ispresent(p_SdpTemplate);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, c_sdpApplication, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var SdpBody v_SdpBody;
+    var SDP_Message v_SDP_Message;
+
+    if (isvalue(v_MIME_Part)) {
+      v_SdpBody := valueof(v_MIME_Part.body.sdpMessageBody);
+      v_SDP_Message := f_IMS_SIP_DecodeMatchAndCheckSDP(v_SdpBody, p_SdpTemplate);                /* => FAIL if v_SdpTemplate=omit */
+      return v_SDP_Message;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCPTT info, decode and match the MCPTT info
+   * @param     p_MIME_Message
+   * @param     p_McpttInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCPTT_Info_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcpttInfo(MIME_Message p_MIME_Message,
+                                           template MCPTT_Info_Type p_McpttInfo,
+                                           charstring p_MCServiceID,
+                                           template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCPTT_Info_Type
+  {
+    var boolean v_IsRequired := ispresent(p_McpttInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McpttInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCPTT_Info_Type v_McpttInfo;
+    
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_McpttInfo := f_MCX_MCPTTInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_McpttInfo, p_McpttInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCPTT-Info in MIME body");
+      }
+      return v_McpttInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCVideo info, decode and match the MCVideo info
+   * @param     p_MIME_Message
+   * @param     p_McvideoInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCVideo_Info_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcvideoInfo(MIME_Message p_MIME_Message,
+                                             template MCVideo_Info_Type p_McvideoInfo,
+                                             charstring p_MCServiceID,
+                                             template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCVideo_Info_Type
+  {
+    var boolean v_IsRequired := ispresent(p_McvideoInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McvideoInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCVideo_Info_Type v_McvideoInfo;
+    
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_McvideoInfo := f_MCX_MCVideoInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_McvideoInfo, p_McvideoInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCVideo-Info in MIME body");
+      }
+      return v_McvideoInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCData info, decode and match the MCData info
+   * @param     p_MIME_Message
+   * @param     p_McdataInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCData_Info_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcdataInfo(MIME_Message p_MIME_Message,
+                                            template MCData_Info_Type p_McdataInfo,
+                                            charstring p_MCServiceID,
+                                            template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCData_Info_Type
+  {
+    var boolean v_IsRequired := ispresent(p_McdataInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McdataInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCData_Info_Type v_McdataInfo;
+    
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_McdataInfo := f_MCX_MCDataInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_McdataInfo, p_McdataInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCData-Info in MIME body");
+      }
+      return v_McdataInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCPTT location info, decode and match the MCPTT location info
+   * @param     p_MIME_Message
+   * @param     p_LocationInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCPTT_LocationInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcpttLocation(MIME_Message p_MIME_Message,
+                                               template MCPTT_LocationInfo_Type p_LocationInfo,
+                                               charstring p_MCServiceID,
+                                               template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCPTT_LocationInfo_Type
+  {
+    var boolean v_IsRequired := ispresent(p_LocationInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McpttLocationInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCPTT_LocationInfo_Type v_LocationInfo;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_LocationInfo := f_MCPTT_LocationInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_LocationInfo, p_LocationInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCPTT-Location-Info in MIME body");
+      }
+      return v_LocationInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCVideo location info, decode and match the MCVideo location info
+   * @param     p_MIME_Message
+   * @param     p_LocationInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCVideo_LocationInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcvideoLocation(MIME_Message p_MIME_Message,
+                                                 template MCVideo_LocationInfo_Type p_LocationInfo,
+                                                 charstring p_MCServiceID,
+                                                 template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCVideo_LocationInfo_Type
+  {
+    var boolean v_IsRequired := ispresent(p_LocationInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McvideoLocationInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCVideo_LocationInfo_Type v_LocationInfo;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_LocationInfo := f_MCVideo_LocationInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_LocationInfo, p_LocationInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCVideo-Location-Info in MIME body");
+      }
+      return v_LocationInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for MCData location info, decode and match the MCData location info
+   * @param     p_MIME_Message
+   * @param     p_LocationInfo
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCData_LocationInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchMcdataLocation(MIME_Message p_MIME_Message,
+                                                 template MCData_LocationInfo_Type p_LocationInfo,
+                                                 charstring p_MCServiceID,
+                                                 template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCData_LocationInfo_Type
+  {
+    var boolean v_IsRequired := ispresent(p_LocationInfo);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McdataLocationInfo, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCData_LocationInfo_Type v_LocationInfo;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_LocationInfo := f_MCData_LocationInfo_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_LocationInfo, p_LocationInfo)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MCData-Location-Info in MIME body");
+      }
+      return v_LocationInfo;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for resource lists, decode and match the resource lists
+   * @param     p_MIME_Message
+   * @param     p_ResourceLists
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) ResourceLists_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchResourceLists(MIME_Message p_MIME_Message,
+                                               template ResourceLists_Type p_ResourceLists,
+                                               charstring p_MCServiceID,
+                                               template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) ResourceLists_Type
+  {
+    var boolean v_IsRequired := ispresent(p_ResourceLists);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, c_xmlresourcelistApplication, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var ResourceLists_Type v_ResourceLists;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_ResourceLists := f_MCX_ResourceLists_DecryptDecode(v_XmlBody, p_MCServiceID, p_CSK);
+      if (not match(v_ResourceLists, p_ResourceLists)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid Resource-lists in MIME body");
+      }
+      return v_ResourceLists;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for simple filter, decode and match the simple filter
+   * @param     p_MIME_Message
+   * @param     p_SimpleFilter
+   * @return    template (omit) MCX_SimpleFilter_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchSimpleFilter(MIME_Message p_MIME_Message,
+                                              template MCX_SimpleFilter_Type p_SimpleFilter) runs on IMS_PTC return template (omit) MCX_SimpleFilter_Type
+  {
+    var boolean v_IsRequired := ispresent(p_SimpleFilter);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_SimpleFilter, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCX_SimpleFilter_Type v_SimpleFilter;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_SimpleFilter := f_MCX_SimpleFilter_Decode(v_XmlBody);
+      if (not match(v_SimpleFilter, p_SimpleFilter)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid simple filer in MIME body");
+      }
+      return v_SimpleFilter;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for PIDF, decode and match the PIDF
+   * @param     p_MIME_Message
+   * @param     p_PIDF
+   * @param     p_ServiceType
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    template (omit) MCX_PIDF_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchPIDF(MIME_Message p_MIME_Message,
+                                      template MCX_PIDF_Type p_PIDF,
+                                      MCX_ServiceType_Type p_ServiceType,
+                                      charstring p_MCServiceID,
+                                      template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC return template (omit) MCX_PIDF_Type
+  {
+    var boolean v_IsRequired := ispresent(p_PIDF);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_Pidf, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var MCX_PIDF_Type v_PIDF;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+
+      select (p_ServiceType) {
+        case (MCPTT) {
+          v_PIDF := f_MCPTT_PIDF_DecodeDecrypt(v_XmlBody, p_MCServiceID, p_CSK);
+        }
+        case (MCVideo) {
+          v_PIDF := f_MCVideo_PIDF_DecodeDecrypt(v_XmlBody, p_MCServiceID, p_CSK);
+        }
+        case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+          v_PIDF := f_MCData_PIDF_DecodeDecrypt(v_XmlBody, p_MCServiceID, p_CSK);
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "Invalid service type");
+        }
+      }
+
+      if (not match(v_PIDF, p_PIDF)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid PIDF affiliation in MIME body");
+      }
+      return v_PIDF;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for affiliation command, decode and match the affiliation command
+   * @param     p_ServiceType
+   * @param     p_MIME_Message
+   * @param     p_AffiliationCmd
+   * @return    template (omit) MCX_Affiliation_CommandList_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchAffiliationCmd(MCX_ServiceType_Type p_ServiceType,
+                                                MIME_Message p_MIME_Message,
+                                                template MCX_Affiliation_CommandList_Type p_AffiliationCmd) runs on IMS_PTC return template (omit) MCX_Affiliation_CommandList_Type
+  {
+    var boolean v_IsRequired := ispresent(p_AffiliationCmd);
+    var template (omit) MIME_Part v_MIME_Part;
+    var charstring v_TypeAndSubtype;
+    var XmlBody v_XmlBody;
+    var MCX_Affiliation_CommandList_Type v_AffiliationCmd;
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        v_TypeAndSubtype := tsc_MimeType_McpttAffiliationCommand;
+      }
+      case (MCVideo) {
+        v_TypeAndSubtype := tsc_MimeType_McvideoAffiliationCommand;
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_TypeAndSubtype := tsc_MimeType_McdataAffiliationCommand;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, v_TypeAndSubtype, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_AffiliationCmd := f_MCX_AffiliationCommand_Decode(v_XmlBody);
+      if (not match(v_AffiliationCmd, p_AffiliationCmd)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid affiliation command in MIME body");
+      }
+      return v_AffiliationCmd;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Get body part for PoC Settings, decode and match the PoC Settings
+   * @param     p_MIME_Message
+   * @param     p_PocSettings
+   * @return    template (omit) PocSettings_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIME_DecodeAndMatchPocSettings(MIME_Message p_MIME_Message,
+                                             template PocSettings_Type p_PocSettings) runs on IMS_PTC return template (omit) PocSettings_Type
+  {
+    var boolean v_IsRequired := ispresent(p_PocSettings);
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_pocSettings, v_IsRequired);  // => fail/inconc if MIME part is not there but required
+    var XmlBody v_XmlBody;
+    var PocSettings_Type v_PocSettings;
+
+    if (isvalue(v_MIME_Part)) {
+      v_XmlBody := valueof(v_MIME_Part.body.xmlBody);
+      v_PocSettings := f_MCX_PocSettings_Decode(v_XmlBody);
+      if (not match(v_PocSettings, p_PocSettings)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid PoC-Settings in MIME body");
+      }
+      return v_PocSettings;
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Check the profile index of the given POC Settings
+   * @param     p_PocSettings
+   * @param     p_SelectedUserProfileIndex
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_PocSettings_CheckProfileIndex(PocSettings_Type p_PocSettings,
+                                                    template (present) PocSettings_SelectedProfileIndex_Type p_SelectedUserProfileIndex) runs on IMS_PTC
+  { /* NOTE : function may need to be extended as a Rel-18 may provide a <multiplex-support> element in the any-extension of the entity and <multiplex-support> and <selected-user-profile-index> may occur in any order */
+    var PocSettings_SelectedProfileIndex_Type v_SelectedProfileIndex := f_MCX_PocSettings_SelectedUserProfileIndex_Decode(p_PocSettings.entity_list[0].elem_list[0]);
+    if (not match(v_SelectedProfileIndex, p_SelectedUserProfileIndex)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid user-profile-index in PoC-Settings in MIME body");
+    }
+  }
+
+  /*
+   * @desc      Decode and match all XML bodies contained in the given MIME message
+   * @param     p_MIME_Message
+   * @param     p_ServiceType
+   * @param     p_KeyIndex          (default value: CSK)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McpttInfoExt      (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McvideoInfoExt    (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_McdataInfoExt     (default value: omit)
+   * @param     p_McpttLocationInfo (default value: omit)
+   * @param     p_McvideoLocationInfo (default value: omit)
+   * @param     p_McdataLocationInfo (default value: omit)
+   * @param     p_ResourceLists     (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @param     p_AffiliationCmd    (default value: omit)
+   * @param     p_SimpleFilter      (default value: omit)
+   * @return    MCX_MIME_XmlBodies_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_DecodeAndMatchXML(MIME_Message p_MIME_Message,
+                                        MCX_ServiceType_Type p_ServiceType,
+                                        MCX_KeyIndex_Type p_KeyIndex := CSK,
+                                        template MCPTT_Info_Type p_McpttInfo := omit,
+                                        template McpttInfoExt_ElementList_Type p_McpttInfoExt := omit,
+                                        template MCVideo_Info_Type p_McvideoInfo := omit,
+                                        template McvideoInfoExt_ElementList_Type p_McvideoInfoExt := omit,
+                                        template MCData_Info_Type p_McdataInfo := omit,
+                                        template McdataInfoExt_ElementList_Type p_McdataInfoExt := omit,
+                                        template MCPTT_LocationInfo_Type p_McpttLocationInfo := omit,
+                                        template MCVideo_LocationInfo_Type p_McvideoLocationInfo := omit,
+                                        template MCData_LocationInfo_Type p_McdataLocationInfo := omit,
+                                        template ResourceLists_Type p_ResourceLists := omit,
+                                        template PocSettings_Type p_PocSettings := omit,
+                                        template MCX_PIDF_Type p_PIDF := omit,
+                                        template MCX_Affiliation_CommandList_Type p_AffiliationCmd := omit,
+                                        template MCX_SimpleFilter_Type p_SimpleFilter := omit) runs on MCX_IMS_PTC return MCX_MIME_XmlBodies_Type
+  {
+    var charstring v_MCServiceID := f_MCX_MCService_ID_User_A(p_ServiceType);
+    var template (omit) MCX_SecurityKey_Type v_CSK := f_MCX_IMS_PTC_SecurityParameters_GetKey(p_KeyIndex);
+    var template (value) MCX_MIME_XmlBodies_Type v_XmlBodies := cs_MCX_MIME_XmlBodies_AllOmit;
+    
+    v_XmlBodies.McpttInfo           := fl_MIME_DecodeAndMatchMcpttInfo(p_MIME_Message, p_McpttInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.McvideoInfo         := fl_MIME_DecodeAndMatchMcvideoInfo(p_MIME_Message, p_McvideoInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.McdataInfo          := fl_MIME_DecodeAndMatchMcdataInfo(p_MIME_Message, p_McdataInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.McpttLocationInfo   := fl_MIME_DecodeAndMatchMcpttLocation(p_MIME_Message, p_McpttLocationInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.McvideoLocationInfo := fl_MIME_DecodeAndMatchMcvideoLocation(p_MIME_Message, p_McvideoLocationInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.McdataLocationInfo  := fl_MIME_DecodeAndMatchMcdataLocation(p_MIME_Message, p_McdataLocationInfo, v_MCServiceID, v_CSK);
+    v_XmlBodies.ResourceLists       := fl_MIME_DecodeAndMatchResourceLists(p_MIME_Message, p_ResourceLists, v_MCServiceID, v_CSK);
+    v_XmlBodies.SimpleFilter        := fl_MIME_DecodeAndMatchSimpleFilter(p_MIME_Message, p_SimpleFilter);
+    v_XmlBodies.PIDF                := fl_MIME_DecodeAndMatchPIDF(p_MIME_Message, p_PIDF, p_ServiceType, v_MCServiceID, v_CSK);
+    v_XmlBodies.AffiliationCmd      := fl_MIME_DecodeAndMatchAffiliationCmd(p_ServiceType, p_MIME_Message, p_AffiliationCmd);
+    v_XmlBodies.PocSettings         := fl_MIME_DecodeAndMatchPocSettings(p_MIME_Message, p_PocSettings);
+
+    if (isvalue (v_XmlBodies.McpttInfo)) {
+      v_XmlBodies.McpttInfoExt := f_MCX_McpttInfoExt_DecodeAndMatch(valueof(v_XmlBodies.McpttInfo), p_McpttInfoExt);
+    }
+    if (isvalue (v_XmlBodies.McvideoInfo)) {
+      v_XmlBodies.McvideoInfoExt := f_MCX_McvideoInfoExt_DecodeAndMatch(valueof(v_XmlBodies.McvideoInfo), p_McvideoInfoExt);
+    }
+    if (isvalue (v_XmlBodies.McdataInfo)) {
+      v_XmlBodies.McdataInfoExt := f_MCX_McdataInfoExt_DecodeAndMatch(valueof(v_XmlBodies.McdataInfo), p_McdataInfoExt);
+    }
+
+    // Check Signature
+    f_MCX_MIME_CheckSignatures(p_MIME_Message, p_ServiceType, v_CSK);
+
+    return valueof(v_XmlBodies);
+  }
+
+  /*
+   * @desc      Get body part for MIKEY, decode and match the MIKEY
+   * @param     p_MIME_Message
+   * @param     p_MIKEY_Message
+   * @param     p_KeyParametersPayload (default value: *)
+   * @return    MIKEY_Message
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_DecodeMatchAndCheckMikeyMessage(MIME_Message p_MIME_Message,
+                                                      template (present) MIKEY_Message p_MIKEY_Message,
+                                                      template MCX_KeyParametersPayload_Type p_KeyParametersPayload := *) runs on MCX_IMS_PTC return MIKEY_Message
+  { // NOTE: MIKEY_Message is assumed to be mandatory present in the MIME message
+    var MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(p_MIME_Message, tsc_MimeType_Mikey);
+    var MikeyMsg v_MikeyMsg := v_MIME_Part.body.commonText;
+
+    return f_MCX_MIKEY_DecodeMatchAndCheckMikeyMessage(v_MikeyMsg, p_MIKEY_Message, p_KeyParametersPayload);
+  }
+
+  /*
+   * @desc      Check all signatures of XML bodies contained in the given MIME message
+   * @param     p_MIME_Message
+   * @param     p_ServiceType
+   * @param     p_CSK               (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_CheckSignatures(MIME_Message p_MIME_Message,
+                                      MCX_ServiceType_Type p_ServiceType,
+                                      template (omit) MCX_SecurityKey_Type p_CSK := omit) runs on IMS_PTC
+  {
+    var template (present) charstring v_BodyPartsWithNoSignature := (tsc_MimeType_McpttSigned, tsc_MimeType_Mikey, c_sdpApplication, tsc_MimeType_McdataPayload, tsc_MimeType_McdataSignalling,   // MIKEY body and SDP body are no XML bodies
+                                                                     tsc_MimeType_Mcpttregroup); // !!!! CORE SPEC ISSUE: It is not clear in 24.379 (clause 6.6.3.1) whether or not the MCPTT-Regroup body shall have a signature !!!!
+    var MIME_Part_List v_MIME_Part_List := p_MIME_Message.mimePartList;
+    var MIME_Part v_MimePartSignature;
+    var XmlBody v_XmlBodySignature;
+    var universal charstring v_EncodedSignature;
+    var MCX_SecurityKey_Type v_CSK;
+    var MIME_Part_Header v_MimePartHeader;
+    var charstring v_ContentType;
+    var charstring v_AddrSpec;
+    var charstring v_ReferenceURI;
+    var integer i;
+
+    if (isvalue(p_CSK) and tsc_MCX_XML_IntegrityProtection) {
+      v_CSK := valueof(p_CSK);
+      v_MimePartSignature := valueof(f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, tsc_MimeType_McpttSigned));  // f_IMS_MIME_MessageBody_FindBody raises fail/inconc if MIME part is not there
+      v_XmlBodySignature := v_MimePartSignature.body.xmlBody;
+      
+      for (i := 0; i < lengthof(v_MIME_Part_List); i := i + 1) {
+        v_MimePartHeader := v_MIME_Part_List[i].header;
+        v_ContentType := v_MimePartHeader.contentType.typeAndSubtype;
+        if (not match(v_ContentType, v_BodyPartsWithNoSignature)) {
+          if (not isvalue(v_MimePartHeader.contentId) or not match(v_MimePartHeader.contentId, cr_MimeContentId)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing or invalid content id for " & v_ContentType);
+          }
+          v_AddrSpec := f_MIME_ContentId_GetAddrSpec(v_MimePartHeader.contentId);       // @sic R5s230480: f_MIME_ContentId_GetAddrSpec sic@
+          v_ReferenceURI := "cid:" & v_AddrSpec;                                        // RFC 2392: cid-url = "cid" ":" content-id
+          
+          v_EncodedSignature := f_MCX_Signatures_FindSignature(v_XmlBodySignature, v_ReferenceURI);
+          if (v_EncodedSignature == "") {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing signature for " & v_ContentType);
+          }
+          if (not f_MCX_XML_CheckDetachedSignature(p_ServiceType, v_MIME_Part_List[i].body.xmlBody, v_ReferenceURI, v_EncodedSignature, v_CSK)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid signature for " & v_ContentType);
+          }
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      Add signatures XML body containing the signatures of the XML bodies of the given list
+   * @param     p_ServiceType
+   * @param     p_MIME_Part_List
+   * @param     p_CSK               (default value: omit)
+   * @return    template (value) MIME_Part_List
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_Part_List_AddSignatures(MCX_ServiceType_Type p_ServiceType,
+                                              template (value) MIME_Part_List p_MIME_Part_List,
+                                              template (omit) MCX_SecurityKey_Type p_CSK := omit) return template (value) MIME_Part_List
+  {
+    var template (value) MIME_Part_List v_MIME_Part_List := {};
+    var template (value) MIME_Part v_MIME_Part;
+    var SignatureList_Type v_SignatureList := {};
+    var MCX_SecurityKey_Type v_XPK;
+    var XSD.String v_EmptySignature;
+    var charstring v_Number;
+    var charstring v_SignatureId;
+    var charstring v_ContentId;
+    var charstring v_ReferenceURI;
+    var charstring v_MsgId;
+    var charstring v_KeyName;
+    var integer i;
+    var integer k := 0;
+
+    if (isvalue(p_CSK) and tsc_MCX_XML_IntegrityProtection) {
+      v_XPK := valueof(p_CSK);
+      v_KeyName := f_Base64Encode(v_XPK.Id);    // 33.180 clause 9.3.5
+      for (i := 0; i < lengthof(valueof(p_MIME_Part_List)); i := i + 1) {
+        v_MIME_Part := p_MIME_Part_List[i];
+        if (ischosen(v_MIME_Part.body.xmlBody)) {
+          v_Number := int2str(k + 1);
+          v_SignatureId := "signature" & v_Number;
+          v_ContentId := "content" & v_Number & "@mcx.3gpp.org";
+          v_ReferenceURI := "cid:" & v_ContentId;
+          v_MsgId := "<" & v_ContentId & ">";
+          v_EmptySignature := f_MCX_Signature_Encode(cs_MCX_XML_Signature(v_SignatureId, v_ReferenceURI, v_KeyName));
+          v_SignatureList[k] := f_MCX_XML_CreateSignature(p_ServiceType, valueof(v_MIME_Part.body.xmlBody), v_EmptySignature, v_XPK);
+          v_MIME_Part.header.contentId := cs_MimeContentId(v_MsgId);
+          k := k + 1;
+        }
+        v_MIME_Part_List[i] := v_MIME_Part;
+      }
+    } else {
+      v_MIME_Part_List := p_MIME_Part_List;
+    }
+    if (lengthof(v_SignatureList) > 0) {
+      v_MIME_Part_List[i] := cs_MIME_Part_XML(tsc_MimeType_McpttSigned, -, -, f_MCX_Signatures_Encode(v_SignatureList));
+    }
+    return v_MIME_Part_List;
+  }
+
+  /*
+   * @desc      Build up MIME body list to be sent to the client
+   * @param     p_ServiceType
+   * @param     p_KeyIndex          (default value: CSK)
+   * @param     p_MIME_Part_List
+   * @param     p_SDP_Message       (default value: omit)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_McpttLocationInfo (default value: omit)
+   * @param     p_McvideoLocationInfo (default value: omit)
+   * @param     p_McdataLocationInfo (default value: omit)
+   * @param     p_ResourceLists     (default value: omit)
+   * @param     p_AffiliationCommand (default value: omit)
+   * @param     p_XcapDiff          (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_ConferenceInfo    (default value: omit)
+   * @param     p_McpttRegroup      (default value: omit)
+   * @return    template (value) MIME_Part_List
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_PartList_AddTX(MCX_ServiceType_Type p_ServiceType,
+                                     MCX_KeyIndex_Type p_KeyIndex := CSK,
+                                     template (value) MIME_Part_List p_MIME_Part_List,
+                                     template (omit) SDP_Message p_SDP_Message := omit,
+                                     template (omit) MCPTT_Info_Type p_McpttInfo := omit,
+                                     template (omit) MCVideo_Info_Type p_McvideoInfo := omit,
+                                     template (omit) MCData_Info_Type p_McdataInfo := omit,
+                                     template (omit) MCPTT_LocationInfo_Type p_McpttLocationInfo := omit,
+                                     template (omit) MCVideo_LocationInfo_Type p_McvideoLocationInfo := omit,
+                                     template (omit) MCData_LocationInfo_Type p_McdataLocationInfo := omit,
+                                     template (omit) ResourceLists_Type p_ResourceLists := omit,
+                                     template (omit) MCX_Affiliation_CommandList_Type p_AffiliationCommand := omit,
+                                     template (omit) MCX_XcapDiff_Type p_XcapDiff := omit,
+                                     template (omit) MCX_PIDF_Type p_PIDF := omit,
+                                     template (omit) PocSettings_Type p_PocSettings := omit,
+                                     template (omit) ConferenceInfo_Type p_ConferenceInfo := omit,
+                                     template (omit) McpttRegroup_Type p_McpttRegroup := omit)
+    runs on MCX_IMS_PTC return template (value) MIME_Part_List
+  { /* @sic R5s240690: p_KeyIndex sic@ */
+    var template (value) MIME_Part_List v_MIME_Part_List := p_MIME_Part_List;
+    var charstring v_MCServiceID := f_MCX_MCService_ID_User_A(p_ServiceType);
+    var template (omit) MCX_SecurityKey_Type v_CSK := f_MCX_IMS_PTC_SecurityParameters_GetKey(p_KeyIndex);
+    var charstring v_TypeAndSubtype;
+    var XmlBody_Type v_XmlBody;
+
+    if (isvalue(p_SDP_Message)) {
+      v_MIME_Part_List := f_MIME_Part_List_AddSDP(v_MIME_Part_List, valueof(p_SDP_Message));
+    }
+    if (isvalue(p_McpttInfo)) {
+      v_XmlBody := f_MCX_MCPTTInfo_EncodeEncrypt(valueof(p_McpttInfo), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McpttInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McvideoInfo)) {
+      v_XmlBody := f_MCX_MCVideoInfo_EncodeEncrypt(valueof(p_McvideoInfo), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McvideoInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McdataInfo)) {
+      v_XmlBody := f_MCX_MCDataInfo_EncodeEncrypt(valueof(p_McdataInfo), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McdataInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McpttLocationInfo)) {
+      if (ischosen(p_McpttLocationInfo.choice.report)) {                                        /* according to 24.379 F.3.3 "the contents of the subelements in the <CurrentLocation> subelement of the <Report> element can be encrypted" */
+        v_XmlBody := f_MCPTT_LocationInfoReport_EncodeEncrypt(valueof(p_McpttLocationInfo), v_MCServiceID, v_CSK);
+      } else {
+        v_XmlBody := f_MCPTT_LocationInfo_Encode(valueof(p_McpttLocationInfo));
+      }
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McpttLocationInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McvideoLocationInfo)) {
+      if (ischosen(p_McvideoLocationInfo.choice.report)) {                                      /* according to 24.281 F.3.3 "the contents of the subelements in the <CurrentLocation> subelement of the <Report> element can be encrypted" */
+        v_XmlBody := f_MCVideo_LocationInfoReport_EncodeEncrypt(valueof(p_McvideoLocationInfo), v_MCServiceID, v_CSK);
+      } else {
+        v_XmlBody := f_MCVideo_LocationInfo_Encode(valueof(p_McvideoLocationInfo));
+      }
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McvideoLocationInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McdataLocationInfo)) {
+      if (ischosen(p_McdataLocationInfo.choice.report)) {                                       /* according to 24.281 F.3.3 "the contents of the subelements in the <CurrentLocation> subelement of the <Report> element can be encrypted" */
+        v_XmlBody := f_MCData_LocationInfoReport_EncodeEncrypt(valueof(p_McdataLocationInfo), v_MCServiceID, v_CSK);
+      } else {
+        v_XmlBody := f_MCData_LocationInfo_Encode(valueof(p_McdataLocationInfo));
+      }
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_McdataLocationInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_ResourceLists)) {
+      v_XmlBody := f_MCX_ResourceLists_EncodeEncrypt(valueof(p_ResourceLists), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, c_xmlresourcelistApplication, -, -, v_XmlBody);
+    }
+    if (isvalue(p_AffiliationCommand)) {
+      select (p_ServiceType) {
+        case (MCPTT) {
+          v_TypeAndSubtype := tsc_MimeType_McpttAffiliationCommand;
+        }
+        case (MCVideo) {
+          v_TypeAndSubtype := tsc_MimeType_McvideoAffiliationCommand;
+        }
+        case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+          v_TypeAndSubtype := tsc_MimeType_McdataAffiliationCommand;
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "Invalid service type");
+        }
+      }
+      v_XmlBody := f_MCX_AffiliationCommand_Encode(valueof(p_AffiliationCommand));              /* according to 24.379 F.4 there is no encryption for a affiliate-command and the group URIs are no attribute URIs */
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, v_TypeAndSubtype, -, -, v_XmlBody);
+    }
+    if (isvalue(p_XcapDiff)) {
+      v_XmlBody := f_MCX_XcapDiff_EncodeEncrypt(valueof(p_XcapDiff), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_XcapDiff, -, -, v_XmlBody);
+    }
+    if (isvalue(p_PIDF)) {
+      v_XmlBody := f_MCX_PIDF_EncryptEncode(valueof(p_PIDF), v_MCServiceID, v_CSK);             /* attribute URI encryption */
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_Pidf, -, -, v_XmlBody);
+    }
+    if (isvalue(p_PocSettings)) {
+      v_XmlBody := f_MCX_PocSettings_Encode(valueof(p_PocSettings));                            /* PoC Settings are not encrypted */
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_pocSettings, -, -, v_XmlBody);
+    }
+    if (isvalue(p_ConferenceInfo)) {
+      v_XmlBody := f_MCX_ConferenceInfo_EncodeEncrypt(valueof(p_ConferenceInfo), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_ConferenceInfo, -, -, v_XmlBody);
+    }
+    if (isvalue(p_McpttRegroup)) {
+      v_XmlBody := f_MCX_Mcpttregroup_EncodeEncrypt(valueof(p_McpttRegroup), v_MCServiceID, v_CSK);
+      v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List, tsc_MimeType_Mcpttregroup, -, -, v_XmlBody);
+    }
+
+    v_MIME_Part_List := f_MCX_MIME_Part_List_AddSignatures(p_ServiceType, v_MIME_Part_List, v_CSK);
+
+    return v_MIME_Part_List;
+  }
+
+  /*
+   * @desc      Build up MIME MessageBody to be sent to the client
+   * @param     p_ServiceType
+   * @param     p_KeyIndex          (default value: CSK)
+   * @param     p_SDP_Message       (default value: omit)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_McpttLocationInfo (default value: omit)
+   * @param     p_McvideoLocationInfo (default value: omit)
+   * @param     p_McdataLocationInfo (default value: omit)
+   * @param     p_ResourceLists     (default value: omit)
+   * @param     p_AffiliationCommand (default value: omit)
+   * @param     p_XcapDiff          (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_ConferenceInfo    (default value: omit)
+   * @param     p_McpttRegroup      (default value: omit)
+   * @return    template (value) MessageBody
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MIME_MessageBodyTX(MCX_ServiceType_Type p_ServiceType,
+                                    MCX_KeyIndex_Type p_KeyIndex := CSK,
+                                    template (omit) SDP_Message p_SDP_Message := omit,
+                                    template (omit) MCPTT_Info_Type p_McpttInfo := omit,
+                                    template (omit) MCVideo_Info_Type p_McvideoInfo := omit,
+                                    template (omit) MCData_Info_Type p_McdataInfo := omit,
+                                    template (omit) MCPTT_LocationInfo_Type p_McpttLocationInfo := omit,
+                                    template (omit) MCVideo_LocationInfo_Type p_McvideoLocationInfo := omit,
+                                    template (omit) MCData_LocationInfo_Type p_McdataLocationInfo := omit,
+                                    template (omit) ResourceLists_Type p_ResourceLists := omit,
+                                    template (omit) MCX_Affiliation_CommandList_Type p_AffiliationCommand := omit,
+                                    template (omit) MCX_XcapDiff_Type p_XcapDiff := omit,
+                                    template (omit) MCX_PIDF_Type p_PIDF := omit,
+                                    template (omit) PocSettings_Type p_PocSettings := omit,
+                                    template (omit) ConferenceInfo_Type p_ConferenceInfo := omit,
+                                    template (omit) McpttRegroup_Type p_McpttRegroup := omit)
+    runs on MCX_IMS_PTC return template (value) MessageBody
+  { /* @sic R5s240690: p_KeyIndex sic@ */
+    var template (value) MIME_Part_List v_MIME_Part_List := {};
+    v_MIME_Part_List := f_MCX_MIME_PartList_AddTX(p_ServiceType,
+                                                  p_KeyIndex,
+                                                  v_MIME_Part_List,
+                                                  p_SDP_Message,
+                                                  p_McpttInfo,
+                                                  p_McvideoInfo,
+                                                  p_McdataInfo,
+                                                  p_McpttLocationInfo,
+                                                  p_McvideoLocationInfo,
+                                                  p_McdataLocationInfo,
+                                                  p_ResourceLists,
+                                                  p_AffiliationCommand,
+                                                  p_XcapDiff,
+                                                  p_PIDF,
+                                                  p_PocSettings,
+                                                  p_ConferenceInfo,
+                                                  p_McpttRegroup);
+    if (lengthof(v_MIME_Part_List) < 2) {
+      FatalError(__FILE__, __LINE__, "Less than 2 MIME body parts for MIME message");
+    }
+    return cs_MessageBody_MIME(cs_MIME_Message(tsc_MCX_MIME_Boundary, v_MIME_Part_List));
+  }
+
+}

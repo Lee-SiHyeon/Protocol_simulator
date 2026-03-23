@@ -1,0 +1,159 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-03-06 17:18:04 +0100 (Thu, 06 Mar 2025) $
+// $Rev: 40693 $
+/******************************************************************************/
+
+module IMS_CommonSRVCC {
+
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      step 1 of generic C.28 procedure
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_BuildSDP_AnnexC28_Step1() runs on IMS_PTC return template (present) SDP_Message
+  {
+    var template (present) charstring v_Fmt := cr_SDP_AnyMediaFormatDescr;
+    var template (present) SDP_media_field v_SDP_Media_Field := cr_SDP_Media_Audio(v_Fmt);
+    var template (present) SDP_attribute_list v_SDP_MediaAttributes := {
+      cr_SDP_Attribute_rtpmap(v_Fmt, cr_RTPMAP_AMR_16000), // @sic R5-168033: cr_RTPMAP_AMR_16000 sic@
+      cr_SDP_Attribute_fmtp(v_Fmt)
+      // @sic R5-212240: "a=sendrecv" removed sic@
+    };
+    var template (present) SDP_attribute_list v_SDP_PreconditionAttributes := cr_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, (c_optional, c_mandatory));
+      
+    return f_IMS_BuildSDP_RX(-, v_SDP_Media_Field, v_SDP_MediaAttributes, v_SDP_PreconditionAttributes);
+  }
+
+  /*
+   * @desc      Generic test procedure for SIP UPDATE after aSRVCC/bSRVCC handover failure/cancelled
+   * @param     p_InviteRequest
+   * @param     p_MessageHeader_Response183 (default value: omit)
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_SRVCC_AnnexC28(INVITE_Request p_InviteRequest,
+                                template (omit) MessageHeader p_MessageHeader_Response183 := omit) runs on IMS_PTC
+  {
+    var SipUrl v_PeerContactUrl;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (present) MessageHeader v_MessageHeader_Update;
+    var SDP_Message v_SDP_Offer;
+    var UPDATE_Request v_UpdateRequest;
+    var template (value) MessageBody v_MessageBody_200OK;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    
+    if (f_IMS_PTC_ImsInfo_DialogIsMO()) {   // @sic R5s140370 change 3 - MCC160 implementation sic@
+      v_PeerContactUrl := f_MessageHeader_GetContactSipUrl(valueof(p_MessageHeader_Response183));    // in case of MO call p_MessageHeader_Response183 has to be handed over
+    } else {
+      v_PeerContactUrl := f_MessageHeader_GetContactSipUrl(p_InviteRequest.msgHeader);
+    }
+
+    // Step 1. Receive Update
+    v_MessageHeader_Update := f_IMS_UpdateRequest_MessageHeaderRX(p_InviteRequest);
+    v_MessageHeader_Update.reason := f_IMS_SIP_Reason487_RX();   // @sic R5s140370 change 3 sic@
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Update_Request(cr_UPDATE_Request(v_PeerContactUrl, v_MessageHeader_Update, cr_MessageBody_SDP)));   /* @sic R5-150702 change 22: cr_MessageBody_SDP sic@ */
+    v_UpdateRequest := v_IMS_DATA_REQ.Request.Update;
+
+    v_SDP_Offer := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_UpdateRequest.messageBody, f_IMS_BuildSDP_AnnexC28_Step1());   /* @sic R5s150205 (reverting R5-150702 change 22) sic@ */
+
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+    f_IMS_PTC_ImsInfo_CseqSet(dialogRemote, v_UpdateRequest.msgHeader.cSeq.seqNumber);  /* @sic R5w140112 sic@ @sic R5s140370 change 3 - MCC160 implementation: set cseq in case there has not been any request in UL before sic@ */
+
+    // Step 2. Send 200 OK
+    v_MessageHeader_200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_UpdateRequest.msgHeader, cs_ContentTypeSDP, f_SIP_SipUrl2Str(v_PeerContactUrl));   /* @sic R5s240677: f_SIP_SipUrl2Str(v_PeerContactUrl) sic@ */
+    v_MessageBody_200OK := cs_MessageBody_SDP(f_IMS_BuildSDP_CommonResponseToOfferTX(v_SDP_Offer));         /* @sic R5w140112 sic@ @sic R5s140370 change 3 - MCC160 implementation sic@
+                                                                                                               @sic R5-150702 change 22: "o=" line identical to previous SDP sent by SS sic@
+                                                                                                               @sic R5s150665: SessVersion to be incremented sic@ */
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_200OK, v_MessageBody_200OK)));
+  }
+
+  /*
+   * @desc      Removal of early dialog of origination call after successful aSRVCC handover acc. to 34.229-1 C.34
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_SRVCC_RemoveEarlyDialogMO_AnnexC34(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var InternetProtocol_Type v_Protocol := p_InviteRequestWithSdp.RoutingInfo.Protocol;
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (present) SipUrl v_ContactUri := f_SIP_BuildSipUri_RX(f_SIP_SipUrl2Str(v_InviteRequest.requestLine.requestUri));    /* acc. to A.2.7 (ACK, A4: for non-2xx response) the contact URI as of the INVITE shall be used */
+    var template (value) MessageHeader v_MessageHeader_404 := f_IMS_InviteResponse_4XX_MessageHeaderTX(v_InviteRequest.msgHeader);
+    var template (present) MessageHeader v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine404);
+
+    timer t_T1;
+
+    IMS_Server.send(cas_IMS_DATA_RSP(cs_IMS_RoutingInfo(v_Protocol), cs_Response(c_statusLine404, v_MessageHeader_404)));
+
+    t_T1.start(5.0);
+    alt {  // @sic R5-247689: UE may not support IMS over UTRAN sic@
+      [] a_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUri, v_MessageHeader_Ack)), v_IMS_DATA_REQ)
+        {
+          t_T1.stop;
+        }
+      [] t_T1.timeout
+        {}
+    }
+  }
+
+  /*
+   * @desc      Removal of early dialog of incoming call after successful aSRVCC handover acc. to 34.229-1 C.35
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_SRVCC_RemoveEarlyDialogMT_AnnexC35(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  {
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var template (value) MessageHeader v_MessageHeader_Ack;
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (value) MessageHeader v_MessageHeader_Cancel := f_IMS_CancelRequest_MessageHeaderTX(v_InviteRequest);
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var SipUrl v_ContactUri := v_InviteRequest.requestLine.requestUri;  /* acc. to A.2.15 (CANCEL) and A.2.7 (ACK, A4: for non-2xx response) the contact URI as of the INVITE shall be used */
+
+    timer t_T1;
+    
+    IMS_Client.send(cas_IMS_Cancel_Request(cs_IMS_RoutingInfo(v_Protocol), cs_CANCEL_Request(v_ContactUri, v_MessageHeader_Cancel)));
+    
+    t_T1.start(5.0);
+    alt {  // @sic R5-247689: UE may not support IMS over UTRAN sic@
+      [] a_IMS_ReceiveResponse(v_MessageHeader_Cancel,
+                               v_Protocol,
+                               cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Cancel)),
+                               v_IMS_DATA_RSP)
+        {
+          t_T1.stop;     /* NOTE: T1 is stopped here as otherwise a timeout may cause a fail which is not specifed in C.35 either */
+          f_IMS_ReceiveResponse(p_InviteRequestWithSdp.Invite.msgHeader,
+                                v_Protocol,
+                                cr_Response(c_statusLine487, f_IMS_InviteResponse_4XX_MessageHeaderRX(v_InviteRequest.msgHeader)));
+          v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderTX(v_InviteRequest, c_statusLine487);
+          IMS_Client.send(cas_IMS_Ack_Request(cs_IMS_RoutingInfo(v_Protocol), cs_ACK_Request(v_ContactUri, v_MessageHeader_Ack)));
+        }
+      [] t_T1.timeout
+        {}
+    }
+  }
+
+}

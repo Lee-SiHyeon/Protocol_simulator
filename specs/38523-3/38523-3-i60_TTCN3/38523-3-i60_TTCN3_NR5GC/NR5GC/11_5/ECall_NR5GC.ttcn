@@ -1,0 +1,124 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-12-10 12:47:46 +0100 (mi., 10 dic. 2025) $
+// $Rev: 42627 $
+/******************************************************************************/
+
+module ECall_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_5_5_NR5GC() runs on NR5GC_PTC
+  { //eCall Only mode / Limited service state / Call to URI for test service should not be attempted / eCall over IMS should be attempted / 5GS
+    f_NR5GC_Init(NR_1);
+
+    //the eCall capable UE is equipped with 'eCall only' enabled USIM configured as per TS 38.508-1 [4] Table 6.4.1-26
+    f_UT_USIM_Insert(UT, "USIM configuration 26 specified in table 6.4.1-26 TS 38.508-1");
+    
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_004_31); // @sic R5-227244 sic@
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1); // @sic R5-227244 sic@
+    
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0A); // @sic R5-227244 sic@
+    
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_11_5_5_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_EMERGENCY_RELEASE_IDLE); // @sic R5-227244 R5s230679 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_5_5
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_5_5_TestBody() runs on NR5GC_PTC
+  {
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var O1_Type v_PDUSessionId;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var default v_MyDefaultVar := null;
+    var float v_Wait:= 5.0; // @sic R5-243594 sic@
+    
+    //@siclog "Step 1" siclog@
+    f_NR5GC_SwitchOnAndResetIMS();
+    
+    //@siclog "Step 2" siclog@
+    f_Delay(60.0);
+    // @sic R5-227244 R5s240050 sic@
+    
+    //@siclog "Step 3" siclog@
+    f_UT_InitiateECall(UT, MANUAL);
+       
+    //@siclog "Step 4A-4R" siclog@
+    f_NR5GC_EmergencyCallLimitedService(nr_Cell1); // @sic R5-227244 sic@
+    
+    //@siclog "Step 5-5A" siclog@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2]);
+
+    v_MyDefaultVar := activate(a_NR5GC_Deregistration_REQ(nr_Cell1)); // @sic R5-243594 sic@
+    
+    IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Trigger ("IMS Call Release Msgs Sent"));  // @sic R5s220039, R5-225362 sic@ sic@
+    // @siclog "Step 5B" siclog@
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();  // @sic R5s240428 sic@
+    v_PDUSessionId := int2oct(f_Get_PDUSessionIdForDNNType(v_PDUSessionInfoList, Emergency_PDN), 1);
+
+    v_MsgToSend := f_Get_NG_PDUSessionReleaseCommand(v_PDUSessionId, cs_GMM_GSM_Cause (omit, '00100100'B));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB2, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // @siclog "Step 5C" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell1, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionReleaseComplete (v_PDUSessionInfoList, v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionId)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Complete failed");
+    }
+    
+    //@siclog "Step 7" siclog@
+    f_NR_RRCRelease(nr_Cell1); // @sic R5-227244 sic@
+    deactivate(v_MyDefaultVar); //@sic R5-243594 sic@
+    
+    //@siclog "Step 8" siclog@
+    f_Delay(120.0); // @sic R5-243594 sic@
+    
+    //@siclog "Step 9" siclog@
+    f_UT_InitiateECall(UT, TEST, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+    
+    //@siclog "Step 10" siclog@
+    //Check: Does UE send an RRCConnectionRequest on NGC Cell A within 5 seconds?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, v_Wait, -, "Step 10: RRCSetupRequest received");  // @sic R5-227244 sic@
+   }
+
+}

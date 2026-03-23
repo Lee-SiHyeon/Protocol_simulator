@@ -1,0 +1,493 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-09-09 13:13:26 +0200 (Mon, 09 Sep 2024) $
+// $Rev: 39600 $
+/******************************************************************************/
+
+module HTTP_XCAP_Main {
+
+  import from CommonDefs all;
+  import from HTTP_ASP_TypeDefs all;
+  import from HTTP_CommonAuthentication all;
+  import from HTTP_CommonFunctions all;
+  import from HTTP_CommonTemplates all;
+  import from HTTP_XCAP_Component all;
+  import from HTTP_XCAP_CoordMsg all;
+  import from IMS_CC_Parameters all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonTemplates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SIPTypesAndValues all;
+  import from XCAP_ASP_TypeDefs all;
+  import from XCAP_TemplatesAndFunctions all;
+
+  const charstring tsc_Simservs_ContentType_Document := "application/vnd.etsi.simservs+xml";  /* @status    APPROVED (IMS) */
+
+  const charstring tsc_Simservs_ContentType_Element := "application/xcap-el+xml";             /* @status    APPROVED (IMS) */
+
+  const charstring tsc_Simservs_ContentType_Attribute := "application/xcap-att+xml";          /* @status    APPROVED (IMS) */
+
+  template (present) HttpRequestLine_Type cr_HttpRequestLineXCAP(template (present) charstring p_Uri := ?) := cr_HttpRequestLine(("GET", "PUT", "DELETE"), p_Uri);  /* @status    APPROVED (IMS) */
+
+  template (present) HttpRequest_Type cr_HttpRequestXCAP(template UserAgent p_UserAgent := *,
+                                                         template Authorization p_Authorization := *,
+                                                         template Host p_Host := *)  :=
+  /* @status    APPROVED (IMS) */
+  /* @sic R5-155363: p_Host sic@ */
+    cr_HttpRequest(cr_HttpRequestLineXCAP, p_UserAgent, p_Authorization, p_Host);  /* @sic R5-153795: support of ProSe - cr_HttpRequestXCAP, cr_HttpRequestLineXCAP sic@ */
+
+  /*
+   * @desc      build up default receive template for UserAgent header for XCAP
+   * @return    template UserAgent
+   * @status    APPROVED (IMS)
+   */
+  function fl_UserAgentRX_XCAP() return template UserAgent
+  {
+    var ServerVal_List v_UserAgentTokens := {};
+
+    if (pc_HttpGBAAuthentication) {
+      v_UserAgentTokens := {"3gpp-gba"};
+    }
+    return f_UserAgentRX(v_UserAgentTokens);
+  }
+
+  /*
+   * @desc      build up WwwAuthenticate for XCAP authentication
+   * @param     p_Realm
+   * @param     p_Nonce
+   * @return    template (value) WwwAuthenticate
+   * @status    APPROVED (IMS)
+   */
+  function fl_WwwAuthenticate_XCAP(charstring p_Realm,
+                                   charstring p_Nonce) return template (value) WwwAuthenticate
+  {
+    var template (value) CommaParam_List v_ChallangeParams;
+
+    v_ChallangeParams := {
+      cs_GenericParamQuoted("realm",     p_Realm),
+      cs_GenericParamQuoted("algorithm", tsc_MD5),
+      cs_GenericParamQuoted("qop",       "auth"),
+      cs_GenericParamQuoted("nonce",     p_Nonce),
+      cs_GenericParamQuoted("opaque",    tsc_IMS_Opaque)
+    };
+    return cs_HTTP_WwwAuthenticate(v_ChallangeParams);
+  }
+
+  /*
+   * @desc      HTTP authentication acc. to 23.229-1 C.29.1
+   * @param     p_HttpDataPort
+   * @param     p_Watchdog
+   * @param     p_AuthenticationMethod
+   * @param     p_XRESLength
+   * @param     p_XcapUsername
+   * @return    template (value) HTTP_AuthenticationResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_XCAP_Authentication(HTTP_DATA_PORT p_HttpDataPort,
+                                      timer p_Watchdog,
+                                      HTTP_AuthenticationMethod_Type p_AuthenticationMethod,
+                                      integer p_XRESLength,
+                                      charstring p_XcapUsername) return template (value) HTTP_AuthenticationResult_Type
+  { /* @sic R5-151795, R5s150945: restructuring of authentication procedure sic@ */
+    /* @sic R5-160765: simplification, generic implementation for XCAP and ProSe sic@ */
+    /* @sic R5s160710: p_XRESLength sic@ */
+    var template (omit) HTTP_DATA_ASP v_HTTP_DATA_ASP;
+    var HTTP_DATA_ASP v_InitialRequestXCAP;
+    var HTTP_DATA_ASP v_SubsequentRequestXCAP;
+    var charstring v_UsernameXCAP := p_XcapUsername;
+    var charstring v_PasswordXCAP;
+    var charstring v_RealmXCAP;
+    var bitstring v_XRES;
+    var integer v_XRESLength;
+    var HTTP_AuthenticationParams_Type v_HTTP_AuthenticationParams := f_HTTP_AuthenticationInit(p_XRESLength);
+    var ServerVal_List v_ProductTokenList;
+    var template (value) WwwAuthenticate v_WwwAuthenticate;
+    var template UserAgent v_UserAgent;
+    var template Authorization v_Authorization;
+    var boolean v_GbaAuthenticationRequired := (p_AuthenticationMethod == httpDigestAndGbaAuthentication);
+    var template (value) HTTP_AuthenticationResult_Type v_AuthenticationResult;
+    var charstring v_Error := "";
+
+    if (v_GbaAuthenticationRequired) {
+      v_RealmXCAP := "3GPP-bootstrapping@" & v_HTTP_AuthenticationParams.HomeDomainName;    /* @sic R5s150945 change 1.7 sic@ */
+    }
+    else {
+      v_RealmXCAP := v_HTTP_AuthenticationParams.HomeDomainName;
+    }
+
+    // 29.1 step 2
+    v_UserAgent := fl_UserAgentRX_XCAP();
+    v_Authorization := *;
+    v_HTTP_DATA_ASP := f_HTTP_ReceiveRequest(p_HttpDataPort, cr_HttpRequestXCAP(v_UserAgent, v_Authorization), p_Watchdog);  /* @sic R5-153795: support of ProSe - cr_HttpRequest -> cr_HttpRequestXCAP sic@ */
+    if (not ispresent(v_HTTP_DATA_ASP)) { return cs_HTTP_AuthenticationResult_Timeout; }
+    v_InitialRequestXCAP := valueof(v_HTTP_DATA_ASP);
+
+    // 29.1 step 3a
+    v_ProductTokenList := {"XCAP-Server"};
+    v_WwwAuthenticate := fl_WwwAuthenticate_XCAP(v_RealmXCAP, v_HTTP_AuthenticationParams.Nonce);
+    f_HTTP_SendResponse(p_HttpDataPort, v_InitialRequestXCAP.routingInfo, cs_HttpResponse_401(v_ProductTokenList, v_WwwAuthenticate));
+
+    if (v_GbaAuthenticationRequired) {    // GBA authentication
+      v_AuthenticationResult := f_HTTP_GBA_Authentication(p_HttpDataPort,
+                                                          p_Watchdog,
+                                                          NAF_XCAP,
+                                                          v_HTTP_AuthenticationParams);
+      if (not ischosen(v_AuthenticationResult.NoError)) { return v_AuthenticationResult; }
+      v_UsernameXCAP := v_HTTP_AuthenticationParams.PSK_BootstrappingInfo.BTid;
+      v_XRES := v_HTTP_AuthenticationParams.PSK_BootstrappingInfo.Ks_NAF;
+      v_XRESLength := lengthof(v_XRES) / 8;
+    } else {
+      v_PasswordXCAP := px_DigestPasswordForXCAP;    /* @sic R5s130794 Change 25 sic@
+                                                        @sic R5-151795: evaluation of the password moved from f_IMS_HTTP_Transaction (IMS_XCAP_PTC) to here sic@
+                                                        @sic R5-168956: px_XCAP_Password sic@
+                                                        @sic R5-170558: renamed to px_DigestPasswordForXCAP sic@ */
+      v_XRES := oct2bit(char2oct(v_PasswordXCAP));
+      v_XRESLength := lengthof(v_PasswordXCAP);
+    }
+
+    // 29.1 step 3b
+    v_UserAgent := fl_UserAgentRX_XCAP();
+    v_Authorization := f_AuthorizationSubsequent(v_UsernameXCAP, v_RealmXCAP, v_HTTP_AuthenticationParams.Nonce, v_InitialRequestXCAP.http.request.requestLine.uri, tsc_MD5);
+
+    v_HTTP_DATA_ASP := f_HTTP_ReceiveRequest(p_HttpDataPort, cr_HttpRequestXCAP(v_UserAgent, v_Authorization), p_Watchdog);  /* @sic R5-153795: support of ProSe - cr_HttpRequest -> cr_HttpRequestXCAP sic@ */
+    if (not ispresent(v_HTTP_DATA_ASP)) { return cs_HTTP_AuthenticationResult_Timeout; }
+    v_SubsequentRequestXCAP := valueof(v_HTTP_DATA_ASP);
+    
+    // Check authentication response
+    v_Error := f_HTTP_CheckDigestResponse("XCAP-Server", v_SubsequentRequestXCAP.http.request, v_XRES, v_XRESLength);
+
+    if (v_Error != "") {
+      return cs_HTTP_AuthenticationResult_Error(v_Error);
+    }
+
+    return cs_HTTP_AuthenticationResult_InitialRequest(v_SubsequentRequestXCAP);
+  }
+
+  /*
+   * @desc      Gets the document selector received in the Http Request line
+   * @param     p_RequestUri
+   * @return    charstring - document selector
+   * @status    APPROVED (IMS)
+   */
+  function fl_DocSelector_FromHttpRequestUri(charstring p_RequestUri) return charstring
+  {
+    var charstring v_DocumentSelector;
+
+    v_DocumentSelector := regexp(p_RequestUri, "(*)/~~*", 0); // "~~" is the separator, See RFC 4825
+    if (v_DocumentSelector == "") {    // i.e. URI does not have any node selector    @sic R5s130794 change 18 sic@
+      v_DocumentSelector := p_RequestUri
+    }
+    return f_URL_Decoding(v_DocumentSelector);
+  }
+
+  /*
+   * @desc      Calculates the document selector (path) for accessing the XCAP XML document associated with the UserId
+   * @param     p_XcapRootUri
+   * @param     p_UserId
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_DocSelector_Build(charstring p_XcapRootUri,
+                                charstring p_UserId) return charstring
+  {
+    var charstring v_DocSelector := p_XcapRootUri & "/simservs.ngn.etsi.org/users/" & p_UserId & "/simservs.xml";  /* @sic R5s141051 change 4: "/" before root URI sic@
+                                                                                                                      @sic R5s150030, R5-150355, R5s150202 "/" shall be part of px_XCAP_RootUri sic@ */
+    // FFS convert character ':' to %3A and character '@' to %40 according to the url encoding rules
+    return v_DocSelector;
+  }
+
+  /*
+   * @desc      build URI for XCAP server
+   * @param     p_DocSelector
+   * @param     p_NodeSelector      (default value: omit)
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_XcapUri_Build(charstring p_DocSelector,
+                            template (omit) charstring p_NodeSelector := omit) return charstring
+  {
+    var charstring v_XcapUri := p_DocSelector;
+
+    if (ispresent(p_NodeSelector)) {
+      v_XcapUri := v_XcapUri & "/~~/" & valueof(p_NodeSelector);
+    }
+
+    return v_XcapUri;
+  }
+
+  /*
+   * @desc      get command IMS PTC
+   * @param     p_Port
+   * @return    IMS_HTTP_Command_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_IMS_CoordMsg_ReceiveCommand(XCAP_IMS_CO_ORD_PORT p_Port) return IMS_HTTP_Command_Type
+  {
+    var template (present) IMS_HTTP_Command_Type  v_ExpectedCommand := ?;
+    var IMS_HTTP_Command_Type v_Command;
+
+    p_Port.receive(v_ExpectedCommand) -> value v_Command;
+    return v_Command;
+  }
+
+  /*
+   * @desc      send response to IMS PTC
+   * @param     p_Port
+   * @param     p_Result            (default value: "")
+   * @param     p_Error             (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_IMS_CoordMsg_SendResponse(XCAP_IMS_CO_ORD_PORT p_Port,
+                                            charstring p_Result := "",
+                                            template (omit) charstring p_Error := omit)
+  {
+    var IMS_HTTP_Response_Type v_Response;
+
+    if (isvalue(p_Error)) {
+      v_Response.Error := valueof(p_Error);
+    } else {
+      v_Response.Result := p_Result;
+    }
+    p_Port.send(v_Response);
+  }
+
+  /*
+   * @desc      check validity of the  request line of an HTTP request
+   * @param     p_RequestUri
+   * @param     p_DocSelector
+   * @return    template (omit) charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_HTTP_CheckRequestUri(charstring p_RequestUri,
+                                   charstring p_DocSelector) return template (omit) charstring
+  {
+    var template (omit) charstring v_Error := omit;
+    
+    if (p_DocSelector != fl_DocSelector_FromHttpRequestUri(p_RequestUri)) {
+      v_Error := "invalid doc selector";
+    }
+    return v_Error;
+  }
+
+  /*
+   * @desc      check validity of HTTP request
+   * @param     p_HttpRequest
+   * @param     p_DocSelector
+   * @return    template (omit) charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_HTTP_CheckRequest(HttpRequest_Type p_HttpRequest,
+                                charstring p_DocSelector) return template (omit) charstring
+  {
+    var template (omit) charstring v_Error := omit;
+    var charstring v_RequestUri := p_HttpRequest.requestLine.uri;
+    var boolean v_UriHasNodeSelector := match(v_RequestUri, pattern "*~~*");
+    
+    v_Error := fl_HTTP_CheckRequestUri(v_RequestUri, p_DocSelector);
+    if (not isvalue(v_Error)) {
+      if (p_HttpRequest.requestLine.method == "PUT") {
+        if (not isvalue(p_HttpRequest.messageBody)) {    // @sic R5w220006 sic@
+          v_Error := "missing message body for HTTP PUT";
+        }
+        else if (not isvalue(p_HttpRequest.contentType)) {
+          v_Error := "missing content type for HTTP PUT";
+        } else { /* @sic R5s130794 change 16 sic@ */
+          select (valueof(p_HttpRequest.contentType.mTypeSubtype)) {
+            case (tsc_Simservs_ContentType_Document) {
+              if (v_UriHasNodeSelector) {
+                v_Error := "invalid content type for HTTP PUT: uri has node selector but content type refers to document";
+              }
+            }
+            case (tsc_Simservs_ContentType_Element, tsc_Simservs_ContentType_Attribute) {
+              if (not v_UriHasNodeSelector) {
+                v_Error := "invalid content type for HTTP PUT: uri has no node selector but content type refers to element/attribute";
+            }
+            }
+            case else {
+              v_Error := "invalid content type for HTTP PUT";
+            }
+          }
+        }
+      }
+    }
+    return v_Error;
+  }
+
+  /*
+   * @desc      loop to receive HTTP requests and send the respective reponse
+   * @param     p_Watchdog
+   * @param     p_InactivityDuration
+   * @param     p_DocSelector
+   * @param     p_InitialHttpRequest (default value: omit)
+   * @return    template (omit) charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_HTTP_SendReceiveLoop(timer p_Watchdog,
+                                   float p_InactivityDuration,
+                                   charstring p_DocSelector,
+                                   template (omit) HTTP_DATA_ASP p_InitialHttpRequest := omit) runs on HTTP_XCAP_PTC return template (omit) charstring
+  {
+    var template (omit) HTTP_DATA_ASP v_HTTP_DATA_ASP := p_InitialHttpRequest;
+    var template (omit) charstring v_Error := omit;
+    var boolean v_Finished := false;
+    var float v_InactivityDuration := 9999.0;     // => in fact infinity (for first message only) @sic R5s130794 change 20 sic@
+    var charstring v_Method;
+    var template (omit) charstring v_ContentType;
+    var template (omit) charstring v_XmlBody;
+    var HttpRequest_Type v_HttpRequest;
+    var IP_Connection_Type v_HttpRoutingInfo;
+    var XCAP_RSP v_XcapResponse;
+    var charstring v_ETag_UpperPart := "478fb2358f7";   // @sic R5-151795 sic@
+    var integer v_ETag_LowerPartInteger := 0;           // @sic R5-151795 sic@
+    var charstring v_ETag;
+    var ServerVal_List v_ServerProductList := { "XCAP-Server" };
+
+    while (not v_Finished) {
+      if (not isvalue(v_HTTP_DATA_ASP)) {
+        v_HTTP_DATA_ASP := f_HTTP_ReceiveRequest(HTTPDATA, cr_HttpRequestXCAP, p_Watchdog, v_InactivityDuration);   // returns omit in case of timeout @sic R5s150269: v_InactivityDuration instead of p_InactivityDuration sic@
+      }
+      v_InactivityDuration := p_InactivityDuration;                                             // => apply inactivity timer for all subsequent messages
+      if (not isvalue(v_HTTP_DATA_ASP)) {                                                       // timeout
+        v_Finished := true;
+      }
+      else {
+        v_HttpRequest := valueof(v_HTTP_DATA_ASP.http.request);
+        v_HttpRoutingInfo := valueof(v_HTTP_DATA_ASP.routingInfo);
+        v_Error := fl_HTTP_CheckRequest(v_HttpRequest, p_DocSelector);
+        if (isvalue(v_Error)) {
+          v_Finished := true;
+        }
+        else {
+          v_Method := v_HttpRequest.requestLine.method;
+          if (ispresent(v_HttpRequest.contentType)) {
+            v_ContentType := v_HttpRequest.contentType.mTypeSubtype;
+            v_XmlBody := v_HttpRequest.messageBody.text;    // @sic R5w220006 sic@
+          } else {
+            v_ContentType := omit;
+            v_XmlBody := omit;
+          }
+
+          v_XcapResponse := f_XCAP_GetResponse(XCAP,
+                                               v_Method,
+                                               v_HttpRequest.requestLine.uri,
+                                               v_ContentType,
+                                               v_XmlBody);
+          v_XmlBody := v_XcapResponse.xmlBody;
+          if ((v_Method == "GET") and not ispresent(v_XmlBody)) {
+            f_HTTP_SendResponse(HTTPDATA, v_HttpRoutingInfo, cs_HttpResponse_404(v_ServerProductList));             // 404 - File Not Found
+          }
+          else { // Send Http Response 200 OK to the UE
+            v_ETag := v_ETag_UpperPart & oct2str(int2oct(v_ETag_LowerPartInteger, 1));
+            if (v_Method == "PUT") {    // @sic R5-151795: ETag incremented for each PUT sic@
+              v_ETag_LowerPartInteger := v_ETag_LowerPartInteger + 1;
+            }
+            f_HTTP_SendResponse(HTTPDATA, v_HttpRoutingInfo, f_HttpResponse_200(v_ServerProductList, v_ETag, v_XcapResponse.contentType, v_XmlBody));
+          }
+        }
+      }
+      v_HTTP_DATA_ASP := omit;
+    }
+    return v_Error;
+  }
+
+  /*
+   * @desc      Main loop for the HTTP_XCAP_PTC
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_XCAP_Main() runs on HTTP_XCAP_PTC
+  {
+    var IMS_HTTP_Command_Type v_IMS_Command;
+    var HTTP_ConfigurationParams_Type v_ConfigurationParams;
+    var HTTP_AuthenticationMethod_Type v_AuthenticationMethod;
+    var template (value) HTTP_AuthenticationResult_Type v_AuthenticationResult;
+    var XCAP_RSP v_XcapResponse;
+    var charstring v_SimservsDocument;
+    var charstring v_DocSelector;
+    var template (omit) charstring v_Error;
+    var template (omit) HTTP_DATA_ASP v_InitialHttpRequest;
+    timer t_Watchdog;
+
+    v_IMS_Command := f_HTTP_IMS_CoordMsg_ReceiveCommand(IMS);
+    if (not ischosen(v_IMS_Command.Configure)) {
+      FatalError(__FILE__, __LINE__, "invalid command");  // at the beginning HTTP needs to be configured
+    }
+    v_ConfigurationParams := v_IMS_Command.Configure;
+    v_AuthenticationMethod := v_ConfigurationParams.AuthenticationMethod;
+
+    // Configure HTTP server(s) -> IP_PTC
+    f_HTTP_ConfigureHttpAndBsf(HTTPCTRL,
+                               v_ConfigurationParams.XcapServerAddrAndPort_List,   // @sic R5s150148 sic@
+                               v_ConfigurationParams.BsfServerAddrAndPort_List,    // @sic R5s150148 sic@
+                               v_ConfigurationParams.DrbRoutingInfo);
+    
+    // Configure XCAP Server
+    v_DocSelector := fl_DocSelector_Build(v_ConfigurationParams.XcapRootUri,
+                                          v_ConfigurationParams.XcapUserId);
+    f_XCAP_Initialise(XCAP, v_DocSelector);
+    f_HTTP_IMS_CoordMsg_SendResponse(IMS);
+
+    while (true) {
+
+      v_IMS_Command := f_HTTP_IMS_CoordMsg_ReceiveCommand(IMS);     // Get command from IMS PTC
+      
+      if (ischosen(v_IMS_Command.DocumentSet)) {                    // Set document
+        v_SimservsDocument := v_IMS_Command.DocumentSet;
+        f_XCAP_Put(XCAP, fl_XcapUri_Build(v_DocSelector), tsc_Simservs_ContentType_Document, v_SimservsDocument);
+        f_HTTP_IMS_CoordMsg_SendResponse(IMS);
+      }
+      else if (ischosen(v_IMS_Command.DocumentGet)) {               // Get document
+        v_XcapResponse := f_XCAP_Get(XCAP, fl_XcapUri_Build(v_DocSelector));
+        if (not ispresent(v_XcapResponse.xmlBody)) {
+          FatalError(__FILE__, __LINE__, "File Not Found");
+        } else {
+          v_SimservsDocument := v_XcapResponse.xmlBody;
+          f_HTTP_IMS_CoordMsg_SendResponse(IMS, v_SimservsDocument);
+        }
+      }
+      else if (ischosen(v_IMS_Command.TransactionStart)) {           // Start transaction: HTTP requests and responses acc. to 34.229 C.29
+
+        t_Watchdog.start(v_IMS_Command.TransactionStart.MaxDuration);
+        v_InitialHttpRequest := omit;
+        v_Error := omit;
+
+        select (v_AuthenticationMethod) {
+          case (httpDigestAuthentication, httpDigestAndGbaAuthentication) {
+            // do authentication:
+            v_AuthenticationResult := f_HTTP_XCAP_Authentication(HTTPDATA,
+                                                                 t_Watchdog,
+                                                                 v_AuthenticationMethod,
+                                                                 v_ConfigurationParams.XRESLength,      /* @sic R5s160710 sic@ */
+                                                                 v_ConfigurationParams.XcapUsername);
+            if (ischosen(v_AuthenticationResult.Error)) {
+              v_Error := v_AuthenticationResult.Error;
+            }
+            if (ischosen(v_AuthenticationResult.InitialRequest)) {
+              v_InitialHttpRequest := v_AuthenticationResult.InitialRequest;
+              v_Error := fl_HTTP_CheckRequestUri(valueof(v_InitialHttpRequest.http.request.requestLine.uri), v_DocSelector);
+            }
+            v_AuthenticationMethod := noAuthentication;   // no further authentication
+          }
+          case else {
+            // no authentication
+          }
+        }
+        if (not isvalue(v_Error)) {
+          v_Error := fl_HTTP_SendReceiveLoop(t_Watchdog, v_IMS_Command.TransactionStart.InactivityDuration, v_DocSelector, v_InitialHttpRequest);
+        }
+        t_Watchdog.stop;
+        f_HTTP_IMS_CoordMsg_SendResponse(IMS, -, v_Error);
+      }
+      else {
+        FatalError(__FILE__, __LINE__, "invalid command");
+      }
+    }
+  }
+
+}

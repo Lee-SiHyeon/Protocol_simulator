@@ -1,0 +1,666 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-09-17 08:50:20 +0200 (Wed, 17 Sep 2025) $
+// $Rev: 42004 $
+/******************************************************************************/
+
+module MAC_717 {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_AuxiliaryFunctions all;
+  import from EUTRA_BandDependentParam all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_L2_CommonTemplates all;
+  import from EUTRA_MAC_Common all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_Parameters all;
+  import from EUTRA_Timing all;
+
+  group LocalFunctions {
+
+  /*
+   * @desc      check the reported UE supports UL64QAM vs. PICS
+   *            Inconsistency leads to verdict INCONCLUSIVE
+   * @return    boolean
+   * @status    APPROVED (LTE)
+   */
+  function fl_Check_UE_SupportUL64QAM() runs on EUTRA_PTC return boolean
+  { //@sic R5-155942 sic@
+    var UE_EUTRA_Capability v_ReceivedCapabilityMsg := vc_EUTRA_Global.MobileInfo.EUTRA_Capability;
+    var boolean v_SupportUL64QAM := false;
+    
+    if (isvalue(v_ReceivedCapabilityMsg.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.rf_Parameters_v1250)){
+      if (isvalue(v_ReceivedCapabilityMsg.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.rf_Parameters_v1250.supportedBandListEUTRA_v1250)){
+        if (isvalue(v_ReceivedCapabilityMsg.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.nonCriticalExtension.rf_Parameters_v1250.supportedBandListEUTRA_v1250[0].ul_64QAM_r12)){
+          v_SupportUL64QAM := true;
+          if (not pc_UL_64QAM) {f_SetVerdict(inconc, __FILE__, __LINE__, "ul_64QAM_r12 reported inconsistent with PICS");}
+        }
+      }
+    }
+    return v_SupportUL64QAM;
+  }
+
+  /*
+   * @desc      basic function for 7.1.7.x test cases
+   * @param     p_Format
+   * @param     p_ResourceAllocType
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_7_1_7_1_x (PdcchDciFormat_Type p_Format,
+                              PdcchResourceAllocation_Type p_ResourceAllocType) runs on EUTRA_PTC
+  { /* L2/MAC/7.1
+     * 7.1.7.x : DL-SCH Transport Block Size selection
+     */
+    var charstring v_UE_DL_Category;
+    var charstring v_UE_UL_Category; //@sic R5s170014 sic@
+    var integer v_TBSize:=0;    // transport block size in bits
+    var integer v_I_MCS:=0;     // Modulation and Coding Scehme Index
+    var integer v_I_TBS:=0;     // Transport Block Size Index
+    var integer v_N_PRB:=1;     // Number of physical resource Blocks
+    var integer v_N_RBDL := 100; // Specifies the DL Bandwidth.
+    var integer v_Max_nPRB;     // to store the max allowed PRB resources that can be allocated
+    var integer v_PDCPsize:=0;  // PDCP SDU Size
+    var integer v_N:=1;         // Number of PDCP SDU
+    var PDCP_SDUList_Type v_PDCP_SDUList := {''O};
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init (c1);
+    f_EUTRA_CellInfo_SetHighestBandwidth(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    v_UE_DL_Category := f_EUTRA_MobileInfo_GetUECapability_UECategoryExtn(); //@sic R5s120641 R5-126021 sic@
+    v_UE_UL_Category:= f_EUTRA_MobileInfo_GetUECapability_UECategory_UL();  //@sic R5s170014 sic@
+    f_CheckUECategoryDL(v_UE_DL_Category); //@sic R5s160832 sic@
+    // Bring UE to state Loopback Activated (state 4)
+    f_EUTRA_LoopBackActivation_State4_717(); //@sic R5-100263 R5s100155 R5s110697 sic@
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell1,
+                                cas_CellModify_REQ_PDSCH_Pwr_Ratio_TBS_Test(eutra_Cell1,
+                                                                            cs_TimingInfo_Now));
+   
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+
+    //Steps 1 to 4 are repeated for values of nPRB  from 1 to v_Max_nPRB and iMCS from 0 to 28
+    v_N_RBDL := f_ConvertDL_BandwidthToInteger(f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1));
+
+    if ((p_Format == dci_1) and (p_ResourceAllocType == ra_0))
+      {
+        // test case 7.1.7.1.1
+        v_Max_nPRB := v_N_RBDL;
+        // MAX index can be NRBDL but not all nPRB's may be allowed
+      }
+    else if ((p_Format == dci_1) and (p_ResourceAllocType == ra_1))
+      {
+        // test case 7.1.7.1.2
+        //@sic R5-242392 3MhzSupport sic@
+        if (v_N_RBDL == 15)//3MhzSupport
+          {
+          v_Max_nPRB := 6;
+          }else if (v_N_RBDL == 25)//5MhzSupport
+          {
+          v_Max_nPRB := 11;
+          }else  if (v_N_RBDL == 50)
+          {
+            v_Max_nPRB := 14;
+          }
+        else if (v_N_RBDL == 75)
+          {
+            v_Max_nPRB := 16;
+          }
+        else if (v_N_RBDL == 100)
+          {
+            v_Max_nPRB := 22;
+          }
+        else
+          {
+            FatalError(__FILE__, __LINE__, "Step 1: invalid MAX Bandwidth set");
+          }
+      }
+    else if ((p_Format == dci_1A) and (p_ResourceAllocType == ra_2_Localised))
+      {
+        // test case 7.1.7.1.3
+        v_Max_nPRB := v_N_RBDL;
+      }
+    else if ((p_Format == dci_1A) and (p_ResourceAllocType == ra_2_Distributed))
+      {
+        // test case 7.1.7.1.4
+        //@sic R5-242392 3MhzSupport sic@
+        if (v_N_RBDL == 15)//3MhzSupport
+          {
+            v_Max_nPRB := 14;
+          }else if (v_N_RBDL == 25)//5MhzSupport
+          {
+            v_Max_nPRB := 24;
+          }else
+          {
+          v_Max_nPRB := 16;
+          }
+      }
+    else
+      {
+        FatalError(__FILE__, __LINE__, "Step 1: invalid DCI format and Resource allocation combination ");
+      }
+    //@sic R5s170303  R5-182907 R5-182909 sic@
+    f_ConfigureULGrant_MaxTBSupported(v_UE_UL_Category, f_ConvertUL_BandwidthToInteger(f_EUTRA_CellInfo_GetUL_ChBandwidth(eutra_Cell1)));
+
+    for (v_N_PRB := 1; v_N_PRB <= v_Max_nPRB; v_N_PRB := v_N_PRB + 1) {  //for nPRB 1 to v_Max_nPRB
+      // For DCI 1 and RA 0, not all 1..v_Max_nPRB are applicable, needs to be addressed
+      if ((p_Format == dci_1) and (p_ResourceAllocType == ra_0)) {
+        
+        //@sic R5-242392 3MhzSupport sic@
+        if((v_N_RBDL == 15) or (v_N_RBDL == 25))     // 5 Mhz BW or 3 Mhz BW
+          {
+            // all PRBs applicable
+          } else
+          if (v_N_RBDL == 50)      // 10 Mhz BW
+          {
+            if ((v_N_PRB mod 3)==1) { continue; } // not applicable
+          }
+        else if (v_N_RBDL== 75)  // 15 Mhz BW
+          {
+            if (((v_N_PRB mod 4)==1) or ((v_N_PRB mod 4)==2)) { continue; } // not applicable
+          }
+        else if (v_N_RBDL == 100) // 20 Mhz BW
+          {
+            if ((v_N_PRB mod 4)!=0) { continue; } // not applicable
+          }
+        else
+          {
+            FatalError(__FILE__, __LINE__, "Step 1: invalid MAX Bandwidth set");
+          }
+      }
+      for (v_I_MCS := 0; v_I_MCS <= 28 ; v_I_MCS := v_I_MCS + 1) {   //for iMCS 0 to 28
+        //SS looks up iTBS in table 7.1.7.1-1 in TS 36.213 based on the value of iMCS
+        v_I_TBS := f_EUTRA_Get_iTBS_For_iMCS(v_I_MCS);
+        //SS looks up TBsize in table 7.1.7.2.1-1 in TS 36.213 based on values of iTBS and nPRB
+        v_TBSize := f_EUTRA_LookUp_TB_Size(v_N_PRB, v_I_TBS);
+        
+        if (v_TBSize < 104)             //this results in zero number of PDCP SDUs
+          // @sic R5-096421 R5s100321 R5s100422 sic@
+          {
+            continue ;
+          }  // skip this nprb and Imcs combination.
+        if (v_TBSize > f_EUTRA_GetMaxDLSCH_TB_Bits_Per_TTI(v_UE_DL_Category)) //@sic R5s170303 R5-182907sic@
+          {
+            continue;
+          } ; // skip this nprb and Imcs combination.
+        if ( not (fl_CalculateCodingRate(v_I_MCS, v_N_PRB, v_TBSize))) // @sic R5s100155 sic@
+          {
+            continue;
+          }  // skip this nprb and Imcs combination.
+
+        // Steps 2 to 4 are performed if  TBsize is less or equal to UE capability
+        // "Maximum number of DL-SCH transport block bits received within a TTI" as specified in Table 7.1.7.1.1.3.2-1
+        // When TBsize is less than 48 bits, no of PDCP SDUs results in 0
+
+        //@siclog "Step 2" siclog@
+        // SS creates one or more PDCP SDUs, depending on TBsize, in accordance with Table 7.1.7.1.1.3.2-2.
+
+        f_EUTRA_Set_PDCP_SDUs_Size(v_N, v_PDCPsize, v_TBSize);  //calculates v_N,v_PDCPsize
+        //@siclog "Step 3" siclog@
+        // SS sends MAC PDU (NxPDCP SDUs)
+
+        //Configure SS for DCI Format x with RA type y and a Resource block assignment (RBA) correspondent
+        //to nPRB as specified in 7.1.6.1 in TS 36.213 and Modulation and coding scheme iMCS
+        f_EUTRA_SS_CommonCellConfig(eutra_Cell1, cas_CcchDcchDtchDL_Config_REQ(eutra_Cell1,               // @sic R5s110320 additional Changes sic@
+                                                                               cs_TimingInfo_Now,
+                                                                               cs_DciDLInfo_Explicit(cs_DciDlInfoExplicit(v_I_MCS,
+                                                                                                                          p_Format,
+                                                                                                                          p_ResourceAllocType,
+                                                                                                                          v_N_PRB))));
+        //@siclog "Step 3" siclog@
+        // SS sends MAC PDU (NxPDCP SDUs)
+        v_PDCP_SDUList := f_Build_N_PDCP_SDUList(v_N, v_PDCPsize);
+        f_Tx_N_PDCP_SDUs(v_PDCP_SDUList);
+
+        //@siclog "Step 4" siclog@
+        // SS receives NxPDCP SDUs
+        f_Rx_N_PDCP_SDUs(v_PDCP_SDUList);
+
+      }//End for iMCS 0 to 28
+    }//End for nPRB 1 to 110
+
+    f_EUTRA_TestBody_Set(false);
+    //test body ends
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+
+    //@sic R5-103847 Deactivate test loop and open test loop is removed sic@
+    //Switch off UE and expect a DETACH REQUEST message
+    f_EUTRA_Postamble(eutra_Cell1, E3_TESTMODE);//@sic R5-103875 sic@
+  }//f_7_1_7_x
+
+  /*
+   * @desc      basic function for 7.1.7.x test cases
+   * @param     p_Format
+   * @param     p_ResourceAllocType
+   * @param     p_CodeWordSwapFlag
+   * @status    APPROVED (LTE)
+   * @status
+   */
+  function f_EUTRA_7_1_7_1_x_MIMO (PdcchDciFormat_Type p_Format,
+                                   PdcchResourceAllocation_Type p_ResourceAllocType,
+                                   B1_Type p_CodeWordSwapFlag ) runs on EUTRA_PTC
+  { /* L2/MAC/7.1
+     * 7.1.7.x : DL-SCH Transport Block Size selection
+     */
+    //@sic R5-113849 sic@
+    //@sic R5s110582 R5s110585 sic@
+    var charstring v_UE_DL_Category;
+    var charstring v_UE_UL_Category ; //@sic R5s170014 sic@
+    var integer v_TBSize1:=0;   // transport block size in bits
+    var integer v_TBSize:=0;    // transport block size in bits
+    var integer v_I_MCS:=0;     // Modulation and Coding Scehme Index
+    var integer v_I_TBS:=0;     // Transport Block Size Index
+    var integer v_N_PRB:=1;     // Number of physical resource Blocks
+    var integer v_N_RBDL := 100; // Species the DL Bandwidth.
+    var integer v_Max_nPRB;     // to store the max allowed PRB resources that can be allocated
+    var integer v_PDCPsize:=0;  // PDCP SDU Size
+    var integer v_N:=1;         // Number of PDCP SDU
+    var PDCP_SDUList_Type v_PDCP_SDUList := {''O};
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init (c1);
+    f_EUTRA_CellInfo_SetHighestBandwidth(eutra_Cell1);
+    f_EUTRA_CellInfo_SetMIMO_2TX(eutra_Cell1); //@sic R5s110582 R5s110585 sic@
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    v_UE_DL_Category := f_EUTRA_MobileInfo_GetUECapability_UECategoryExtn(); //@sic R5s120641 R5-126021 sic@
+    v_UE_UL_Category:= f_EUTRA_MobileInfo_GetUECapability_UECategory_UL();  //@sic R5s170014 sic@
+    f_CheckUECategoryDL(v_UE_DL_Category); //@sic R5s160832 sic@
+    // Bring UE to state Loopback Activated (state 4)
+    f_EUTRA_LoopBackActivation_State4_717_MIMO(); //@sic R5s110697 sic@
+    /* f_EUTRA_SS_CommonCellConfig(eutra_Cell1,
+                                cas_CellModify_REQ_PDSCH_Pwr_Ratio_TBS_Test(eutra_Cell1,
+                                                                            cs_TimingInfo_Now));*/
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    
+    //Steps 1 to 4 are repeated for values of nPRB  from 1 to v_Max_nPRB and iMCS from 0 to 28
+    v_N_RBDL := f_ConvertDL_BandwidthToInteger(f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1));
+    
+    if ((p_Format == dci_2A) and (p_ResourceAllocType == ra_0))
+      {
+        // test case 7.1.7.1.5
+        v_Max_nPRB := v_N_RBDL;
+        // MAX index can be NRBDL but not all nPRB's allowed
+      }
+    else if ((p_Format == dci_2A) and (p_ResourceAllocType == ra_1))
+      {
+        // test case 7.1.7.1.6
+        
+        //@sic R5-242392 3MhzSupport sic@
+        if (v_N_RBDL == 15)//3MhzSupport
+          {
+          v_Max_nPRB := 6;
+          }else if (v_N_RBDL == 25)//5MhzSupport
+          {
+            v_Max_nPRB := 11;
+          }
+        else   if (v_N_RBDL == 50)
+          {
+            v_Max_nPRB := 14;
+          }
+        else if (v_N_RBDL == 75)
+          {
+            v_Max_nPRB := 16;
+          }
+        else if (v_N_RBDL == 100)
+          {
+            v_Max_nPRB := 22;
+          }
+        else
+          {
+            FatalError(__FILE__, __LINE__, "Step 1: invalid MAX Bandwidth set");
+          }
+      }
+    else
+      {
+        FatalError(__FILE__, __LINE__, "Step 1: invalid DCI format and Resource allocation combination ");
+      }
+    //@sic R5s170303 R5-182907 R5-182909 sic@
+    f_ConfigureULGrant_MaxTBSupported(v_UE_UL_Category, f_ConvertUL_BandwidthToInteger(f_EUTRA_CellInfo_GetUL_ChBandwidth(eutra_Cell1)));
+    
+    for (v_N_PRB := 1; v_N_PRB <= v_Max_nPRB; v_N_PRB := v_N_PRB + 1) {  //for nPRB 1 to v_Max_nPRB
+      // For DCI 2A and RA 0, not all 1..v_Max_nPRB are applicable, needs to be addressed
+      if ((p_Format == dci_2A) and (p_ResourceAllocType == ra_0)) {
+      
+       //@sic R5-242392 3MhzSupport sic@
+        if((v_N_RBDL == 15) or (v_N_RBDL == 25))     // 5 Mhz BW or 3 Mhz BW
+          {
+             // all PRBs applicable
+          } else
+        if (v_N_RBDL == 50)      // 10 Mhz BW
+          {
+            if ((v_N_PRB mod 3)==1) { continue; } // not applicable
+          }
+        else if (v_N_RBDL== 75)  // 15 Mhz BW
+          {
+            if (((v_N_PRB mod 4)==1) or ((v_N_PRB mod 4)==2)) { continue; } // not applicable
+          }
+        else if (v_N_RBDL == 100) // 20 Mhz BW
+          {
+            if ((v_N_PRB mod 4)!=0) { continue; } // not applicable
+          }
+        else
+          {
+            FatalError(__FILE__, __LINE__, "Step 1: invalid MAX Bandwidth set");
+          }
+      }
+      for (v_I_MCS := 0; v_I_MCS <= 28 ; v_I_MCS := v_I_MCS + 1) {   //for iMCS 0 to 28
+        //SS looks up iTBS in table 7.1.7.1-1 in TS 36.213 based on the value of iMCS
+        v_I_TBS := f_EUTRA_Get_iTBS_For_iMCS(v_I_MCS);
+        //SS looks up TBsize in table 7.1.7.2.1-1 in TS 36.213 based on values of iTBS and nPRB
+        v_TBSize1 := f_EUTRA_LookUp_TB_Size(v_N_PRB, v_I_TBS);
+        if ( not (fl_CalculateCodingRate(v_I_MCS, v_N_PRB, v_TBSize1,2))) // Coding Rate exceeds
+          {
+            continue;
+          }  // skip this nprb and Imcs1 combination.
+        if (v_TBSize1 > f_EUTRA_GetMaxDLSCH_TB_Bits_Per_TTI(v_UE_DL_Category)) //@sic R5s170303 R5-182907 sic@
+          {
+            continue;
+          } ; // skip this nprb and Imcs1  combination.
+        
+        v_TBSize := v_TBSize1 + v_TBSize1 ;
+        if (v_TBSize < 136)             //this results in zero number of PDCP SDUs
+          {
+            continue ;
+          }  // skip this nprb and Imcs1 and Imcs2 combination.
+        if (v_TBSize > f_EUTRA_GetMaxDLSCH_2TB_Bits_Per_TTI_MIMO(str2int(v_UE_DL_Category)))//@sic R5s170303 sic@
+          {
+            continue;
+          } ; // skip this nprb and Imcs1 & Imcs2 combination.
+        
+        
+        // Steps 2 to 4 are performed if the sum of the sizes of TBsize#1  and TBsize#2 is less than or equal to
+        //UE capability "Maximum number of DL-SCH transport block bits received within a TTI" as specified in Table 7.1.7.1.5.3.2-1
+        //and larger than or equal to 72 136 bits as specified in Table 7.1.7.1.5.3.2-2, and the effective channel code rate, as defined
+        //in TS 36.213 clause 7.1.7, is lower than or equal to 0.930.
+        
+        //@siclog "Step 2" siclog@
+        // SS creates one or more PDCP SDUs, depending on TBsize, in accordance with Table 7.1.7.1.5/6.3.2-2.
+        
+        f_EUTRA_Set_PDCP_SDUs_Size_MIMO(v_N, v_PDCPsize, v_TBSize);  //calculates v_N,v_PDCPsize
+        //@siclog "Step 3" siclog@
+        // SS sends MAC PDU (NxPDCP SDUs)
+        
+        //Configure SS for DCI Format x with RA type y and a Resource block assignment (RBA) correspondent
+        //to nPRB as specified in 7.1.6.1 in TS 36.213 and Modulation and coding scheme iMCS
+        f_EUTRA_SS_CommonCellConfig(eutra_Cell1, cas_CcchDcchDtchDL_Config_REQ(eutra_Cell1,
+                                                                               cs_TimingInfo_Now,
+                                                                               cs_DciDLInfo_Explicit(cs_DciDlInfoExplicit_MIMO(cs_Imcs_Value(v_I_MCS),
+                                                                                                                               cs_Imcs_Value(v_I_MCS),
+                                                                                                                               p_Format,
+                                                                                                                               p_ResourceAllocType,
+                                                                                                                               v_N_PRB,
+                                                                                                                               -,
+                                                                                                                               -,
+                                                                                                                               p_CodeWordSwapFlag))));
+        //@siclog "Step 3" siclog@
+        // SS sends MAC PDU (NxPDCP SDUs)
+        v_PDCP_SDUList := f_Build_N_PDCP_SDUList_MIMO(v_N, v_PDCPsize);
+        f_Tx_N_PDCP_SDUs(v_PDCP_SDUList);
+        
+        //@siclog "Step 4" siclog@
+        // SS receives NxPDCP SDUs
+        f_Rx_N_PDCP_SDUs(v_PDCP_SDUList);
+      }//End for iMCS 0 to 28
+    }//End for nPRB 1 to 110
+    
+    f_EUTRA_TestBody_Set(false);
+    //test body ends
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    
+    //@sic R5-103847 Deactivate test loop and open test loop is removed sic@
+    // configure SS in normal grant transmission
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell1,
+                                cas_CcchDcchDtchDL_Config_REQ(eutra_Cell1,
+                                                              cs_TimingInfo_Now,
+                                                              cs_DciDLInfo_Auto(cs_DciInfo_CcchDcchDtchDL(f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1))))); //@sic R5s110320 sic@
+    
+    f_EUTRA_StartDefULGrantTransmission(eutra_Cell1);
+    //Switch off UE and expect a DETACH REQUEST message
+    f_EUTRA_Postamble(eutra_Cell1, E3_TESTMODE);//@sic R5-103875 sic@
+  }//f_7_1_7_x_MIMO_EUTRA
+
+  } // end of group LocalFunctions
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.1
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_1_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.1 : DL-SCH Transport Block Size selection / DCI format 1 / RA type 0
+     */
+    f_EUTRA_7_1_7_1_x(dci_1, ra_0);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.2
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_2_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.2 : DL-SCH Transport Block Size selection / DCI format 1 / RA type 1
+     */
+    f_EUTRA_7_1_7_1_x(dci_1, ra_1);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.3
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_3_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.3 : DL-SCH Transport Block Size selection / DCI format 1A / RA type 2 / Localised VRB
+     */
+    f_EUTRA_7_1_7_1_x(dci_1A, ra_2_Localised);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.4
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_4_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.4 : DL-SCH Transport Block Size selection / DCI format 1A / RA type 2 / Distributed VRB
+     */
+    f_EUTRA_7_1_7_1_x(dci_1A, ra_2_Distributed);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.5
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_5_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.5 : DL-SCH transport block size selection / DCI format 2A / RA type 0 / Two transport blocks enabled /
+     *           Transport block to codeword swap flag value set to '0'
+     */
+    f_EUTRA_7_1_7_1_x_MIMO(dci_2A, ra_0,'0'B);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.1.6
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_1_6_EUTRA () runs on EUTRA_PTC
+  { /* L2/MAC/7.2
+     * 7.1.7.6 : DL-SCH Transport Block Size selection / DCI format 2A / RA type 1 /
+     *           Two transport blocks enabled / Transport block to codeword swap flag value set to '1'
+     */
+    f_EUTRA_7_1_7_1_x_MIMO(dci_2A, ra_1,'1'B);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.7.2.1
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_7_2_1_EUTRA ( ) runs on EUTRA_PTC
+  { /* L2/MAC/7.1
+     * 7.1.7.2.1 : UL-SCH Transport Block Size selection / DCI format 0
+     */
+    var charstring v_UE_Category ;
+    var integer v_TBSize:=0;    // transport block size in bits
+    var integer v_I_MCS:=0;     // Modulation and Coding Scheme Index
+    var integer v_I_TBS:=0;     // Transport Block Size Index
+    var integer v_N_PRB:=1;     // Number of physical resource Blocks
+    //var integer v_N_RBDL := 100; // Species the DL Bandwidth.
+    var integer v_N_RBUL := 50;  // Species the UL Bandwidth.
+    var integer v_Max_nPRB;     // to store the max allowed PRB resources that can be allocated
+    var integer v_PDCPsize:=0;  // PDCP SDU Size
+    var integer v_N:=1;         // Number of PDCP SDU
+    var PDCP_SDUList_Type v_PDCP_SDUList := {''O};
+    var integer v_MAX_IMCS := 20; // to be initialised based on UE category
+    var SubFrameTiming_Type v_SubFrameInfo;
+    var boolean v_SupportUL64QAM := false;//@sic R5-155942 sic@
+    var Ul_Bandwidth_Type v_UL_Bandwidth ;
+    var Dl_Bandwidth_Type v_DL_Bandwidth ;
+    var ChannelBandwidthDependency_Type v_ChannelBandwidthDependency ;
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init (c1);
+    f_EUTRA_CellInfo_SetHighestBandwidth(eutra_Cell1);
+    v_UL_Bandwidth := f_EUTRA_CellInfo_GetUL_ChBandwidth(eutra_Cell1);
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1);
+    v_ChannelBandwidthDependency := f_EUTRA_BandDependentParam(v_DL_Bandwidth, v_UL_Bandwidth);
+    f_EUTRA_CellInfo_SetSIB2_Enable64QAM(eutra_Cell1,v_ChannelBandwidthDependency.Pusch_HoppingOffset);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    v_UE_Category := f_EUTRA_MobileInfo_GetUECapability_UECategoryExtn(); //@sic R5s120641 sic@
+    f_CheckUECategoryDL(v_UE_Category);  //@sic R5s160832 sic@
+    v_UE_Category := f_EUTRA_MobileInfo_GetUECapability_UECategory_UL();
+    v_UE_Category := fl_Check_GetUE_CategoryUL(v_UE_Category);//@sic R5-155942 sic@
+    v_SupportUL64QAM := fl_Check_UE_SupportUL64QAM();//@sic R5-155942 sic@
+
+    f_EUTRA_LoopBackActivation_State4_717(); //@sic R5-100263 sic@
+    // Bring UE to state Loopback Activated (state 4)
+    
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell1,
+                                cas_CellModify_REQ_PDSCH_Pwr_Ratio_TBS_Test(eutra_Cell1,
+                                                                            cs_TimingInfo_Now));
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    
+    //v_N_RBDL := f_ConvertDL_BandwidthToInteger(f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1));
+    v_N_RBUL := f_ConvertUL_BandwidthToInteger(f_EUTRA_CellInfo_GetUL_ChBandwidth(eutra_Cell1));
+
+    v_Max_nPRB := v_N_RBUL;
+    //@siclog "Step 1" siclog@
+    // Automatic
+    //@sic R5-155942 R5s240657 sic@
+    if ((f_EUTRA_Int_UECategory_UL (v_UE_Category) == 5) or v_SupportUL64QAM ) { v_MAX_IMCS := 28 }; //UL 64 QAM supported
+    // Configure DL Grant for all loops
+    f_ConfigureDLGrant_MaxULTBSupported_7172(f_EUTRA_Int_UECategory_UL(v_UE_Category), v_N_RBUL);//@sic R5s230448 sic@
+    //EXCEPTION Step after Step1
+    //Steps 2 to 7 are repeated for values of nPRB  from 1 to v_Max_nPRB and iMCS from 0 to 28
+    for (v_N_PRB := 1; v_N_PRB <= v_Max_nPRB; v_N_PRB := v_N_PRB + 1) {  // for nPRB 1 to v_Max_nPRB
+
+      if (fl_Check_This_N_PRB(v_N_PRB) == false) {                       // nPRB check in EXCEPTION Step
+        continue; // nprb not allowed
+      }
+
+      for (v_I_MCS := 0; v_I_MCS <= v_MAX_IMCS; v_I_MCS := v_I_MCS + 1) {   //for iMCS 0 to 28
+        //@siclog "Step 2" siclog@
+        //SS looks up iTBS in table 8.6.1-1 in TS 36.213 based on the value of iMCS
+        v_I_TBS := f_EUTRA_Get_iTBS_For_iMCS_PUSCH(v_I_MCS);
+        //SS looks up TBsize in table 7.1.7.2.1-1 in TS 36.213 based on values of iTBS and nPRB
+        v_TBSize := f_EUTRA_LookUp_TB_Size(v_N_PRB, v_I_TBS);
+
+        if (v_TBSize < 104)//this results in zero number of PDCP SDUs
+        //@sic R5s100446 sic@
+          {
+            continue;
+          }  // skip this nprb and Imcs combination.
+        if (v_TBSize > f_EUTRA_GetMaxULSCH_TB_Bits_Per_TTI(f_EUTRA_Int_UECategory_UL(v_UE_Category)))
+          { // Steps 3 to 7 are performed if  TBsize is less or equal to UE capability
+            // "Maximum number of DL-SCH transport block bits received within a TTI" as specified in Table 7.1.7.1.1.3.2-1
+            continue;
+          } // skip this nprb and Imcs combination.
+        
+        //@siclog "Step 3" siclog@
+        // SS creates one or more PDCP SDUs, depending on TBsize, in accordance with Table 7.1.7.1.1.3.2-2.
+        
+        f_EUTRA_Set_PDCP_SDUs_Size(v_N, v_PDCPsize, v_TBSize);     // calculates v_N, v_PDCPsize
+        // Step3: SS sends MAC PDU (NxPDCP SDUs)
+        
+        // Configure SS for DCI Format x with RA type y and a Resource block assignment (RBA) correspondent
+        // to nPRB as specified in 7.1.6.1 in TS 36.213 and Modulation and coding scheme iMCS
+        //@siclog "Step 5" siclog@
+        // f_EUTRA_StartULGrantTransmissionOnSR_Reception(eutra_Cell1, cs_TimingInfo_Now,cs_DciInfo_CcchDcchDtchUL_Explicit(v_I_MCS, v_N_PRB ));
+        // above step is not used as specific RedundancyVersionList is needed here
+        // SS sends MAC PDU (NxPDCP SDUs)
+         //@siclog "Step 3" siclog@
+        v_PDCP_SDUList := f_Build_N_PDCP_SDUList(v_N, v_PDCPsize);
+        v_SubFrameInfo := f_EUTRA_GetNextSendOccasion(eutra_Cell1, 300);
+        v_SubFrameInfo.Subframe.Number := 9; // @sic R5s120040 sic@ Sub frame 9 selected to avoid Data and SIB being scheduled in same TTI for TDD
+        //@siclog "Step 4" siclog@
+        // SS transmits NxPDCP SDUs
+        f_Tx_N_PDCP_SDUs(v_PDCP_SDUList, cs_TimingInfo_EUTRA_NB(v_SubFrameInfo));
+
+        //@siclog "Step 5" siclog@
+        // one time UL grant
+        v_SubFrameInfo:=f_EUTRA_TimingInfoAdd(v_SubFrameInfo,60,f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1));
+
+        f_EUTRA_SS_CommonCellConfig(eutra_Cell1, cas_CellConfig_DciInfo_REQ(eutra_Cell1,
+                                                                           cs_TimingInfo_EUTRA_NB(v_SubFrameInfo),
+                                                                           v_I_MCS,
+                                                                            0,
+                                                                            v_N_PRB)); //@sic R5s240444 sic@
+        //@siclog "Step 6" void siclog@
+        // void
+        //@siclog "Step 7" siclog@
+        // SS receives NxPDCP SDUs
+        // All PDU's should be received in one TTI to guarantee that the TB size under test is tested.
+        fl_Rx_N_PDCP_SDUs_InOneTTI(v_PDCP_SDUList);
+        
+      } // End for iMCS 0 to v_MAX_IMCS
+      
+    } // End for nPRB 1 to v_Max_nPRB
+    
+    f_EUTRA_TestBody_Set(false);
+    //test body ends
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    
+    //@sic R5-103847 Deactivate test loop and open test loop is removed sic@
+    // configure SS for default grant allocation
+    f_EUTRA_StartDefULGrantTransmission(eutra_Cell1); //@sic R5-115620 sic@
+    //Switch off UE and expect a DETACH REQUEST message
+    f_EUTRA_Postamble(eutra_Cell1, E3_TESTMODE);  // @sic R5-103875 sic@
+  } //f_TC_7_1_7_2_1_EUTRA
+
+}

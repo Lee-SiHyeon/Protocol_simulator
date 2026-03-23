@@ -1,0 +1,636 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-02 20:25:22 +0100 (Mon, 02 Dec 2024) $
+// $Rev: 40016 $
+/******************************************************************************/
+
+module MCX_SIP_CallControl_Common {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_CommonProcedures all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIME_Functions all;
+  import from MCX_SIP_Common all;
+  import from MCX_XML_mcptt_info all;
+  import from MCX_XML_mcvideo_info all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Several header fields are the same for INVITE and REFER
+   * @param     p_ServiceType
+   * @param     p_Method
+   * @param     p_PriorityCallType  (default value: NORMAL_CALL)
+   * @param     p_ExpectedToUri
+   * @param     p_MandatoryContactParams
+   * @param     p_RequestWithinDialog (default value: false)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteReferCommon_MessageHeaderRX(MCX_ServiceType_Type p_ServiceType,
+                                                   charstring p_Method,
+                                                   MCX_PriorityCallType_Type p_PriorityCallType := NORMAL_CALL,
+                                                   template (present) SipUrl p_ExpectedToUri,
+                                                   template (present) SemicolonParam_List p_MandatoryContactParams,
+                                                   boolean p_RequestWithinDialog := false)
+    runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader := cr_MessageHeader_Dummy;
+    var template (present) RouteBody_List v_RouteBodyList;
+    var IMS_ProtectedPorts_Type v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+    var integer v_Port_us_Contact := v_Protected.Port_us;
+    var integer v_Port_ps_Route := v_Protected.Port_ps;
+    var template (present) SipUrl v_SipUrlFrom;
+    var template (present) charstring v_Pcscf;
+    var template (present) CallId v_CallId;
+    var template (present) integer v_CSeqValue := ?;
+    var template (present) From v_From;
+    var template (present) To v_To;
+    var template ResourcePriority v_ResourcePriority := *;
+    
+    select (p_PriorityCallType) {
+      case (EMERGENCY_CALL)  {
+        select (p_ServiceType) {
+          case (MCPTT) {
+            v_ResourcePriority := cr_ResourcePriority(cr_R_Value(tsc_MCPTT_EmergencyResourcePriorityNamespace, tsc_MCPTT_EmergencyResourcePriorityValue));
+          }
+          case (MCVideo) {
+            v_ResourcePriority := cr_ResourcePriority(cr_R_Value(tsc_MCVideo_EmergencyResourcePriorityNamespace, tsc_MCVideo_EmergencyResourcePriorityValue));
+          }
+          case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+            FatalError(__FILE__, __LINE__, "Priority call not supported for MCData");
+          }
+          case else {
+            FatalError(__FILE__, __LINE__, "Invalid service type");
+          }
+        }
+      }
+      case (IMMPERIL_CALL)  {
+        select (p_ServiceType) {
+          case (MCPTT) {
+            v_ResourcePriority := cr_ResourcePriority(cr_R_Value(tsc_MCPTT_ImminentPerilResourcePriorityNamespace, tsc_MCPTT_ImminentPerilResourcePriorityValue));
+          }
+          case (MCVideo) {
+            v_ResourcePriority := cr_ResourcePriority(cr_R_Value(tsc_MCVideo_ImminentPerilResourcePriorityNamespace, tsc_MCVideo_ImminentPerilResourcePriorityValue));
+          }
+          case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+            FatalError(__FILE__, __LINE__, "Priority call not supported for MCData");
+          }
+          case else {
+            FatalError(__FILE__, __LINE__, "Invalid service type");
+          }
+        }
+      }
+      case (BROADCAST) {    // test cases 6.1.1.8, 6.1.1.10
+        v_ResourcePriority := omit;
+      }
+    }
+
+    if (p_RequestWithinDialog) {        // re-INVITE according to 36.579-1 clause 5.5.2.6.1
+      v_RouteBodyList := f_IMS_Request_RouteSet_RouteBodyList_RX();
+      v_CallId := f_IMS_PTC_ImsInfo_DialogGetCallId();
+      v_From := f_IMS_RequestInDialog_FromHeaderRX();
+      v_To := f_IMS_RequestInDialog_ToHeaderRX();
+      v_CSeqValue := f_IMS_RequestInDialog_CSeqValueRX();
+    }
+    else {                              // INVITE according to 36.579-1 clause 5.5.2.5.1
+      v_Pcscf := ?;                                                                                 /* P-CSCF address is checked later on (f_MCX_InviteRefer_CommonChecks -> f_IMS_MessageHeader_Request_CheckRoute) */
+      v_RouteBodyList := cr_RouteBodyList_InitialReq(v_Port_ps_Route, v_Pcscf, tsc_IMS_Scscf);      /* acc. to 24.229 clause 5.1.2A.1 */
+      v_CallId := cr_CallId(?);
+      v_SipUrlFrom := f_MCX_DefaultPublicUserIdRX();
+      v_From := cr_From(*, v_SipUrlFrom);
+      v_To := cr_ToDef(p_ExpectedToUri);
+    }
+
+    v_MessageHeader.via                 := f_IMS_SipRequest_ViaRX();                        /* additional checks in f_MCX_InviteRefer_CommonChecks: f_IMS_MessageHeader_Request_CheckVia */
+    v_MessageHeader.route               := cr_Route(v_RouteBodyList);                       /* additional checks in f_MCX_InviteRefer_CommonChecks: f_IMS_MessageHeader_Request_CheckRoute */
+    v_MessageHeader.fromField           := v_From;
+    v_MessageHeader.toField             := v_To;                                            /* additional checks in f_MCX_InviteRefer_CommonChecks: check of tag */
+    v_MessageHeader.callId              := v_CallId;
+    v_MessageHeader.cSeq                := cr_CseqDef(v_CSeqValue, p_Method);
+    v_MessageHeader.proxyRequire        := cr_ProxyRequireSecAgree;
+    v_MessageHeader.securityVerify      := f_IMS_PTC_BuildSecurityVerifyHeader();
+    v_MessageHeader.contact             := cr_Contact(f_Contact_SipUri_HostPortRX(?, v_Port_us_Contact),    /* additional checks in f_MCX_InviteRefer_CommonChecks: f_IMS_MessageHeader_CheckContactAddr (FQDN or IP address) */
+                                                      p_MandatoryContactParams);
+    v_MessageHeader.maxForwards         := cr_MaxForwardsDef;
+    v_MessageHeader.pAccessNetworkInfo  := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    v_MessageHeader.pPreferredService   := cr_PPreferredService(f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_ServiceType)); /* NOTE: acc. RFC 6050 the service is not percent-encoded */
+    v_MessageHeader.pPreferredID        := cr_PPreferredID( { v_MessageHeader.fromField.addressField } ) ifpresent;
+    v_MessageHeader.resourcePriority    := v_ResourcePriority;
+
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      Set Answer-Mode in Message header for INVITE or REFER
+   * @param     p_MessageHeader
+   * @param     p_CommencementMode  (default value: NONE)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteRefer_MessageHeaderRX_SetAnswerMode(template (present) MessageHeader p_MessageHeader,
+                                                           MCX_CommencementMode_Type p_CommencementMode := NONE) return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader := p_MessageHeader;
+
+    v_MessageHeader.privAnswerMode   := omit;    // no Priv-Answer-Mode in re-INVITE (RFC 5373, 24.379 clause 6.3.2.2.6.3
+    v_MessageHeader.answerMode       := omit;    // no Answer-Mode in re-INVITE (RFC 5373, 24.379 clause 6.3.2.2.6.3
+
+    select (p_CommencementMode) {
+      case (AUTOMATIC) {
+        v_MessageHeader.answerMode := cr_AnswerMode_Auto;
+      }
+      case (AUTOMATIC_FORCE, AMBIENT_LISTENING_REMOTE, AMBIENT_LISTENING_LOCAL) {
+        v_MessageHeader.privAnswerMode := cr_PrivAnswerMode_Auto;
+      }
+      case (AMBIENT_VIEWING_REMOTE, AMBIENT_VIEWING_LOCAL) {
+        v_MessageHeader.privAnswerMode := cr_PrivAnswerMode_Auto;
+        v_MessageHeader.answerMode := *;        /* NOTE: in contrast to MCPTT the MCVideo test cases 6.7.1 and 6.7.3 do not spcify the answerMode to be not present (Table 6.7.1.3.3-1, Table 6.7.3.3.3-1)
+                                                 *       and according to RFC 5373 clause 4.1 in this case if the requester is authorized for Priv-Answer-Mode, only Priv-Answer-Mode is considered */
+      }
+      case (MANUAL) {
+        v_MessageHeader.answerMode := cr_AnswerMode_Manual;
+      }
+      case (ANY) {
+        v_MessageHeader.answerMode := *;
+      }
+    }
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      INVITE (36.579-1 Table 5.5.2.5.1-1 SIP INVITE from the UE)
+   * @param     p_ServiceType
+   * @param     p_EstabModType      (default value: CALL_ESTAB_MOD)
+   * @param     p_PriorityCallType  (default value: NORMAL_CALL)
+   * @param     p_CommencementMode  (default value: NONE)
+   * @param     p_ExpectedToUri
+   * @param     p_IsReInvite        (default value: false)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteRequest_MessageHeaderRX(MCX_ServiceType_Type p_ServiceType,
+                                               MCX_SIP_EstabMod_Type p_EstabModType := CALL_ESTAB_MOD,
+                                               MCX_PriorityCallType_Type p_PriorityCallType := NORMAL_CALL,
+                                               MCX_CommencementMode_Type p_CommencementMode := NONE,
+                                               template (present) SipUrl p_ExpectedToUri,
+                                               boolean p_IsReInvite := false)
+    runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) SemicolonParam_List v_MandatoryContactParams := f_MCX_SIP_CallControl_ContactParams_RX(p_ServiceType, p_EstabModType);
+    var template (present) MessageHeader v_MessageHeader := f_MCX_InviteReferCommon_MessageHeaderRX(p_ServiceType, "INVITE", p_PriorityCallType, p_ExpectedToUri, v_MandatoryContactParams, p_IsReInvite);
+    var template (present) AcceptBody_List v_AcceptBodyList;
+
+    v_AcceptBodyList[0] := cr_AcceptBody(c_sdpApplication);
+
+    select (p_EstabModType) {
+      case (CALL_ESTAB_MOD) {
+        v_AcceptBodyList[1] := cr_AcceptBody(f_MCX_MimeType_mcs_info(p_ServiceType));
+        v_MessageHeader.contentType  := cr_ContentTypeMIME;
+      }
+      case (PRE_EST_SESSION_ESTAB_MOD) {   // 36.579-1 Table 5.3.3.4-1: Step 8 of Generic Test Procedure for MCPTT pre-established session establishment CO
+        if (p_ServiceType == MCDataSDS) {  // @sic R5-233490 sic@
+          v_MessageHeader.contentType  := cr_ContentTypeMIME;
+        } else {
+          v_MessageHeader.contentType  := cr_ContentTypeSDP;
+        }
+      }
+    }
+
+    v_MessageHeader.supported        := cr_Supported(tsc_OptionTagList_timer);  /* !!!! PROSE ISSUE: It seems that in the core specs in general presence of the "timer" option tag in the Supported header field is a 'should' statement for the INVITE
+                                                                                   (but the "timer" option tag seems to be mandatory for establishment of a pre-established session) */
+    v_MessageHeader.sessionExpires   := cr_SessionExpires;                      /* !!!! PROSE ISSUE: It seems that in the core specs in general presence of the Session-Expires header field is a 'should' statement for the INVITE !!!! */
+    v_MessageHeader.require          := cr_RequireSecAgree;
+    v_MessageHeader.accept           := cr_Accept(v_AcceptBodyList);            // @sic R5s220869 Change 1 sic@
+    v_MessageHeader.acceptContact    := cr_AcceptContact_Common(f_MCX_AcceptContact_AcValues_RX(p_ServiceType));
+
+    v_MessageHeader := f_MCX_InviteRefer_MessageHeaderRX_SetAnswerMode(v_MessageHeader, p_CommencementMode);     /* @sic R5s211359 - additional change: p_CommencementMode shall be NONE for re-INVITE sic@ */
+    
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      Common checks for a REFER received from the client
+   * @param     p_IMS_DATA_REQ
+   * @param     p_IsReInvite        (default value: false)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteRefer_CommonChecks(IMS_DATA_REQ p_IMS_DATA_REQ,
+                                          boolean p_IsReInvite := false) runs on IMS_PTC
+  {
+    var InternetProtocol_Type v_Protocol := p_IMS_DATA_REQ.RoutingInfo.Protocol;
+    var MessageHeader v_MessageHeader;
+
+    select union (p_IMS_DATA_REQ.Request) {
+      case (Invite) { v_MessageHeader := p_IMS_DATA_REQ.Request.Invite.msgHeader; }
+      case (Refer)  { v_MessageHeader := p_IMS_DATA_REQ.Request.Refer.msgHeader; }
+      case else     { FatalError(__FILE__, __LINE__, ""); }
+    }
+
+    f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol);                              /* check whether via contains "SIP URI with IP address or FQDN" sic@ */
+    f_IMS_MessageHeader_CheckContactAddr(v_MessageHeader);                                          /* check whether contact contains "SIP URI with IP address or FQDN" */
+    if (not p_IsReInvite) {
+      f_IMS_MessageHeader_CheckTo(v_MessageHeader, noToTag);                                        /* check that there is no To tag */
+      f_IMS_MessageHeader_Request_CheckRoute(v_MessageHeader);                                      /* NOTE: for re-invite no check is needed as the route set is fully specified in f_MCX_InviteRequest_MessageHeaderRX */
+    }
+  }
+
+  /*
+   * @desc      generic function, similar as f_IMS_INVITE_ReceiveRequest_A_2_1_Optional for IMS;
+   *            central place to do additional checks (f_MCX_InviteRefer_CommonChecks)
+   * @param     p_ExpectedRequestUri
+   * @param     p_MessageHeader_Invite
+   * @param     p_MessageBody
+   * @param     p_WaitDuration      (default value: omit)
+   * @param     p_IsReInvite        (default value: false)
+   * @return    template (omit) IMS_DATA_REQ
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteMO_ReceiveRequest_Optional(template (present) SipUrl p_ExpectedRequestUri,
+                                                  template (present) MessageHeader p_MessageHeader_Invite,
+                                                  template (present) MessageBody p_MessageBody,
+                                                  template (omit) float p_WaitDuration := omit,
+                                                  boolean p_IsReInvite := false)
+    runs on IMS_PTC return template (omit) IMS_DATA_REQ
+  {
+    var template (omit) IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest_Optional(p_ExpectedRequestUri, p_MessageHeader_Invite, p_MessageBody, p_WaitDuration, p_IsReInvite);
+    if (isvalue(v_IMS_DATA_REQ)) {
+      f_MCX_InviteRefer_CommonChecks(valueof(v_IMS_DATA_REQ), p_IsReInvite);
+    }
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      send 100 trying to UE
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteMO_Send100Trying(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  {
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+  }
+
+  /*
+   * @desc      Contact header used in the 200 OK sent during MO call establishment
+   * @param     p_ServiceType
+   * @return    template (value) Contact
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CallSetup_ContactSS(MCX_ServiceType_Type p_ServiceType) runs on IMS_PTC return template (value) Contact
+  {
+    var template (value) SipUrl v_ContactSipUrl := f_IMS_PTC_ImsInfo_GetContactUrlSS();   // @sic R5w220111, R5-223945: Sesssion id different from PSI sic@
+    var template (value) SemicolonParam_List v_ContactParams := f_MCX_SIP_ContactParams_TX(p_ServiceType, {"isfocus"});  /* @sic R5-220466: f_MCX_SIP_ContactParams_TX instead of f_MCX_ServiceSpecificContactFeatureTagsTX sic@ */
+    return cs_Contact(v_ContactSipUrl, v_ContactParams);
+  }
+
+  /*
+   * @desc      send (final) 200 OK to UE; function can be used as reponse for an UPATE too, in which case there is no ACK from the UE
+   * @param     p_ServiceType
+   * @param     p_MessageHeader_Request
+   * @param     p_RoutingInfo_DL
+   * @param     p_SDP_Message       (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteMO_Send200OK(MCX_ServiceType_Type p_ServiceType,
+                                    MessageHeader p_MessageHeader_Request,
+                                    template (value) IMS_RoutingInfo_Type p_RoutingInfo_DL,
+                                    template (omit) SDP_Message p_SDP_Message := omit) runs on IMS_PTC
+  { // NOTE: function may be used for UPDATE too
+    // @sic R5-206448: p_McpttInfo removed sic@
+    // @sic R5w220111, R5-223945: global variable ContactUrlSS => p_ContactUri removed sic@
+    var template (value) Contact v_Contact;
+    var template (value) MessageHeader v_MessageHeader_Response;
+    var template (omit) ContentType v_ContentType := omit;
+    var template (omit) MessageBody v_MessageBody := omit;
+
+    if (isvalue(p_SDP_Message)) {
+      v_ContentType := cs_ContentTypeSDP;
+      v_MessageBody := cs_MessageBody_SDP(valueof(p_SDP_Message));
+    }
+
+    v_Contact := f_MCX_CallSetup_ContactSS(p_ServiceType);
+    v_MessageHeader_Response := f_MCX_CommonResponse_200_MessageHeaderTX(p_MessageHeader_Request, v_Contact, v_ContentType);
+    IMS_Server.send(cas_IMS_DATA_RSP(p_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_Response, v_MessageBody)));
+  }
+
+  /*
+   * @desc      receive ACK from the UE
+   * @param     p_InviteRequest
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteMO_ReceiveACK(INVITE_Request p_InviteRequest) runs on IMS_PTC
+  {
+    var template (present) SipUrl v_RequestUri := f_IMS_PTC_ImsInfo_GetContactUrlSS();  /* @sic R5w220111, R5-223945: Sesssion id instead of PSI sic@
+                                                                                           NOTE: so far in MCX there is no case of unsuccessful call establishment where the Request URI would need to be the same as in the INVITE */
+    var template (present) MessageHeader v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(p_InviteRequest, c_statusLine200);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_RequestUri, v_MessageHeader_Ack)));
+  }
+
+  /*
+   * @desc      36.579 Table 5.5.2.5.2-1
+   * @param     p_ServiceType
+   * @param     p_CommencementMode  (default value: NONE)
+   * @param     p_ContentType
+   * @param     p_IsReInvite        (default value: false)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteRequest_MessageHeaderTX(MCX_ServiceType_Type p_ServiceType,
+                                               MCX_CommencementMode_Type p_CommencementMode := NONE,
+                                               template (omit) ContentType p_ContentType,
+                                               boolean p_IsReInvite := false) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5w220006, R5-223945: p_PriorityCallType removed; resourcePriority removed from MessageHeader sic@ */
+    /* @sic R5w220111, R5-223945: global variable ContactUrlSS => p_Contact removed sic@ */
+    var charstring v_PublicServiceId := f_MCX_MCServer_PublicServiceId(p_ServiceType);                  // SIP URI to be used in From header field
+    var template (value) SipUrl v_PublicServiceIdSipUrl := f_SIP_BuildSipUri_TX(v_PublicServiceId);     // @sic R5s220869 Change 7: f_SIP_BuildSipUri_TX instead of f_SIP_BuildSipUri_lr_TX sic@
+    var OptionTag_List v_OptionTagsForSupported := { "100rel", "timer", "tdialog", "norefersub" };
+    var template (value) Contact v_Contact := f_MCX_CallSetup_ContactSS(p_ServiceType);                 /* @sic R5w220111, R5-223945: Sesssion id instead of PSI sic@
+                                                                                                           NOTE: f_MCX_IMS_PTC_ImsInfo_SetContactUrlSS needs to be called beforehand */
+    var template (value) SipUrl v_ContactSipUrl := f_Contact_GetSipUrl(v_Contact);
+    var template (value) HostPort v_HostPort := v_ContactSipUrl.components.sip.hostPort;
+    var template (value) MessageHeader v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderTX_Common(v_OptionTagsForSupported, p_IsReInvite, v_PublicServiceId, v_HostPort);  // @sic R5s240228: v_HostPort sic@
+
+    var template (value) GenericParamList_Type v_AcceptContactParams := {
+      crs_MCX_FeatureParam_3gpp_icsi_ref(p_ServiceType),
+      crs_MCX_FeatureTag_g_3gpp_mcs(p_ServiceType)
+    };
+
+    v_MessageHeader_Invite.sessionExpires    := cs_SessionExpires(1800);
+    v_MessageHeader_Invite.pEarlyMedia       := cs_PEarlyMedia({"inactive"});
+    v_MessageHeader_Invite.require           := cs_Require(tsc_OptionTagList_sec_agree);
+    v_MessageHeader_Invite.proxyRequire      := cs_ProxyRequire(tsc_OptionTagList_sec_agree);
+    v_MessageHeader_Invite.pAssertedID       := cs_PAssertedId(v_PublicServiceIdSipUrl);
+    v_MessageHeader_Invite.contact           := v_Contact;
+    v_MessageHeader_Invite.accept            := cs_Accept({cs_AcceptBody(c_sdpApplication), cs_AcceptBody(f_MCX_MimeType_mcs_info(p_ServiceType))});
+    v_MessageHeader_Invite.acceptContact     := cs_AcceptContact_Common(f_MCX_AcceptContact_AcValues_Common_TX(v_AcceptContactParams));
+    v_MessageHeader_Invite.contentType       := p_ContentType;
+
+    if (not p_IsReInvite) {
+      select (p_CommencementMode) {
+        case (AUTOMATIC) {
+          v_MessageHeader_Invite.answerMode := cs_AnswerMode_Auto;
+        }
+        case (AUTOMATIC_FORCE, AMBIENT_LISTENING_LOCAL) {
+          v_MessageHeader_Invite.privAnswerMode := cs_PrivAnswerMode_Auto;
+        }
+        case (AMBIENT_LISTENING_REMOTE, AMBIENT_VIEWING_REMOTE) {
+          v_MessageHeader_Invite.privAnswerMode := cs_PrivAnswerMode_Auto;
+          v_MessageHeader_Invite.alertInfo := cs_AlertInfo("<file:///dev/null>");
+        }
+        case (MANUAL) {
+          v_MessageHeader_Invite.answerMode := cs_AnswerMode_Manual;
+        }
+        case (PRIV_MANUAL) {
+          v_MessageHeader_Invite.privAnswerMode := cs_PrivAnswerMode_Manual;
+        }
+      }
+    }
+    return v_MessageHeader_Invite;
+  }
+
+  /*
+   * @desc      Build up receive template for message header of a 200 OK response for INVITE or UPDATE
+   * @param     p_CallType
+   * @param     p_MessageHeader_Request
+   * @param     p_MandatoryContactParams (default value: {})
+   * @param     p_ContentType       (default value: omit)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteUpdateResponse_200_MessageHeaderRX(MCX_CallType_Type p_CallType,
+                                                          template (value) MessageHeader p_MessageHeader_Request,
+                                                          template (present) SemicolonParam_List p_MandatoryContactParams := {},
+                                                          template ContentType p_ContentType := omit)
+    runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader_Response := f_MCX_CommonResponse_200_MessageHeaderRX(p_MessageHeader_Request);
+    var integer v_Port_us := f_IMS_PTC_GetPort_us();
+    var template (present) SipUrl v_ContactSipUrl := f_Contact_SipUri_HostPortRX(?, v_Port_us);         /* host address needs to be checked after receiving (f_IMS_MessageHeader_CheckContactAddr) */
+    var template (present) integer v_SessionExpiresValue;
+
+    v_MessageHeader_Response.recordRoute    := p_MessageHeader_Request.recordRoute;
+    v_MessageHeader_Response.contact        := cr_Contact(v_ContactSipUrl, p_MandatoryContactParams);
+    v_MessageHeader_Response.require        := cr_Require(tsc_OptionTagList_timer);
+    v_MessageHeader_Response.contentType    := p_ContentType;
+
+    if (isvalue(p_MessageHeader_Request.sessionExpires)) {                                              /* present only for INVITE but not necessarily for UPDATE */
+      v_SessionExpiresValue := str2int(valueof(p_MessageHeader_Request.sessionExpires.deltaSec));       /* @sic R5-206448 sic@ */
+      v_MessageHeader_Response.sessionExpires := cr_SessionExpires(v_SessionExpiresValue, cr_SessionExpiresParams_Refresher);
+    }
+
+    select (p_CallType) {
+      case (GROUP_CALL, GROUP_REJOIN, CHAT_GROUP_CALL) {
+        v_MessageHeader_Response.pAnswerState := cr_PAnswerState("confirmed") ifpresent;
+      }
+    }
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      Common function to receive the 200 OK for INVITE or UPDATE
+   * @param     p_ServiceType
+   * @param     p_CallType          (default value: ANY)
+   * @param     p_MessageHeaderRequest
+   * @param     p_InternetProtocol
+   * @param     p_AllowTrying       (default value: false)
+   * @param     p_EstabModType      (default value: CALL_ESTAB_MOD)
+   * @param     p_SdpAnswer
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_InviteUpdateMT_Receive200OK(MCX_ServiceType_Type p_ServiceType,
+                                             MCX_CallType_Type p_CallType := ANY,
+                                             template (value) MessageHeader p_MessageHeaderRequest,
+                                             InternetProtocol_Type p_InternetProtocol,
+                                             boolean p_AllowTrying := false,
+                                             MCX_SIP_EstabMod_Type p_EstabModType := CALL_ESTAB_MOD,
+                                             template SDP_Message p_SdpAnswer,
+                                             template MCPTT_Info_Type p_McpttInfo := omit,
+                                             template MCVideo_Info_Type p_McvideoInfo := omit) runs on MCX_IMS_PTC return IMS_ResponseWithSdp_Type
+  { /* p_AllowTrying is needed to distinguish call establishment (or re-INVITE) with trying only from call establishment with SIP 180/183 response */
+    /* @sic R5-210214: P-Answer-State in Table 5.5.2.17.1.1-1 for GROUP-CALL => p_CallType := ANY sic@ */
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var IMS_Response_Type v_Response;
+    var MessageBody v_MessageBody;
+    var template (omit) SDP_Message v_SdpAnswer := omit;
+    var template (present) SemicolonParam_List v_MandatoryContactParams;
+    var template (present) IMS_Response_Type v_ExpectedResponse;
+    var template (present) MessageHeader v_MessageHeader;
+    var template ContentType v_ExpectedContentType := omit;
+    var template MessageBody v_ExpectedMessageBody := omit;
+
+    // receive 200 OK
+    if (ispresent(p_McpttInfo) or ispresent(p_McvideoInfo)) {                     /* => MIME in any case due to the signature
+                                                                                     NOTE: there is no case where mcdata-info is needed */
+      v_ExpectedContentType := cr_ContentTypeMIME;
+      v_ExpectedMessageBody := cr_MessageBody_MIME;
+    } else if (ispresent(p_SdpAnswer)) {
+      v_ExpectedContentType := cr_ContentTypeSDP;
+      v_ExpectedMessageBody := cr_MessageBody_SDP;
+    }
+
+    v_MandatoryContactParams := f_MCX_SIP_CallControl_ContactParams_RX(p_ServiceType, p_EstabModType);    // @sic R5-220466: isfocus removed sic@
+    
+    v_MessageHeader := f_MCX_InviteUpdateResponse_200_MessageHeaderRX(p_CallType, p_MessageHeaderRequest, v_MandatoryContactParams, v_ExpectedContentType);
+
+    v_ExpectedResponse := cr_Response(c_statusLine200, v_MessageHeader, v_ExpectedMessageBody);
+    v_IMS_DATA_RSP := f_IMS_ReceiveResponse_OptionalTrying(p_MessageHeaderRequest, p_InternetProtocol, v_ExpectedResponse, p_AllowTrying);
+    v_Response := v_IMS_DATA_RSP.Response;
+
+    f_IMS_MessageHeader_CheckContactAddr(v_Response.msgHeader);
+    
+    if (isvalue(v_Response.messageBody)) {
+      v_MessageBody := v_Response.messageBody;
+      select union (v_MessageBody) {
+        case (sdpMessageBody) {
+          v_SdpAnswer := f_IMS_SIP_DecodeMatchAndCheckSDP(v_MessageBody.sdpMessageBody, p_SdpAnswer);                /* => FAIL if p_SdpAnswer=omit */
+        }
+        case (mimeMessageBody) {                                /* not applicable for MCData: for MCData the message body is SDP (only) */
+          v_SdpAnswer := f_MCX_MIME_DecodeMatchAndCheckSDP(v_MessageBody.mimeMessageBody, p_SdpAnswer);
+          f_MCX_MIME_DecodeAndMatchXML(v_MessageBody.mimeMessageBody, p_ServiceType, -, p_McpttInfo, -, p_McvideoInfo);
+        }
+      }
+    }
+    
+    if (isvalue(f_IMS_PTC_ImsInfo_DialogGetRemoteTag())) {      /* i.e. re-INVITE or there has been a 18X response completing intialisation of the dialog */
+      f_IMS_MessageHeader_CheckTo(v_Response.msgHeader, dialogToTag);
+    } else {                                                    /* first response (apart from 100 Trying): intialisation of the dialog needs to be completed */
+      f_IMS_Dialog_CompleteCreationForMTCall(v_Response.msgHeader);
+    }
+
+    return valueof(cs_IMS_ResponseWithSdp(v_Response, v_SdpAnswer));
+  }
+
+  /*
+   * @desc      MO call release
+   * @param     p_ContactSipUrl
+   * @param     p_MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_ReceiveByeSendOK(template (present) SipUrl p_ContactSipUrl,
+                                 template (present) MessageHeader p_MessageHeader) runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+
+    // --- Receive BYE
+    [] a_IMS_ReceiveBye(v_IMS_DATA_REQ_ByRef, -, p_ContactSipUrl, p_MessageHeader)
+      {
+        // --- Send 200 OK
+        v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ_ByRef.RoutingInfo);
+        IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine200, f_MCX_CommonResponse_200_MessageHeaderTX(v_IMS_DATA_REQ_ByRef.Request.Bye.msgHeader))));
+      }
+  }
+
+  /*
+   * @desc      MT call release (36.579-1 Table 5.3.12.3-1) but without RRC connection release
+   * @param     p_RequestUri        (default value: omit)
+   * @param     p_Reason            (default value: omit)
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_MessageBody       (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CallReleaseMT_WithoutRRCConnectionRelease(template (omit) charstring p_RequestUri := omit,
+                                                           template (omit) Reason p_Reason := omit,
+                                                           template (omit) ContentType p_ContentType := omit,
+                                                           template (omit) MessageBody p_MessageBody := omit) runs on IMS_PTC
+  {
+    var template (value) SipUrl v_ContactSipUrlSS := f_IMS_PTC_ImsInfo_GetContactUrlSS();
+    var template (value) HostPort v_HostPortSS := v_ContactSipUrlSS.components.sip.hostPort;
+    var template (value) MessageHeader v_MessageHeader_Bye := f_IMS_ByeRequest_MessageHeaderTX(p_ContentType, v_HostPortSS);  // @sic R5s240228: v_HostPort sic@
+    var template (present) MessageHeader v_MessageHeader_200OK := f_MCX_CommonResponse_200_MessageHeaderRX(v_MessageHeader_Bye);
+    var template (value) SipUrl v_RequestSipUri;
+    
+    v_MessageHeader_Bye.reason := p_Reason;
+
+    if (isvalue(p_RequestUri)) {
+      v_RequestSipUri := f_SIP_BuildSipUri_TX(valueof(p_RequestUri));
+    } else {
+      v_RequestSipUri := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    }
+    /* @sic R5-216669: pAssertedID removed sic@ */
+
+    f_IMS_CallReleaseMT_Common(v_RequestSipUri, v_MessageHeader_Bye, v_MessageHeader_200OK, p_MessageBody);
+  }
+
+  /*
+   * @desc      Wrapper finction
+   * @param     p_InviteRequest
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ReceiveByeSendOK(template (value) INVITE_Request p_InviteRequest) runs on IMS_PTC
+  { // @sic R5w220111, R5-223945: global variable ContactUrlSS => p_ServiceType, p_ContactSipUrlSS removed sic@
+
+    var template (present) MessageHeader v_MessageHeader_Bye := f_IMS_ByeRequest_MessageHeaderRX(p_InviteRequest);
+    var template (present) SipUrl v_RequestUri := f_IMS_PTC_ImsInfo_GetContactUrlSS();   // @sic R5w220111, R5-223945: global variable ContactUrlSS sic@
+
+    a_MCX_ReceiveByeSendOK(v_RequestUri, v_MessageHeader_Bye);
+  }
+
+  /*
+   * @desc      MO call release (36.579-1 Table 5.3.10.3-1) but without RRC connection release
+   * @param     p_InviteRequest
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CallReleaseMO_WithoutRRCConnectionRelease(template (value) INVITE_Request p_InviteRequest) runs on IMS_PTC
+  {
+    f_UT_HangupIMSCall(MMI);
+    f_MCX_ReceiveByeSendOK(p_InviteRequest);
+  }
+
+  /*
+   * @desc      MO call release (36.579-1 Table 5.3.10.3-1)
+   * @param     p_InviteRequest
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CallReleaseMO(template (value) INVITE_Request p_InviteRequest) runs on IMS_PTC
+  { // @sic R5w220111, R5-223945: global variable ContactUrlSS => p_ServiceType, p_ContactSipUrlSS removed sic@
+    f_MCX_CallReleaseMO_WithoutRRCConnectionRelease(p_InviteRequest);
+    f_MCX_IPCAN_ReleaseConnection();
+  }
+
+  /*
+   * @desc      MT call release (36.579-1 Table 5.3.12.3-1)
+   * @param     p_RequestUri        (default value: omit)
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_MessageBody       (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CallReleaseMT(template (omit) charstring p_RequestUri := omit,
+                               template (omit) ContentType p_ContentType := omit,
+                               template (omit) MessageBody p_MessageBody := omit) runs on IMS_PTC
+  {
+    f_MCX_CallReleaseMT_WithoutRRCConnectionRelease(p_RequestUri, -, p_ContentType, p_MessageBody);
+    f_MCX_IPCAN_ReleaseConnection();
+  }
+
+}

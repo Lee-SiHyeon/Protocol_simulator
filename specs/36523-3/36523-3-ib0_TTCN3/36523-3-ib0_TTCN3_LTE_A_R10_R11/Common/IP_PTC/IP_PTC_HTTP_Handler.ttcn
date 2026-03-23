@@ -1,0 +1,156 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-07 18:09:08 +0200 (Sat, 07 Jun 2025) $
+// $Rev: 41335 $
+/******************************************************************************/
+
+module IP_PTC_HTTP_Handler {
+
+  import from CommonDefs all;
+  import from HTTP_ASP_TypeDefs all;
+  import from HTTP_CommonTemplates all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Templates all;
+  import from TCP_Functions all;
+
+  type record HTTP_Info_Type {   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    IP_SocketList_Type ServerList optional,
+    IP_ConnectionList_Type ConnectionList
+  };
+
+  template (value) HTTP_Info_Type cs_HTTP_Info_Init(template (omit) IP_SocketList_Type p_ServerList) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    ServerList := p_ServerList,
+    ConnectionList := {}
+  };
+
+  /*
+   * @desc      Initialise HTTP servers
+   * @param     p_ServerList        (default value: omit)
+   * @return    HTTP_Info_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_HTTP_Info_Init(template (omit) IP_SocketList_Type p_ServerList := omit) return HTTP_Info_Type
+  {
+    return valueof(cs_HTTP_Info_Init(p_ServerList));
+  }
+
+  template (present) HTTP_CTRL_REQ cr_HttpCtlReq := ?;   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  template (present) HTTP_DATA_ASP cr_DataAsp := ?;      /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  template (value) HTTP_CTRL_CNF cs_HTTP_CTRL_CNF(template (omit) charstring p_ErrorInfo := omit) := { errorInfo := p_ErrorInfo }; /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  /*
+   * @desc      handling of HTTP data at IP PTC
+   * @param     p_HttpInfo          (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_HTTP_Handler(inout HTTP_Info_Type p_HttpInfo) runs on IP_PTC
+  { // @sic R5s150148: list of HTTP servers to cope with IPv4/IPv6 and to be prepared for HTTPS sic@
+    var HTTP_CTRL_REQ v_HTTP_CTRL_REQ;
+    var HTTP_DATA_ASP v_HTTP_DATA_ASP;
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var template (value) IP_SocketList_Type v_ServerList := {};
+    var HttpServerInfo_Type v_HttpServerInfo;
+    var IP_AddrInfo_Type v_ServerAddr;
+    var PortNumber_Type v_PortNumber;
+    var IP_Connection_Type v_HttpConnectionByRef;          /* @sic R5s250228 change 2.1.8: no template (omit) anymore sic@ */
+    var IP_Connection_Type v_Connection;
+    var IP_ConnectionList_Type v_ConnectionList;
+    var HttpRequest_Type v_HttpRequest;
+    var HttpResponse_Type v_HttpResponse;
+    var TCP_Data_Type v_Data;
+    var bitstring v_Bitstring;
+    var integer i;
+    var integer k;
+
+    var boolean v_HttpServerIsStarted := ispresent(p_HttpInfo.ServerList);
+    var boolean v_HttpServerIsConnected := lengthof(p_HttpInfo.ConnectionList) > 0;
+
+
+    [] HTTPCTRL.receive(cr_HttpCtlReq) -> value v_HTTP_CTRL_REQ
+      { /* @sic R5-151795: sic@
+         * - BSF and XCAP server both are HTTP servers (they may even share the same HTTP server when IP address and port are the same);
+         * - in general there is always an IPv4 and an IPv6 server;
+         * - there seems to be no need to start/stop HTTP servers dynamically
+         *   (i.e. HTTP servers shall be started in one go at the beginning of a test case and kept until the end of the test case)
+         * - there is no need to take into consideration any authenticationMechanism */
+        
+        if (ispresent(v_HTTP_CTRL_REQ.httpServerList)) {
+          if (v_HttpServerIsStarted) {
+            FatalError(__FILE__, __LINE__, "HTTP handling is started already");
+          } else {
+            for (i := 0; i < lengthof(v_HTTP_CTRL_REQ.httpServerList); i := i + 1) {
+              v_HttpServerInfo := v_HTTP_CTRL_REQ.httpServerList[i];
+              v_ServerAddr := v_HttpServerInfo.serverAddr;
+              v_PortNumber := v_HttpServerInfo.serverPort;
+              f_TcpServer_Start(v_ServerAddr, v_PortNumber, v_HttpServerInfo.drbInfo, http, v_HttpServerInfo.tlsConfig);
+              v_ServerList[i] := cs_IP_Socket(v_ServerAddr, v_PortNumber);
+            }
+            p_HttpInfo := f_HTTP_Info_Init(v_ServerList);
+          }
+        }
+        HTTPCTRL.send(cs_HTTP_CTRL_CNF);
+      }
+
+    [v_HttpServerIsStarted] a_TcpServer_AcceptConnection(v_HttpConnectionByRef, (all from p_HttpInfo.ServerList))
+      {
+        i := lengthof(p_HttpInfo.ConnectionList);
+        p_HttpInfo.ConnectionList[i] := v_HttpConnectionByRef;
+      }
+
+    [v_HttpServerIsConnected] IP_SOCK_CTRL.receive(cr_TCP_CLOSE_IND((all from p_HttpInfo.ConnectionList))) -> value v_IP_SOCKET_IND {
+      /* routing table does not need to be modified as the server is still running */
+      /* remove connection from list of HTTP server connections: */
+      v_Connection := v_IP_SOCKET_IND.CTRL.ConnectionId;
+      v_ConnectionList := {};
+      k := 0;
+      for (i := 0; i < lengthof(p_HttpInfo.ConnectionList); i := i + 1) {
+        if (v_Connection != p_HttpInfo.ConnectionList[i]) {
+          v_ConnectionList[k] := p_HttpInfo.ConnectionList[i];
+          k := k + 1;
+        }
+      }
+      p_HttpInfo.ConnectionList := v_ConnectionList;
+    }
+
+    [v_HttpServerIsConnected] HTTPDATA.receive(cr_DataAsp) -> value v_HTTP_DATA_ASP
+      {
+        select union (v_HTTP_DATA_ASP.http) {
+          case (response) {
+            v_HttpResponse := v_HTTP_DATA_ASP.http.response;
+            v_Bitstring := encvalue(v_HttpResponse);
+          }
+          case (request) {                                      /* @sic R5-245678: MCData test case 6.8.4 needs HTTP request in DL and HTTP response in UL sic@  */
+            v_HttpRequest := v_HTTP_DATA_ASP.http.request;
+            v_Bitstring := encvalue(v_HttpRequest);
+          }
+        }
+        v_Data := bit2oct(v_Bitstring);
+        IP_SOCK_DATA.send(cs_TCP_DATA_REQ(v_HTTP_DATA_ASP.routingInfo, v_Data));
+      }
+
+    [v_HttpServerIsConnected] IP_SOCK_DATA.receive(cr_TCP_DATA_IND((all from p_HttpInfo.ConnectionList))) -> value v_IP_SOCKET_IND
+      {
+        v_Data := v_IP_SOCKET_IND.DATA.Ind.TCP.Recv;
+        v_Bitstring := oct2bit(v_Data);
+        if (decvalue(v_Bitstring, v_HttpRequest) != 0) {
+          if (decvalue(v_Bitstring, v_HttpResponse) != 0) {     /* @sic R5-245678: MCData test case 6.8.4 needs HTTP request in DL and HTTP response in UL sic@  */
+            FatalError(__FILE__, __LINE__, "Neither HTTP Request nor HTTP Response can be decoded");
+          } else {
+            HTTPDATA.send(cs_HTTP_RESPONSE(v_IP_SOCKET_IND.DATA.ConnectionId, v_HttpResponse));
+          }
+        } else {
+          HTTPDATA.send(cs_HTTP_REQUEST(v_IP_SOCKET_IND.DATA.ConnectionId, v_HttpRequest));
+        }
+      }
+  }
+
+}

@@ -1,0 +1,140 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-05-19 17:29:16 +0200 (Fri, 19 May 2023) $
+// $Rev: 35926 $
+/******************************************************************************/
+
+module MCX_MediaControl_Common {
+
+  import from CommonDefs all;
+  import from IMS_Component all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Templates all;
+  import from IP_PTC_UdpPacketHandlerMsgs all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+
+  type enumerated MCX_MediaControl_AckRequest_Type { ACK_REQUIRED, ACK_NOT_REQUIRED };        /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      returns true if the upper bit of the sub-type ia set
+   * @param     p_Subtype
+   * @return    boolean
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControl_AckRequested(B5_Type p_Subtype) return boolean
+  {
+    return match(p_Subtype, '1????'B);
+  }
+
+  /*
+   * @desc      return Message Type to be used in Floor Ack or Transmission Control Ack
+   * @param     p_Subtype
+   * @return    O1_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControl_AckMsgType(B5_Type p_Subtype) return O1_Type
+  {
+    var B5_Type v_Subtype := p_Subtype and4b '01111'B;     /* @sic R5-232214: CT1 has clarified (C1-230130) that in the Message Type field of the Transmission Control Ack the first bit of the 5 bit message subtype shall be set to zero sic@
+                                                              @sic R5-232216: CT1 has clarified (C1-230129) that in the Message Type field of the Floor Ack the first bit of the 5 bit message subtype shall be set to zero sic@ */
+    var O1_Type v_MsgType := bit2oct('000'B & v_Subtype);
+
+    return v_MsgType;
+  }
+
+  /*
+   * @desc      The fields of media control messages are 4-octet-aligned;
+   *            => Padding need to be added
+   *            the length information (lngth) does neither include the id and lngth nor the padding
+   * @param     p_Length
+   * @return    octetstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControlField_Padding(integer p_Length) return octetstring
+  {
+    var integer v_FieldLength := p_Length + 2;    // length of the field including id and lgth
+    var integer v_PaddingLength := (((v_FieldLength + 3) / 4) * 4) - v_FieldLength;  // padding so that field is 4-octet-aligned
+    return int2oct(0, v_PaddingLength);
+  }
+
+  /*
+   * @desc      Return sub-type with or without ACK request (depending on p_AckRequest)
+   * @param     p_SubtypeWithoutAckRequest
+   * @param     p_AckRequest
+   * @return    B5_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControlSubtype_TX(B5_Type p_SubtypeWithoutAckRequest,
+                                        MCX_MediaControl_AckRequest_Type p_AckRequest) return B5_Type
+  {
+    var B5_Type v_Subtype := p_SubtypeWithoutAckRequest;
+    if (p_AckRequest == ACK_REQUIRED) {
+      v_Subtype := '10000'B or4b v_Subtype;
+    }
+    return v_Subtype;
+  }
+
+  /*
+   * @desc      Start UDP packet handler at the IP_PTC with DrbInfo as gotten from the IPCAN_PTC
+   * @param     p_DrbInfo
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControl_Start(IP_DrbInfo_Type p_DrbInfo) runs on MCX_IMS_PTC
+  {
+    var IP_AddrInfo_Type v_NW_Address := f_IMS_PTC_NW_Address_Get();
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(v_NW_Address, tsc_MCX_MediaControlPortNW);
+    
+    MEDIA_CTRL.send(cs_IP_PTC_UdpPacketHandler_Start(v_LocalSocket, p_DrbInfo));
+  }
+
+  /*
+   * @desc      Send encoded media control message
+   * @param     p_Datagram
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControl_SendMsg(octetstring p_Datagram) runs on MCX_IMS_PTC
+  {
+    var IP_AddrInfo_Type v_UE_Address := f_IMS_PTC_UE_Address_Get();
+    var IP_AddrInfo_Type v_NW_Address := f_IMS_PTC_NW_Address_Get();
+    var PortNumber_Type v_UE_PortNumber := f_MCX_IMS_PTC_UE_MediaControlPort_Get();
+    var PortNumber_Type v_NW_PortNumber := tsc_MCX_MediaControlPortNW;
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(v_NW_Address, v_NW_PortNumber);
+    var template (value) IP_Socket_Type v_RemoteSocket := cs_IP_Socket(v_UE_Address, v_UE_PortNumber);
+    
+    if (v_UE_PortNumber == 0) {
+      FatalError(__FILE__, __LINE__, "Media plane control port at the UE is not known yet");
+    }
+
+    MEDIA_CTRL.send(cs_IP_PTC_UdpPacketHandler_DataRequest(v_LocalSocket, v_RemoteSocket, p_Datagram));
+  }
+
+  /*
+   * @desc      receive datagram with media control message
+   * @return    octetstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaControl_ReceiveMsg() runs on MCX_IMS_PTC return octetstring
+  {
+    var IP_PTC_UdpPacketHandler_RespOrInd_Type v_UdpDataIndication;
+    var IP_AddrInfo_Type v_UE_Address := f_IMS_PTC_UE_Address_Get();
+    var IP_AddrInfo_Type v_NW_Address := f_IMS_PTC_NW_Address_Get();
+    var PortNumber_Type v_UE_PortNumber := f_MCX_IMS_PTC_UE_MediaControlPort_Get();
+    var PortNumber_Type v_NW_PortNumber := tsc_MCX_MediaControlPortNW;
+    var template (present) IP_Socket_Type v_LocalSocket := cr_IP_Socket(v_NW_Address, v_NW_PortNumber);
+    var template (present) IP_Socket_Type v_RemoteSocket := cr_IP_Socket(v_UE_Address, v_UE_PortNumber);
+
+    if (v_UE_PortNumber == 0) {
+      FatalError(__FILE__, __LINE__, "Media plane control port at the UE is not known yet");
+    }
+
+    MEDIA_CTRL.receive(cr_IP_PTC_UdpPacketHandler_DataIndication(v_LocalSocket, v_RemoteSocket)) -> value v_UdpDataIndication;
+      
+    return v_UdpDataIndication.Data.Datagram;
+  }
+
+}

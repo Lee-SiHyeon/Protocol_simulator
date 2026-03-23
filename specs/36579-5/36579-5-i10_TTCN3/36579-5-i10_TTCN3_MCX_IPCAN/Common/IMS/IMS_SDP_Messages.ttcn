@@ -1,0 +1,149 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module IMS_SDP_Messages {
+
+  import from IMS_Component all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+
+  type enumerated SDP_Message_Check_Type {asPreviousSDP, newSDP, sameOriginAsPreviousSDP};      /* @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT) */
+
+  /*
+   * @desc      Wrapper function to encode SDP message
+   * @param     p_SDP_Message
+   * @return    charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+   
+  function f_IMS_SDP_Message_Encode(template (value) SDP_Message p_SDP_Message) return charstring
+  {
+    var bitstring v_BitStr := encvalue(p_SDP_Message);
+    return oct2char(bit2oct(v_BitStr));
+  }
+
+  /*
+   * @desc      Wrapper function to decode SDP message and to assign fail verdict in case of syntactically wrong SDP message
+   * @param     p_SdpBody
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SDP_Message_Decode(SdpBody p_SdpBody) runs on IMS_PTC return SDP_Message
+  {
+    var SDP_Message v_SDP_Message;
+    var bitstring v_BitStr := oct2bit(char2oct(p_SdpBody));
+    var integer v_Result := decvalue(v_BitStr, v_SDP_Message);
+
+    if (v_Result != 0) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid SDP message");
+    }
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      check that 'Connections' is included either at the top level or in the media description(s) or in both
+   * @param     p_SDP_Message
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SDP_CheckConnections(SDP_Message p_SDP_Message) runs on IMS_PTC
+  {
+    var boolean v_ConnectionFound := false;
+    var integer i;
+
+    if (ispresent(p_SDP_Message.connection)) {
+      v_ConnectionFound := true;
+    }
+
+    if (not v_ConnectionFound) {
+      // no connection specified in session description => there shall be at least one connection per media description
+      v_ConnectionFound := true;
+      for (i := 0; i < lengthof(p_SDP_Message.media_list); i := i + 1) {
+        if (not ispresent(p_SDP_Message.media_list[i].connections)) {  // @sic R5s130586 change 12 sic@
+          if ((p_SDP_Message.media_list[i].media_field.ports.port_number != 0) or not f_IMS_PTC_RanTypeIsNR5GC()) {  /* @sic R5-221481, R5-221482: c=line of removed video stream shall not be checked sic@
+                                                                                                                        NOTE: for 4G still the c=line is checked as there has been no CR as for 5g yet */
+            v_ConnectionFound := false;
+            break;
+          }
+        }
+      }
+    }
+
+    if (not v_ConnectionFound) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'Connections found neither in session description nor in media description");
+    }
+  }
+
+  /*
+   * @desc      Wrapper function to decode and match SDP message
+   * @param     p_SdpBody
+   * @param     p_SDP_Message_Template
+   * @param     p_SdpCheck          (default value: newSDP)
+   * @param     p_CheckContent      (default value: true)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SIP_DecodeMatchAndCheckSDP(template (omit) SdpBody p_SdpBody,
+                                            template SDP_Message p_SDP_Message_Template,
+                                            SDP_Message_Check_Type p_SdpCheck := newSDP,
+                                            boolean p_CheckContent := true) runs on IMS_PTC return SDP_Message
+  { /* @sic R5-150702: generic check of origin sic@ */
+    /* @sic R5-162931: p_CheckConnections replaced by p_CheckContent sic@ */
+    var SDP_Message v_SDP_Message;
+    var template (omit) SDP_Message v_PrevSdpMessage;
+    var integer v_PrevSessionVersion;
+    var template SDP_Origin v_ExpectedOrigin := *;
+    
+    if (not ispresent(p_SdpBody)) {                             /* there is no SDP message */
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Missing sdpMessageBody");
+    }
+    else {                                                      /* => MessageBody is present and contains an SDP message */
+      v_SDP_Message := f_IMS_SDP_Message_Decode(valueof(p_SdpBody));
+      if (not match(v_SDP_Message, p_SDP_Message_Template)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "received sdpMessageBody does not match");
+      }
+
+      /* @sic R5-150702: sic@ */
+      v_PrevSdpMessage := f_IMS_PTC_ImsInfo_DialogGetPrevSdpMessageRX();
+      select (p_SdpCheck) {          /* @sic R5-150702 sic@ */
+        case (asPreviousSDP) {       /* current SDP shall be identically as previous SDP (i.e. even the session version has to be the same) */
+          if (not match(v_SDP_Message, v_PrevSdpMessage)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "received SDP message is different than previous one");
+          }
+        }
+        case (newSDP) {
+          if (p_CheckContent) {      /* @sic R5-162931: p_CheckConnections replaced by p_CheckContent sic@ */
+            f_IMS_SDP_CheckConnections(v_SDP_Message);
+            if (ispresent(v_PrevSdpMessage)) {
+              if (not match(v_SDP_Message, v_PrevSdpMessage)) { /* @sic R5s150497: SDP may be the same as previous SDP sic@
+                                                                   NOTE: whether or not it shall be allowed to have the same SDP depends on the given template */
+                v_PrevSessionVersion := str2int(valueof(v_PrevSdpMessage.origin.session_version));
+                v_ExpectedOrigin := v_PrevSdpMessage.origin;
+                v_ExpectedOrigin.session_version := int2str(v_PrevSessionVersion + 1);
+                
+                if (not match(v_SDP_Message.origin, v_ExpectedOrigin)) { /* @sic R5-143201, R5-151684 sic@ */
+                  f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "session version not incremented or o-line changed");
+                }
+              }
+            }
+          }
+          f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageRX(v_SDP_Message);
+        }
+        case (sameOriginAsPreviousSDP) {   /* @sic R5-192318 sic@ */
+          if (not match(v_SDP_Message.origin, v_PrevSdpMessage.origin)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "received SDP message has different origin than previous one");
+          }
+        }
+      }
+    }
+    return v_SDP_Message;
+  }
+
+}

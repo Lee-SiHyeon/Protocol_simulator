@@ -1,0 +1,145 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module EUTRA_IRATFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_SecurityFunctions all;
+  import from EUTRA_NR_SecurityFunctions all;
+  import from EUTRA_SecurityFunctions all;
+  import from NAS_AuthenticationCommon all;
+  import from NasEmu_CtrlFunctions all;
+  import from Parameters all;
+
+  /*
+   * @desc      To send authentication parameters to another PTC
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_AuthParams
+   * @param     p_PTMSISig
+   * @param     p_AuthParamsCS      (default value: omit)
+   * @param     p_UEACap            (default value: omit)
+   * @param     p_UIACap            (default value: omit)
+   * @param     p_StartPS           (default value: omit)
+   * @param     p_StartCS           (default value: omit)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_SendAuthCoOrdParameters (IRAT_CO_ORD_PORT p_Port,
+                                            EUTRA_CellId_Type p_CellId,
+                                            Common_AuthenticationParams_Type p_AuthParams,
+                                            B16_Type p_PTMSISig,
+                                            template (omit) Common_AuthenticationParams_Type p_AuthParamsCS := omit, // used in SRVCC tests to pass CS auth params
+                                            template (omit) CoOrd_UEACap_Type p_UEACap := omit,  // @sic R5s130506 sic@
+                                            template (omit) CoOrd_UIACap_Type p_UIACap := omit,  // @sic R5s130680 sic@
+                                            template (omit) B20_Type p_StartPS := omit, // used to pass the start value in HO tests (got from UE Capability)
+                                            template (omit) B20_Type p_StartCS := omit) runs on EUTRA_PTC
+  {
+    var GutiParameters_Type v_Guti_Params := f_EUTRA_CellInfo_GetGuti(p_CellId);
+    
+    p_Port.send (cms_IRAT_AuthInfo(p_AuthParams,
+                                   p_AuthParamsCS,
+                                   cs_IRAT_GUTIStuff (v_Guti_Params.MME_GroupId, v_Guti_Params.MME_Code, v_Guti_Params.M_TMSI, p_PTMSISig),
+                                   -,
+                                   p_UEACap,
+                                   p_UIACap,
+                                   p_StartPS,
+                                   p_StartCS)); //@sic R5-120764 sic@
+  }
+
+  /*
+   * @desc      Function to send the authentication parameters to UTRAN or GERAN in case they are updated in the test case.
+   * @param     p_CellId
+   * @param     p_Port
+   * @param     p_ForIdleMode       (default value: true)
+   * @param     p_SRVCCKeys         (default value: false)
+   * @param     p_StartPS           (default value: omit)
+   * @param     p_StartCS           (default value: omit)
+   * @param     p_CS_PS_ComHO       (default value: false)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_SendAuthParameters(EUTRA_CellId_Type p_CellId,
+                                      IRAT_CO_ORD_PORT p_Port,
+                                      boolean p_ForIdleMode := true, // set to false if used in handover test cases
+                                      boolean p_SRVCCKeys  := false, // set to true if used in SRVCC test cases
+                                      template (omit) B20_Type p_StartPS := omit, // used to pass the start value in HO tests (got from UE Capability)
+                                      template (omit) B20_Type p_StartCS := omit, // used to pass the start value in SRVCC tests (got from UE Capability)
+                                      boolean p_CS_PS_ComHO := false) runs on EUTRA_PTC //set to true if used in SRVCC test cases is PS domain is also handed over
+  {
+    var EUTRA_SecurityParams_Type v_SecurityParams;
+    var Common_AuthenticationParams_Type v_CommonAuthParams;
+    var template (omit) Common_AuthenticationParams_Type v_CommonAuthParamsCS := omit;
+    var B256_Type v_CkIk;
+    var B256_Type v_CkIkSRVCC;
+    var B128_Type v_CK;
+    var B128_Type v_CKSRVCC;
+    var B128_Type v_IK;
+    var B128_Type v_IKSRVCC;
+    var O4_Type v_DL_NAS_Count := f_EUTRA_NB_SS_NAS_CountGetDLNext(NASCTRL); // @sic R5s110382 sic@
+    var O4_Type v_UL_NAS_Count := f_EUTRA_NB_SS_NAS_CountGetULNext(NASCTRL); // @sic R5s110382 sic@
+    var template (omit) CoOrd_UEACap_Type v_UEACap := omit;
+    var template (omit) CoOrd_UIACap_Type v_UIACap := omit;
+    var B16_Type v_PTMSISig;
+    
+    //Get latest security params...
+    v_SecurityParams := f_EUTRA_Security_Get();
+    //...and use them to update CK and IK
+    
+    if (p_ForIdleMode or (p_SRVCCKeys and (not p_CS_PS_ComHO))) {//@sic R5s130561 R5s140096 sic@
+      v_CkIk := f_EUTRA_Authentication_S1B(v_SecurityParams.KDF, v_SecurityParams.KASME, v_UL_NAS_Count); //@sic R5s160711 parameter change sic@
+    } else {
+      v_CkIk := f_EUTRA_Authentication_S16(v_SecurityParams.KDF, v_SecurityParams.KASME, v_DL_NAS_Count); //@sic R5s160711 parameter change sic@
+    }
+    
+    v_CK := substr(v_CkIk, 0, 128);
+    v_IK := substr(v_CkIk, 128, 128);
+    
+    v_CommonAuthParams := v_SecurityParams.AuthParams;
+    v_CommonAuthParams.CK := v_CK;
+    v_CommonAuthParams.IK := v_IK;
+    
+    v_PTMSISig := substr (f_EUTRA_Authentication_S17 (v_SecurityParams.KDF, v_SecurityParams.KASME, v_UL_NAS_Count), 240, 16); // @sic R5-140761 R5s160711 parameter change sic@
+    
+    // @sic R5s130506 sic@
+    if (ispresent(v_SecurityParams.NAS_SecurityCap.ueaCap)) {
+      v_UEACap.Uea0 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 0, 1);
+      v_UEACap.Uea1 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 1, 1);
+      v_UEACap.Uea2 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 2, 1);
+    }
+    // @sic R5s130680 sic@
+    if (ispresent(v_SecurityParams.NAS_SecurityCap.uiaCap)) {
+      v_UIACap.Uia0 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 0, 1);
+      v_UIACap.Uia1 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 1, 1);
+      v_UIACap.Uia2 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 2, 1);
+    }
+    //@sic R5-120637 enhancements for SRVCC sic@
+    if (p_SRVCCKeys) {
+      v_CkIkSRVCC := f_EUTRA_Authentication_S1A(v_SecurityParams.KDF, v_SecurityParams.KASME, v_DL_NAS_Count); //@sic R5s130561 R5s160711 parameter change sic@
+      v_CKSRVCC := substr(v_CkIkSRVCC, 0, 128);
+      v_IKSRVCC := substr(v_CkIkSRVCC, 128, 128);
+      v_CommonAuthParamsCS := cs_CommonAuthParams_Init(px_eAuthRAND);
+      v_CommonAuthParamsCS.CK := v_CKSRVCC;
+      v_CommonAuthParamsCS.IK := v_IKSRVCC;
+      v_CommonAuthParamsCS.KeySeq := v_SecurityParams.AuthParams.KeySeq;
+      //derivation of KcGSM from CKsrvcc and IKsrvcc c3 = ((CK1 XOR CK2) XOR (IK1 XOR IK2)) @sic R5s140730 sic@
+      v_CommonAuthParamsCS.KcGSM := (substr( v_CKSRVCC, 0, 64) xor4b substr( v_CKSRVCC, 64, 64)) xor4b (substr( v_IKSRVCC, 0, 64) xor4b substr( v_IKSRVCC, 64, 64));
+      v_CommonAuthParamsCS.Kc128 := substr (fx_KeyDerivationFunction ( tsc_KDF_HMAC_SHA_256, (valueof(v_CommonAuthParamsCS.CK) & valueof(v_CommonAuthParamsCS.IK)), '32'O ), 0, 128);  // @sic R5s150121 sic@
+    }
+    
+    //Now send these over to the other RAT, but DON'T store them
+    f_EUTRA_SendAuthCoOrdParameters (p_Port, p_CellId, v_CommonAuthParams, v_PTMSISig, v_CommonAuthParamsCS, v_UEACap, v_UIACap, p_StartPS, p_StartCS); // @sic R5-120764, R5s130506, R5s130680, R5-140761 sic@
+  }
+
+}

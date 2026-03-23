@@ -1,0 +1,181 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-04 09:21:59 +0100 (Wed, 04 Mar 2026) $
+// $Rev: 43179 $
+/******************************************************************************/
+
+module NR5GC_CommonFunctions_CA {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NR5GC_CommonFunctions all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_CommonFunctions_CA all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+
+  /*
+   * @desc     Function to add 1 SCell
+   * @param     p_PCell
+   * @param     p_SCell
+   * @param     p_SCellIndex        (default value: tsc_NR_SCellIndex_1)
+   * @param     p_UL_CA             (default value: false)
+   * @param     p_SCellDeactivationTimer (default value: omit)
+   * @param     p_UL_CA_ConfigPUCCH (default value: true)
+   * @param     p_SCellState        (default value: omit)
+   * @param     p_RadioBearerConfig (default value: omit)
+   * @param     p_RLC_Bearer_Config (default value: omit)
+   * @param     p_SCGConfig         (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_AddMod_1SCell(NR_CellId_Type  p_PCell,
+                                 NR_CellId_Type  p_SCell,
+                                 SCellIndex p_SCellIndex := tsc_NR_SCellIndex_1,
+                                 boolean p_UL_CA := false,
+                                 template (omit) ServingCellConfig.sCellDeactivationTimer p_SCellDeactivationTimer := omit,
+                                 boolean p_UL_CA_ConfigPUCCH := true,
+                                 template (omit) SCellConfig.sCellState_r16 p_SCellState := omit,
+                                 template (omit) RadioBearerConfig p_RadioBearerConfig := omit,
+                                 template (omit) NR_RLC_BearerToAddModList_Type p_RLC_Bearer_Config := omit,
+                                 template (omit) CellGroupConfig p_SCGConfig := omit
+                                 ) runs on NR_BASE_PTC
+  { //@sic R5-214764 : added p_UL_CA_ConfigPUCCH R5-227562: added p_SCellState sic@
+    var template (value) CellGroupConfig v_SCGConfig;
+    var SubFrameTiming_Type v_TimingInfo;
+    var SubFrameTiming_Type v_TimingInfo2;
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var ServCellIndex v_PUCCH_Cell := tsc_NR_PCellIndex;
+
+
+    //By default SCell is not PUCCH-Cell @sic R5-237429 sic@
+    if (p_UL_CA and p_UL_CA_ConfigPUCCH) {  // SCell is PUCCH-Cell
+        v_PUCCH_Cell := p_SCellIndex;
+    }
+    //@sic R5s200575 sic@
+    if (isvalue(p_SCGConfig)) {
+      v_SCGConfig := p_SCGConfig; // NOTE: compiler warning cannot be avoided here
+    } else {
+      v_SCGConfig := f_NR_GetSCGConfig_SCellAdd(p_SCell, p_SCellIndex, p_UL_CA, p_SCellDeactivationTimer, p_RLC_Bearer_Config, p_UL_CA_ConfigPUCCH, p_SCellState);
+    }
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_SCGConfig)));   //@sic R5-201221 sic@
+
+    v_TimingInfo := f_NR_GetNextSendOccasion_DL(p_PCell);
+    v_TimingInfo2 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo, 5); // 5 ms later
+
+    f_NR_ConfigPCell_AddRelSCells (p_PCell, {p_SCell}, tsc_PCellIndex_0, cs_TimingInfo_NR(v_TimingInfo2), f_NR_CellInfo_GetRNTI(p_PCell));
+    f_NR_ConfigSCell(p_SCell,v_SCGConfig, cs_TimingInfo_NR(v_TimingInfo2), v_PUCCH_Cell);
+
+    // Transmit RRCReconfiguration with condition SCell_add to UE
+    //@sic R5-213516: added MacBearerRpoiting - CA already configured in SS sic@
+    f_NR_SendRRCReconfiguration(p_PCell, tsc_NR_RbId_SRB1, p_RadioBearerConfig, v_V1530Ext, -, -, cs_TimingInfo_NR(v_TimingInfo), -, -, crs_MacBearerRouting(p_PCell));
+
+    if (p_UL_CA and p_UL_CA_ConfigPUCCH) {  //@sic R5s220944 sic@
+         f_NR_ULGrantConfiguration_Start(p_SCell);
+    }
+  }
+
+  /*
+   * @desc     Function to release SCells
+   * @param     p_PCell
+   * @param     p_SCellIdRel
+   * @param     p_SCellRelIndex     (default value: tsc_NR_SCellIndex_1)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_Rel_1SCell(NR_CellId_Type     p_PCell,
+                              NR_CellId_Type     p_SCellIdRel,
+                              SCellIndex p_SCellRelIndex := tsc_NR_SCellIndex_1
+                              ) runs on NR_BASE_PTC
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var SubFrameTiming_Type v_TimingInfo;
+    var SubFrameTiming_Type v_TimingInfo2;
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var CellGroupId v_CellGroupId := f_NR_CellInfo_Get_CellGroupId(p_PCell); //@sic R5s201387 sic@
+
+    v_SCGConfig := cs_38508_CellGroupConfig(v_CellGroupId,
+                                            omit,  //p_RLC_Bearer_Config
+                                            omit,  //RLC_BearerToRelease
+                                            omit,  //MAC_CellGroupConfig
+                                            omit,  //PhysicalCellGroupConfig
+                                            omit,  //SpCellConfig
+                                            omit,  //p_SCellConfig
+                                            {p_SCellRelIndex} );
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_SCGConfig)));
+
+    v_TimingInfo := f_NR_GetNextSendOccasion_DL(p_PCell);
+    v_TimingInfo2 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo, 5); // 5 ms later
+
+    //Reconfigure SCell with an emptySCell list
+    f_NR_Rel_SCell_Common( p_PCell,  p_SCellIdRel, tsc_PCellIndex_0, cs_TimingInfo_NR(v_TimingInfo2));
+    // Transmit RRCReconfiguration with condition SCell_add to UE
+    f_NR_SendRRCReconfiguration(p_PCell, tsc_NR_RbId_SRB1, -, v_V1530Ext, -, -,cs_TimingInfo_NR(v_TimingInfo));
+  }
+
+  /*
+   * @desc      Loop back one IP packet to verify the data path for CA NR5GC test cases
+   *            As per 38.508-1 Table 4.9.1-1A: Test procedure sequence for Data path check for CA tests
+   * NOTE       The function is currently using default DRB/PDU session
+   * @param     p_PCell
+   * @param     p_SCell
+   * @param     p_StepNo            (default value: "")
+   * @param     p_ActivateSCell     (default value: true)
+   * @param     p_SCellIndex        (default value: tsc_NR_SCellIndex_1)
+   * @param     p_UL_CA             (default value: false)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_CheckDataPath_CA(NR_CellId_Type p_PCell,
+                                    NR_CellId_Type p_SCell,
+                                    charstring p_StepNo := "",
+                                    boolean p_ActivateSCell := true,
+                                    SCellIndex p_SCellIndex := tsc_NR_SCellIndex_1,
+                                    boolean p_UL_CA := false
+                                   ) runs on NR5GC_PTC
+  {
+    var integer v_DRBId;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var template (value) MacBearerRouting_Type v_MacBearRoutingDL := crs_MacBearerRouting(p_SCell);       //@sic R5-213616 sic@
+    var template (value) MacBearerRouting_Type v_MacBearRoutingUL := crs_MacBearerRouting(p_PCell);       //@sic R5-213616 sic@
+    var SubFrameTiming_Type v_TimingInfo := f_NR_GetNextSendOccasion_DL(p_PCell);                         //@sic R5s240675 sic@
+
+    // Step 1 : The SS transmits an Activation MAC control element to activate SCell.
+    if (p_ActivateSCell) {
+        f_SS_CellConfig_ActivateSCell_CA(p_PCell, p_SCellIndex, cs_TimingInfo_NR(v_TimingInfo));
+    }
+    if (p_UL_CA)  { v_MacBearRoutingUL := crs_MacBearerRouting(p_SCell); }
+    //Add 20ms before sending data (longest k1=7slots=7ms in SCS15kHz allowing a retransmission )
+    v_TimingInfo := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo, 20);       //@sic R5s240675 sic@
+    // Steps 2
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    f_NR5GC_CheckDataPath(p_PCell,  // for DL
+                          f_NR5GC_GetPdnIndex(v_PDUSessionInfoList[0]),
+                          dedicatedBearer,
+                          v_DRBId,
+                          p_StepNo,
+                          -,
+                          -,
+                          -,
+                          v_MacBearRoutingDL,
+                          v_MacBearRoutingUL,
+                          cs_TimingInfo_NR(v_TimingInfo)
+                          ); // for UL
+   }
+
+}

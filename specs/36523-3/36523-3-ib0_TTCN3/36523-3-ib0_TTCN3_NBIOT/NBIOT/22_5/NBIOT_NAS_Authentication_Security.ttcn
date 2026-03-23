@@ -1,0 +1,751 @@
+// ***************************************************************************
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// * $Date: 2024-05-31 10:46:21 +0200 (Fri, 31 May 2024) $
+// * $Rev: 38588 $
+// ***************************************************************************
+
+module NBIOT_NAS_Authentication_Security {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MessageTemplates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from EUTRA_NB_SecurityFunctions all;
+  import from NAS_AuthenticationCommon all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Paging all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+  import from NBIOT_Timing all;
+  import from NasEmu_CtrlFunctions all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Given the security cababilities of an UE (e.g. from an ATTACH REQUEST/UE network capabilities IE)
+   *            this function creates a new value for the security capabilities which is invalid for the current UE.
+   *            To achieve this, the original, mandatory, capabilities are inverted
+   * @param     p_SecurityCaps
+   * @return    UE_SecurityCapability
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_InvalidateUeSecurityCap(UE_SecurityCapability p_SecurityCaps)
+    return UE_SecurityCapability
+  {
+    var UE_SecurityCapability v_InvalidSecurityCaps := p_SecurityCaps;
+
+    v_InvalidSecurityCaps.eeaCap := not4b p_SecurityCaps.eeaCap;
+    v_InvalidSecurityCaps.eiaCap := not4b p_SecurityCaps.eiaCap;
+
+    return v_InvalidSecurityCaps;
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.1
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_1_NBIOT() runs on NBIOT_PTC
+  { /* Attach procedure for EPS services. Authentication not accepted by the network, GUTI used,
+       authentication reject and re-authentication */
+
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1,-,-,-,{nbiot_Cell11});
+    
+    f_NBIOT_CellInfo_SetIntraFreqReselection(nbiot_Cell1, allowed);
+    f_NBIOT_CellInfo_SetIntraFreqReselection(nbiot_Cell11, allowed);//@sic R5-173746 sic@
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell11, CONTROL_PLANE);//@sic R5-173746 sic@
+    
+    // Preamble: The UE is in NB-IoT UE Attach, Connected mode (State 2-NB) on Ncell 1
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE); // @sic R5s170347 sic@
+    f_NBIOT_SetCellPower(nbiot_Cell11, tsc_NonSuitableNBIOTCellRS_EPRE); // @sic R5-242486 sic@
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    fl_TC_22_5_1_Body();
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble(nbiot_Cell11, CONTROL_PLANE, N1_IDLE); // @sic R5s170347, R5-173746 sic@
+  }
+
+  /*
+   * @desc      test body of TC_22_5_1
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_5_1_Body() runs on NBIOT_PTC
+  {
+    var float v_NoReactionTime := 30.0;
+    var GutiParameters_Type v_GutiParams := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId(v_GutiParams.PLMN_Identity);
+    var NBIOT_SecurityParams_Type v_SecurityParams := f_NBIOT_Security_Get();
+    var B32_128_Type v_ReceivedRES;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var NBIOT_SecurityParams_Type v_SecurityParams_MACerror;
+    var float v_T3418Val := f_NBIOT_SetTimerToleranceMax(nasTimer, 260.0 ); // @sic R5s180465 sic@
+    var template (value) NB_CellPowerList_Type v_CellPowerList;
+    
+    timer t_Wait;
+    
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams, v_PLMN); // @sic R5s240263 sic@
+    //@siclog "Step 1" siclog@
+    //The SS transmits an AUTHENTICATION REQUEST message.
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    //@siclog "Step 2" siclog@
+    //The UE transmits an AUTHENTICATION RESPONSE message.
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(?, // @sic R5-171133 sic@
+                                                            cr_AUTHENTICATION_RESPONSE)));
+    //@siclog "Step 3" siclog@
+    //The SS transmits an AUTHENTICATION REJECT message.
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,  // @sic R5-171133 sic@
+                                                      cs_508_AUTHENTICATION_REJECT)));
+    //@siclog "Step 4" siclog@
+    //SS releases the RRC connection
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 5" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message in the next 30 seconds?
+    t_Wait.start(30.0);
+    alt {
+      // receive RRC Connection Request on SRB0 (CCCH):
+      [] SRB.receive(car_NB_SRB0_RrcPdu_IND(nbiot_Cell1, cr_RRCConnectionRequest_NB(cr_EstablishmentCause_NB_Any)))
+        {
+          t_Wait.stop;
+          f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 5: SS received an unexpected RRCConnectionRequest-NB message");
+        }
+      [] t_Wait.timeout
+        {
+          f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+        }
+    }
+    
+    //@siclog "Step 6-7" siclog@
+    //SS sends a Paging message to the UE on the appropriate paging block, and including the UE identity in one entry of the IE pagingRecordLists.
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message in the next 30 seconds?
+    f_NBIOT_UE_Page_NoReaction(nbiot_Cell1,
+                               cs_NB_Paging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_GutiParams.MME_Code, v_GutiParams.M_TMSI)),
+                               v_NoReactionTime);
+    
+    //@siclog "Step 8" siclog@
+    //If possible (see ICS) switch off is performed or the USIM is removed.
+    //Otherwise the power is removed.
+    f_UT_SwitchOffUE(UT, true);
+    
+    //@siclog "Step 9" siclog@
+    //The UE is brought back to operation or the USIM is inserted.
+    f_UT_SwitchOnUE(UT, true);
+    
+    //@siclog "Step 10" siclog@
+    //The Generic procedure 'NB-IoT UE Attach, Connected mode (State 2-NB)' specified in TS 36.508 [18], clause 8.1.5.2 takes place.
+    f_NBIOT_InitialRegistration(nbiot_Cell1, CONTROL_PLANE, PREAMBLE); // @sic R5s170502, R5s170706 sic@
+    
+    v_SecurityParams := f_NBIOT_Security_Get();
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams,
+                                                       v_PLMN,
+                                                       f_AuthenticationInit(v_SecurityParams.AuthParams, sqnFailure));
+    //@siclog "Step 11" siclog@
+    //SS transmits AUTHENTICATION REQUEST message with the AMF field in the IE "Authentication parameter AUTN" set to "AMFRESYNCH" value to trigger SQN re-synchronisation procedure in test USIM
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    
+    //@siclog "Step 12" siclog@
+    //Check: Does the UE respond with an AUTHENTICATION FAILURE message, with EMM cause "synch failure"?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_AUTHENTICATION_FAIL_synch)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+    
+    //@siclog "Step 13" siclog@
+    //SS waits for 5 sec.
+    f_Delay (5.0);
+    
+    //@siclog "Step 14" siclog@
+    //The SS transmits an AUTHENTICATION REQUEST message.
+    v_SecurityParams.AuthParams.RandValue  := not4b(px_eAuthRAND);
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams, v_PLMN);
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    //@siclog "Step 15" siclog@
+    //Check: Does the UE respond with AUTHENTICATION RESPONSE message with RES that is equal to the XRES calculated in the SS?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_AUTHENTICATION_RESPONSE))) -> value v_ReceivedAsp;
+    
+    v_ReceivedRES := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.aUTHENTICATION_RESPONSE.authenticationResponseParameter.res;
+    if (v_ReceivedRES == substr(v_SecurityParams.AuthParams.XRES, 0, lengthof(v_ReceivedRES))) {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+    } else {
+      f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 15: UE respond with AUTHENTICATION RESPONSE message with unexpected RES");
+    }
+    
+    //@siclog "Step 16" siclog@
+    //SS waits for 5 sec.
+    f_Delay (5.0);
+    
+    //@siclog "Step 17" siclog@
+    //SS transmits an AUTHENTICATION REQUEST message with "separation bit" in the AMF field is 0.
+    v_SecurityParams := f_NBIOT_Security_Get();
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams,
+                                                       v_PLMN,
+                                                       f_AuthenticationInit(v_SecurityParams.AuthParams, sepBit0)); // separation bit set to 0
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    //@siclog "Step 18" siclog@
+    //Check: Does the UE respond with an AUTHENTICATION FAILURE message, with reject cause "non-EPS authentication unacceptable"?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_AUTHENTICATION_FAIL_nonEPS_AuthUnacc)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 18");
+    
+    //@siclog "Step 19" siclog@
+    //The SS transmits an IDENTITY REQUEST message.
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_IDENTITY_REQUEST(tsc_IdType_IMSI))));
+    //@siclog "Step 20" siclog@
+    //The UE transmit an IDENTITY RESPONSE message.
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_IDENTITY_RESPONSE(f_Imsi2MobileIdentity(px_IMSI_Def)))));
+    
+    
+    //@siclog "Step 21" siclog@
+    //The SS transmits an AUTHENTICATION REQUEST message.
+    v_SecurityParams.AuthParams.RandValue  := not4b(px_eAuthRAND);
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams, v_PLMN);
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    
+    //@siclog "Step 22" siclog@
+    //Check: Does the UE respond with AUTHENTICATION RESPONSE message with RES that is equal to the XRES calculated in the SS?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_AUTHENTICATION_RESPONSE))) -> value v_ReceivedAsp;
+    v_ReceivedRES := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.aUTHENTICATION_RESPONSE.authenticationResponseParameter.res;
+    if (v_ReceivedRES == substr(v_SecurityParams.AuthParams.XRES, 0, lengthof(v_ReceivedRES)))  {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+    }
+    else {
+      f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 22: UE respond with AUTHENTICATION RESPONSE message with unexpected RES");
+    }
+    
+    //@siclog "Step 23" siclog@
+    //SS waits for 5 sec.
+    f_Delay (5.0);
+    
+    //@siclog "Step 24" siclog@
+    //SS transmits an AUTHENTICATION REQUEST message which contains an invalid MAC code
+    v_SecurityParams := f_NBIOT_Security_Get(); // @sic R5s170084 sic@
+    v_SecurityParams_MACerror := f_NBIOT_Authentication_InitNAS(v_SecurityParams,
+                                                                v_PLMN,
+                                                                f_AuthenticationInit(v_SecurityParams.AuthParams, macError));
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams_MACerror.KSIasme,
+                                                                                v_SecurityParams_MACerror.AuthParams.RandValue,
+                                                                                v_SecurityParams_MACerror.AuthParams.AUTN))));
+    //@siclog "Step 25" siclog@
+    //UE responds with an AUTHENTICATION FAILURE message, with reject cause "MAC failure".
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5s170502 sic@
+                                                            cr_AUTHENTICATION_FAIL_mac)));
+    //@siclog "Step 26" siclog@
+    //SS waits for the expiration of T3418 (20s).
+    //NOTE: After T3418 expires the UE shall consider the cell as "barred".
+    f_Delay(v_T3418Val);
+    
+    //@siclog "Step 27-28" siclog@
+    //SS sends a Paging message to the UE on the appropriate paging block, and including the UE identity in one entry of the IE pagingRecordLists.
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message in the next 30 seconds?
+    f_NBIOT_UE_Page_NoReaction(nbiot_Cell1,
+                               cs_NB_Paging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_GutiParams.MME_Code, v_GutiParams.M_TMSI)),
+                               v_NoReactionTime);
+    //@siclog "Step 29" siclog@
+    //The SS configures:
+    //- Ncell 11 as the "Serving cell".
+    //- Ncell 1 as a "Suitable cell".
+    v_CellPowerList:={
+      cs_NB_CellPower(nbiot_Cell11, tsc_ServingCellRS_EPRE),//@sic R5-173746 sic@
+      cs_NB_CellPower(nbiot_Cell1, tsc_Suitable_NeighbourIntraFreq_CellRS_EPRE)
+    };
+    f_NBIOT_SetCellPowerList(v_CellPowerList);
+    
+    //The Generic procedure 'NB-IoT Registered, Idle Mode (State 3-NB)' specified in TS 36.508 [18], clause 8.1.5.3 takes place on Ncell 2.
+    //@siclog "Step 30" siclog@
+    f_NBIOT_TrackingAreaUpdate(nbiot_Cell11, CONTROL_PLANE); //@sic R5-173746 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.2
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_2_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT / NAS Security / Handling of null integrity protection and null ciphering algorithms
+       NAS count reset to zero / Security mode command with not matching replayed security capabilities / Provision of IMEISV and IMEI */
+    
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1);
+    
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    // Preamble: The UE is in State 1-NB "Switched OFF"
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    fl_TC_22_5_2_Body();
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble (nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_22_5_2
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_5_2_Body() runs on NBIOT_PTC
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var integer i;
+    var GutiParameters_Type v_GutiParams := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId(v_GutiParams.PLMN_Identity);
+    var NBIOT_SecurityParams_Type v_SecurityParams;
+    var NasCount_Type v_NasCountUL;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var template (omit) UE_AdditionalSecurityCapability v_AddSecurityCap := omit;
+    
+    timer t_Wait := f_NBIOT_SetTimerToleranceMin(nonProtocolTimer, 30.0);
+    
+    //@siclog "Step 1-6" siclog@
+    //Steps 1-6 from the Generic procedure 'NB-IoT UE Attach, Connected mode (State 2-NB)' as described in TS 36.508 [18], clause 8.1.5.2 take place.
+    f_UT_SwitchOnUE(UT, false);
+    v_NasInd := f_NBIOT_InitialRegistration_Step2_4 (nbiot_Cell1, CONTROL_PLANE, NORMAL);
+    v_SecurityParams := f_NBIOT_Security_Get();
+    v_SecurityParams.NAS_SecurityCap := f_EUTRA_NB_FillNAS_SecurityCapability(v_NasInd.Pdu.Msg.aTTACH_REQUEST);
+    if (ispresent(v_NasInd.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap)) {// @sic R5-182074 sic@
+      v_AddSecurityCap := v_NasInd.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap;
+    }
+    f_NBIOT_Security_Set(v_SecurityParams);
+    
+    // Step 5-6: Authentication
+    v_SecurityParams := f_NBIOT_NAS_Authentication(nbiot_Cell1,
+                                                   tsc_SRB1bis,
+                                                   v_SecurityParams,
+                                                   tsc_SHT_NoSecurityProtection, // @sic R5-171417 sic@
+                                                   (tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected), // @sic R5-171417 sic@
+                                                   v_PLMN);                        // AUTHENTICATION REQUEST & RESPONSE
+    
+    //@siclog "Step 7" siclog@
+    //The SS transmits a NAS SECURITY MODE COMMAND message to activate NAS security requesting "null integrity protection algorithm" EIA0.
+    v_SecurityParams.NAS_Ciphering.Algorithm := '000'B; // EEA0
+    v_SecurityParams.NAS_Integrity.Algorithm := '000'B; // EIA0
+    f_NBIOT_Security_Set(v_SecurityParams); // store the new setting, do not configure security at the SS side as UE will not accept it
+    
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_NewSecurityContext, //see 24.301 cl. 5.4.3.2
+                                                      cs_508_SECURITY_MODE_COMMAND(v_SecurityParams.NAS_Ciphering.Algorithm,
+                                                                                   v_SecurityParams.NAS_Integrity.Algorithm,
+                                                                                   v_SecurityParams.KSIasme,
+                                                                                   v_SecurityParams.NAS_SecurityCap,
+                                                                                   omit))));  // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    //@siclog "Step 8" siclog@
+    //Check: Does the UE transmit a NAS SECURITY MODE REJECT message?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication((tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected), // @sic R5-171417 sic@
+                                                            cr_SECURITY_MODE_REJECT((tsc_UeSecurityCapsMismatch, tsc_SecurityModeRejUnspecified)))));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+    
+    //@siclog "Step 9" siclog@
+    //The SS Transmits an IDENTITY REQUEST message for IMEI.
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_NoSecurityProtection,
+                                                      cs_IDENTITY_REQUEST(tsc_IdType_IMEI))));
+    //@siclog "Step 10" siclog@
+    t_Wait.start;
+    alt {
+      //Check: Does the UE transmit IDENTITY RESPONSE message in the next 30 sec?
+      [] SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                               cr_NAS_Indication(tsc_SHT_NoSecurityProtection,
+                                                                 cr_IDENTITY_RESPONSE(f_Imei2MobileIdentity(px_IMEI_Def))))) // @sic R5s170172 sic@
+        {
+          t_Wait.stop;
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 10: SS received an unexpected IDENTITY RESPONSE message");
+        }
+      [] t_Wait.timeout
+        {
+          f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+        }
+    }
+    
+    //@siclog "Step 11" siclog@
+    //The SS transmits a NAS SECURITY MODE COMMAND message to activate NAS security requesting "null ciphering algorithm" EEA0
+    //and a not "null integrity protection algorithm" (i.e. different to EIA0).
+    v_SecurityParams.NAS_Integrity.Algorithm := px_NAS_IntegrityProtAlgorithm;
+    f_NBIOT_Security_Set (v_SecurityParams); // store the new setting, configure security at the SS side as UE will accept it
+    f_EUTRA_NB_SS_NAS_ConfigureSecurity(NASCTRL, v_SecurityParams.NAS_Integrity, v_SecurityParams.NAS_Ciphering); // @sic R5s170289, R5-174463 sic@
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_NewSecurityContext, //see 24.301 cl. 5.4.3.2
+                                                      cs_508_SECURITY_MODE_COMMAND(v_SecurityParams.NAS_Ciphering.Algorithm,
+                                                                                   v_SecurityParams.NAS_Integrity.Algorithm,
+                                                                                   v_SecurityParams.KSIasme,
+                                                                                   v_SecurityParams.NAS_SecurityCap,
+                                                                                   v_AddSecurityCap))));// @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    
+    //@siclog "Step 12" siclog@
+    //Check: Does the UE transmit a NAS SECURITY MODE COMPLETE message and establishes the initial security configuration?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered_NewSecurityContext, cr_508_SECURITY_MODE_COMPLETE)))
+      -> value v_ReceivedAsp;
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+    v_NasCountUL := v_ReceivedAsp.Signalling.Nas[0].SecurityProtection.NasCount;
+    
+    //@siclog "Step 13a1-18b1" siclog@
+    //Steps 9a1-14b1 from the Generic procedure 'NB-IoT UE Attach, Connected mode (State 2-NB)' as described in TS 36.508 [18], clause 8.1.5.2 take place.
+    f_NBIOT_InitialRegistration_Step9_12(nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED, v_NasInd, v_NasCountUL);
+    
+    f_NBIOT_InitialRegistration_Step13(nbiot_Cell1,
+                                       CONTROL_PLANE,
+                                       v_NasInd); // @sic R5s170597 sic@
+    
+    f_NBIOT_InitialRegistration_Step14(nbiot_Cell1, CONTROL_PLANE, tsc_EpsDefaultBearerId); // @sic R5s170289, R5s170597 sic@
+    
+    //@siclog "Step 19" siclog@
+    //The SS transmits a NAS SECURITY MODE COMMAND message to change the NAS security algorithms for the current EPS security context already in use. It is integrity protected.
+    //The included replayed security capabilities of the UE does not match those provided by the UE.
+    v_SecurityParams.NAS_Ciphering.Algorithm := px_NAS_CipheringAlgorithm; // @sic R5s180448 sic@
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_NewSecurityContext, // @sic R5-171417 sic@
+                                                      cs_508_SECURITY_MODE_COMMAND(v_SecurityParams.NAS_Ciphering.Algorithm,
+                                                                                   v_SecurityParams.NAS_Integrity.Algorithm,
+                                                                                   v_SecurityParams.KSIasme,
+                                                                                   fl_InvalidateUeSecurityCap(v_SecurityParams.NAS_SecurityCap),
+                                                                                   omit)))); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    //@siclog "Step 20" siclog@
+    //Check: Does the UE transmit a NAS SECURITY MODE REJECT message?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, // @sic R5-171417 sic@
+                                                            cr_SECURITY_MODE_REJECT(tsc_UeSecurityCapsMismatch))));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 20");
+    
+    //@siclog "Step 21" siclog@
+    //The SS Transmits an IDENTITY REQUEST message for IMEI using the existing security context before the message in step 19 was sent.
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_IDENTITY_REQUEST(tsc_IdType_IMEI))));
+
+    //@siclog "Step 22" siclog@
+    //Check: Does the UE transmit IDENTITY RESPONSE message providing its IMEI and using the existing security context before the message in step 19 was sent?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cr_IDENTITY_RESPONSE(f_Imei2MobileIdentity(px_IMEI_Def))))); // @sic R5s170172 sic@
+    
+    //@siclog "Step 23" siclog@
+    //The SS transmits an AUTHENTICATION REQUEST message to initiate the EPS authentication and AKA procedure for new key set generation.
+    v_SecurityParams := f_NBIOT_Authentication_InitNAS(v_SecurityParams, v_PLMN);
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_AUTHENTICATION_REQUEST(v_SecurityParams.KSIasme,
+                                                                                v_SecurityParams.AuthParams.RandValue,
+                                                                                v_SecurityParams.AuthParams.AUTN))));
+    //@siclog "Step 24" siclog@
+    //The UE transmits an AUTHENTICATION RESPONSE message and establishes mutual authentication.
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cr_AUTHENTICATION_RESPONSE)));
+    //@siclog "Step 25" siclog@
+    //SS resets UL and DL NAS Count to zero.
+    f_EUTRA_NB_SS_NAS_ConfigureSecurity(NASCTRL,
+                                        v_SecurityParams.NAS_Integrity,
+                                        v_SecurityParams.NAS_Ciphering);
+    //@siclog "Step 26" siclog@
+    //The SS transmits a SECURITY MODE COMMAND message to activate NAS security.
+    //It is integrity protected and includes request to include IMEISV.
+    //Exception: Steps 26 and 27 are executed 10 times to check UE is applying security correctly taking into account the NAS count.
+    for (i := 0; i < 10; i := i + 1) {
+      SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                         cs_TimingInfo_Now,
+                                         cs_NAS_Request(tsc_SHT_IntegrityProtected_NewSecurityContext,
+                                                        cds_SECURITY_MODE_COMMAND_IMEISV(v_SecurityParams.NAS_Ciphering.Algorithm,
+                                                                                         v_SecurityParams.NAS_Integrity.Algorithm,
+                                                                                         v_SecurityParams.KSIasme,
+                                                                                         v_SecurityParams.NAS_SecurityCap,
+                                                                                         v_AddSecurityCap))));// @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+      //@siclog "Step 27" siclog@
+      //Check: Does the UE transmit a NAS SECURITY MODE COMPLETE message providing IMEISV?
+      SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                            cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered_NewSecurityContext, cdr_SECURITY_MODE_COMPLETE_IMEISV)));
+    }
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 27");
+    
+    //@siclog "Step 28" siclog@
+    //The SS transmits an IDENTITY REQUEST message (Security protected as per the algorithms specified in step 24)
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_IDENTITY_REQUEST(tsc_IdType_IMEISV))));  // @sic R5-171417 sic@
+    //@siclog "Step 29" siclog@
+    //The UE transmit an IDENTITY RESPONSE message.
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cr_IDENTITY_RESPONSE(f_Imeisv2MobileIdentity(px_IMEISV_Def))))); // @sic R5-171417 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 29");
+    
+    //@siclog "Step 30" siclog@
+    //SS releases the RRC connection.
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+  }
+
+  /*
+   * @desc      step 1..21 of test cases 22.5.*
+   * @param     p_NAS_IntegrityProtAlgorithm
+   * @param     p_NAS_CipheringAlgorithm
+   * @param     p_IOT_State         (default value: CONTROL_PLANE)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_PdcpScurityProcedure_Common_22_5(B3_Type p_NAS_IntegrityProtAlgorithm,
+                                                    B3_Type p_NAS_CipheringAlgorithm,
+                                                    IOT_STATE_Type p_IOT_State := CONTROL_PLANE) runs on NBIOT_PTC
+  {
+    var NAS_MSG_Indication_Type v_NAS_Ind;                                            // temporary variable which is used when receiving NAS ASPs
+    var NasCount_Type v_NasCountUL;
+    var NBIOT_SecurityParams_Type v_AuthParams;
+    var template (present) SecurityHeaderType v_ExpectedSecurityHeader := tsc_SHT_IntegrityProtected_Ciphered;
+    var SecurityHeaderType v_SentSecurityHeader := tsc_SHT_IntegrityProtected_Ciphered;
+    var GutiParameters_Type v_GutiParams := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId (v_GutiParams.PLMN_Identity);
+    
+    timer t_WaitTimer := f_NBIOT_SetTimerToleranceMin(nasTTCNTimer, 5.0) ; //5 seconds timer acc. to the test case prose @sic R5w100302, R5-106675 sic@
+
+    // Initialise the integrity and ciphering algorithm to test
+    f_NBIOT_NAS_IntegrityAlgorithm_Set(p_NAS_IntegrityProtAlgorithm);
+    f_NBIOT_NAS_CipheringAlgorithm_Set(p_NAS_CipheringAlgorithm);
+
+    // initialize security parameters
+    v_AuthParams := f_NBIOT_Security_Get();
+
+    //+   The UE is switched on.
+    //@siclog "Step 1" siclog@
+    f_UT_SwitchOnUE(UT, false);
+   
+    //+   Steps 2-6 of the generic procedure for UE registration specified in TS 36.508 subclause  are performed.
+    //@siclog "Step 2-4B" siclog@
+    v_NAS_Ind := f_NBIOT_InitialRegistration_Step2_4(nbiot_Cell1, CONTROL_PLANE, PREAMBLE);
+    // Set UE network capabilities as sent by the UE to be used later (see TS 24.301 clause 5.4.3.3)
+    v_AuthParams.NAS_SecurityCap := f_EUTRA_NB_FillNAS_SecurityCapability(v_NAS_Ind.Pdu.Msg.aTTACH_REQUEST);
+    f_NBIOT_Security_Set(v_AuthParams);
+    
+    if (ispresent(v_NAS_Ind.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap)) {// @sic R5-182074 sic@
+      v_AuthParams.NAS_SecurityCap5G := v_NAS_Ind.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap;
+    }
+    if (v_NAS_Ind.SecurityProtection.Status == tsc_SHT_NoSecurityProtection) {
+      v_ExpectedSecurityHeader := tsc_SHT_NoSecurityProtection;
+      v_SentSecurityHeader := tsc_SHT_NoSecurityProtection; // @sic R5s170546 sic@
+    }
+    // Step 5-6: Authentication
+    v_AuthParams := f_NBIOT_NAS_Authentication(nbiot_Cell1,
+                                               tsc_SRB1bis,
+                                               v_AuthParams,
+                                               v_SentSecurityHeader,
+                                               v_ExpectedSecurityHeader,
+                                               v_PLMN);                        // AUTHENTICATION REQUEST & RESPONSE
+    f_NBIOT_Security_Set(v_AuthParams);
+
+    //+   The SS transmits a SECURITY MODE COMMAND message to activate NAS
+    //+   security. It is integrity protected and includes request to
+    //+   include IMEISV <-- SECURITY MODE COMMAND
+    //+   Check: Does the UE transmit a SECURITY MODE COMPLETE message ciphered and
+    //+   starts applying ciphering and the NAS integrity protection in both UL and DL?
+    //+   SECURITY MODE COMPLETE [1,P]
+    //@siclog "Steps 7-8" siclog@
+    v_NasCountUL := f_NBIOT_NAS_ActivateSecurity(nbiot_Cell1, v_AuthParams, -, true); // @sic R5-182074 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+    f_NBIOT_Security_Set(v_AuthParams);
+    
+    //Step 9a1-12 of the UE transmit a security
+    f_NBIOT_InitialRegistration_Step9_12(nbiot_Cell1, p_IOT_State, STATE2_NB_CONNECTED_UPDATED, v_NAS_Ind, v_NasCountUL);
+    
+    f_NBIOT_InitialRegistration_Step13(nbiot_Cell1,
+                                       p_IOT_State,
+                                       v_NAS_Ind); // @sic R5s170597 sic@
+    
+    f_NBIOT_InitialRegistration_Step14(nbiot_Cell1, p_IOT_State, tsc_EpsDefaultBearerId); // @sic R5s170597 sic@
+    
+    //+   The SS Transmits an IDENTITY REQUEST message [Security
+    //+   protected] <- IDENTITY REQUEST
+    //@siclog "Step 18" siclog@
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_IDENTITY_REQUEST(tsc_IdType_IMSI))));
+    //+   Check: Does the UE transmit an IDENTIY RESPONSE message
+    //+   [Security Protected]? -> IDENTITY RESPONSE [1,P]
+    //@siclog "Step 19" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_IDENTITY_RESPONSE(f_Imsi2MobileIdentity(px_IMSI_Def)))));
+    
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+    //+   The SS Transmits an IDENTITY REQUEST message [Not integrity protected] <- IDENTITY REQUEST
+    //@siclog "Step 20" siclog@
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_NoSecurityProtection,
+                                                  cs_IDENTITY_REQUEST(tsc_IdType_IMEI))));
+    t_WaitTimer.start;
+    alt {
+      []SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                          tsc_SRB1bis,
+                                          cr_NAS_Indication(?,
+                                                            cr_IDENTITY_RESPONSE(f_Imei2MobileIdentity(px_IMEI_Def)))))
+        {
+          t_WaitTimer.stop;
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 21: UE is responding to non integrity protected SMC");
+        }
+      [] t_WaitTimer.timeout {}
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.10
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_10_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT /EPS NAS integrity and encryption /SNOW 3G */
+    
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1);
+    
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    // Preamble: The UE is in state Switched OFF (state 1-NB)
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    f_NBIOT_TestBody_Set(true);
+    
+    f_NBIOT_PdcpScurityProcedure_Common_22_5(tsc_EPS_Integerity_Snow3G, tsc_EPS_Encryption_Snow3G);
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble (nbiot_Cell1, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.11
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_11_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT /EPS NAS integrity and encryption /SNOW 3G */
+
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1);
+    
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    // Preamble: The UE is in state Switched OFF (state 1-NB)
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    f_NBIOT_TestBody_Set(true);
+    
+    f_NBIOT_PdcpScurityProcedure_Common_22_5(tsc_EPS_Integerity_AES, tsc_EPS_Encryption_AES);
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble (nbiot_Cell1, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.12
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_12_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT /EPS NAS integrity and encryption /SNOW 3G */
+
+    f_NBIOT_Init(c1);
+    
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    // Preamble: The UE is in state Switched OFF (state 1-NB)
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    f_NBIOT_TestBody_Set(true);
+    
+    f_NBIOT_PdcpScurityProcedure_Common_22_5(tsc_EPS_Integerity_ZUC, tsc_EPS_Integerity_ZUC);
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble (nbiot_Cell1, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+}

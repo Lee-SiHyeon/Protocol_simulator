@@ -1,0 +1,306 @@
+// ***************************************************************************
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// * $Date: 2024-08-29 09:14:48 +0200 (Thu, 29 Aug 2024) $
+// * $Rev: 39300 $
+// ***************************************************************************
+
+module NBIOT_NAS_Detach {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Paging all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+  import from NBIOT_Timing all;
+  import from NasEmu_CtrlFunctions all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.3
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_3_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT / NW initiated detach Re-attach required / UE initiated detach Abnormal case EMM common procedure collision /
+       UE initiated detach Abnormal case Local detach after 5 attempts due to no network response */
+    var NBIOT_POSTAMBLE_STATE_Type v_Postamble_State;
+   
+    f_NBIOT_Init(c1); // @sic R5-237126 sic@
+    
+    // create cell and send out system information
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    // Preamble: The UE is in NB-IoT UE Attach, Connected mode (State 2-NB) on Ncell 1
+    // ==========================================================================
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    v_Postamble_State := fl_TC_22_5_3_Body();
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, v_Postamble_State);
+  }
+
+  /*
+   * @desc      test body of TC_22_5_3
+   * @return    NBIOT_POSTAMBLE_STATE_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_5_3_Body() runs on NBIOT_PTC return NBIOT_POSTAMBLE_STATE_Type
+  {
+    var GutiParameters_Type v_Guti1_Params := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+    var EUTRA_ASN1_TrackingAreaCode_Type v_TAC := f_NBIOT_CellInfo_GetTAC(nbiot_Cell1);
+    var NAS_TacList v_TacList := { bit2oct(v_TAC) };
+    var template (value) TrackingAreaIdList v_Tai1_List := cs_TAIListNonConsecutive_lv(f_Asn2Nas_PlmnId(v_Guti1_Params.PLMN_Identity), v_TacList);
+    // create new GUTI with different S-TMSI (gets sent to UE in Attach Accept)
+    var GutiParameters_Type v_Guti2_Params := f_CreateGutiParamsWithUpdatedSTmsi(v_Guti1_Params);
+    var template (value) MobileIdentity v_Guti2 := f_GutiParameters2MobileIdentity(omit, v_Guti2_Params); // @sic R5s170254 sic@
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId (v_Guti1_Params.PLMN_Identity);
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NBIOT_SecurityParams_Type v_AuthParams;
+    var template (present) NAS_UL_Message_Type v_ESMMessageUL;
+    var integer i;
+    var float v_T3421 := f_NBIOT_SetTimerToleranceMin(nasTimer, 255.0);
+    var NBIOT_POSTAMBLE_STATE_Type v_Postamble_State;
+    timer t_T3421Min := v_T3421;
+    timer t_AttachTime := 60.0;
+    
+    if (px_DoAttachWithoutPDN) {
+      v_ESMMessageUL := cr_ESM_DUMMY_MESSAGE;
+    } else {
+      v_ESMMessageUL := cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach, ?);
+    }
+    //@siclog "Step 1" siclog@
+    //The SS initiates Detach procedure with the Detach Type IE "re-attach required".
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_508_DETACH_REQUEST_MT(cs_DetachType(tsc_DetachMT_ReAttach), omit))));
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE send DETACH ACCEPT message?
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cr_508_DETACH_ACCEPT)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    //@siclog "Step 3" siclog@
+    //The SS releases RRC connection.
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //EXCEPTION: Step 4a1 describes a behaviour which depends on the UE capability.
+    //@siclog "Step 4a1" siclog@
+    //IF NOT pc_Automatic_Re_Attach, the user initiates an attach by MMI or by AT command.
+    if (not pc_Automatic_Re_Attach) {
+      f_UT_TriggerAttach (UT);
+    }
+    
+    //@siclog "Step 5" siclog@
+    //The Generic procedure 'NB-IoT UE Attach, Connected mode (State 2-NB)' as described in TS 36.508 [18], clause 8.1.5.2 takes place.
+    v_NasInd := f_NBIOT_RRC_ConnEst_DefWithNas(nbiot_Cell1,
+                                               cr_EstablishmentCause_NB_Any,
+                                               cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected,
+                                                                                 cdr_CIOT_ATTACH_REQUEST_WithGuti(cr_AdditionalUpdateType_CIOT,
+                                                                                                                  f_NBIOT_SecurityKSIasme_Get(),
+                                                                                                                  f_GutiParameters2MobileIdentity(omit, v_Guti1_Params), // GUTI1 @sic R5s170254 sic@
+                                                                                                                  cr_TAI(v_PLMN, tsc_TAC1)),
+                                                                                 v_ESMMessageUL));
+    
+    f_NBIOT_InitialRegistration_Step5_12(nbiot_Cell1, CONTROL_PLANE, STATE3_NB_IDLEUPDATED, v_NasInd);
+    
+    f_NBIOT_InitialRegistration_Step13(nbiot_Cell1,
+                                       CONTROL_PLANE,
+                                       v_NasInd,
+                                       -,
+                                       v_Tai1_List,//TAI-1
+                                       f_GutiParameters2MobileIdentity(tsc_IEI_Guti, v_Guti2_Params));//GUTI-2 @sic R5s170254, R5s170597 sic@
+    f_NBIOT_InitialRegistration_Step14(nbiot_Cell1, CONTROL_PLANE, tsc_EpsDefaultBearerId); // @sic R5s170597 sic@
+    
+    if (pc_UserRequestedPS_Detach) { // @sic R5-245483 sic@
+            //@siclog "Step 5Aa1" siclog@
+            //Cause UE to initiate normal detach.
+            f_UT_InitiateDetach(UT);
+
+            //@siclog "Step 5Aa2" siclog@
+            //The UE transmits a DETACH REQUEST message.
+            SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                                  cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                    cr_508_DETACH_REQUEST_MO(cr_NAS_KeySetIdentifier (?, tsc_NasKsi_NativeSecurityContext),
+                                                                                             v_Guti2,
+                                                                                             cr_DetachType('0'B, tsc_DetachMO_EpsOnly)))));
+
+            //@siclog "Step 5Aa3" siclog@
+            //SS start Timer=T3421 (255 sec).
+            t_T3421Min.start;
+
+            //@siclog "Step 5Aa4 - 5Aa5" siclog@
+            //With T3421 still running the SS sends AUTHENTICATION REQUEST.
+            //Check: Does the UE transmit an AUTHENTICATION RESPONSE message?
+            v_AuthParams := f_NBIOT_Security_Get();
+            v_AuthParams := f_NBIOT_NAS_Authentication(nbiot_Cell1,
+                                                       tsc_SRB1bis,
+                                                       v_AuthParams,
+                                                       tsc_SHT_IntegrityProtected_Ciphered,
+                                                       tsc_SHT_IntegrityProtected_Ciphered,
+                                                       v_PLMN);
+            f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 10: AUTHENTICATION RESPONSE message received");
+
+            f_EUTRA_NB_SS_NAS_ConfigureSecurity(NASCTRL,
+                                                v_AuthParams.NAS_Integrity,
+                                                v_AuthParams.NAS_Ciphering);  // @sic R5s170254 sic@
+            //@siclog "Step 5Aa6" siclog@
+            //With timer=T3421 (255 sec) still running the SS shall send SECURITY MODE COMMAND.
+            f_NBIOT_Security_Set(v_AuthParams);
+            SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                               cs_TimingInfo_Now,
+                                               cs_NAS_Request(tsc_SHT_IntegrityProtected_NewSecurityContext,
+                                                              cs_508_SECURITY_MODE_COMMAND(v_AuthParams.NAS_Ciphering.Algorithm,
+                                                                                           v_AuthParams.NAS_Integrity.Algorithm,
+                                                                                           v_AuthParams.KSIasme,
+                                                                                           v_AuthParams.NAS_SecurityCap,
+                                                                                           omit)))); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+
+            //@siclog "Step 5Aa7" siclog@
+            //Check: Does the UE transmit a SECURITY MODE COMPLETE message?
+            SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                                  cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered_NewSecurityContext, cr_508_SECURITY_MODE_COMPLETE)));
+            f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 12: SECURITY MODE COMPLETE message received");
+
+            //@siclog "Step 5Aa8" siclog@
+            //With timer=T3421 (255 sec) still running the SS shall send IDENTITY REQUEST.
+            SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                               cs_TimingInfo_Now,
+                                               cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                              cs_IDENTITY_REQUEST(tsc_IdType_IMSI))));
+            //@siclog "Step 5Aa9" siclog@
+            //Check: Does the UE transmit an IDENTITY RESPONSE message?
+            SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                                  cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                    cr_IDENTITY_RESPONSE(f_Imsi2MobileIdentity(px_IMSI_Def)))));
+
+            f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 14: IDENTITY RESPONSE message received");
+
+            //@siclog "Step 5Aa10" siclog@
+            //With timer=T3421 (255 sec) still running the SS transmits a GUTI REALLOCATION COMMAND message.
+            SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell1,
+                                               cs_TimingInfo_Now,
+                                               cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                              cs_508_GUTI_REALLOCATION_COMMAND(v_Guti2, omit))));
+             //@siclog "Step 5Aa11" siclog@
+            //Check: Does the UE transmit a GUTI REALLOCATION COMPLETE message?
+            alt {
+              [] SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         cr_508_GUTI_REALLOCATION_COMPLETE)))
+                {
+                  t_T3421Min.stop;
+                  f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 16: GUTI REALLOCATION COMPLETE message received");
+                }
+              //@siclog "Step 5Aa12" siclog@
+              //Timer=T3421 (255 sec) expires.
+              [] t_T3421Min.timeout {}
+            }
+
+            //EXCEPTION: Steps 5Aa13 - 5Aa15 are repeated 4 times.
+            for (i := 0; i < 4; i := i + 1) {
+              //@siclog "Step 5Aa13" siclog@
+              //Check: Does the UE transmits a DETACH REQUEST message?
+              SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell1,
+                                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                      cr_508_DETACH_REQUEST_MO(cr_NAS_KeySetIdentifier(?, tsc_NasKsi_NativeSecurityContext),
+                                                                                               v_Guti2,
+                                                                                               cs_DetachType(tsc_DetachMO_EpsOnly)))));
+              f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 18: DETACH REQUEST sent by UE iteration " & int2str(i + 1));
+
+              //@siclog "Step 5Aa14- 5Aa15" siclog@
+              //SS start Timer=T3421 (255 sec).
+              //Timer=T3421 expires (255 sec).
+              f_Delay(v_T3421);
+            }
+            f_NBIOT_SS_SRBs_DRBs_Reset(nbiot_Cell1, CONTROL_PLANE);
+
+            //EXCEPTION: Steps 5Aa16a1 - 5Aa16b3 describe behaviour that depends on UE implementation;
+            //the "lower case letter" identifies a step sequence that take place depending on whether the UE may attempt to attach automatically.
+            //@siclog "Step 5Aa16a1" siclog@
+            //Start timer Wait for attach=60 sec.
+            t_AttachTime.start;
+
+            alt {
+              //@siclog "Step 5Aa16a2" siclog@
+              //UE transmits an RRCConnectionRequest-NB message, establishmentCause=mo-Signalling.
+              [] SRB.receive(car_NB_SRB0_RrcPdu_IND(nbiot_Cell1, cr_RRCConnectionRequest_NB(mo_Signalling, ?))) //@sic R5s180310 sic@
+                {
+                  f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 21a2: RRCConnectionRequest-NB sent by UE");
+                  //@siclog "Step 5Aa16a3" siclog@
+                  t_AttachTime.stop;
+                  //@siclog "Step 5Aa16a4" siclog@
+                  //SS transmits an RRCConnectionSetup-NB message.
+                  f_NBIOT_RRC_ConnectionSetup_Def();
+
+                  //@siclog "Step 5Aa16a5a1" siclog@
+                  //SS transmits an RRCConnectionSetup-NB message.
+                  // Receive RRC Connection Setup Complete with NAS
+                  v_NasInd := f_NBIOT_RRCConnectionSetupComplete_Def(nbiot_Cell1,
+                                                                     cr_508_RRCConnectionSetupComplete_NB,
+                                                                     cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected,
+                                                                                                       cr_CIOT_ATTACH_REQUEST(cr_AdditionalUpdateType_CIOT),
+                                                                                                       v_ESMMessageUL));
+                  f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 21a5: ATTACH_REQUEST message received");
+                  //@siclog "Step 5Aa16a6 - 5Aa16a15b1" siclog@
+                  f_NBIOT_InitialRegistration_Step5_14(nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED, v_NasInd);
+
+                  //@siclog "Step 5Aa16a16" siclog@
+                  //The SS transmits an RRCConnectionRelease-NB message to release RRC connection and move to RRC_IDLE..
+                  f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+                  v_Postamble_State := N1_IDLE;
+                }
+              //@siclog "Step 5A216b1" siclog@
+              //Timer=T3421 (255 sec) expires.
+              []t_AttachTime.timeout
+                {
+                  //@siclog "Step 5Aa16b2 - 5Aa16b3" siclog@
+                  //Check: Does the result of generic 'Test procedure to check UE response to Paging for Control Plane CIoT MT access' described in TS 36.508 [18],
+                  //subclause 8.1.5A.2, shows that the UE responds to paging?
+                  f_NBIOT_UE_Page_NoReaction(nbiot_Cell1,
+                                             cs_NB_Paging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_Guti2_Params.MME_Code, v_Guti2_Params.M_TMSI)),
+                                             30.0);
+                  v_Postamble_State := N4_DEREGISTERED;
+                }
+            }
+    } else {
+            f_UT_PowerOffUE (UT);
+            v_Postamble_State := N4_DEREGISTERED;
+    }
+    return v_Postamble_State;
+ }
+
+}

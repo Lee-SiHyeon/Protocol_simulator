@@ -1,0 +1,856 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-09-02 10:21:45 +0200 (lu., 02 sep. 2024) $
+// $Rev: 39336 $
+/******************************************************************************/
+
+module Idle_CAG_Selection_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from UpperTesterFunctions all;
+
+  template (value) CAGInfoList cs_CAGInfoList_oneEntry(template (value) CAG_Info p_CAGInfo, O2_Type p_IEL := '0009'O) :=
+  { /* @status    APPROVED (NR5GC) */
+    /* 24.501 cl. 9.11.3.18A */
+    iei     := '75'O,
+    iel     := p_IEL,
+    listOfCAGInfos := {p_CAGInfo}
+  };
+
+  template (value) CAG_Info cs_CAGInfo_oneID (O3_Type p_Plmn,
+                                              B1_Type p_CagOnlyFlag,
+                                              O4_Type p_CAGId) :=
+  { /* @status    APPROVED (NR5GC) */
+    /* 24.501 cl. 9.11.3.18AA */
+    iel          := '08'O,
+    cagValue     := {          // Sep22 @sic R5s221179 Baseline Moving sic@
+      plmn             := p_Plmn,
+      spareBits        := tsc_Spare7,
+      cagOnly          := p_CagOnlyFlag,
+      listOfCAGIds     := {p_CAGId}
+    }
+  };
+
+  template (value) CAG_Info cs_CAGInfo_twoIDs (O3_Type p_Plmn, //@sic R5-223986 sic@
+                                              B1_Type p_CagOnlyFlag,
+                                              O4_Type p_CAGId1,
+                                              O4_Type p_CAGId2) :=
+  { /* @status    APPROVED (NR5GC) */
+    /* 24.501 cl. 9.11.3.18AA */
+    iel          := '0C'O,//@sic R5-225307 sic@
+    cagValue     := {          // Sep22 @sic R5s221179 Baseline Moving sic@
+      plmn             := p_Plmn,
+      spareBits        := tsc_Spare7,
+      cagOnly          := p_CagOnlyFlag,
+      listOfCAGIds     := {p_CAGId1,p_CAGId2}
+    }
+  };
+
+  template (value) CAGInfoList cs_CAGInfoList_twoEntries(template (value) CAG_Info p_CAGInfo1,
+                                                         template (value) CAG_Info p_CAGInfo2) :=
+  {  /* @status    APPROVED (NR5GC) */
+    /* 24.501 cl. 9.11.3.18A */
+    iei     := '75'O,
+    iel     := '0012'O,   // @sic R5-220532 sic@ @sic R5s220768 sic@
+    listOfCAGInfos := {p_CAGInfo1,p_CAGInfo2}
+  };
+
+  /*
+   * @desc      38.508-1 table 4.5.2.2-2 RRC_IDLE procedure with CAG information list included in the Registration Accept message
+   * @param     p_NR_CellId
+   * @param     p_ReceivedMsg
+   * @param     p_RegType           (default value: Initial_Secure)
+   * @param     p_GMM_Cap           (default value: *)
+   * @param     p_CAGInfoList       (default value: omit)
+   * @param     p_EPLMNs            (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(NR_CellId_Type p_NR_CellId,
+                                                       NG_NAS_MSG_Indication_Type p_ReceivedMsg,
+                                                       TypeOfRegistration_Type p_RegType := Initial_Secure,
+                                                       template NG_GMM_Cap p_GMM_Cap := *,
+                                                       template (omit) CAGInfoList p_CAGInfoList := omit,
+                                                       template (omit) PLMN_List p_EPLMNs := omit)  runs on NR5GC_PTC   //@sic Rs220768 sic@
+  {
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    
+    //step 4
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, p_ReceivedMsg.Pdu, p_RegType, -, -, -, -, p_GMM_Cap)) {    // Check if the CAG is surported
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                p_NR_CellId, p_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (p_NR_CellId)),
+                                TESTMode_OFF,
+                                p_RegType);
+    //@sic R5s220599 sic@
+    v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo();
+    if (ispresent (v_GMM_MobilityInfo.GMMCap.cag)) {
+          if (isvalue (v_GMM_MobilityInfo.GMMCap.cag == '1'B)) {
+              f_NR_PreliminaryPass (__FILE__, __LINE__, "Registration Request Message Success, CAG supported");
+          }else{
+              f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed, CAG not supported");
+          }
+      }else {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed, CAG not supported");
+      }
+    //Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (p_NR_CellId),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (p_NR_CellId)), {bit2oct(f_NR_CellInfo_GetTAC (p_NR_CellId))}),
+                                                   p_EPLMNs, //@sic Rs220768 sic@
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   p_CAGInfoList);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(p_NR_CellId, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //Registration Complete
+    f_NR5GC_Registration_Complete(p_NR_CellId);
+    f_NR5GC_RRC_Idle_Steps16_20(p_NR_CellId,-,-,rrcConnectionRelease); //@sic Rs220599 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.5.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_5_2_1_NR5GC() runs on NR5GC_PTC
+  { //CAG Selection in Manual Mode
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    
+    f_NR5GC_Init(NR_2);
+
+    f_NR_CellInfo_SetPLMN(nr_Cell2, tsc_NR_HPLMN_003_21);//PLMN3 - @sic R5-223381 sic@
+    f_NR_CellInfo_SetPLMN(nr_Cell4, tsc_NR_HPLMN_002_11);//PLMN2
+ 
+    //Cell2 and Cell4 are CAG Cells. default CAG-ID value used for Cell2, value 2 used for Cell4 - @sic R5s220768 sic@
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell2);
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell4, 2);
+ 
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell4, true_);//@sic R5-225305 sic@
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell2, true_);//@sic R5-225305 sic@
+
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -88, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell2, -88, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell4, -88, -82); //@sic R5-237331 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell4); //CAG Cell
+
+    //Make the pre-test condition satisfied
+    v_ReceivedMsg := f_NR5GC_Preamble_Steps1_4 (nr_Cell1);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes CAG information list with CAG-ID 1.
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, Initial_NoSecurity, -, cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell2)),'0'B, int2oct(1,4)))); //@sic Rs220599 sic@
+
+    //The UE is set to Manual PLMN selection mode
+    f_UT_ManualPLMN_Select(UT,
+                           f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell1)));
+
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_5_2_1_TestBody();
+    
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A); //@sic R5-226302 sic@
+  }
+
+  /*
+   * @desc      test body of TC_6_5_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_5_2_1_TestBody() runs on NR5GC_PTC
+  {
+    var NAS_PlmnId v_PlmnID_1 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2));
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT4;  //@sic R5-226302 sic@
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NAS_PlmnId v_PlmnID_2 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell4)); //@sic R5-243588 sic@
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;  //@sic R5-243588 sic@
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;  //@sic R5-243588 sic@
+ 
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+                             cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};       //@sic R5-237331 sic@
+ 
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};       //@sic R5-237331 sic@
+    
+    v_CellPowerList_AtT3 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),  // @sic R5s220857 R5-225305 sic@
+                             cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),        // @sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE)}; // @sic R5-223381 sic@
+  
+    v_CellPowerList_AtT4 := {cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),  //@sic R5-226302 sic@
+                             cs_NR_CellPower(nr_Cell2, -115, tsc_NR_NonSuitableOffCellSSS_EPRE),
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE)}; //@sic R5-237331 sic@
+    //@siclog "Step 1" siclog@
+    //The SS changes cell power levels according to row "T1" in Table 6.5.2.1.3.2-1 for FR1 and Table 6.5.2.1.3.2-2 for FR2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    //@siclog "Step 2" siclog@
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    //@siclog "Step 3" siclog@
+    //The UE is made to perform manual CAG selection and selects NR Cell 2.
+    f_UT_ManualPLMN_Select(UT, f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell2)));
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 2 ?
+    //@sic R5-223381 sic@
+    //@siclog "Step 5-22" siclog@
+    //Steps 3-20a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 2.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell2, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4"); //@sic R5s220857 sic@
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell2, v_ReceivedMsg, -, -, cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(v_PlmnID_1,'1'B, int2oct(1,4)))); // @sic R5-221531 sic@
+    //@siclog "Step 23" siclog@
+    //The SS changes cell power levels according to row "T2" in Table 6.5.2.1.3.2-1 for FR1 and Table 6.5.2.1.3.2-2 for FR2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+    //@siclog "Step 24" siclog@
+    //The UE is made to perform manual CAG selection and select NR Cell 4.
+    f_UT_ManualPLMN_Select(UT, f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell4)));
+    //@siclog "Step 25" siclog@
+    //@siclog "Step 26-39" siclog@
+    //@sic R5-223381 sic@
+    //Test procedure to check that UE is camped on a new cell belonging to a new TA as specified in TS 38.508-1 [4] subclause 4.9.5 are performed on NR Cell 4.
+    //f_NR5GC_MobilityRegistration(nr_Cell4);    //@sic R5-221531 sic@
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell4, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "UE perform manual CAG selection and select NR Cell 4.");
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI(nr_Cell4), //@sic R5s240507 sic@
+                                                   cs_NG_TAIListNonConsecutive(v_PlmnID_2, {bit2oct(f_NR_CellInfo_GetTAC (nr_Cell4))}),//@sic R5s240507 sic@
+                                                   omit,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(v_PlmnID_2,'1'B, int2oct(2,4)))); //@sic R5-243588 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell4, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    f_NR5GC_Registration_Complete(nr_Cell4, tsc_NR_RbId_SRB1); // No SRB2 so must be on SRB1
+    f_NR_RRCRelease(nr_Cell4);
+    //@siclog "Step 44-46" siclog@ // @sic R5s220857 sic@
+    //void
+    //@siclog "Step 46A" siclog@
+    //@sic R5-223381 sic@
+    //The SS changes cell power levels according to row "T4" in Table 6.5.2.1.3.2-1 for FR1 and Table 6.5.2.1.3.2-2 for FR2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);//@sic R5-225305 sic@
+    f_Delay(15.0);//@sic R5s220599 sic@
+    //@siclog "Step 47" siclog@
+    //The UE is made to perform manual CAG selection and select NR Cell 2.
+    f_UT_ManualPLMN_Select(UT, f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell2)));
+    //@siclog "Step 48" siclog@
+    //@siclog "Step 49-53" siclog@
+    //@sic R5-223381 sic@
+    //Test procedure to check that UE is camped on a new cell belonging to a new TA as specified in TS 38.508-1 [4] subclause 4.9.5 are performed on NR Cell 2.
+    f_NR5GC_MobilityRegistration(nr_Cell2);     //@sic R5-221531 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "UE perform manual CAG selection and select NR Cell 2.");
+    //@sic R5-226302 sic@
+    //Make the UE back to Automatic PLMN selection, but also reduce the test execution time.
+    //@siclog "Step 54" siclog@
+    //The SS changes cell power levels according to row "T4" in Table 6.5.2.1.3.2-1 for FR1 and Table 6.5.2.1.3.2-2 for FR2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT4);
+    //@siclog "Step 55" siclog@
+    //The user sets the UE in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select(UT);
+    //@siclog "Step 56" siclog@
+    //The UE performs the Registration procedure for mobility registration update as specified in TS 38.508-1 [4] subclause 4.9.5 on NR Cell 1
+    f_NR5GC_MobilityRegistration (nr_Cell1);
+}//End of fl_TC_6_5_2_1_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.5.2.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_5_2_2_NR5GC() runs on NR5GC_PTC
+  { //CAG Selection in Automatic Mode
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+
+    f_NR5GC_Init(NR_2);
+ 
+    f_NR_CellInfo_SetPLMN(nr_Cell2, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell4, tsc_NR_HPLMN_003_21);//PLMN3
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2  // @sic R5-220531 R5s220987 sic@
+ 
+    //Cell2 and Cell4 are CAG Cells. default CAG-ID value used for Cell2, value 2 used for Cell4
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell2);
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell4, 2);
+ 
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell4, true_);//@sic R5-225306 sic@
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell2, true_);//@sic R5-225306 sic@
+
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -88, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell2, -88, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell4, -88, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -88, -82); //@sic R5-237331 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell4); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+
+    //Make the pre-test condition satisfied
+    v_ReceivedMsg := f_NR5GC_Preamble_Steps1_4 (nr_Cell1);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes CAG information list with CAG-ID 1.
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, Initial_NoSecurity, -, cs_EmptyCAGInfoList);
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+ 
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_5_2_2_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_5_2_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_5_2_2_TestBody() runs on NR5GC_PTC
+  {
+    var NAS_PlmnId v_PlmnID_2 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2));
+    var NAS_PlmnId v_PlmnID_4 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell4)); //@sic R5-225306 sic@
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    timer t_Watchdog := 60.0;
+ 
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};             //@sic R5-237331 sic@- @sic R5-225306 sic@
+ 
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE)};       //@sic R5-237331 sic@ - @sic R5-225306 sic@
+    
+    v_CellPowerList_AtT3 := {cs_NR_CellPower(nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};            //@sic R5-237331 sic@
+
+
+    //@siclog "Step 1" siclog@
+    //Power on the UE
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 1?
+    //@siclog "Step 3-13" siclog@
+    //Steps 3 to 13 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 1.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    //@siclog "Step 14" siclog@
+    //The SS transmits a DLInformationTransfer message and a REGISTRATION ACCEPT message containing the CAG information list with the CAG ID of NR Cell 2
+    //@siclog "Step 15-20a1" siclog@
+    //Steps 15 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 1.
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, -, -,
+                                               cs_CAGInfoList_twoEntries(cs_CAGInfo_oneID(v_PlmnID_2,'0'B, int2oct(1,4)),
+                                                                         cs_CAGInfo_oneID(v_PlmnID_4,'1'B, int2oct(4,4))),   //@sic R5-225306 sic@
+                                               cs_PLMN_List_1PLMN (f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2))));  //@sic R5-225306 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    //@siclog "Step 21" siclog@
+    //The UE is switched off by executing generic procedure in Table 4.9.6.1-1 in TS 38.508-1
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+    //@siclog "Step 22" siclog@
+    //SS adjusts cell levels according to row T1 of table 6.5.2.2.3.2-1 for FR1 and table 6.5.2.2.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    //@siclog "Step 23" siclog@
+    //Power on the UE.
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    //@siclog "Step 24" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 4 within the next 60 s?
+    t_Watchdog.start;
+    alt {
+        [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell4, cr_38508_RRCSetupRequest))){
+          t_Watchdog.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 24");
+        }
+        [] t_Watchdog.timeout {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 24");
+        }
+      }
+    //@siclog "Step 25" siclog@
+    //SS adjusts cell levels according to row T2 of table 6.5.2.2.3.2-1 for FR1 and table 6.5.2.2.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+    //@siclog "Step 26" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 2?
+    //@siclog "Step 27-44a1" siclog@
+    //Steps 3 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 2.
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell2, -, -, Initial_Secure);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 26");
+    //@siclog "Step 45" siclog@
+    //The UE is switched off by executing generic procedure in Table 4.9.6.1-1 in TS 38.508-1
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell2, STATE_IDLE_1A); // @sic R5s221091 sic@
+    //@siclog "Step 46" siclog@
+    //SS adjusts cell levels according to row T1 of table 6.5.2.2.3.2-1 for FR1 and table 6.5.2.2.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+    //@siclog "Step 47" siclog@
+    //Power on the UE.
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    //@siclog "Step 48" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 11?
+    //@siclog "Step 49-66a1" siclog@
+    //Steps 3 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 11.
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell11, -, -, Initial_Secure);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 48");
+    }//End of f_TC_6_5_2_2_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.5.2.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_5_2_3_NR5GC() runs on NR5GC_PTC
+  { //CAG / Limited Service / No Suitable cell
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    
+    v_CellPowerList_AtT0 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};             //@sic R5-237331 sic@
+
+    f_NR5GC_Init(NR_2);
+ 
+    //Cell2 and Cell4 are CAG Cells. default CAG-ID value used for Cell2, value 2 used for Cell4
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell2);
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell4, 2);
+ 
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell4, true_);//@sic R5s221013 sic@
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell2, true_);//@sic R5s221013 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell4); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+
+    //Make the pre-test condition satisfied
+    v_ReceivedMsg := f_NR5GC_Preamble_Steps1_4 (nr_Cell1);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes an empty CAG information list before it is in state Switched OFF (State 0N-B).
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, Initial_NoSecurity, -, cs_EmptyCAGInfoList);
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+    //SS adjusts cell levels according to row T0 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0);
+ 
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_5_2_3_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell2,STATE_IDLE_1A); //@sic R5s221211 sic@
+  }
+
+  /*
+   * @desc      test body of TC_6_5_2_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_5_2_3_TestBody() runs on NR5GC_PTC
+  {
+    var NAS_PlmnId v_PlmnID_2 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2));
+    var NAS_PlmnId v_PlmnID_11 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT4;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT5; //@sic R5s221211 sic@
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    timer t_Watchdog := 60.0;
+ 
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};            //@sic R5-237331 sic@
+ 
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};            //@sic R5-237331 sic@
+    
+    v_CellPowerList_AtT3 := {cs_NR_CellPower(nr_Cell4, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};            //@sic R5-237331 sic@
+
+    v_CellPowerList_AtT4 := {cs_NR_CellPower(nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),        //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};            //@sic R5-237331 sic@
+    
+    v_CellPowerList_AtT5 := {cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),              //@sic R5-237331 sic@
+                             cs_NR_CellPower(nr_Cell11, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE)};      //@sic R5-237331 sic@ //@sic R5s221211 sic@
+
+    //@siclog "Step 1" siclog@
+    //Power on the UE
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 4 within the next 60 s?
+    t_Watchdog.start;
+    alt {
+        [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell4, cr_38508_RRCSetupRequest))){
+          t_Watchdog.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+        }
+        [] t_Watchdog.timeout {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+        }
+      }
+    //@siclog "Step 3" siclog@
+    //SS adjusts cell levels according to row T1 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    //@siclog "Step 4-16" siclog@
+    //Steps 1 to 13 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 1.
+    //@siclog "Step 17" siclog@
+    //The SS transmits a DLInformationTransfer message and a REGISTRATION ACCEPT message containing the CAG information list with the CAG ID of NR Cell 2
+    //@siclog "Step 18-23a1" siclog@
+    //Steps 15 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 1.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, -, -, cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(v_PlmnID_2,'0'B, int2oct(1,4))));
+    //@siclog "Step 24" siclog@
+    //The UE is switched off by executing generic procedure in Table 4.9.6.1-1 in TS 38.508-1
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+    //@siclog "Step 25" siclog@
+    //SS adjusts cell levels according to row T2 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+    //@siclog "Step 26" siclog@
+    //Power on the UE.
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 27" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 4 within the next 60 s?
+    t_Watchdog.start;
+    alt {
+        [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell4, cr_38508_RRCSetupRequest))){
+          t_Watchdog.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 27");
+        }
+        [] t_Watchdog.timeout {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 27");
+        }
+      }
+    //@siclog "Step 28" siclog@
+    //SS adjusts cell levels according to row T3 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+    //@siclog "Step 29-47a1" siclog@
+    //Steps 1 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 2.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell2, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell2, v_ReceivedMsg, -, -, cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(v_PlmnID_11,'1'B, int2oct(1,4))));
+    //@siclog "Step 48" siclog@
+    //The UE is switched off by executing generic procedure in Table 4.9.6.1-1 in TS 38.508-1
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell2, STATE_IDLE_1A);
+    //@siclog "Step 49" siclog@
+    //SS adjusts cell levels according to row T4 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT4);
+    //@siclog "Step 50" siclog@
+    //Power on the UE.
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 51" siclog@
+    //Check: Does the UE send a RRCSetupRequest on NR Cell 11 within the next 60 s?
+    t_Watchdog.start;
+    alt {
+        [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell11, cr_38508_RRCSetupRequest))){
+          t_Watchdog.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 51");
+        }
+        [] t_Watchdog.timeout {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 51");
+        }
+      }
+    //@sic R5s221211 sic@
+    //@siclog "Step 52" siclog@
+    //SS adjusts cell levels according to row T5 of table 6.5.2.3.3.2-1 for FR1 and table 6.5.2.3.3.2-2 for FR2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT5);
+    //@siclog "Step 53-71a1" siclog@
+    // Steps 1 to 20a1 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2 are performed on NR Cell 2.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell2, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell2, v_ReceivedMsg, -, -, cs_CAGInfoList_oneEntry(cs_CAGInfo_oneID(v_PlmnID_2,'0'B, int2oct(1,4))));
+
+    }//End of f_TC_6_5_2_3_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.5.2.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_5_2_4_NR5GC() runs on NR5GC_PTC
+  { // CAG / cell reselection / Within allowed CAG / non-CAG cell to CAG cell
+
+    var boolean v_IsFR1 := true;
+    var ReselectionThreshold v_ThreshX_HighP;
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList_Cell;
+    var template (value) SSB_MTC v_SSB_MTC;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    
+    // System information combination NR-4 as defined in TS 38.508-1 Table 4.4.3.1.2-1 is used in NR cells.
+    f_NR5GC_Init(NR_4);
+
+    v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+    
+    if (v_IsFR1){
+       
+        v_ThreshX_HighP := 10;  // FR1 value
+    
+    }else{
+
+        v_ThreshX_HighP := 9;   // FR2 value
+    }
+     
+    // Table 6.5.2.4.3.1-1 PLMN  // @sic R5s221029 sic@
+    f_NR_CellInfo_SetPLMN(nr_Cell3, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell6, tsc_NR_HPLMN_002_11);//PLMN2
+
+    // Table 6.5.2.4.3.1-1 Cell3 and Cell6 are CAG Cells. default CAG-ID value used for Cell3, value 2 used for Cell6
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell3);
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell6, 2);
+
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell3, true_);//@sic R5-225299 sic@
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell6, true_);//@sic R5-225299 sic@
+
+    // Table 6.5.2.4.3.3-2: SIB2 of NR Cell 6
+    f_NR_CellInfo_SetSIB2_ThreshServingLowP(nr_Cell6, 10);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell6, 5);
+
+    // Table 6.5.2.4.3.3-3 SIB4 of NR Cell 3
+    v_InterFreqCarrierFreqList_Cell := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell3);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell3, {v_InterFreqCarrierFreqList_Cell[1]});
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell3, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell3, 0, v_ThreshX_HighP);
+    
+    // Table 6.5.2.4.3.3-3 SIB4 of NR Cell 1
+    v_InterFreqCarrierFreqList_Cell := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, {v_InterFreqCarrierFreqList_Cell[1], v_InterFreqCarrierFreqList_Cell[0]});
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell1, 0, 5);
+    
+    // PeriodicityAndOffset with condtion INTER-FREQ_ODD
+    v_SSB_MTC := f_NR_GetSSB_MTC_InterFreqOdd(nr_Cell1, nr_Cell3);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell1, 0, v_SSB_MTC.periodicityAndOffset);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell3, 0, v_SSB_MTC.periodicityAndOffset);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell6, 0, v_SSB_MTC.periodicityAndOffset);
+
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, -82); //@sic R5-237331 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -78, -82); //@sic R5-237331 sic@
+   
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell6); //CAG Cell
+    
+    // Make the pre-test condition satisfied
+    v_ReceivedMsg := f_NR5GC_Preamble_Steps1_4 (nr_Cell1);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes CAG information list with CAG-ID 1 and CAG-ID 2.
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, Initial_NoSecurity, -,
+                                              cs_CAGInfoList_oneEntry(cs_CAGInfo_twoIDs(f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell3)),'0'B, int2oct(1,4),int2oct(2,4)), '000D'O), //@sic R5s220768 sic@ @sic R5-223986 sic@ @sic R5s221093 sic@
+                                              cs_PLMN_List_1PLMN(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell3)))); //@sic R5-224342 sic@
+    
+    f_NR_TestBody_Set(true);
+    fl_TC_6_5_2_4_TestBody();
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell6, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_5_2_4
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_5_2_4_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+    timer t_Watchdog := 60.0;
+ 
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell3, -78, -82)}; //@sic R5-237331 sic@
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell1, -145, -145),
+                             cs_NR_CellPower(nr_Cell6, -78, -82)}; //@sic R5-237331 sic@
+    
+    // @siclog "Step 1" siclog@
+    // The SS changes cell power levels according to row "T1" in Table 6.5.2.1.3.2-1 for FR1 and Table 6.5.2.1.3.2-2 for FR2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    // @siclog "Step 2" siclog@
+    // Does the UE transmit an RRCSetupRequest message on NR Cell 3?
+    t_Watchdog.start;
+    alt {
+        [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell3, cr_38508_RRCSetupRequest))){
+          t_Watchdog.stop;
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+        }
+        [] t_Watchdog.timeout {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+        }
+      }
+    // @siclog "Step 3-7a1" siclog@
+    // Steps 2 to 6a1 of the mobility registration updating procedure described in TS 38.508-1 [4] Table 4.9.5.2.2-1 are performed on NR Cell 3.
+    f_NR5GC_MobilityRegistration(nr_Cell3);
+    // @siclog "Step 8" siclog@
+    // SS adjusts cell levels according to row T2 of table 6.5.2.4.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+    // @siclog "Step 9" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) {
+       
+        f_Delay(34.0);
+    }
+    else{
+       
+        f_Delay(130.0);
+    }
+    // @siclog "Step 10" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 [4] Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 6?
+    f_NR5GC_CheckRRCIdle(nr_Cell6);
+    }//End of fl_TC_6_5_2_4_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.5.2.6
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_5_2_6_NR5GC() runs on NR5GC_PTC
+  { //CAG / cell reservation
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+
+    f_NR5GC_Init(NR_4);
+
+    f_NR_CellInfo_SetPLMN(nr_Cell3, tsc_NR_HPLMN_002_11);//PLMN2//@sic R5s221233 sic@
+    f_NR_CellInfo_SetPLMN(nr_Cell6, tsc_NR_HPLMN_002_11);//PLMN2c
+
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell3);//@sic R5-225307 sic@
+    f_NR_CellInfo_SetSIB1_SetPNI_NPN_IdentityInfoList(nr_Cell6, 2);//@sic R5-225307 sic@
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell6, true_);
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell3, true_); //@sic R5s221233 sic@
+
+    f_NR_CellInfo_SetTAC (nr_Cell6, int2bit(2,24));//NR Cell 6 TAC=2
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -78, -78);
+
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3); //CAG Cell
+    f_NR_CellConfig_Def(nr_Cell6); //CAG Cell
+    //There is no CAG information list provisioned in the UE.
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+
+    //preamble
+    v_ReceivedMsg := f_NR5GC_Preamble_Steps1_4 (nr_Cell1);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes CAG information list with CAG-ID 1 and CAG-ID 2.
+
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell1, v_ReceivedMsg, Initial_NoSecurity, -,
+                                               cs_CAGInfoList_oneEntry(cs_CAGInfo_twoIDs(f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell3)),'0'B, int2oct(1,4),int2oct(2,4)), '000D'O),//@sic R5s221233 sic@
+                                               cs_PLMN_List_1PLMN(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell3))));
+
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+ 
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_5_2_6_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    //And now remove the cell(s)
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_6_5_2_6
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_5_2_6_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell3));
+    var TrackingAreaCode v_TAC := f_NR_CellInfo_GetTAC (nr_Cell3);
+    var NG_NAS_GutiParameters_Type v_GutiParams:=f_NR5GC_CellInfo_GetGutiParameters (nr_Cell3);
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+
+    //@siclog "Step 1" siclog@
+    //The SIB1 for NR cell 1 is updated according to Table 6.5.2.6.3.3-2
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell1, true_);
+    f_NR_ModifySysinfo(nr_Cell1, false);//@sic R5s221233 sic@
+    //@siclog "Step 1A" siclog@
+    //Wait for 2.1* modification period second for the SS to transmit modified system information.//@sic R5-225307 sic@
+    f_NR_WaitModificationPeriods(nr_Cell1);
+    //@siclog "Step 2" siclog@
+    //Power on the UE
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 3" siclog@
+    //Check: Does the UE transmit a RRCSetupRequest message on NR Cell 1 within 60s?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, 60.0,-, "Step3: UE sent an RRCSetupRequest on NR Cell 1 within 60 s");
+    //@siclog "Step 4" siclog@
+    //The SS changes cell power levels according to row "T1" in Table 6.5.2.6.3.2-1 for FR1 and Table 6.5.2.6.3.2-2 for FR2.
+    f_NR_SetCellPower (nr_Cell3,tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-237331 sic@
+    //@siclog "Steps 5-22a1" siclog@
+    //Steps 2-20a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 3.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell3, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    //The UE is registered on NR Cell 1 using the procedure described in TS 38.508-1 [4] clause 4.5.2.2 except that the REGISTRATION ACCEPT message includes CAG information list with CAG-ID 1 and CAG-ID 2.
+    fl_NR5GC_RRC_IdleSteps4_20_withCAGInfoList(nr_Cell3, v_ReceivedMsg, Initial_Secure, -,
+                                              cs_CAGInfoList_oneEntry(cs_CAGInfo_twoIDs(f_NR_Asn2Nas_PlmnId (f_NR_CellInfo_GetPLMN (nr_Cell3)),'1'B, int2oct(1,4),int2oct(2,4)), '000D'O)); //@sic R5s221233 R5-225307 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 5-22a1 pass");
+    //@siclog "Step 23" siclog@
+    //SS adjusts cell levels according to row T2 of table 6.5.2.6.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell1,tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    f_NR_SetCellPower (nr_Cell6,-78, -82);//@sic R5-237331 sic@
+    //@siclog "Step 24" siclog@
+    //Check: Does the UE transmit a RRCSetupRequest message on NR Cell 6
+    f_NR_RRC_SetupRequest_Def(nr_Cell6);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 24 pass");
+    //@siclog "Steps 25-29" siclog@
+    //Steps 2-6a1 of Table 4.9.5.2.2-1 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 6.
+    f_NR_RRCSetup_Def(nr_Cell6);
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell6,
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def));
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell6, v_GMM_MobilityInfo);//@sic R5s221233 sic@
+    //@siclog "Step 30" siclog@
+    //Void//@sic R5-225307 sic@
+    //@siclog "Step 31" siclog@
+    //SS adjusts cell levels according to row T3 of table 6.5.2.6.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell3,tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR1);//FR2 is FFS
+    f_NR_SetCellPower (nr_Cell6,tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    //@siclog "Steps 32-40" siclog@//@sic R5-225307 sic@
+    //Steps 1 to 5 of the generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1  are performed on NR cell 3.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell3, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    // Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams),
+                                                   cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)}),
+                                                   -, -, -, -,
+                                                   -,
+                                                   -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,-,-,-,cs_EmptyCAGInfoList);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell3, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    f_NR5GC_Registration_Complete(nr_Cell3, tsc_NR_RbId_SRB1); // No SRB2 so must be on SRB1
+    }//End of f_TC_6_5_2_6_TestBody
+
+}

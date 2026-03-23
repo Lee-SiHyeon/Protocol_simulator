@@ -1,0 +1,831 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-05-04 17:38:01 +0200 (Thu, 04 May 2023) $
+// $Rev: 35902 $
+/******************************************************************************/
+
+module IMS_IRAT_19_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_IRATFunctions all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_UE_Location all;
+  import from IMS_CommonParameters all;
+  import from IMS_IRAT_CSFB_EUTRA all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc   Checks if EXTENDED SERVICE REQUEST is not received within one second after PDN DISCONNECT REQUEST
+             in order to send DEACTIVATE EPS BEARER CONTEXT REQUEST.
+   * @return    boolean
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function fl_EsrReceivedWithinOneSecondAfterPdnDisconnectReq() runs on EUTRA_PTC return boolean
+  {
+    var boolean v_EsrReceived :=false;
+    var GutiParameters_Type v_GutiParams := f_EUTRA_CellInfo_GetGuti(eutra_CellA);
+    timer t_Wait_Esr := 1.0;
+    
+    t_Wait_Esr.start;
+    
+    alt {
+      [] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA, // @sic R5s140788 sic@
+                                         cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                           cr_EXT_SERVICE_REQUEST_Common(f_EUTRA_SecurityKSIasme_Get(),
+                                                                                         tsc_EST_CsFallback_EC,
+                                                                                         bit2oct(v_GutiParams.M_TMSI),
+                                                                                         omit))))
+        {
+          v_EsrReceived := true;
+          t_Wait_Esr.stop;
+        }
+      [] t_Wait_Esr.timeout {};
+    }
+    return v_EsrReceived;
+  }
+
+  /*
+   * @desc      If CS Fallback is perfomed, the UE sends service request with Service type set to mobile originating CS fallback as defined in 24.301 clause 9.9.3.27.
+   *            If UTRA/GERAN is supported UE performs CS fallback or cell reselection to a cell supporting CS domain (UTRAN/GERAN) and performs a call in CS domain
+   * @param     p_SysInfo
+   * @param     p_PDN
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function fl_TC_19_1_3_Steps8to9b4(IRAT_CoOrd_SysInfo_Type p_SysInfo,
+                                    integer p_PDN) runs on EUTRA_PTC
+  { /* @sic R5-153988 sic@ */
+    var GutiParameters_Type v_GutiParams; // @sic R5s140788 sic@
+    var template (value) RedirectedCarrierInfo v_RedirectedCarrierInfo; //@sic R5s150061 sic@
+    var boolean v_AckReceived := false;
+    var boolean v_TimerExpired := false;
+    var boolean v_EsrReceived := false;
+    var PDN_DISCONNECT_REQUEST v_PDNDiscReq;
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var NAS_MSG_Indication_Type v_NasInd;
+    var EPS_BearerIdentity v_EpsBearerId2 := '6'H; // default bearer on additional PDN
+    var ProcedureTransactionIdentifier v_EpsTi := tsc_PTI_Unassigned;
+    var template (value) ESM_Cause v_EsmCause := cs_ESM_Cause_v ('00100100'B); // #36 regular deactivation
+    var template (value) LinkedEpsBearerIdentity v_LinkedEpsBearerId := {idValue := hex2bit(v_EpsBearerId2)};
+    timer t_WaitforExtServiceReq := 2.0;  // @sic R5-145792, R5-150699, R5-150700, R5-150704 sic@
+    
+    // EXCEPTION: Within 2 seconds of step 7 the UE may transmit EXTENDED SERVICE REQUEST
+    t_WaitforExtServiceReq.start; // @sic R5-145792 sic@
+    v_GutiParams := f_EUTRA_CellInfo_GetGuti(eutra_CellA);
+    
+    // @sic R5-150699 sic@ @sic R5-150700 sic@ @sic R5-150704 sic@
+    // If CS Fallback is perfomed, the UE sends Extended service request with Service type set to mobile originating CS fallback emergency call as defined in 24.301 clause 9.9.3.27
+    
+    alt { // @sic R5-145792 sic@ @sic R5-155998 sic@
+      [] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA, // @sic R5s140788 sic@
+                                         cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                           cr_EXT_SERVICE_REQUEST_Common(f_EUTRA_SecurityKSIasme_Get(),
+                                                                                         tsc_EST_CsFallback_EC,
+                                                                                         bit2oct(v_GutiParams.M_TMSI),
+                                                                                         omit))))
+        {
+          v_EsrReceived := true; // ESR is received
+          // Timer stopped because ESR was received.
+          t_WaitforExtServiceReq.stop;
+          v_TimerExpired := true;
+          
+          if (not v_AckReceived) { // TC will not continue until ACK is received. If ACK is not received TC will finish by timeout.
+            repeat;
+          }
+        }
+      [] t_WaitforExtServiceReq.timeout  // CS fallback is not developed: ESR is not received.
+        {
+          v_TimerExpired := true;
+          if (not v_AckReceived) {
+            repeat;
+          }
+        }
+      [] IMS[p_PDN].receive(cmr_IMS_IPCAN_Trigger) // Receive Trigger indicating receipt of ACK in parallel with EXTENDED SERVICE REQUEST
+        { // @siclog "Step 8" siclog@
+          
+          v_AckReceived := true;
+          if(not v_TimerExpired) {
+            repeat;             // In case not ESR received and not timeout, then repeat until one of these conditions is satisfied.
+          }
+        }
+      
+      [not v_EsrReceived] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA, // @sic R5-153988 sic@
+                                         cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                           cr_PDNDisconnectReq(v_LinkedEpsBearerId)))) -> value v_ReceivedAsp
+        { // @siclog "Step 8AAa1 8AAb1 8AAc1" siclog@
+          
+          // Checks if EXTENDED SERVICE REQUEST is not received within one second after PDN DISCONNECT REQUEST in order to send DEACTIVATE EPS BEARER CONTEXT REQUEST.
+          v_EsrReceived := fl_EsrReceivedWithinOneSecondAfterPdnDisconnectReq();
+          
+          // if ESR is not received the DEACTIVATE EPS BEARER CONTEXT REQUEST is sent.
+          if (not v_EsrReceived) {
+            // @sic R5-155998 sic@
+            v_NasInd := v_ReceivedAsp.Signalling.Nas[0];
+            v_PDNDiscReq  := v_NasInd.Pdu.Msg.pDN_DISCONNECT_REQUEST;
+            v_EpsTi := v_PDNDiscReq.procedureTransactionIdentifier;
+            // @siclog "Step 8AAa2 8AAb2" siclog@
+            // The SS transmits a DEACTIVATE EPS BEARER CONTEXT REQUEST
+            SRB.send(cas_SRB1_RrcNasPdu_REQ(eutra_CellA,
+                                            cs_TimingInfo_Now,
+                                            cs_RRCConnectionReconfiguration_DRB_Release (tsc_RRC_TI_Def, tsc_DRB2),
+                                            cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                           cs_508_DeactivateEPSBearerCxtReq(v_EpsBearerId2,
+                                                                                            v_EpsTi,
+                                                                                            v_EsmCause))));
+          }
+          else { // if ESR is received then
+            // @siclog "Step 8AAC2" siclog@
+            t_WaitforExtServiceReq.stop;
+            v_TimerExpired := true;
+          }
+          
+          if (not v_AckReceived or not v_EsrReceived) {
+            repeat;
+          }
+        }
+      
+      [not v_EsrReceived] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA,
+                                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                            cr_508_DeactivateEPSBearerCxtAccept(v_EpsBearerId2, tsc_PTI_Unassigned))))
+        { // @siclog "Step 8AAa3" siclog@
+          if (( not v_AckReceived ) or ( not v_TimerExpired )) {
+            repeat;
+          }
+        }
+    }
+
+    f_Delay(2.0); // @sic R5s170044 sic@
+
+    // IF px_RATComb_Tested = EUTRA_UTRA UE performs CS fallback or cell reselection to a cell supporting CS domain (UTRAN) and performs emergency(19.1.3, 19.3.2, 19.3.2c)/normal (19.3.2b) call in CS domain together with MM/GMM registration
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      f_EUTRA_SendAuthParameters(eutra_CellA, UTRAN, true, true);
+      
+      if (not v_EsrReceived) { // CS fallback is not developed.
+        f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+      }
+      else { // CS fallback is developed
+        if (f_IRAT_GetUTRAN_FDD_TDD_Mode() == UTRAN_FDD) {
+          v_RedirectedCarrierInfo := cs_RedirectionInfo_UtraFdd(p_SysInfo.Utran[0].FDD.Freq);      //[0] corresponds to Utran cell 5 according to the Init-function. //@sic R5s150061 sic@
+        }
+        else {
+          v_RedirectedCarrierInfo := cs_RedirectionInfo_UtraTdd(p_SysInfo.Utran[0].TDD.Freq);
+        }
+        f_EUTRA_RRC_ConnectionRelease_Common(eutra_CellA, cs_RRCConnectionRelease(tsc_RRC_TI_Def, other, v_RedirectedCarrierInfo));
+      }
+      f_EUTRA_SetCellPower(eutra_CellA, tsc_NonSuitableCellRS_EPRE); //@sic R5s150273 sic@
+      f_IRAT_WaitForCoOrd_Trigger(UTRAN);
+    }
+    //IF px_RATComb_Tested = EUTRA_GERAN UE performs CS fallback or cell reselection to a cell supporting CS domain (GERAN cell) and performs emergency (19.1.3, 19.3.2, 19.3.2c)/normal (19.3.2b) call in CS domain
+    else if (px_RATComb_Tested == EUTRA_GERAN) {
+      f_EUTRA_SendAuthParameters(eutra_CellA, GERAN); //@sic R5s160754 sic@
+      if (not v_EsrReceived) { // CS fallback is not developed.
+        f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+      }
+      else {
+        v_RedirectedCarrierInfo := cs_RedirectionInfo_Geran_NoNeighCells(p_SysInfo.Geran[0].Arfcn, //@sic R5s150061 sic@
+                                                                         p_SysInfo.Geran[0].BandIndicator );
+        f_EUTRA_RRC_ConnectionRelease_Common(eutra_CellA, cs_RRCConnectionRelease(tsc_RRC_TI_Def, other, v_RedirectedCarrierInfo));
+      }
+      f_EUTRA_SetCellPower(eutra_CellA, tsc_NonSuitableCellRS_EPRE); //@sic R5s150273 sic@
+      f_IRAT_WaitForCoOrd_Trigger(GERAN);
+    }
+    else {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.1.3
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_1_3_EUTRA() runs on EUTRA_PTC
+  { /* Emergency call with emergency registration / Abnormal case / IM CN sends a 380 / UE performs emergency call via CS domain (UTRAN or GERAN) */
+    var IRAT_CoOrd_SysInfo_Type v_SysInfo; //@sic R5s150061 sic@
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c10, -, HANDLE_UM_DATA, USE_BIG_GRANTS); /* @sic R5-131470 sic@ @sic R5s140788 ch.1 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    //Coordinate with other component to receive frequencies
+    //@sic R5s150061 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (UTRAN);
+    }
+    else {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (GERAN);
+    }
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE);
+    
+    //Send trigger to let other RAT know that preamble is done so can change cell power to suitable cell @sic R5s140788 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    }
+    else if(px_RATComb_Tested == EUTRA_GERAN) {
+      f_IRAT_SendCoOrd(GERAN, cms_IRAT_Trigger);
+    }
+    else  {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+    
+    // @sic R5s150846 sic@
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1-5" siclog@
+    f_EUTRA_508_EstablishIMSEmergencyCall(eutra_CellA, px_EmergencyCallNumber);
+    
+    // Coordination between IMS PTC and EUTRA PT: step 8--> Note1
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Trigger to start timer is coming before ACK is sent by IMS PTC  @sic R5-150700 sic@
+    
+    //@siclog "Steps 8- 9b4" siclog@
+    fl_TC_19_1_3_Steps8to9b4(v_SysInfo,tsc_Index_IMS2);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2_EUTRA() runs on EUTRA_PTC
+  { /* Non-UE detectable emergency call / IM CN sends 380 Alternative Service / Non-emergency IMS registration
+     * To verify that UE correctly requests an emergency service on CS domain (UTRAN/GERAN) if the UE has received a 380 (Alternative Service) response to an INVITE request */
+    
+    var IRAT_CoOrd_SysInfo_Type v_SysInfo;  //@sic R5s150061 sic@
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c10, -, HANDLE_UM_DATA, USE_BIG_GRANTS); /* @sic R5-131470 @sic R5s140788 ch.1 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (UTRAN);
+    }
+    else {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (GERAN);
+    }
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE, -, -, cs_EPS_NwkFtSup_IMSVoice); // @sic R5-160937 sic@
+
+    f_EUTRA_TestBody_Set(true);
+    
+    //Send trigger to let other RAT know that preamble is done so can change cell power to suitable cell @sic R5s140788 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    }
+    else if(px_RATComb_Tested == EUTRA_GERAN) {
+      f_IRAT_SendCoOrd(GERAN, cms_IRAT_Trigger);
+    }
+    else  {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number. The NW will deem it as an emergency call
+    f_IMS_IPCAN_SendCoOrdMsg (IMS[tsc_Index_IMS1]); //trigger non-emergency call @sic R5s160294 ch.1 sic@
+    
+    f_EUTRA_ServiceRequestAndActivate_SRB2_DRB(eutra_CellA, -, -, -, -, -, -, -, -, -, cr_EstablishmentCause_MoData);
+    // Coordination between IMS PTC and EUTRA PT: step 4--> Note1
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]); //Wait reception of IMS ACK on step 4 //// @sic R5-150699 sic@
+    
+    //@siclog "Steps 4- 5b4" siclog@
+    f_IMS_CSFB_EUTRA(v_SysInfo, tsc_Index_IMS1);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2b
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2b_EUTRA() runs on EUTRA_PTC
+  { /* Non-UE detectable emergency call / IM CN sends a 380 with unavailable emergency service URN / UE performs normal call via CS domain / UTRAN or GERAN */
+    
+    var IRAT_CoOrd_SysInfo_Type v_SysInfo;  //@sic R5s150061 sic@
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c10, -, HANDLE_UM_DATA, USE_BIG_GRANTS); /* @sic R5-131470 sic@ @sic R5s140788 ch.1
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (UTRAN);
+    }
+    else {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (GERAN);
+    }
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE, -, -, cs_EPS_NwkFtSup_IMSVoice); // @sic R5-160937 sic@
+    
+    //Send trigger to let other RAT know that preamble is done so can change cell power to suitable cell @sic R5s140788 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    }
+    else if(px_RATComb_Tested == EUTRA_GERAN) {
+      f_IRAT_SendCoOrd(GERAN, cms_IRAT_Trigger);
+    }
+    else  {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+    
+    f_EUTRA_TestBody_Set(true);
+
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number. The NW will deem it as an emergency call
+    f_IMS_IPCAN_SendCoOrdMsg (IMS[tsc_Index_IMS1]); //trigger non-emergency call @sic R5s160294 ch.2 sic@
+    
+    f_EUTRA_ServiceRequestAndActivate_SRB2_DRB(eutra_CellA, -, -, -, -, -, -, -, -, -, cr_EstablishmentCause_MoData);
+    
+    // Coordination betweenIMS PTC and EUTRA PT: step 4--> Note1
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]); //Wait reception of IMS ACK on step 4 // @sic R5-150704 sic@
+    
+    //@siclog "Steps 4- 5b4" siclog@
+    f_IMS_CSFB_EUTRA(v_SysInfo, tsc_Index_IMS1, tsc_EST_CsFallback_MO); // @sic R5s160070 sic@
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2c
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2c_EUTRA() runs on EUTRA_PTC
+  { /* Non-UE detectable emergency call / IM CN sends a 380 with available emergency service URN / UE performs CS Emergency call via CS domain / UTRAN or GERAN */
+    
+    var IRAT_CoOrd_SysInfo_Type v_SysInfo; // @sic R5-151522 sic@
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c10, -, HANDLE_UM_DATA, USE_BIG_GRANTS); /* @sic R5-131470 sic@ @sic R5s140788 ch.1 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // @sic R5-151522 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (UTRAN);
+    }
+    else {
+      v_SysInfo := f_IRAT_WaitForCoOrd_SysInfo (GERAN);
+    }
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE, -, -, cs_EPS_NwkFtSup_IMSVoice); // @sic R5-160937 sic@
+    
+    //Send trigger to let other RAT know that preamble is done so can change cell power to suitable cell @sic R5s140788 sic@
+    if (px_RATComb_Tested == EUTRA_UTRA) {
+      f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    }
+    else if(px_RATComb_Tested == EUTRA_GERAN) {
+      f_IRAT_SendCoOrd(GERAN, cms_IRAT_Trigger);
+    }
+    else  {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+    
+    // @sic R5s150846 sic@
+
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number. The NW will deem it as an emergency call
+    f_IMS_IPCAN_SendCoOrdMsg (IMS[tsc_Index_IMS1]); //trigger non-emergency call @sic R5s160294 ch.3 sic@
+
+    f_EUTRA_ServiceRequestAndActivate_SRB2_DRB(eutra_CellA, -, -, -, -, -, -, -, -, -, cr_EstablishmentCause_MoData);
+    
+    // Coordination betweenIMS PTC and EUTRA PT: step 4--> Note1
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]); // Wait reception of IMS ACK on step 4 // @sic R5-150704 sic@  @sic R5-151522 sic@
+    
+    //@siclog "Steps 4- 5b4" siclog@
+    f_IMS_CSFB_EUTRA(v_SysInfo, tsc_Index_IMS1);  // @sic R5-151522 sic@
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.1
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_1_EUTRA() runs on EUTRA_PTC
+  { /* Emergency call without emergency registration / EPS / UE does not contain an ISIM or USIM */
+    
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (Step 1) refers to condition A8 of A.2.1 */
+    var EPS_BearerIdentity v_EpsBearerId;
+    var EPS_BearerIdentity v_EpsDedicatedBearerId;
+
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c1, -, HANDLE_UM_DATA, USE_BIG_GRANTS);  /* @sic R5-131470 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    // remove the USIM
+    f_UT_USIM_Remove(UT);
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+ 
+    // Trigger SS to execute location related functions to allow UE to get its position
+    if (v_GeolocationUsage) {
+      f_EUTRA_ProvideUE_LocationInformation(eutra_CellA, RRC_IDLE);
+    }
+
+    f_EUTRA_TestBody_Set(true);
+
+    // Prompt the use to switch and start the IP stack
+    f_EUTRA_SwitchOnUEandStartIP(eutra_CellA, -, -, -, PDN_2, tsc_DRB2); // @sic R5s130799, R5s160031, R5s160032 ch. 4 sic@
+
+    //@siclog "Steps 1-5 parallel behaviour" siclog@
+    // Generic test procedure for setting up emergency speech call. Referred from 36.508 [94] table 4.5A.5.3-1 for a UE with E-UTRA support.
+    f_EUTRA_508_IMSEmergencyCallLimitedService(eutra_CellA, px_EmergencyCallNumber, PREAMBLE);  // @sic R5s150964, R5-214623 sic@
+
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call release @sic R5s130799 sic@ @sic R5s160032 ch. 4 sic@
+
+    //The SS deactivates the EPS bearer. [This is the rest of C.32] sic@
+    v_EpsBearerId := f_EUTRA_InitialRegistrationEpsBearerId(emergencyPDN); // @sic R5-172935 sic@
+    v_EpsDedicatedBearerId := f_EUTRA_IncrementEpsBearerId(v_EpsBearerId);
+    f_EUTRA_DeactivateEPS_BearerContext(eutra_CellA, v_EpsDedicatedBearerId);
+
+    f_EUTRA_TestBody_Set(false);
+    
+    // Postamble
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+    f_EUTRA_Postamble(eutra_CellA, E1_IDLE, EPS_Only, omit); // @sic R5s141232, R5s210815 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.2
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_2_EUTRA() runs on EUTRA_PTC
+  { /* Emergency call without emergency registration / EPS / UE contains an ISIM or USIM / UE is in state EMM-REGISTERED.LIMITED-SERVICE */
+    
+    var B3_Type v_EpsUpdate_TypeValue := f_GetEPSTAUType(NORMAL);
+    var template AdditionalUpdateType v_AdditionalUpdateType_Expected := f_GetAdditionalUpdateType(NORMAL);
+    var template (value) CellPowerList_Type v_CellPowerList;
+    var GutiParameters_Type v_Guti_Params; // @sic R5s160125 sic@
+    var boolean v_Detached := false;
+    var EPS_BearerIdentity v_EpsBearerId;
+    var EPS_BearerIdentity v_EpsDedicatedBearerId;
+    timer t_WaitforDetach := 5.0;
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c1, -, HANDLE_UM_DATA, USE_BIG_GRANTS);  /* @sic R5-131470 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // Create cells and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    f_EUTRA_CellConfig_Def(eutra_CellB);
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE);
+
+    // @sic R5s150846 sic@
+    
+    // Change power levels to trigger UE to move to cell B
+    v_CellPowerList := {
+      cs_CellPower(eutra_CellB, tsc_ServingCellRS_EPRE),
+      cs_CellPower(eutra_CellA, tsc_NonSuitableCellRS_EPRE)
+    };
+    f_Delay(5.0); // @sic R5s120274 sic@
+    f_EUTRA_SetCellPowerList(v_CellPowerList);
+    
+    f_EUTRA_RRC_ConnectionRequest_Def(eutra_CellB);
+    f_EUTRA_RRC_ConnectionSetup_Def(eutra_CellB);
+    f_EUTRA_RRCConnectionSetupComplete_Def(eutra_CellB,
+                                           cr_508_RRCConnectionSetupComplete(tsc_RRC_TI_Def, ?),
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                             cr_508_TAU_Request(v_EpsUpdate_TypeValue,
+                                                                                f_EUTRA_SecurityKSIasme_Get(),
+                                                                                cr_DRXparameter_Any('5C'O) ifpresent,
+                                                                                v_AdditionalUpdateType_Expected)));
+    // The SS transmits a TRACKING AREA UPDATE REJECT message with cause #15, No suitable cells in tracking area
+    // so that UE is not registered for IMS services
+    SRB.send(cas_SRB1_NasPdu_REQ(eutra_CellB,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_TRACKING_AREA_UPDATE_REJECT(tsc_Cause_NoSuitableCells))));
+    
+    // The SS transmits an RRCConnectionRelease message to release RRC connection and move to RRC_IDLE
+    f_EUTRA_RRC_ConnectionRelease( eutra_CellB);
+    
+    f_EUTRA_TestBody_Set(true);
+
+    f_IP_Handling_StartPDN(IP, PDN_2, cs_DrbInfo_EUTRA(eutra_CellB, tsc_DRB2)); // @sic R5s160032 ch. 4 sic@
+
+    //@siclog "Steps 1-6 incl. parallel behaviour" siclog@
+    // Generic test procedure for setting up emergency speech call. Referred from 36.508 [94] table 4.5A.5.3-1 for a UE with E-UTRA support.
+    f_EUTRA_508_IMSEmergencyCallLimitedService(eutra_CellB, px_EmergencyCallNumber, PREAMBLE);
+        
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call release @sic R5s160032 ch. 4 sic@
+
+    // EXCEPTION: Following steps describes optional behaviour that depends on the UE implementation. @sic R5s160125 sic@
+    v_Guti_Params:=f_EUTRA_CellInfo_GetGuti(eutra_CellB);
+    t_WaitforDetach.start;
+    alt {
+      [] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellB,
+                                         cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,cr_508_DETACH_REQUEST_MO(?,
+                                                                                                                        f_GutiParameters2MobileIdentity(omit, v_Guti_Params),
+                                                                                                                        cr_DetachType( '0'B, tsc_DetachMO_EpsOnly))))) {
+         t_WaitforDetach.stop;
+         SRB.send (cas_SRB2_NasPdu_REQ (eutra_CellB,cs_TimingInfo_Now,
+                                        cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,cs_508_DETACH_ACCEPT)));
+
+         v_Detached := true;
+      }
+      [] t_WaitforDetach.timeout {}
+    }
+    
+    //The SS deactivates the EPS bearer. [This is the rest of C.32] sic@
+    if (v_Detached == false) {
+      v_EpsBearerId := f_EUTRA_InitialRegistrationEpsBearerId(emergencyPDN);
+      v_EpsDedicatedBearerId := f_EUTRA_IncrementEpsBearerId(v_EpsBearerId);
+      f_EUTRA_DeactivateEPS_BearerContext(eutra_CellB, v_EpsDedicatedBearerId);
+    }
+
+    //The SS releases the RRC connection after 5 seconds
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellB);
+    f_EUTRA_TestBody_Set(false);
+
+    if (v_Detached == false) {
+      f_EUTRA_Postamble(eutra_CellB, E1_IDLE, EPS_Only);
+    }
+    else {
+      f_EUTRA_Postamble(eutra_CellB, E4_DEREGISTERED);
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.5
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_5_EUTRA() runs on EUTRA_PTC
+  { /* Emergency call without emergency registration / UE credentials are not accepted */
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c1, -, HANDLE_UM_DATA, USE_BIG_GRANTS);  /* @sic R5-131470 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE);
+
+    // @sic R5s150846 sic@
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Steps 1-13 incl. parallel behaviour" siclog@
+    // IMS emergency registration by the UE followed by IMS emergency call setup with PSAP. Referred from 36.508 [94] table 4.5A.4.3-1 for a UE with E-UTRA support.
+    f_EUTRA_508_EstablishIMSEmergencyCall(eutra_CellA, px_EmergencyCallNumber);
+    
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call establishment
+    f_IMS_IPCAN_SendCoOrdMsg (IMS[tsc_Index_IMS2]);  // @sic R5s140786, R5s190785 ch. 1 sic@
+    f_EUTRA_TestBody_Set(false);
+
+    // Steps 4-5 C.32a  (void)
+    //  @sic R5-186456 sic@ // f_EUTRA_DeactivateEPS_BearerContext(eutra_CellA, '7'H);  // @sic R5s141370, R5-150268, R5-177122 sic@
+
+    // steps 6-7 of C.32a EPS Bearer Deactivation procedure according TS 36.508 subclause 4.5A.15A.
+    f_EUTRA_DeactivateEPS_BearerContext_Optional_DiscReq (eutra_CellA, tsc_EpsDefaultBearerId2); // @sic R5-177122 sic@
+
+    // Postamble
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellA); // @sic R5s150157 sic@    @sic R5s150338: no v_DrbReleaseList anymore sic@
+    f_EUTRA_Postamble(eutra_CellA, E1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.5.1
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_5_1_EUTRA() runs on EUTRA_PTC
+  { /* New initial emergency registration / UE obtains from the serving IP-CAN an IP address different
+     * than the IP address used for the emergency registration */
+    /* @sic R5s160131: coordination messages are needed after call release only sic@ */
+    /* @sic R5s160131: former fl_ReAttach_19_5_1 incorporated sic@ */
+    
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (step 1 of Annex C.22) refers to condition A8 of A.2.1 */
+    var EPS_BearerIdentity v_EpsDedicatedBearerId := f_EUTRA_IncrementEpsBearerId(tsc_EpsDefaultBearerId2); // @sic R5s160813 sic@
+ 
+    // Check that the new addresses to be used for PDN-2a are really different
+    if (px_IPv4_Address2_UE == px_IPv4_Address2a_UE) {
+      f_SetVerdictInconc(__FILE__, __LINE__, "px_IPv4_Address2a_UE shall be different than px_IPv4_Address2_UE");
+    }
+    if (px_IPv6_Address2_UE == px_IPv6_Address2a_UE) {
+      f_SetVerdictInconc(__FILE__, __LINE__, "px_IPv6_Address2a_UE shall be different than px_IPv6_Address2_UE");
+    }
+    
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c1, -, HANDLE_UM_DATA, USE_BIG_GRANTS);  /* @sic R5-131470 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE);
+    // Trigger SS to execute location related functions to allow UE to get its position
+    if (v_GeolocationUsage) {
+      f_EUTRA_ProvideUE_LocationInformation(eutra_CellA, RRC_IDLE);
+    }
+    
+    /* Initial conditions:
+     * UE is registered to IMS services, by executing the generic test procedure in Annex C.2 up to the last step
+     * UE has registered to IMS emergency services, by executing the generic test procedure in Annex C.20 up to the last step.
+     * Thereafter the UE has initiated an emergency call by executing the generic test procedure in Annex C.22 up to the last step.
+     * The emergency call is released.
+     */
+    f_EUTRA_508_EstablishIMSEmergencyCall(eutra_CellA, px_EmergencyCallNumber);
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call release
+    
+    f_EUTRA_DeactivateDedicatedEpsBearer_Speech (eutra_CellA, // @sic R5s160813 sic@
+                                                 v_EpsDedicatedBearerId,
+                                                 PDN_2);
+    f_EUTRA_DeactivateEPS_BearerContext (eutra_CellA,
+                                         tsc_EpsDefaultBearerId2);
+                                               
+    f_EUTRA_ResetIPandIMS(eutra_CellA); // @sic R5s160313 sic@ @sic R5s160439 sic@
+    f_IP_Handling_StopPDN(IP, cs_IP_StopPDN(PDN_2)); // @sic R5s160492 sic@
+    
+    /* Trigger an IP address re=allocation;
+     * This is done by executing a network initiated detach procedure with detach type indicates
+     * "re-attach required". The UE then triggers an Attach procedure */
+    
+    // The SS transmits a DETACH REQUEST message with the Type of detach set to 're-attach required'.
+    SRB.send(cas_SRB2_NasPdu_REQ(eutra_CellA,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_DETACH_REQUEST_MT(cs_DetachType(tsc_DetachMT_ReAttach),
+                                                                         omit))));
+    // UE transmit a DETACH ACCEPT message
+    SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_DETACH_ACCEPT)));
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+    
+    if (not pc_Automatic_Re_Attach) {
+      f_UT_TriggerAttach(UT);
+    }
+
+    f_EUTRA_InitialRegistration(eutra_CellA, PREAMBLE, STATE2_IDLEUPDATE, NORMAL); // @sic R5-160947 sic@
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    // Establish emergency call on PDN_2a with different UE IP address
+    f_EUTRA_508_EstablishIMSEmergencyCall(eutra_CellA, px_EmergencyCallNumber, -, -, -, PDN_2a); /* @sic R5s150692 add. change 2 sic@ */
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call release
+ 
+    f_EUTRA_DeactivateDedicatedEpsBearer_Speech (eutra_CellA, // @sic R5s160813 sic@
+                                                 v_EpsDedicatedBearerId,
+                                                 PDN_2a);
+    f_EUTRA_DeactivateEPS_BearerContext (eutra_CellA,
+                                         tsc_EpsDefaultBearerId2);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    // Postamble
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+    f_EUTRA_Postamble(eutra_CellA, E1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.5.10
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_5_10_EUTRA() runs on EUTRA_PTC
+  { // @sic R5-171589 sic@
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (step 1 of Annex C.22) refers to condition A8 of A.2.1 */
+    var EPS_BearerIdentity v_EpsDedicatedBearerId := f_EUTRA_IncrementEpsBearerId(tsc_EpsDefaultBearerId2); // @sic R5s160813 sic@
+    timer t_RegExpire;
+ 
+    f_EUTRA_NAS_Init(LTE_AllCellsOnSamePLMN, c1, -, HANDLE_UM_DATA, USE_BIG_GRANTS);  /* @sic R5-131470 sic@
+                                                                                         @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS sic@ */
+    
+    // Create cell and send out system information
+    f_EUTRA_CellConfig_Def(eutra_CellA);    /* @sic R5s130681: DISCARD_UM_DATA; R5s140160: USE_BIG_GRANTS sic@
+                                               @sic R5s150338: f_EUTRA_CellConfig_DRB_Common replaced by f_EUTRA_CellConfig_Def sic@
+                                               @sic R5-153746: DISCARD_UM_DATA -> HANDLE_UM_DATA sic@
+                                               @sic R5s170597 - Cleanup of UL grant Configuration: HANDLE_UM_DATA, USE_BIG_GRANTS moved to f_EUTRA_NAS_Init sic@ */
+    
+    // power on the cell
+    f_EUTRA_SetCellPower(eutra_CellA, tsc_ServingCellRS_EPRE);
+    
+    f_EUTRA_Preamble(eutra_CellA, STATE2_IDLEUPDATE);
+    // Trigger SS to execute location related functions to allow UE to get its position
+    if (v_GeolocationUsage) {
+      f_EUTRA_ProvideUE_LocationInformation(eutra_CellA, RRC_IDLE);
+    }
+    
+    /* Initial conditions:
+     * UE is registered to IMS services, by executing the generic test procedure in Annex C.2 up to the last step
+     * UE has registered to IMS emergency services, by executing the generic test procedure in Annex C.20 up to the last step.
+     * Thereafter the UE has initiated an emergency call by executing the generic test procedure in Annex C.22 up to the last step.
+     * The emergency call is released.
+     */
+    f_EUTRA_TestBody_Set(true);
+
+    f_EUTRA_508_EstablishIMSEmergencyCall(eutra_CellA, px_EmergencyCallNumber);
+    
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS registration
+    
+    t_RegExpire.start(110.0); // 100 sec + 10% tolerance
+    
+    f_Delay(20.0); //Wait for 20 seconds
+    
+    f_IMS_IPCAN_SendCoOrdMsg (IMS[tsc_Index_IMS2]);  //Trigger IMS call release
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]); //Wait for IMS call release
+    
+    //@siclog "Steps 21-22" siclog@
+    // Deactivate dedicated bearers -- steps 4-5 of C.32
+    f_EUTRA_DeactivateDedicatedEpsBearer_Speech (eutra_CellA,
+                                                 v_EpsDedicatedBearerId,
+                                                 PDN_2);
+    //@siclog "Steps 23-24" siclog@
+    // Deactivate default bearer
+    f_EUTRA_DeactivateEPS_BearerContext (eutra_CellA,
+                                         tsc_EpsDefaultBearerId2);
+                                         
+    f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+                                                   
+    alt {
+      [] SRB.receive(car_SRB0_RrcPdu_IND(?, cr_RRCConnectionRequest(?))) {
+         f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected RRC Connection Request while waiting for Reregistration expiry ");
+      }
+      [] t_RegExpire.timeout {}
+    }
+
+    f_EUTRA_TestBody_Set(false);
+    
+    // Postamble
+    f_EUTRA_Postamble(eutra_CellA, E1_IDLE);
+  }
+
+}

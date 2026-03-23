@@ -1,0 +1,844 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-12-10 10:32:45 +0100 (Wed, 10 Dec 2025) $
+// $Rev: 42613 $
+/******************************************************************************/
+module MAC_716 {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_L2_CommonFunctions all;
+  import from EUTRA_L2_CommonTemplates all;
+  import from EUTRA_LoopBack all;
+  import from EUTRA_MAC_Common all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_CommonMAC all;
+  import from EUTRA_Parameters all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SecuritySteps all;
+  import from EUTRA_Timing all;
+  import from Parameters all;
+
+  template (value) ShortDRX_Type cs_ShortDRX_Config(integer p_DrxShortCycleTimer) :=
+  { /* @status    APPROVED (LTE) */
+    shortDRX_Cycle := sf64,
+    drxShortCycleTimer := p_DrxShortCycleTimer
+  };
+
+  template (value) MAC_MainConfig_Type cs_MAC_MainConfig_Explicit_RBC_ShortDRX(integer p_CycleStartOffset,
+                                                                               integer p_DrxShortCycleTimer) :=
+  { /* @status    APPROVED (LTE) */
+    explicitValue := cs_MAC_MainConfig_Common(cs_UL_SCH_Config_DisableBSR,
+                                              cs_DRX_Config_7_1_6_X(cs_LongDrxCycleAndOffset_sf640(p_CycleStartOffset), cs_ShortDRX_Config(p_DrxShortCycleTimer)),
+                                              infinity_,
+                                              cs_PHR_Config_Release)
+  };
+
+  /*
+   * @desc      Evaluate a suitable timing info in future and lying in On-Duration of the cell
+   * @param     p_CellId
+   * @param     p_EUTRA_FDD_TDD_Mode
+   * @param     p_DrxCycle
+   * @param     p_DrxStartOffset
+   * @param     p_CountY
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (LTE)
+   */
+  function f_GetNextSendOccasion_7_1_6_X_ShortDRX(EUTRA_CellId_Type p_CellId,
+                                                  EUTRA_FDD_TDD_Mode_Type p_EUTRA_FDD_TDD_Mode,
+                                                  integer p_DrxCycle,
+                                                  integer p_DrxStartOffset,
+                                                  integer p_CountY) runs on EUTRA_PTC return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_SubFrameInfo := f_EUTRA_GetCurrentTiming(p_CellId);
+    var integer v_DRXFrame := p_DrxCycle;
+    var integer v_SubframeNumber;
+    var integer v_FrameNumber;
+    var integer v_HSFN;
+    var integer v_NormalSF;
+    var SubFrameTiming_Type v_Timing;
+    var Dl_Bandwidth_Type v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId);   //@sic R5-253974 sic@
+    //  2 cycles ahead is selected to provide enough time for SS
+    v_FrameNumber := (((v_SubFrameInfo.SFN.Number * 10 + v_SubFrameInfo.Subframe.Number) / v_DRXFrame) + 2) * v_DRXFrame;
+    v_SubframeNumber := v_FrameNumber mod 10;
+    v_FrameNumber := (v_FrameNumber/10) mod 1024;
+    v_HSFN := (v_SubFrameInfo.HSFN.Number + ((v_FrameNumber/10)/1024)) mod 1024; // @sic R5w160204r1 sic@
+    //@sic R5s170922 sic@
+    v_Timing := valueof(cs_SubFrameTiming(v_FrameNumber, v_SubframeNumber, v_HSFN));
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing, p_DrxStartOffset, v_DL_Bandwidth);
+    v_NormalSF := f_DRX_NormalSF(v_Timing.Subframe.Number, p_CountY, p_EUTRA_FDD_TDD_Mode); //@sic R5s110297 R5s180010 sic@
+    
+    return f_EUTRA_TimingInfoAdd(v_Timing, v_NormalSF, v_DL_Bandwidth);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.6.1
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_6_1_EUTRA ( ) runs on EUTRA_PTC
+  { /* L2/MAC
+     * 7.1.6.1 : DRX Operation / (short cycle not configured) /Parameters configured by RRC (radio resource configuration)
+     */
+    //@sic R5s110173 R5-113679 sic@
+    const integer tsc_LongDRXCycle := 640;
+    const integer tsc_DrxStartOffset := 4; //@sic R5s110698 sic@
+    //const integer tsc_OnDurationTimer := 20;
+    //const integer tsc_InactivityTimer := 6;
+    //const integer tsc_DRXRetranTimer := 6;
+   // const integer tsc_MaxHARQTx := 5;
+    
+    //var SubFrameTiming_Type v_Timing  := valueof(cs_SubFrameTiming(0, 0, 0));
+    var SubFrameTiming_Type v_Timing1 := valueof(cs_SubFrameTiming(0, 0, 0));
+    //var SubFrameTiming_Type v_Timing2 := v_Timing;
+   // var SubFrameTiming_Type v_Timing3 := v_Timing;
+    
+    //var integer v_NormalSF := 0;
+    //var integer v_HARQRTTTimer := 0;
+    
+    var EUTRA_FDD_TDD_Mode_Type v_EUTRA_FDD_TDD_Mode;
+    
+    //var integer v_SubframeOffset;
+    //var octetstring v_EncodedRlcPdu;
+    
+    //timer t_Watchdog := 5.0;
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init(c1);
+    v_EUTRA_FDD_TDD_Mode := f_EUTRA_CellInfo_GetFDD_TDD (eutra_Cell1);
+    f_EUTRA_CellConfig_Def (eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    //f_EUTRA_SS_CellConfig_DciDlInfo_NoRetransmission(eutra_Cell1);
+    // creates cell and performs registration
+    //@sic R5-104796 R5-106675 DRX support on SS mandated sic@
+    f_EUTRA_LoopBackActivation_State4_Def( eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_1DRB(0, tsc_DRB1) );
+    
+
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell1,
+                                        cs_TimingInfo_SubFrame(4),
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(4, 4), // Imcs = Itbs =4, Nprb Results in TB size of 328 selected to be neither too big nor too small
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,                  //@sic R5s110618 sic@
+                                        cs_UL_GrantConfig_ContPeriodic(5));       // periodic grant every 5ms (80% of 6ms the Inactivity Timer)
+
+    // Reconfigure RRC Connection: Step 0A and 0B
+    f_RRC_ConnectionReconfiguration_MAC_MainConfig_PhysicalConfig (eutra_Cell1, cs_MAC_MainConfig_Explicit_RBC_DrxL(tsc_DrxStartOffset)); //@sic R5s110698 sic@
+    f_Delay(0.66); //
+    //@sic R5-165871 sic@
+    // Test body
+    f_TC_7_1_6_Steps (tsc_LongDRXCycle);
+
+    //test body ends
+    f_EUTRA_TestBody_Set(false);
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    // to configure SS to stop report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Disable );
+    // to configure SS to stop report reception of BSR
+    f_SS_ConfigBufferStatusReportIndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Disable );
+    // configure SS for default grant allocation
+    f_EUTRA_StartDefULGrantTransmission(eutra_Cell1);
+    // leaving UE test state 4
+    //@sic R5-103847 Deactivate test loop and open test loop is removed sic@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, 0);
+    
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1, tsc_RRC_TI_Def, other, cs_TimingInfo_EUTRA_NB(v_Timing1));
+
+    //  Switch off
+    f_EUTRA_Postamble ( eutra_Cell1, E1_IDLE);//@sic R5-103875 sic@
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.6.2
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_6_2_EUTRA ( ) runs on EUTRA_PTC
+  { /* L2/MAC
+     * 7.1.6.2 : DRX Operation / Parameters (short cycle not configured) / DRX command MAC control element reception
+     */
+     //@sic R5s110173 R5-113679 sic@
+    const integer tsc_LongDRXCycle := 640;
+    const integer tsc_DrxStartOffset := 4; //@sic R5s110692 sic@
+    const integer tsc_OnDurationTimer := 20;
+    const integer tsc_DRXRetranTimer := 6;
+    const integer tsc_SubFrameX := 6;
+    var integer v_SubFrameY; //@sic R5s240293 sic@
+   // var integer v_SubFrameZ;
+    var integer v_SubFrameGrant;
+
+
+    var integer v_NormalSF := 0;
+    var SubFrameTiming_Type v_Timing  := valueof(cs_SubFrameTiming(0, 0, 0));
+    var SubFrameTiming_Type v_Timing1 := v_Timing;
+    var SubFrameTiming_Type v_Timing2 := v_Timing;
+    var SubFrameTiming_Type v_Timing3 := v_Timing;
+    var SubFrameTiming_Type v_Timing4 := v_Timing;
+    var SubFrameTiming_Type v_Timing5 := v_Timing;
+
+    var integer v_HARQRTTTimer := 0;
+    var octetstring v_EncodedRlcPdu;
+
+    var EUTRA_FDD_TDD_Mode_Type  v_EUTRA_FDD_TDD_Mode;
+    var Dl_Bandwidth_Type v_DL_Bandwidth;   //@sic R5-253974 sic@
+    timer t_Watchdog := 5.0;
+
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init(c1);
+    v_EUTRA_FDD_TDD_Mode := f_EUTRA_CellInfo_GetFDD_TDD (eutra_Cell1);
+    f_EUTRA_CellConfig_Def (eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0); // set null AS ciphering algorithm
+    //f_EUTRA_SS_CellConfig_DciDlInfo_NoRetransmission(eutra_Cell1);
+    // creates cell and performs registration
+     //@sic R5-104796 R5-106675DRX support on SS mandated sic@
+    //f_EUTRA_GenericRbEst_Common_716( eutra_Cell1, 0, 0, omit, cs_MAC_MainConfig_Explicit_RBC_DrxL(0), omit, omit, omit, 5); //@sic R5-112665 sic@
+    // Period is set as 4 = 80% of 6ms the Inactivity Timer
+    //@sic R5s100466 change of period for TA from 16 to 4 sic@
+    //f_EUTRA_CloseUE_TestLoopModeA( eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_1DRB(0, tsc_DRB1) );
+    //f_Delay(0.66); //@sic R5s100466 add timer for TA MCE to be sent once sic@
+    //f_EUTRA_StartULGrantTransmissionOnSR_Reception_No_PUCCH_Sync(eutra_Cell1, cs_TimingInfo_Now, cs_DciInfo_CcchDcchDtchUL_Def);
+    // Go to state 4 to return no data in UL
+    // step to configure SS RLC/PDCP and MAC in No header manipulation mode on SS Side for DRB
+    //f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NoHeaderManipulationDLOnly);
+    // to configure SS to report reception of HARQ ACK or NACK
+    //f_SS_ConfigUL_HARQ_IndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Enable );
+//@sic R5-104796 R5-106675 DRX support on SS mandated sic@
+    f_EUTRA_LoopBackActivation_State4_Def( eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_1DRB(0, tsc_DRB1) );
+    
+
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    //@sic R5s240293 R5s250195 sic@
+    if(pc_ue_CategoryDL_M1){
+       v_SubFrameY := 1;
+     //  v_SubFrameZ := 2;
+    v_SubFrameGrant := 8;
+    } else {
+       v_SubFrameY := 3;
+    //   v_SubFrameZ := 4;
+       v_SubFrameGrant := 4;
+    }
+    
+
+
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell1,
+                                        cs_TimingInfo_SubFrame(v_SubFrameGrant), //@sic R5s220066 R5s240293 sic@
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(4, 4), // Imcs = Itbs =4, Nprb Results in TB size of 328 selected to be neither too big nor too small
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,                      //@sic R5s110618 sic@
+                                        cs_UL_GrantConfig_ContPeriodic(5));       // periodic grant every 5ms (80% of 6ms the Inactivity Timer)
+    
+    // Reconfigure RRC Connection: Step 0A and 0B
+    if(pc_CEmodeA or pc_CEmodeB){//@sic R5s250290 R5-255054sic@
+        f_RRC_ConnectionReconfiguration_MAC_MainConfig_PhysicalConfig (eutra_Cell1, cs_MAC_MainConfig_Explicit_RBC_DrxL(tsc_DrxStartOffset, cs_DRX_Config_r13_716X)); //@sic R5s250290 sic@
+    } else {
+        f_RRC_ConnectionReconfiguration_MAC_MainConfig_PhysicalConfig (eutra_Cell1, cs_MAC_MainConfig_Explicit_RBC_DrxL(tsc_DrxStartOffset)); //@sic R5s110698 sic@
+    }
+    f_Delay(0.66); //
+    // stop periodic UL grants and restart automatic grant allocation instead; periodic TA is kept stopped:
+    f_EUTRA_StartULGrantTransmissionOnSR_Reception_No_PUCCH_Sync(eutra_Cell1, cs_TimingInfo_Now, cs_DciInfo_CcchDcchDtchUL_Def);
+    
+    // suppress number of DL retransmissions:
+    f_EUTRA_SS_CellConfig_DciDlInfo_NoRetransmission(eutra_Cell1);
+    f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NoHeaderManipulationDLOnly);
+    // to configure SS to report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Enable);
+    
+    //@siclog "Step 1" siclog@
+    // set CRC error as error mode
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,cs_DL_SCH_CRC_C_RNTI_Error(Erroneous));
+    // Choose the next subframe when the onDurationTimer is started.
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, tsc_OnDurationTimer - 1 - tsc_SubFrameX);
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(0, tsc_NoPoll, f_PDCP_PDU_Encvalue (cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN0, crs_PDCP_SDU_17B))));//@sic R5s110552 sic@
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU (eutra_Cell1,
+                                          tsc_RbId_DRB1,
+                                          cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                          cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                          cs_HarqProcessAssignment_Specific(1)));
+    v_HARQRTTTimer := f_GetHARQRTTTimer(v_Timing1.Subframe.Number, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 3" siclog@
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1);
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing1, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Normal),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    v_NormalSF := f_DRX_NormalSF(v_Timing1.Subframe.Number, v_SubFrameY, v_EUTRA_FDD_TDD_Mode);
+    v_Timing2 := f_EUTRA_TimingInfoAdd(v_Timing1, v_NormalSF, v_DL_Bandwidth);
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing2),
+                                         cs_MAC_PDUList_1 ( cs_MAC_PDU_DRX_Command_10Padding ), //@sic R5s110618 sic@
+                                         cs_HarqProcessAssignment_Specific(2)));
+    //@siclog "Step 5" siclog@
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing2, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Erroneous),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    /* v_EncodedRlcPdu := f_RLC_PDU_Encvalue (cs_RLC_AMD_1PDU(tsc_NoPoll,
+       int2bit (1, 10),
+       f_PDCP_PDU_Encvalue (cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN1, crs_PDCP_SDU_17B))))); */
+    
+    v_Timing3 := f_EUTRA_TimingInfoAdd(v_Timing1, v_HARQRTTTimer, v_DL_Bandwidth);
+    if (v_EUTRA_FDD_TDD_Mode == FDD) //@sic R5s120658 sic@
+      {
+        if (not pc_ue_CategoryDL_M1) {
+            v_NormalSF := f_DRX_NormalSF( v_Timing3.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode);
+            } else {
+            v_NormalSF := f_DRX_NormalSF( v_Timing3.Subframe.Number, 1, v_EUTRA_FDD_TDD_Mode);
+            }
+       }
+    else
+      {
+        v_NormalSF := f_DRX_NormalSF( v_Timing3.Subframe.Number, 1, v_EUTRA_FDD_TDD_Mode);
+      }
+    
+    
+    v_Timing3 := f_EUTRA_TimingInfoAdd(v_Timing3, v_NormalSF, v_DL_Bandwidth);
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing3),
+                                         cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                         cs_HarqProcessAssignment_Specific(3)));
+    v_HARQRTTTimer := f_GetHARQRTTTimer(v_Timing3.Subframe.Number, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 7" siclog@
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing3, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Normal),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    v_Timing4 := f_EUTRA_TimingInfoAdd(v_Timing3, v_HARQRTTTimer, v_DL_Bandwidth);
+    if (v_EUTRA_FDD_TDD_Mode == FDD)      //@sic R5s120658 sic@
+      {
+        v_NormalSF := f_DRX_NormalSF( v_Timing4.Subframe.Number, tsc_DRXRetranTimer - v_SubFrameY, v_EUTRA_FDD_TDD_Mode);
+      }
+    else if (v_EUTRA_FDD_TDD_Mode == TDD)
+      {
+        v_NormalSF := f_DRX_NormalSF( v_Timing4.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode);
+      }
+
+    v_Timing4 := f_EUTRA_TimingInfoAdd(v_Timing4, v_NormalSF, v_DL_Bandwidth);
+
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU ( eutra_Cell1,
+                                           tsc_RbId_DRB1,
+                                           cs_TimingInfo_EUTRA_NB(v_Timing4),
+                                           cs_MAC_PDUList_1 ( cs_MAC_PDU_DRX_Command_10Padding ), //@sic R5s110618 sic@
+                                           cs_HarqProcessAssignment_Specific(4)));
+
+    //@siclog "Step 9" siclog@
+    /* v_EncodedRlcPdu := f_RLC_PDU_Encvalue (cs_RLC_AMD_1PDU(tsc_NoPoll,
+                                                           int2bit (2,10),
+                                                           f_PDCP_PDU_Encvalue (cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN2, crs_PDCP_SDU_17B))))); */
+    if (v_EUTRA_FDD_TDD_Mode == FDD)    //@sic R5s120658 sic@
+      {
+        v_NormalSF := f_DRX_NormalSF(v_Timing4.Subframe.Number, v_SubFrameY - 1, v_EUTRA_FDD_TDD_Mode);
+        v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing4, v_NormalSF, v_DL_Bandwidth);
+        }
+    
+    else if (v_EUTRA_FDD_TDD_Mode == TDD)
+      {
+        v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing3, v_HARQRTTTimer, v_DL_Bandwidth);
+        v_NormalSF := f_DRX_NormalSF(v_Timing5.Subframe.Number, 5, v_EUTRA_FDD_TDD_Mode);
+        v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing5, v_NormalSF, v_DL_Bandwidth);
+        }
+
+
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU ( eutra_Cell1,
+                                           tsc_RbId_DRB1,
+                                           cs_TimingInfo_EUTRA_NB(v_Timing5),
+                                           cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                           cs_HarqProcessAssignment_Specific(5) ));
+
+    // Preconfig SS for preventing UE to enter DRX
+    // @sic R5s100520 sic@
+    //@sic R5-104796 DRX support on SS mandated sic@
+    // Period is set as 16 = 80% of 20ms the Inactivity Timer
+    t_Watchdog.start;
+    v_Timing1 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    //@siclog "Step 2" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 1?
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing1.SFN.Number, v_Timing1.Subframe.Number), nack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    //@siclog "Step 4" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 3?
+    v_Timing2 := f_AckNack_TimingInfo(v_Timing2, v_EUTRA_FDD_TDD_Mode);
+    
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing2.SFN.Number, v_Timing2.Subframe.Number), ack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    
+    //@siclog "Step 6" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 5?
+    v_Timing3 := f_AckNack_TimingInfo(v_Timing3, v_EUTRA_FDD_TDD_Mode);
+    
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing3.SFN.Number, v_Timing3.Subframe.Number), nack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    //@siclog "Step 8" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 7?
+    v_Timing4 := f_AckNack_TimingInfo(v_Timing4, v_EUTRA_FDD_TDD_Mode);
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing4.SFN.Number, v_Timing4.Subframe.Number), ack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    //@siclog "Step 10" siclog@
+    // Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 9?
+    v_Timing5 := f_AckNack_TimingInfo(v_Timing5, v_EUTRA_FDD_TDD_Mode);
+    
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing5.SFN.Number, v_Timing5.Subframe.Number), ack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+    t_Watchdog.stop;
+
+    //test body ends
+    f_EUTRA_TestBody_Set(false);
+
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    // to configure SS to stop report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Disable);
+    f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NormalMode); //@sic R5s100354 sic@
+
+    // leaving UE test state 4
+    //@sic R5-103847 Deactivate test loop and open test loop is removed sic@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, 0);
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1, tsc_RRC_TI_Def, other, cs_TimingInfo_EUTRA_NB(v_Timing1));
+
+    // Release RRC Connection and Switch off
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);//@sic R5-103875 sic@
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.6.3
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_6_3_EUTRA() runs on EUTRA_PTC
+  { /* L2/MAC
+     * 7.1.6.3 : DRX operation / Short cycle configured / Parameters configured by RRC
+     */
+    const integer tsc_LongDRXCycle := 640;
+    const integer tsc_ShortDRXCycle := 64;
+    const integer tsc_DrxStartOffset := 4;
+    const integer tsc_OnDurationTimer := 20;
+    const integer tsc_ShortDRXCycleTimer := 4;
+    
+    var SubFrameTiming_Type v_Timing  := valueof(cs_SubFrameTiming(0, 0, 0));
+    var SubFrameTiming_Type v_Timing1 := v_Timing;
+    var SubFrameTiming_Type v_Timing2 := v_Timing;
+    var EUTRA_FDD_TDD_Mode_Type v_EUTRA_FDD_TDD_Mode;
+    var octetstring v_EncodedRlcPdu;
+    var integer v_DRXFrame;
+    var integer v_FrameNumber;
+    var integer v_FrameNumberCalculation;
+    var integer v_NormalSF;
+    var Dl_Bandwidth_Type v_DL_Bandwidth;   //@sic R5-253974 sic@
+    timer t_Watchdog := 5.0;
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init(c1);
+    v_EUTRA_FDD_TDD_Mode := f_EUTRA_CellInfo_GetFDD_TDD(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    
+    f_EUTRA_LoopBackActivation_State4_Def(eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_1DRB(0, tsc_DRB1));
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell1,
+                                        cs_TimingInfo_SubFrame(4),
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(4, 4), // Imcs = Itbs =4, Nprb Results in TB size of 328 selected to be neither too big nor too small
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,
+                                        cs_UL_GrantConfig_ContPeriodic(5));       // periodic grant every 5ms (80% of 6ms the Inactivity Timer)
+    //@siclog "Step 1 - 2" siclog@
+    //SS Transmits RRCConnectionReconfiguration to configure specific DRX parameters
+    //The UE transmits RRCConnectionReconfigurationComplete
+    f_RRC_ConnectionReconfiguration_MAC_MainConfig_PhysicalConfig(eutra_Cell1, cs_MAC_MainConfig_Explicit_RBC_ShortDRX(tsc_DrxStartOffset, tsc_ShortDRXCycleTimer));
+    f_Delay(0.660); //@sic R5s160641 sic@
+    // suppress number of DL retransmissions:
+    f_EUTRA_SS_CellConfig_DciDlInfo_NoRetransmission(eutra_Cell1);
+    f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NoHeaderManipulationDLOnly);
+    // to configure SS to report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Enable);
+    //@sic R5s150062 sic@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X_ShortDRX(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_ShortDRXCycle, tsc_DrxStartOffset, 0);
+    // stop periodic UL grants and restart automatic grant allocation instead; periodic TA is kept stopped:
+    f_EUTRA_StartULGrantTransmissionOnSR_Reception_No_PUCCH_Sync(eutra_Cell1, cs_TimingInfo_EUTRA_NB(v_Timing1), cs_DciInfo_CcchDcchDtchUL_Def);
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1);
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, tsc_ShortDRXCycle, v_DL_Bandwidth);
+    v_NormalSF := f_DRX_NormalSF(v_Timing1.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode);
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, v_NormalSF, v_DL_Bandwidth);
+    
+    //@siclog "Step 3" siclog@
+    // Choose the next subframe when the onDurationTimer is started.
+    // The other things in Step 1 automatically taken care by SS
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(0, tsc_NoPoll, f_PDCP_PDU_Encvalue(cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN0, crs_PDCP_SDU_17B))));
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                         cs_MAC_PDUList_1(cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1,v_EncodedRlcPdu))));
+    
+    t_Watchdog.start;
+    
+    // Get the time when UE sent ACK
+    v_Timing1 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 4" siclog@
+    // Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 3?
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1,
+                                   cr_TimingInfo(v_Timing1.SFN.Number, v_Timing1.Subframe.Number),
+                                   ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    t_Watchdog.stop;
+    
+    //@siclog "Step 5" siclog@
+    //@sic R5s150062 sic@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X_ShortDRX(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_ShortDRXCycle, tsc_DrxStartOffset, tsc_OnDurationTimer - 1);
+    
+    // The other things in Step 3 automatically taken care by SS
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(1, tsc_NoPoll, f_PDCP_PDU_Encvalue(cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN1, crs_PDCP_SDU_17B))));   //@sic R5s110552 sic@
+    
+    DRB.send(cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                        tsc_RbId_DRB1,
+                                        cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                        cs_MAC_PDUList_1(cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1,v_EncodedRlcPdu))));
+    
+    t_Watchdog.start;
+    
+    // Get the time when UE sent ACK
+    v_Timing2 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 5?
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1,
+                                   cr_TimingInfo(v_Timing2.SFN.Number, v_Timing2.Subframe.Number),
+                                   ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    t_Watchdog.stop;
+    
+    //@siclog "Step 7" siclog@
+    //UE waits for drxShortCycleTimer expire.
+    //do nothing
+
+    //@siclog "Step 8" siclog@
+    v_DRXFrame := tsc_LongDRXCycle / 10;
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, 4 * tsc_ShortDRXCycle, v_DL_Bandwidth);
+    v_FrameNumberCalculation := (((v_Timing1.SFN.Number / v_DRXFrame) + 1 ) * v_DRXFrame); //@sic R5s150062, R5w160204r1 sic@
+    v_FrameNumber :=  v_FrameNumberCalculation mod 1024; //@sic R5s150062 sic@
+    v_Timing1 := valueof(cs_SubFrameTiming(v_FrameNumber, tsc_DrxStartOffset, (v_Timing1.HSFN.Number + (v_FrameNumberCalculation/1024)) mod 1024));
+    v_NormalSF := f_DRX_NormalSF(v_Timing1.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode); //@sic R5s180170 sic@
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, v_NormalSF, v_DL_Bandwidth);
+    
+    // The other things in Step 8 automatically taken care by SS
+    // In the first PDCCH sub frame when the OnDurationTimer of Long DRX cycle is running, the SS indicates the transmission of a DL MAC PDU on the PDCCH.
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(2, tsc_NoPoll, f_PDCP_PDU_Encvalue(cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN2, crs_PDCP_SDU_17B))));
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                         cs_MAC_PDUList_1(cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu))));
+    
+    t_Watchdog.start;
+    
+    // Get the time when UE sent ACK
+    v_Timing1 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 9" siclog@
+    //Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 8?
+    SYSIND.receive ( car_UL_HARQ_IND(eutra_Cell1,
+                                     cr_TimingInfo(v_Timing1.SFN.Number, v_Timing1.Subframe.Number),
+                                     ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+    t_Watchdog.stop;
+    
+    //@siclog "Step 10" siclog@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, tsc_OnDurationTimer - 1);
+    
+    // The other things in Step 10 automatically taken care by SS
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(3, tsc_NoPoll, f_PDCP_PDU_Encvalue (cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN3, crs_PDCP_SDU_17B))));
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU (eutra_Cell1,
+                                          tsc_RbId_DRB1,
+                                          cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                          cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu))));
+    
+    t_Watchdog.start;
+    // Get the time when UE sent ACK
+    v_Timing1 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    
+    
+    //@siclog "Step 11" siclog@
+    // Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 10?
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1,
+                                   cr_TimingInfo(v_Timing1.SFN.Number, v_Timing1.Subframe.Number),
+                                   ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+    
+    t_Watchdog.stop;
+    
+    //test body ends
+    f_EUTRA_TestBody_Set(false);
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    // to configure SS to stop report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Disable);
+
+    // configure SS for default grant allocation
+    //f_EUTRA_StartDefULGrantTransmission(eutra_Cell1);
+    //@sic R5s250498 sic@
+    //leaving UE test state 4
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, 0);
+    
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1, tsc_RRC_TI_Def, other, cs_TimingInfo_EUTRA_NB(v_Timing1));
+
+    //  Switch off
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 7.1.6.4
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_7_1_6_4_EUTRA() runs on EUTRA_PTC
+  { /* L2/MAC
+     * 7.1.6.4 : DRX Operation / Short cycle configured / DRX command MAC control element reception
+     */
+    const integer tsc_LongDRXCycle := 640;
+    const integer tsc_ShortDRXCycle := 64;
+    const integer tsc_DrxStartOffset := 4;
+    const integer tsc_OnDurationTimer := 20;
+    const integer tsc_ShortDRXCycleTimer := 10;
+    const integer tsc_DRXRetranTimer := 6;
+    const integer tsc_SubFrameX := 6;
+    const integer tsc_SubFrameY := 2;
+    const integer tsc_SubFrameZ := 6;
+    
+    var integer v_NormalSF := 0;
+    var SubFrameTiming_Type v_Timing  := valueof(cs_SubFrameTiming(0, 0, 0));
+    var SubFrameTiming_Type v_Timing1 := v_Timing;
+    var SubFrameTiming_Type v_Timing2 := v_Timing;
+    var SubFrameTiming_Type v_Timing3 := v_Timing;
+    var SubFrameTiming_Type v_Timing4 := v_Timing;
+    var SubFrameTiming_Type v_Timing5 := v_Timing;
+    
+    var integer v_HARQRTTTimer := 0;
+    var octetstring v_EncodedRlcPdu;
+    
+    var EUTRA_FDD_TDD_Mode_Type  v_EUTRA_FDD_TDD_Mode;
+    var Dl_Bandwidth_Type v_DL_Bandwidth;   //@sic R5-253974 sic@
+    
+    timer t_Watchdog := 5.0;
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      PREAMBLE
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_Init(c1);
+    v_EUTRA_FDD_TDD_Mode := f_EUTRA_CellInfo_GetFDD_TDD(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_Preamble(eutra_Cell1, STATE2A_TESTLOOP_ModeA);
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0); // set null AS ciphering algorithm
+    
+    f_EUTRA_LoopBackActivation_State4_Def(eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_1DRB(0, tsc_DRB1));
+    
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Test Body
+    //////////////////////////////////////////////////////////////////////////////////
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell1,
+                                        cs_TimingInfo_SubFrame(4),
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(4, 4), // Imcs = Itbs =4, Nprb Results in TB size of 328 selected to be neither too big nor too small
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,
+                                        cs_UL_GrantConfig_ContPeriodic(5));       // periodic grant every 5ms (80% of 6ms the Inactivity Timer)
+    
+    //@siclog "Step 1 - 2" siclog@
+    //SS Transmits RRCConnectionReconfiguration to configure specific DRX parameters
+    //The UE transmits RRCConnectionReconfigurationComplete
+    f_RRC_ConnectionReconfiguration_MAC_MainConfig_PhysicalConfig (eutra_Cell1, cs_MAC_MainConfig_Explicit_RBC_ShortDRX(tsc_DrxStartOffset, tsc_ShortDRXCycleTimer));
+    f_Delay(0.660); //@sic R5s160641 sic@
+    // suppress number of DL retransmissions:
+    f_EUTRA_SS_CellConfig_DciDlInfo_NoRetransmission(eutra_Cell1);
+    f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NoHeaderManipulationDLOnly);
+    // to configure SS to report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Enable);
+    //@sic R5s150064 sic@
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X_ShortDRX(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_ShortDRXCycle, tsc_DrxStartOffset, tsc_OnDurationTimer - 1 - tsc_SubFrameX);
+    // stop periodic UL grants and restart automatic grant allocation instead; periodic TA is kept stopped:
+    f_EUTRA_StartULGrantTransmissionOnSR_Reception_No_PUCCH_Sync(eutra_Cell1, cs_TimingInfo_EUTRA_NB(v_Timing1), cs_DciInfo_CcchDcchDtchUL_Def);
+    
+    //@siclog "Step 3" siclog@
+    // set CRC error as error mode
+    // Choose the next subframe when the onDurationTimer is started.
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1);
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, tsc_ShortDRXCycle, v_DL_Bandwidth);
+    v_NormalSF := f_DRX_NormalSF(v_Timing1.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode);
+    v_Timing1 := f_EUTRA_TimingInfoAdd(v_Timing1, v_NormalSF, v_DL_Bandwidth);
+    
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,cs_DL_SCH_CRC_C_RNTI_Error(Erroneous));
+    
+    v_EncodedRlcPdu := f_RLC_AMD_1PDU_Encvalue(0, tsc_NoPoll, f_PDCP_PDU_Encvalue (cs_PDCP_PDU_LongSN(cs_PDCP_DataPdu_LongSN(tsc_B12_SQN0, crs_PDCP_SDU_17B))));
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing1),
+                                         cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                         cs_HarqProcessAssignment_Specific(1)));
+    v_HARQRTTTimer := f_GetHARQRTTTimer(v_Timing1.Subframe.Number, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 5" siclog@
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing1, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Normal),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    v_NormalSF := f_DRX_NormalSF(v_Timing1.Subframe.Number, tsc_SubFrameY, v_EUTRA_FDD_TDD_Mode);
+    v_Timing2 := f_EUTRA_TimingInfoAdd(v_Timing1, v_NormalSF, v_DL_Bandwidth);
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing2),
+                                         cs_MAC_PDUList_1(cs_MAC_PDU_DRX_Command_10Padding),
+                                         cs_HarqProcessAssignment_Specific(2)));
+    //@siclog "Step 7" siclog@
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing2, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Erroneous),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    
+    v_Timing3 := f_EUTRA_TimingInfoAdd(v_Timing1, v_HARQRTTTimer, v_DL_Bandwidth);
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      v_NormalSF := f_DRX_NormalSF( v_Timing3.Subframe.Number, 0, v_EUTRA_FDD_TDD_Mode);
+    }
+    else {
+      v_NormalSF := f_DRX_NormalSF(v_Timing3.Subframe.Number, 1, v_EUTRA_FDD_TDD_Mode);
+    }
+    
+    v_Timing3 := f_EUTRA_TimingInfoAdd(v_Timing3, v_NormalSF, v_DL_Bandwidth);
+    
+    DRB.send (cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                         tsc_RbId_DRB1,
+                                         cs_TimingInfo_EUTRA_NB(v_Timing3),
+                                         cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                         cs_HarqProcessAssignment_Specific(3)));
+    v_HARQRTTTimer := f_GetHARQRTTTimer(v_Timing3.Subframe.Number, v_EUTRA_FDD_TDD_Mode);
+    
+    //@siclog "Step 9" siclog@
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing3, 1, v_DL_Bandwidth);
+    f_SS_ConfigCRC_ErrorMode(eutra_Cell1,
+                             cs_DL_SCH_CRC_C_RNTI_Error(Normal),
+                             cs_TimingInfo_EUTRA_NB(v_Timing));
+    v_Timing4 := f_EUTRA_TimingInfoAdd(v_Timing3, v_HARQRTTTimer, v_DL_Bandwidth);
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      v_NormalSF := f_DRX_NormalSF(v_Timing4.Subframe.Number, tsc_DRXRetranTimer - tsc_SubFrameZ, v_EUTRA_FDD_TDD_Mode);
+    }
+    else if (v_EUTRA_FDD_TDD_Mode == TDD) {
+      v_NormalSF := f_DRX_NormalSF( v_Timing4.Subframe.Number, 1, v_EUTRA_FDD_TDD_Mode); //@sic R5s230173 sic@
+    }
+    
+    v_Timing4 := f_EUTRA_TimingInfoAdd(v_Timing4, v_NormalSF, v_DL_Bandwidth);
+    
+    DRB.send(cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                        tsc_RbId_DRB1,
+                                        cs_TimingInfo_EUTRA_NB(v_Timing4),
+                                        cs_MAC_PDUList_1 ( cs_MAC_PDU_DRX_Command_10Padding ),
+                                        cs_HarqProcessAssignment_Specific(4)));
+    //@siclog "Step 11" siclog@
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      v_NormalSF := f_DRX_NormalSF(v_Timing4.Subframe.Number, tsc_SubFrameZ - 1, v_EUTRA_FDD_TDD_Mode);
+      v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing4, v_NormalSF, v_DL_Bandwidth);
+    }
+    else if (v_EUTRA_FDD_TDD_Mode == TDD) {
+      v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing3, v_HARQRTTTimer, v_DL_Bandwidth);
+      v_NormalSF := f_DRX_NormalSF(v_Timing5.Subframe.Number, 5, v_EUTRA_FDD_TDD_Mode);
+      v_Timing5 := f_EUTRA_TimingInfoAdd(v_Timing5, v_NormalSF, v_DL_Bandwidth);
+    }
+    
+    DRB.send(cas_DRB_COMMOM_REQ_MAC_PDU(eutra_Cell1,
+                                        tsc_RbId_DRB1,
+                                        cs_TimingInfo_EUTRA_NB(v_Timing5),
+                                        cs_MAC_PDUList_1 (cs_MAC_PDU_NoPadding_RLCPDU_LCID(tsc_LchId_DRB1, v_EncodedRlcPdu)),
+                                        cs_HarqProcessAssignment_Specific(5)));
+    // Preconfig SS for preventing UE to enter DRX
+    // Period is set as 16 = 80% of 20ms the Inactivity Timer
+    t_Watchdog.start;
+    v_Timing1 := f_AckNack_TimingInfo(v_Timing1, v_EUTRA_FDD_TDD_Mode);
+    //@siclog "Step 4" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 3?
+    SYSIND.receive ( car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing1.SFN.Number, v_Timing1.Subframe.Number), nack ));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    
+    //@siclog "Step 6" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 5?
+    v_Timing2 := f_AckNack_TimingInfo(v_Timing2, v_EUTRA_FDD_TDD_Mode);
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1, cr_TimingInfo(v_Timing2.SFN.Number, v_Timing2.Subframe.Number), ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    
+    //@siclog "Step 8" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 7?
+    v_Timing3 := f_AckNack_TimingInfo(v_Timing3, v_EUTRA_FDD_TDD_Mode);
+    SYSIND.receive(car_UL_HARQ_IND (eutra_Cell1, cr_TimingInfo(v_Timing3.SFN.Number, v_Timing3.Subframe.Number), nack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+    
+    //@siclog "Step 10" siclog@
+    // Check: Does the UE transmit a HARQ NACK for the DL MAC PDU in Step 9?
+    v_Timing4 := f_AckNack_TimingInfo(v_Timing4, v_EUTRA_FDD_TDD_Mode);
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1, cr_TimingInfo(v_Timing4.SFN.Number, v_Timing4.Subframe.Number), ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+    
+    //@siclog "Step 12" siclog@
+    // Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 11?
+    v_Timing5 := f_AckNack_TimingInfo(v_Timing5, v_EUTRA_FDD_TDD_Mode);
+    
+    SYSIND.receive(car_UL_HARQ_IND(eutra_Cell1, cr_TimingInfo(v_Timing5.SFN.Number, v_Timing5.Subframe.Number), ack));
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+    t_Watchdog.stop;
+    
+    //test body ends
+    f_EUTRA_TestBody_Set(false);
+    
+    ///////////////////////////////////////////////////////////////////////////////////
+    //      Post Amble
+    //////////////////////////////////////////////////////////////////////////////////
+    // to configure SS to stop report reception of HARQ ACK or NACK
+    f_SS_ConfigUL_HARQ_IndMode(eutra_Cell1, tsc_L1Mac_IndicationMode_Disable);
+    f_SS_Config1TM_DRB_NoMACHeader(eutra_Cell1, tsc_RbId_DRB1, cs_MAC_TestMode_NormalMode);
+
+    // leaving UE test state 4
+    v_Timing1 := f_GetNextSendOccasion_7_1_6_X(eutra_Cell1, v_EUTRA_FDD_TDD_Mode, tsc_LongDRXCycle, tsc_DrxStartOffset, 0);
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1, tsc_RRC_TI_Def, other, cs_TimingInfo_EUTRA_NB(v_Timing1));
+
+    // Release RRC Connection and Switch off
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);
+  }
+
+}

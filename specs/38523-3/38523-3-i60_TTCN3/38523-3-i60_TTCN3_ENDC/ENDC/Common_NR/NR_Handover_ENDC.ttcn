@@ -1,0 +1,564 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-11-01 08:32:18 +0100 (Sat, 01 Nov 2025) $
+// $Rev: 42143 $
+/******************************************************************************/
+
+module NR_Handover_ENDC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G all;
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_CommonFunctions_ENDC all;
+  import from NR_Component_Base all;
+  import from NR_Component_ENDC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_HandoverCommonFunctions all;
+  import from NR_PDCP_Templates all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+
+  /*
+   * @desc      Function to generate RRCConnectionReconfiguration to be used for EN-DC NR PSCell change
+   *            Acc to Table 4.6.1-13: RRCReconfiguration with condition
+   *                - EN-DC_HO and RBConfig_KeyChange or
+   *                - EN-DC_HO and RBConfig_NoKeyChange
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_KeyToUse          (default value: secondary)
+   * @param     p_PDCP_Config       (default value: cs_38508_PDCP_Config)
+   * @return    template (value) RadioBearerConfig
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_RetrieveRadioBearerConfig_PSCellChange(boolean                 p_RBConfig_KeyChange := true,
+                                                       boolean                 p_IsSrb3Configured := false,
+                                                       NR_KeyToUse_Type        p_KeyToUse := secondary,
+                                                       template (value) PDCP_Config p_PDCP_Config := cs_38508_PDCP_Config
+                                                       ) runs on NR_BASE_PTC return template (value) RadioBearerConfig
+  {
+    var DRB_Identity v_DrbId := tsc_NR_DRB2;    // for ENDC only
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var template (omit) SRB_ToAddModList v_SRB_ToAddModList := omit;
+
+    //RadioBearerConfig
+    if (p_RBConfig_KeyChange){ //Condition RBConfig_KeyChange
+        v_DRB_ToAddModList := {cs_NR_DRB_ToAddMod_ReestPDCP(v_DrbId, p_PDCP_Config)};
+        if (p_IsSrb3Configured) { //With key change PDCP for SRB3 needs to be reestablished
+            v_SRB_ToAddModList := {cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB3)}
+        }
+    } else { //Condition RBConfig_NoKeyChange
+        v_DRB_ToAddModList := {cs_NR_DRB_ToAddMod_RecoverPDCP(v_DrbId, p_PDCP_Config)};
+        if (p_IsSrb3Configured) {
+            v_SRB_ToAddModList := {cs_NR_SRB_ToAddMod(tsc_SRB3)}
+        }
+    }
+    v_RadioBearerConfig :=  cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList,
+                                                          v_DRB_ToAddModList,
+                                                          -,
+                                                          cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), p_KeyToUse));
+    return v_RadioBearerConfig;
+  }
+
+  /*
+   * @desc      Generic Function for performing SS and UE configuration for EN-DC inter-Cell PSCell change
+   *            The function implements steps 1-10 of 38.523-3 cl 7.2.6.1  Sequence of EN-DC NR inter-cell PSCell change
+   *            NOTE: ONLY DRB2 and SRB3 are handled
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_KeyToUse          (default value: secondary)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_RRC_PSCellChange_InterCell(NR_CellId_Type                       p_SourceCellId,
+                                           NR_CellId_Type                       p_TargetCellId,
+                                           RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                           boolean                              p_IsSrb3Configured := false,
+                                           boolean                              p_RBConfig_KeyChange := true,
+                                           NR_KeyToUse_Type                     p_KeyToUse := secondary,
+                                           template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                           template (omit)  MeasConfig          p_MeasConfig  := omit
+                                           ) runs on NR_BASE_PTC
+  { //@sic R5-195240 sic@
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig;
+    var template (value) CellGroupConfig v_SCGConfig := f_NR_CellGroupConfig_PSCellChange( p_TargetCellId, p_RNTI_Value, p_IsSrb3Configured, p_RACH_ConfigDedicated);
+    var template (value) RadioBearerConfig v_RadioBearerConfig := f_NR_RetrieveRadioBearerConfig_PSCellChange( p_RBConfig_KeyChange, p_IsSrb3Configured, p_KeyToUse);
+    
+    v_RachProcedureConfig := f_NR_GetRACHProcedureConfigPSCell( p_TargetCellId, p_RACH_ConfigDedicated);
+   
+    f_NR_RRC_PSCellChange_InterCell_Common(p_SourceCellId,
+                                           p_TargetCellId,
+                                           p_RNTI_Value,
+                                           v_RadioBearerConfig,
+                                           v_SCGConfig,
+                                           p_RBConfig_KeyChange,
+                                           p_IsSrb3Configured,
+                                           v_RachProcedureConfig,
+                                           p_RACH_ConfigDedicated,
+                                           p_MeasConfig);
+  }
+
+  /*
+   * @desc      Common function for performing SS and UE configuration for EN-DC inter-Cell PSCell change
+   *            The function implements steps 1-10 of 38.523-3 cl 7.2.6.1  Sequence of EN-DC NR inter-cell PSCell change
+   *            NOTE: ONLY DRB2 and SRB3 are handled
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RadioBearerConfig
+   * @param     p_SCGConfig
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RachProcedureConfig
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @status    APPROVED (ENDC)
+   */
+    function f_NR_RRC_PSCellChange_InterCell_Common(NR_CellId_Type                       p_SourceCellId,
+                                                    NR_CellId_Type                       p_TargetCellId,
+                                                    RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                    template (omit) RadioBearerConfig   p_RadioBearerConfig,
+                                                    template (value) CellGroupConfig     p_SCGConfig,
+                                                    boolean                              p_RBConfig_KeyChange := true,
+                                                    boolean                              p_IsSrb3Configured := false,
+                                                    template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                    template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                    template (omit) MeasConfig           p_MeasConfig := omit,
+                                                    template (value) UL_GrantConfig_Type p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR
+                                                    ) runs on NR_BASE_PTC
+  {
+    var template (value) NR_RadioBearerList_Type v_RadioBearerToReleaseList := {cs_NR_SS_DRB_Release(tsc_NR_DRB2)};
+    //@sic R5s190934: p_RadioBearerConfig changed to template (omit) sic@
+
+    f_NR_RRC_PSCellChange_InterCell_Steps1To6( p_SourceCellId,
+                                               p_TargetCellId,
+                                               p_RNTI_Value,
+                                               p_RBConfig_KeyChange,
+                                               p_IsSrb3Configured,
+                                               p_RachProcedureConfig,
+                                               p_RACH_ConfigDedicated,
+                                               p_UL_GrantConfig_TargetCell );
+    
+    // Step 7 E-UTRA Cell Send RRCConnectionReconfiguration
+    // Step 8 E-UTRA Cell: Receive RRCConnectionReconfigurationComplete.
+    f_NR_SendRRCReconfigurationContentsToEUTRA(p_RadioBearerConfig, p_SCGConfig, p_MeasConfig);
+    
+    // Step 9 NR Target Cell: Inform the SS about completion of the PSCell change (e.g. to trigger PDCP STATUS REPORT PDU).
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverComplete_REQ(p_TargetCellId));
+    
+    //Step 10 NR Source Cell: Release SRB3 (if necessary) and DRBs.
+    if (p_IsSrb3Configured) {
+      v_RadioBearerToReleaseList := { cs_NR_SS_RadioBearer_Release(tsc_NR_RbId_SRB3), cs_NR_SS_DRB_Release(tsc_NR_DRB2)};
+    }
+    f_NR_SS_CommonRadioBearerConfig(p_SourceCellId, v_RadioBearerToReleaseList);
+  }
+
+  /*
+   * @desc      Common function for performing SS and UE configuration for EN-DC inter-Cell PSCell change
+   *            The function implements steps 1-10 of 38.523-3 cl 7.2.6.1  Sequence of EN-DC NR inter-cell PSCell change
+   *            NOTE: ONLY DRB2 and SRB3 are handled
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RachProcedureConfig
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @status    APPROVED (ENDC)
+   */
+    function f_NR_RRC_PSCellChange_InterCell_Steps1To6(NR_CellId_Type                       p_SourceCellId,
+                                                       NR_CellId_Type                       p_TargetCellId,
+                                                       RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                       boolean                              p_RBConfig_KeyChange := true,
+                                                       boolean                              p_IsSrb3Configured := false,
+                                                       template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                       template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                       template (value) UL_GrantConfig_Type p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR
+                                                    ) runs on NR_BASE_PTC
+  {
+    var template (value) NR_RadioBearer_Type v_RadioBearerDRB2 := f_NR_GetRadioBearerConfig_FullAM_DRB2(p_TargetCellId);
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := {v_RadioBearerDRB2};
+
+    //@sic R5s190934: p_RadioBearerConfig changed to template (omit) sic@
+   // Step 1 NR Target Cell: Configuration of SRB3 (if necessary) and DRBs
+    if (p_IsSrb3Configured) {
+        v_RadioBearerList := { cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB3, cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsSRB, crs_RlcBearerRouting_None)),
+                               v_RadioBearerDRB2 };
+    };
+    f_NR_SS_CommonRadioBearerConfig(p_TargetCellId, v_RadioBearerList);
+
+    //Step 2. Transfer of the PDCP Count for DRBs and SRB3 (if necessary) from NR source to NR target cell:
+    //a) NR Source Cell: Get PDCP COUNT.
+    //b) NR Target Cell: Set PDCP COUNT.
+    f_NR_SS_PdcpCount_Handover(p_SourceCellId, p_TargetCellId, v_RadioBearerList, p_RBConfig_KeyChange);
+
+    //Step 3. NR Target Cell: Inform the SS about the PSCell change and about the source cell id.
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverInit_REQ(p_SourceCellId, p_TargetCellId));
+
+    //Step 4. NR Target Cell: Configure RACH procedure either dedicated or C-RNTI based.
+    // Save new C-RNTI in cell configuration for p_TargetCellId
+    // NOTE 3:  The FollowOnFlag is set to true in the ASP reconfiguring C-RNTI.
+    f_NR_CellInfo_SetRNTI(p_TargetCellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_TargetCellId, p_RNTI_Value, -, tsc_NoCnfReq, tsc_FollowOnFlag);           //@sic R5s190970 R5-206369 sic@
+    f_NR_SS_RachProcedureConfigHO(p_TargetCellId, p_RachProcedureConfig, -, p_RACH_ConfigDedicated);
+    
+    //Step 5 NR Target Cell: Activate security.
+    // get latest SK Counter value
+    f_ENDC_GetKeysActivateSecurity(p_TargetCellId, EUTRA); // @sic R5s190491 sic@
+    
+    //Step 6 NR Target Cell: Configure UL grant configuration ("OnSR", default grant).
+    //NOTE 4: Unless explicitly specified UL grant configuration keeps configured as per default at the NR source cell.
+    f_NR_ULGrantConfiguration_Start(p_TargetCellId, -, -, -, -, p_UL_GrantConfig_TargetCell);
+  }
+
+  /*
+   * @desc      Generic Function for performing SS and UE configuration for EN-DC inter-Cell PSCell change
+   *            The function implements steps 1-9 of 38.523-3 cl 7.2.6.2 Sequence of EN-DC NR intra-cell PSCell change
+   *            NOTE: ONLY DRB2 and SRB3 are handled
+   * @param     p_NR_CellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_KeyToUse          (default value: secondary)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_RRC_PSCellChange_IntraCell(NR_CellId_Type                       p_NR_CellId,
+                                           RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                           boolean                              p_IsSrb3Configured := false,
+                                           boolean                              p_RBConfig_KeyChange := true,
+                                           NR_KeyToUse_Type                     p_KeyToUse := secondary,
+                                           template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                           template (omit)  MeasConfig          p_MeasConfig  := omit
+                                           ) runs on ENDC_NR_PTC
+  { //@sic R5-195240 sic@
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig;
+    var template (value) CellGroupConfig v_SCGConfig := f_NR_CellGroupConfig_PSCellChange( p_NR_CellId, p_RNTI_Value, p_IsSrb3Configured, p_RACH_ConfigDedicated);
+    var template (value) RadioBearerConfig v_RadioBearerConfig := f_NR_RetrieveRadioBearerConfig_PSCellChange( p_RBConfig_KeyChange, p_IsSrb3Configured, p_KeyToUse);
+    
+    v_RachProcedureConfig := f_NR_GetRACHProcedureConfigPSCell( p_NR_CellId, p_RACH_ConfigDedicated);
+    f_NR_RRC_PSCellChange_IntraCell_Common(p_NR_CellId,
+                                           p_RNTI_Value,
+                                           v_RadioBearerConfig,
+                                           v_SCGConfig,
+                                           p_RBConfig_KeyChange,
+                                           p_IsSrb3Configured,
+                                           v_RachProcedureConfig,
+                                           p_RACH_ConfigDedicated,
+                                           p_MeasConfig);
+  }
+
+  /*
+   * @desc      Common function for performing SS and UE configuration for EN-DC intra-Cell PSCell change
+   *            The function implements steps 1-9 of 38.523-3 cl 7.2.6.2 Sequence of EN-DC NR intra-cell PSCell change
+   *            NOTE: ONLY DRB2 and SRB3 are handled
+   * @param     p_NR_CellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RadioBearerConfig
+   * @param     p_SCGConfig
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RachProcedureConfig
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (ENDC)
+   */
+   function f_NR_RRC_PSCellChange_IntraCell_Common(NR_CellId_Type                           p_NR_CellId,
+                                                   RNTI_Value                               p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                   template (value) RadioBearerConfig       p_RadioBearerConfig,
+                                                   template (value) CellGroupConfig         p_SCGConfig,
+                                                   boolean                                  p_RBConfig_KeyChange := true,
+                                                   boolean                                  p_IsSrb3Configured := false,
+                                                   template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                   template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                   template (omit) MeasConfig               p_MeasConfig := omit
+                                                   ) runs on ENDC_NR_PTC
+  {
+    var template (value) NR_RadioBearer_Type v_RadioBearerDRB2 := f_NR_GetRadioBearerConfig_FullAM_DRB2(p_NR_CellId);
+    var template (value) NR_RadioBearerList_Type v_SS_RadioBearerToReleaseList := {cs_NR_SS_DRB_Release(tsc_NR_DRB2)};
+    var template (value) NR_RadioBearerList_Type v_SS_RadioBearerList := {v_RadioBearerDRB2};
+    
+    if (p_IsSrb3Configured) {
+        v_SS_RadioBearerList := { cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB3, cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsSRB, crs_RlcBearerRouting_None)),
+                                  v_RadioBearerDRB2 };
+    };
+    if (p_IsSrb3Configured) {
+      v_SS_RadioBearerToReleaseList := { cs_NR_SS_RadioBearer_Release(tsc_NR_RbId_SRB3), cs_NR_SS_DRB_Release(tsc_NR_DRB2)};
+    }
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( p_NR_CellId,
+                                              p_RNTI_Value,
+                                              p_RadioBearerConfig,
+                                              -,
+                                              p_SCGConfig,
+                                              p_RBConfig_KeyChange,
+                                              p_RachProcedureConfig,
+                                              v_SS_RadioBearerToReleaseList,
+                                              v_SS_RadioBearerList,
+                                              p_RACH_ConfigDedicated,
+                                              p_MeasConfig
+                                            );
+   }
+
+  /*
+   * @desc      Common function for performing SS and UE configuration for EN-DC intra-Cell PSCell change with specific SS configuration parameters
+   *            As per 38.523-3 cl 7.2.6.2  Sequence of EN-DC NR intra-cell PSCell change
+   * @param     p_NR_CellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RadioBearerConfig
+   * @param     p_RadioBearerConfig2 (default value: omit)
+   * @param     p_SCGConfig
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RachProcedureConfig
+   * @param     p_SS_RadioBearerToReleaseList
+   * @param     p_SS_RadioBearerList
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_WaitForRRCReconfigurationComplete (default value: true)
+   * @status    APPROVED (ENDC)
+   */
+   function f_NR_RRC_PSCellChange_IntraCell_CommonSS(NR_CellId_Type                           p_NR_CellId,
+                                                     RNTI_Value                               p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                     template (value) RadioBearerConfig       p_RadioBearerConfig,
+                                                     template (omit) RadioBearerConfig        p_RadioBearerConfig2 := omit,
+                                                     template (value) CellGroupConfig         p_SCGConfig,
+                                                     boolean                                  p_RBConfig_KeyChange := true,
+                                                     template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                     template (value) NR_RadioBearerList_Type p_SS_RadioBearerToReleaseList,
+                                                     template (value) NR_RadioBearerList_Type p_SS_RadioBearerList,
+                                                     template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                     template (omit) MeasConfig               p_MeasConfig := omit,
+                                                     boolean                                  p_WaitForRRCReconfigurationComplete := true
+                                                    ) runs on ENDC_NR_PTC
+  {
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList;
+    var SubFrameTiming_Type v_Timing;
+    var EUTRA_NR_Coordination_MSG v_Coordination_MSG_Value;
+    
+    //Step 1 NR Cell before T: Get PDCP count for DRBs and SRB3 (if applied)
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_NR_CellId, p_SS_RadioBearerList, p_RBConfig_KeyChange);
+
+   //Step 2 to 5 @sic R5s190337 R5s190370 R5s200126 sic@
+    v_Timing := f_NR_RRC_PSCellChange_IntraCell_Step2To5 (p_NR_CellId, p_RNTI_Value,
+                                                          p_RadioBearerConfig, p_RadioBearerConfig2, p_SCGConfig,
+                                                          p_SS_RadioBearerToReleaseList, p_SS_RadioBearerList,
+                                                          p_RachProcedureConfig, p_RACH_ConfigDedicated,
+                                                          p_MeasConfig);
+    
+    //Step 6 NR Cell at T + 5ms: Restore the PDCP counts
+    //NOTE 2:   For AM DRBs the PDCP count is maintained. For SRB3 (if applied) and UM DRBs, the PDCP count is maintained or reset depending on the RRCConnectionReconfiguration message content.
+    f_NR_SS_PdcpCount_Set(p_NR_CellId, v_NR_PdcpCountInfoList, cs_TimingInfo_NR(v_Timing));
+    
+    //Step 7 NR Cell at T + 5ms: Re-establish security.
+    f_ENDC_GetKeysActivateSecurity(p_NR_CellId, EUTRA); // @sic R5s190587 sic@
+    
+    //Step 8 E-UTRA Cell (after step 2): Receive RRCConnectionReconfigurationComplete
+    //RRCReconfigurationComplete not yet received from E-UTRA - Wait for it @sic R5s200126 sic@
+    if (p_WaitForRRCReconfigurationComplete) {
+        EUTRA.receive(cmr_EUTRA_NR_OctetData ("Complete")) -> value v_Coordination_MSG_Value;
+        f_NR_CheckReceived_RRCReconfigurationComplete(v_Coordination_MSG_Value);
+    }
+  }
+
+  /*
+   * @desc      Step 2 to 5 of function for performing SS and UE configuration for EN-DC intra-Cell PSCell change with specific SS configuration parameters
+   *            As per 38.523-3 cl 7.2.6.2  Sequence of EN-DC NR intra-cell PSCell change
+   * @param     p_NR_CellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RadioBearerConfig
+   * @param     p_RadioBearerConfig2 (default value: omit)
+   * @param     p_SCGConfig
+   * @param     p_SS_RadioBearerToReleaseList
+   * @param     p_SS_RadioBearerList
+   * @param     p_RachProcedureConfig
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (ENDC)
+   */
+   function f_NR_RRC_PSCellChange_IntraCell_Step2To5(NR_CellId_Type                           p_NR_CellId,
+                                                     RNTI_Value                               p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                     template (value) RadioBearerConfig       p_RadioBearerConfig,
+                                                     template (omit) RadioBearerConfig        p_RadioBearerConfig2 := omit,
+                                                     template (value) CellGroupConfig         p_SCGConfig,
+                                                     template (value) NR_RadioBearerList_Type  p_SS_RadioBearerToReleaseList,
+                                                     template (value) NR_RadioBearerList_Type p_SS_RadioBearerList,
+                                                     template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                     template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                     template (omit) MeasConfig               p_MeasConfig := omit
+                                                    ) runs on ENDC_NR_PTC return SubFrameTiming_Type
+   { //@sic R5s190337 R5s190370 sic@
+    var SubFrameTiming_Type v_Timing;
+
+    //Step 2 E-UTRA Cell at T: Send RRCConnectionReconfiguration.
+    f_NR_SendRRCReconfigurationContentsToEUTRA(p_RadioBearerConfig, p_SCGConfig, p_MeasConfig, p_RadioBearerConfig2, false, noRACH_Check);
+    v_Timing := f_NR_ReceiveTimefromEUTRA (p_NR_CellId);
+    
+    //Step 3 NR Cell at T: Release SRB3  (if necessary) and DRBs.
+    f_NR_SS_CommonRadioBearerConfig(p_NR_CellId, p_SS_RadioBearerToReleaseList, cs_TimingInfo_NR(v_Timing));
+    
+    // Step 4 NR Cell at T:  Configure RACH procedure either dedicated or C-RNTI based.
+    // NOTE 1:  The FollowOnFlag is set to true in the ASPs reconfiguring the RadioBearerList (step 3) and C-RNTI (step 4).
+    f_NR_CellInfo_SetRNTI(p_NR_CellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_NR_CellId, p_RNTI_Value, -, tsc_NoCnfReq, tsc_FollowOnFlag);     //@sic R5-206369 sic@
+    f_NR_SS_RachProcedureConfigHO(p_NR_CellId, p_RachProcedureConfig, cs_TimingInfo_NR(v_Timing), p_RACH_ConfigDedicated);
+        
+    //Step 5 NR Cell at T + 5ms: (Re-)configure SRB3 (if necessary) and DRBs.
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(v_Timing, 5);   // add 5ms
+    f_NR_SS_CommonRadioBearerConfig(p_NR_CellId, p_SS_RadioBearerList, cs_TimingInfo_NR(v_Timing));
+    
+    //Receive PRACH Indication to check the RACH on NR, the rported timing is not checked @sic R5s19xxxx sic@
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_RachPreamble(enable));
+    SYSIND.receive(car_NR_PRACH_Preamble_IND(?, cr_TimingInfo_Any, ?));
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_RachPreamble(disable));
+
+    return v_Timing;
+  }
+
+  /*
+   * @desc      PSCell Intra cell change with specific RB configurations: NR_PDCP_SRB1_2, NR_PDCP_SRB1_2_SRB3, NR_PDCP_MCG_SRB1_2
+   * @param     p_NR_CellId
+   * @param     p_RBConfig
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_RRC_PSCellChange_SRB_NR_PDCP(NR_CellId_Type p_NR_CellId,
+                                             ENDC_SRB_DRB_Configuration_Type p_RBConfig
+                                            ) runs on ENDC_NR_PTC
+  {
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig:= f_NR_GetRACHProcedureConfigPSCell( p_NR_CellId, -);
+    var octetstring v_OctetData;
+    var integer v_MCG_Id;
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig2;
+    var template (value) NR_RadioBearerList_Type v_SS_RadioBearerList;
+    var template (value) NR_RadioBearerList_Type v_SS_RadioBearerToReleaseList := {cs_NR_SS_DRB_Release(tsc_NR_DRB2)};
+    var template (value) SRB_ToAddModList v_SRB_ToAddModList_SRB1SRB2 := {
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB1),
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB2)
+    };
+    var template (value) NR_RadioBearer_Type v_RadioBearerDRB2 := f_NR_GetRadioBearerConfig_FullAM_DRB2(p_NR_CellId);
+    
+    select (p_RBConfig   ) {
+        case(NR_PDCP_SRB1_2){
+            v_RadioBearerConfig := f_NR_RetrieveRadioBearerConfig_PSCellChange( true, false);  //DRB2
+            v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList_SRB1SRB2,
+                                                                  -,
+                                                                  -,
+                                                                  cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+            v_SCGConfig := f_NR_CellGroupConfig_PSCellChange( p_NR_CellId, -, false);
+            v_SS_RadioBearerList := {v_RadioBearerDRB2};
+        }
+        case(NR_PDCP_SRB1_2_SRB3){
+            v_SCGConfig := f_NR_CellGroupConfig_PSCellChange(p_NR_CellId, -, true);
+            v_RadioBearerConfig  := f_NR_RetrieveRadioBearerConfig_PSCellChange( true, true);  //DRB2 + SRB3
+            v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList_SRB1SRB2,
+                                                                  -,
+                                                                  -,
+                                                                  cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+            v_SCGConfig := f_NR_CellGroupConfig_PSCellChange(p_NR_CellId, -, true);
+            // Configure SRB3 in SS
+            v_SS_RadioBearerList[0] := cs_NR_SS_SRB3_Config; // @sic R5s201350 sic@
+            v_SS_RadioBearerList[1] := f_NR_GetRadioBearerConfig_FullAM_DRB2(p_NR_CellId);
+        }
+        case(NR_PDCP_MCG_SRB1_2){
+            // get the DRB id for MCG
+            v_OctetData := f_EUTRA_NR_WaitForCoOrd_Data(EUTRA, "DRB ID");
+            v_MCG_Id := oct2int(v_OctetData);
+            v_SCGConfig := f_NR_CellGroupConfig_PSCellChange( p_NR_CellId, -, false);
+            // @sic R5s190554 change 4.10 sic@
+            v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(-,
+                                                                 {cs_NR_DRB_ToAddMod_ReestPDCP(tsc_NR_DRB2, cs_38508_PDCP_Config)},
+                                                                 -,
+                                                                 cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary));
+            v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList_SRB1SRB2,
+                                                                  {cs_38508_DRB_ToAddMod(v_MCG_Id, cs_38508_PDCP_Config)},
+                                                                  -,
+                                                                  cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+            // then configure it
+            // @sic R5s190554 change 4.10 sic@
+            v_SS_RadioBearerList[0] := f_NR_GetRadioBearerConfig_FullAM_DRB2(p_NR_CellId); //@sic R5-195340 sic@
+         }
+        case else{} //do nothing
+    }
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData(bit2oct(f_NR_ConvertCiphAlg2Bitstring(f_NR_AS_CipheringAlgorithm_Get())), "NR Ciphering Alg"));
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData(bit2oct(f_NR_ConvertIntAlg2Bitstring(f_NR_AS_IntegrityAlgorithm_Get())), "NR Integrity Alg"));
+
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( p_NR_CellId,
+                                              -, //tsc_C_RNTI_Value3,
+                                              v_RadioBearerConfig,
+                                              v_RadioBearerConfig2,
+                                              v_SCGConfig,
+                                              true,  // p_RBConfig_KeyChange
+                                              v_RachProcedureConfig,
+                                              v_SS_RadioBearerToReleaseList,
+                                              v_SS_RadioBearerList );
+  }
+
+  /*
+   * @desc      Transmit CellgroupConfig and RadioBearerConfig to E-UTRA side and update C-RNTI
+   *            Note: to be used for PSCell intra cell change in RLC TM only
+   * @param     p_NR_CellId
+   * @param     p_RLC_BearerConfigList
+   * @param     p_PDCP_Config
+   * @param     p_OmitRecoverPDCP   (default value: false)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_WaitForRRCReconfigurationComplete (default value: true)
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_RLC_ReconfigurationHO_ENDC(NR_CellId_Type p_NR_CellId,
+                                           template (value) NR_RLC_BearerToAddModList_Type p_RLC_BearerConfigList,
+                                           template (value) PDCP_Config p_PDCP_Config,
+                                           boolean p_OmitRecoverPDCP := false,
+                                           template (omit) CellGroupConfig p_CellGroupConfig := omit,
+                                           boolean p_WaitForRRCReconfigurationComplete := true
+                                           ) runs on NR_BASE_PTC
+  { //@sic R5-194296 sic@
+    //@sic R5-204512: added p_WaitForRRCReconfigurationComplete sic@
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+         
+    if (ispresent(p_CellGroupConfig)) { // @sic R5s191200 sic@
+      v_CellGroupConfig := p_CellGroupConfig; //compiler warning may be ignored due to check
+    } else {
+      v_CellGroupConfig := f_NR_GetCellGroupConfigHO (p_NR_CellId, p_RLC_BearerConfigList); //tsc_C_RNTI_Value3
+    }
+
+    v_RadioBearerConfig := f_NR_RetrieveRadioBearerConfig_PSCellChange( false, false, -, p_PDCP_Config); // RBConfig_NoKeyChange - No SRB3
+    if (p_OmitRecoverPDCP) { // @sic R5s200180 sic@
+        v_RadioBearerConfig.drb_ToAddModList[0].recoverPDCP := omit;
+    }
+    // RLC configured configured in TM - no ciphering on DRB2 - no integrity on DRB2
+    // SS reconfiguration : Only need to configure the new C-RNTI - needs to be done before RACH is checked
+    //@sic R5s201187 sic@
+    f_NR_SS_C_RNTI_Config(p_NR_CellId, tsc_C_RNTI_Value3);
+    
+    // PSCell change: Signaling msg sent on EUTRA - no RACH procedure change
+    f_NR_SendRRCReconfigurationContentsToEUTRA(v_RadioBearerConfig, v_CellGroupConfig, -, -, p_WaitForRRCReconfigurationComplete, reconfigurationWithSync_CheckRACH);
+
+  }
+
+}

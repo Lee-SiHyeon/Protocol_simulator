@@ -1,0 +1,213 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-04 11:31:11 +0100 (Wed, 04 Mar 2026) $
+// $Rev: 43188 $
+/******************************************************************************/
+module RRC_Others_NTN_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from LoopbackIP all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_ResourceAllocation all;
+  import from NR_Timing all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.5.14.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_5_14_1_NR5GC() runs on NR5GC_PTC
+  {
+    //NTN /SIB19/T430 with the timer value set to ntn-UlSyncValidityDuration / T430 Expiry
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig; //@sic R5-255092 R5s250232 sic@
+
+    f_NR5GC_Init(NR_29); //@sic R5-252348 sic@
+    
+    //@sic R5-255092 R5s250232 sic@
+    v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(nr_Cell1);
+    v_MAC_CellGroupConfig.schedulingRequestConfig.schedulingRequestToAddModList[0].sr_ProhibitTimer := ms64; //@sic R5-256678 sic@
+    v_MAC_CellGroupConfig.schedulingRequestConfig.schedulingRequestToAddModList[0].sr_TransMax := n64;
+    f_NR_CellInfo_SetMAC_CellGroupConfig(nr_Cell1, v_MAC_CellGroupConfig);
+    
+    //Set SIB19 acc to Table 8.1.5.14.1.3.3-1
+    //Set ntn-UlSyncValidityDuration-r17
+    //@sic R5-255092 R5s250232 R5-256678 sic@
+    f_NR_CellInfo_SetSIB19_NTN_UlSyncValidityDuration(nr_Cell1,s20);
+    f_NR_CellInfo_SetSIB19_NTN_ephochTime_setTo0(nr_Cell1);
+    
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    //The pre-configured UE location is defined in TS 38.508-1 [4] Clause 4.5C.
+    //The UE is in state Switched OFF (state 0N-B) as defined in TS 38.508-1 [4], subclause 4.4A on NR Cell 1.
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0B);
+
+    f_NR_TestBody_Set(true);
+    f_TC_8_1_5_14_1_NR5GC_TestBody();
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.5.14.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_5_14_1_NR5GC_TestBody() runs on NR5GC_PTC
+  { //@sic R5-255092 R5s250232 sic@
+
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var integer v_DRBId;
+    var SubFrameTiming_Type v_Timing;
+    var float v_T430fl;
+    var float v_BeforeStep24;
+
+    var integer i;
+    var NR_DRBInfo_Type v_DRBInfo;
+    var NR_DRBInfoList_Type v_ExistingDRBs;
+    var template(value) NR_RLC_BearerToAddModList_Type v_NR_RLC_BearerToAddModList;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var NR_RadioBearerList_Type v_SS_Config;
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    timer t_T430 := 20.0;
+    timer t_Watchdog := 2.0;
+    //@sic R5-256678 sic@
+    timer t_BeforeStep24;
+
+    //@siclog "Step 1" siclog@
+    //Power on UE.
+    f_UT_SwitchOnUE(UT, false);
+
+    //@siclog "Steps 2-19" siclog@
+    //Steps 2 to 19 of the registration procedure described in TS 38.508-1 [4] table 4.5.2.2-2 with 'connected without release' and Test Loop Function (On) with UE test loop mode B
+
+    //@siclog "Steps 20-21" siclog@
+    //The SS transmits a CLOSE UE TEST LOOP message to enter the UE test loop mode. The CLOSE UE TEST LOOP is using the associated condition for the test loop.
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback entities for the radio bearer(s) have been created and loop back is activated.
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell1, TEST_LOOPModeB_ON, noRrcConnectionRelease); //@sic R5-256678 sic@
+
+    //@siclog "Step 22" siclog@
+    //SS stops broadcasting SIB19
+    //Note : The sysinfo combination is changed to NR-2
+    f_NR_SetSysinfoCombinationToNR_2(nr_Cell1);//@sic R5-256678 sic@
+    //@sic R5s250232 sic@
+    f_NR_ModifySysinfo(nr_Cell1,false, RRC_CONNECTED);
+
+    //@sic R5-260187 R5s250516 sic@
+    //@siclog "Step 22A" siclog@
+    //The SS transmits an RRCReconfiguration message to modify t-PollRetransmit to ms1000.
+    //@siclog "Step 22B" siclog@
+    //The UE transmits an RRCReconfigurationComplete message.
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    for (i:= 0; i < lengthof(v_ExistingDRBs); i :=i+1) {
+      if (match (v_ExistingDRBs[i].DRB_Id, v_DRBId)) {
+        v_ExistingDRBs[i].RLC_Config.rlc_Config.am.ul_AM_RLC.t_PollRetransmit := ms1000;
+        v_ExistingDRBs[i].SS_Config.Config.AddOrReconfigure.RlcBearer.Config.Rlc.Rb.AM.Tx.R15.t_PollRetransmit := ms1000;
+        v_DRBInfo := valueof(v_ExistingDRBs[i]);
+        break;
+      }
+    }
+    v_NR_RLC_BearerToAddModList[0] := v_DRBInfo.RLC_Config;
+    v_SS_Config[0] := v_DRBInfo.SS_Config;
+
+    //Store updated DRB information
+    f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);
+    //Reconfigure DRB in SS
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, v_SS_Config);
+    //Send RRCReconfiguration message to UE
+    v_CellGroupConfig := cs_38508_CellGroupConfig(f_NR_CellInfo_Get_CellGroupId(nr_Cell1), v_NR_RLC_BearerToAddModList);
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_CellGroupConfig)));
+    f_NR_SendRRCReconfiguration(nr_Cell1, -, -, v_V1530Ext);
+
+    //@siclog "Step 23" siclog@
+    //@sic R5-255092 R5s250232 sic@
+    //SS start a timer T1 with value = T430-(((Current SFN- epochsfn)*10)/1000)
+    v_Timing := f_NR_GetCurrentTiming(nr_Cell1);
+    v_T430fl := 20.0 - (int2float(v_Timing.SFN.Number * 10)) / 1000.0; //considering epoch time from SFN=0 and SIB modifiction
+    v_BeforeStep24 := v_T430fl - 2.0; //@sic R5-256678 sic@
+    t_T430.start(v_T430fl);
+
+    //@sic R5-256678 sic@
+    //@siclog "Step 23A" siclog@
+    //SS waits for duration of T1-2s(Note 1)
+    t_BeforeStep24.start(v_BeforeStep24);
+    t_BeforeStep24.timeout;
+
+    //@siclog "Step 24" siclog@
+    //SS stops UL periodic grant allocation
+    f_NR_ULGrantConfiguration_Stop(nr_Cell1);
+
+    //@siclog "Step 25" siclog@
+    //The SS transmits one IP packet to the UE on the DRB associated with the first PDU session on NR Cell 1.
+    v_QosFlowId := f_NR_GetQosFlowIdentification_ForDRBId(v_DRBId);
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_SDUList(nr_Cell1, v_QosFlowId, {v_IPData}));
+
+    //@siclog "Step 26" siclog@
+    //Wait until expiry of T1.
+    t_T430.timeout;
+    //@sic R5-255092 R5s250232 sic@
+    //@siclog "Step 26A" siclog@
+    //SS checks if UE sends Scheduling Request for 2 sec (UE should not send Scheduling Request when UL Sync is lost)
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_SchedReq(enable));
+    t_Watchdog.start (2.0);
+    alt{
+      [] SYSIND.receive (car_NR_SchedulingReq_IND (nr_Cell1, ?))
+           {
+              t_Watchdog.stop;
+              f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 26A: UE still sending SR while UE suppos to be in UL Sync Lost state  ");
+           };
+      [] t_Watchdog.timeout
+      {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 26A: UE stops SR on UL Sync Lost ");
+      }
+    }
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_SchedReq(disable));
+
+    //@siclog "Step 27" siclog@
+    //@sic R5-256678 sic@
+    //SS resumes broadcasting SIB19.
+    //Note : The sysinfo combination is changed to NR-29
+    f_NR_ModifySysinfoCombinationToNR_29(nr_Cell1); //@sic R5-252348 R5s250451 sic@
+    //@sic R5-255092 R5s250232 sic@
+    f_NR_CellInfo_SetSIB19_NTN_UlSyncValidityDuration(nr_Cell1,s20);
+    f_NR_ModifySysinfo(nr_Cell1, false, RRC_CONNECTED);
+
+    //@siclog "Step 28" siclog@
+    ////@sic R5-256678 sic@
+    //The SS starts the UL periodic grant transmission allowing the UE to return the IP packet as received at step 25.
+    f_NR_ULGrantConfiguration_StartPeriodicGrant(nr_Cell1, cs_TimingInfo_Now, f_NR_GetDefault_ResourceAllocation(f_NR_CellInfo_GetChannelBandwidth(nr_Cell1), f_NR_CellInfo_GetSCS(nr_Cell1)), 5);
+
+    //@siclog "Step 29" siclog@
+    //Check: Does the UE loop back the IP packet received at step 25 in NR Cell 1?
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_SDUList(nr_Cell1, v_QosFlowId, {v_IPData}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 29: UE loops back the IP packet received at step 25 ");
+
+    f_NR_ULGrantConfiguration_Start(nr_Cell1,-, -, -, cs_NR_UplinkTimeAlignment_Stop);//@sic R5s250232 sic@
+  }
+
+}

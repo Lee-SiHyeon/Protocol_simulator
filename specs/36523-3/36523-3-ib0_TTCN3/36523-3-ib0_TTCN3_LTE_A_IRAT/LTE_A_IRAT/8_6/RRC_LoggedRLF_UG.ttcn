@@ -1,0 +1,500 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2022-10-06 08:02:51 +0200 (ju., 06 oct. 2022) $
+// $Rev: 34385 $
+/******************************************************************************/
+
+module RRC_LoggedRLF_UG {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EUTRA_AuxiliaryFunctions all;
+  import from EUTRA_BandDependentParam all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_IRATFunctions all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_MDT_Specific_Templates all;
+  import from EUTRA_Measurement_Templates all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NasEmu_Common4G5G all;
+  import from NasEmu_CtrlFunctions all;
+  import from Parameters all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.6.5.1
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+   
+  function f_TC_8_6_5_1_EUTRA() runs on EUTRA_PTC
+  { //Radio Link Failure logging / Reporting at UTRAN Inter-RAT handover
+    var integer v_T1_RS_EPRE_Cell1 := -80;
+    var integer v_T2_RS_EPRE_Cell1 := tsc_NonSuitableOffCellRS_EPRE;
+    var integer v_T3_RS_EPRE_Cell1 := -70;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var IRAT_CoOrd_SysInfo_Type v_UTRANSysInfo;
+    var UTRAN_FDD_TDD_Type v_UTRAN_FDD_TDD;
+    var integer v_UTRAN_ARFCN_f8;
+    var integer v_UTRAN_PhysChId_Cell5;
+    var EUTRA_SecurityParams_Type v_Auth_Params_Native;
+    var NasCountInfo_Type v_NasCountInfo;
+    var template(present) UL_DCCH_Message v_MeasRpt;
+    var template(present) MeasResultList2UTRA_r9 v_MeasResList2UTRA_r9;
+    var template (present) MeasResultUTRA.physCellId v_MeasResultUTRA_PhysCellId;
+    var Frequency_IE_Type v_Frequency_IE_Cell1;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Cell1;
+    var CellIdentity v_CellIdentity_Cell1;
+    var PhysCellId v_PhysCellId_Cell1;
+    var PLMN_Identity v_PLMN_Identity_Cell1;
+    var EUTRA_CellInfo_Type v_CellInfo_Cell1;
+    var template RLF_Report_failedPCellId_v1090_Type v_FailedPCellId_v1090 := *; //@sic R5-172830 sic@
+    var template RLF_Report_r9 v_RLF_Report;
+    var integer v_Band; //@sic R5-172830 sic@
+
+    //Initialize testcase
+    f_EUTRA_Init(c4);
+
+    v_Frequency_IE_Cell1 := f_EUTRA_CellInfo_GetFrequencyIEs(eutra_Cell1);
+    v_ChBandDependency_Cell1 := f_EUTRA_BandDependentParam(v_Frequency_IE_Cell1.DL_ChBandwidth, v_Frequency_IE_Cell1.UL_ChBandwidth);
+
+    v_PhysCellId_Cell1 := f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell1);
+
+    v_CellInfo_Cell1 := f_EUTRA_CellInfo_Get(eutra_Cell1);
+    v_CellIdentity_Cell1 := v_CellInfo_Cell1.CellIds.CellIdentity;
+    v_PLMN_Identity_Cell1 := v_CellInfo_Cell1.NAS_Parameters.Guti_Parameters.PLMN_Identity;
+    
+    //Acquire information of UTRAN cells
+    v_UTRANSysInfo := f_IRAT_WaitForCoOrd_SysInfo(UTRAN);
+    if (ischosen(v_UTRANSysInfo.Utran[0].FDD)) {
+      v_UTRAN_FDD_TDD := UTRAN_FDD;
+      v_UTRAN_ARFCN_f8 := v_UTRANSysInfo.Utran[0].FDD.Freq;
+      v_UTRAN_PhysChId_Cell5 := v_UTRANSysInfo.Utran[0].FDD.ScramblingCode;
+    }
+    else {
+      v_UTRAN_FDD_TDD := UTRAN_TDD;
+      v_UTRAN_ARFCN_f8 := v_UTRANSysInfo.Utran[0].TDD.Freq;
+      v_UTRAN_PhysChId_Cell5 := v_UTRANSysInfo.Utran[0].TDD.CellParametersID;
+    }
+    
+    //Set EPRE for RF Initial
+    f_EUTRA_CellInfo_InitMaxReferencePower(eutra_Cell1, v_T3_RS_EPRE_Cell1);
+    
+    //Create and configure Cell1
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    
+    //Send relevant EUTRA cell info to UTRAN PTC
+    f_IRAT_Send_EUTRA_SysInfoToOtherPort(UTRAN,
+                                         f_EUTRA_CellInfo_GetEARFCN_DL_r9(eutra_Cell1), // @sic R5-165892 sic@
+                                         f_ConvertDL_BandwidthToInteger (f_EUTRA_CellInfo_GetDL_ChBandwidth (eutra_Cell1)),
+                                         cs_EUTRA_HOInfo (f_ConvertUL_BandwidthToInteger (f_EUTRA_CellInfo_GetUL_ChBandwidth (eutra_Cell1)),
+                                                          f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell1),
+                                                          f_EUTRA_CellInfo_GetRootSequenceIndex (eutra_Cell1)),
+                                         -, -, -, -, -, -, f_EUTRA_CellInfo_GetUL_CarrierNotDefaultTxRx(eutra_Cell1)); // @sic R5-217955 sic@
+    //Preamble
+    f_EUTRA_Preamble(eutra_Cell1, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(eutra_Cell1);
+
+    f_EUTRA_SendAuthParameters(eutra_Cell1, UTRAN);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1-2" siclog@
+    //The SS transmits an RRCConnectionReconfiguration message to setup inter-RAT measurement on Cell 1.
+    //The UE transmits an RRCConnectionReconfigurationComplete message on Cell 1.
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      f_EUTRA_RRCConnectionReconfiguration_MeasConfig(eutra_Cell1,
+                                                      cs_RRCConnectionReconfiguration_8_6_5_1_Step1_FDD(v_RRC_TI,
+                                                                                                        v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-172830 sic@
+                                                                                                        v_ChBandDependency_Cell1.AllowedMeasBandwidth,
+                                                                                                        v_UTRAN_ARFCN_f8,
+                                                                                                        v_UTRAN_PhysChId_Cell5));
+    }
+    else{
+      f_EUTRA_RRCConnectionReconfiguration_MeasConfig(eutra_Cell1,
+                                                      cs_RRCConnectionReconfiguration_8_6_5_1_Step1_TDD(v_RRC_TI,
+                                                                                                        v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-172830 sic@
+                                                                                                        v_ChBandDependency_Cell1.AllowedMeasBandwidth,
+                                                                                                        v_UTRAN_ARFCN_f8,
+                                                                                                        v_UTRAN_PhysChId_Cell5));
+    }
+
+    //@siclog "Step 3" siclog@
+    //The SS changes Cell 1 and Cell 5 parameters according to the row "T1" in Table 8.6.5.1.3.2-1.
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    f_EUTRA_SetCellPower(eutra_Cell1, v_T1_RS_EPRE_Cell1);
+    
+    //@siclog "Step 4" siclog@
+    //The UE transmits a MeasurementReport message on Cell 1.
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      v_MeasRpt := cr_MeasurementReport_Utran_1Entry_FDD_RSCP(1, v_UTRAN_PhysChId_Cell5);//@sic R5-125789 sic@
+    }
+    else {
+      v_MeasRpt := cr_MeasurementReport_Utran_1Entry_TDD(1, v_UTRAN_PhysChId_Cell5);
+    }
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell1, v_MeasRpt));
+    
+    //Backup Auth params and NAS count.
+    v_Auth_Params_Native := f_EUTRA_Security_Get();
+    v_NasCountInfo := f_EUTRA_NB_SS_NAS_CountGet(NASCTRL);
+    
+    f_EUTRA_SS_SRBs_DRBs_Reset(eutra_Cell1); //@sic R5s150662, R5s150402, R5s140305 sic@
+
+    //@siclog "Step 5" siclog@
+    //The SS changes Cell 1 parameter according to the row "T2" in Table 8.6.5.1.3.2-1.
+    f_EUTRA_SetCellPower(eutra_Cell1, v_T2_RS_EPRE_Cell1);
+
+    f_EUTRA_InterRAT_InitialiseAuthParams (UTRAN); //@sic R5s140305 sic@
+
+    //Wait for trigger from UTRAN side at step 14
+    f_IRAT_WaitForCoOrd_Trigger(UTRAN);
+    
+    //@siclog "Step 14" siclog@
+    //The SS changes Cell 1 and Cell 5 parameters according to the row "T3" in Table 8.6.5.1.3.2-1.
+    f_EUTRA_SetCellPower(eutra_Cell1, v_T3_RS_EPRE_Cell1);
+
+    f_EUTRA_SS_ConfigRachProcedure(eutra_Cell1, tsc_C_RNTI_Def2, cs_RachProcedureConfig_CRNTI_Dedicated (f_EUTRA_CellInfo_GetRAR_TA(eutra_Cell1), f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1) )); //@sic R5s140305 sic@
+    
+    f_EUTRA_CellInfo_SetC_RNTI ( eutra_Cell1, tsc_C_RNTI_Def2 ); //@sic R5s140305 sic@
+    f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT(eutra_Cell1);      // @sic R5s150338: new function f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT sic@
+    
+    //@siclog "Step 17" siclog@
+    //Check: Does the UE transmit an RRCConnectionReconfigurationComplete message with radio link failure information on Cell 1?
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell1, cr_RRCConnectionReconfigurationComplete_r10(v_RRC_TI, true_, omit)));
+    
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.6.5.1 Step 17");
+    
+    //@siclog "Step 18" siclog@
+    //Generic test procedure in TS 36.508 subclause 6.4.2.10 is performed on Cell 1.
+    //NOTE: The UE performs tracking area updating procedure without ISR and security reconfiguration after successful completion of handover from UTRA.
+    f_EUTRA_508Check_TrackingAreaUpdating_AfterHO(eutra_Cell1, v_Auth_Params_Native, v_NasCountInfo);
+    
+    //@siclog "Step 18Aa1 - 18Aa2b1" siclog@
+    if (pc_IMS) { // @sic R5-181149 sic@
+      f_EUTRA_DelayForUserPlaneSignalling(waitForIMS);
+    }
+    //@siclog "Step 19" siclog@
+    //The SS transmits a UEInformationRequest message on Cell 1.
+    SRB.send(cas_SRB1_RrcPdu_REQ(eutra_Cell1,
+                                 cs_TimingInfo_Now,
+                                 cs_508_UEInformationRequest_noLogMeasReport(tsc_RRC_TI_Def, -, true))); //@sic R5s150664 sic@
+
+    //@siclog "Step 20" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on Cell 1?
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      v_MeasResultUTRA_PhysCellId := cr_MeasResultUTRA_PhysCellId_FDD(v_UTRAN_PhysChId_Cell5);
+      v_MeasResList2UTRA_r9 := cr_MeasResultList2UTRA_r9_1Entry(v_UTRAN_ARFCN_f8, v_MeasResultUTRA_PhysCellId, omit, *, *); //@sic R5-150362 sic@
+    } else {
+      v_MeasResultUTRA_PhysCellId := cr_MeasResultUTRA_PhysCellId_TDD(v_UTRAN_PhysChId_Cell5);
+      v_MeasResList2UTRA_r9 := cr_MeasResultList2UTRA_r9_1Entry(v_UTRAN_ARFCN_f8, v_MeasResultUTRA_PhysCellId, omit, *, omit); //@sic R5-150362 sic@
+    }
+    
+    v_Band := f_EUTRA_CellInfo_GetBand (eutra_Cell1); // @sic R5-172830 sic@
+    if (v_Band>64) {   //@sic R5-172830 sic@
+        v_FailedPCellId_v1090 := cr_RLF_Report_failedPCellId_v1090(v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_v9e0);
+    } else {
+        v_FailedPCellId_v1090 := omit;
+    }
+    v_RLF_Report := cr_RLF_Report_1Entry(?,
+                                         *,
+                                         cr_MeasResultNeighCells_r9(-, v_MeasResList2UTRA_r9),
+                                         *,
+                                         (cr_FailedPCellId_CellGlobalId(cr_Cgi(v_PLMN_Identity_Cell1, v_CellIdentity_Cell1)),
+                                          cr_FailedPCellId_Pci_Arfcn(v_PhysCellId_Cell1, v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq)),
+                                         omit,
+                                         omit,
+                                         rlf,
+                                         omit,
+                                         v_FailedPCellId_v1090); //@sic R5-172830 sic@
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell1,
+                                    cr_UEInformationResponse_Common(tsc_RRC_TI_Def, //@sic R5s140305 sic@
+                                                                    -,
+                                                                    v_RLF_Report)));
+                                                                    
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.6.5.1 Step 20");
+    
+    //@siclog "Step 21" siclog@
+    //Check: Does the test result of generic test procedure in TS 36.508 subclause 6.4.2.3 indicate that the UE is in E-UTRA RRC_CONNECTED state on Cell 1?
+    f_EUTRA_508Check_ConnectedState(eutra_Cell1);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //tell the UTRAN component that the test is over
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    
+    f_EUTRA_Postamble(eutra_Cell1, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.6.5.1a
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_8_6_5_1a_EUTRA() runs on EUTRA_PTC
+  { //Radio Link Failure logging / Reporting at UTRAN Inter-RAT handover / PLMN list
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT3;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var IRAT_CoOrd_SysInfo_Type v_UTRANSysInfo;
+    var UTRAN_FDD_TDD_Type v_UTRAN_FDD_TDD;
+    var integer v_UTRAN_ARFCN_f10;
+    var integer v_UTRAN_PhysChId_Cell9;
+    var EUTRA_SecurityParams_Type v_Auth_Params_Native;
+    var NasCountInfo_Type v_NasCountInfo;
+    var template(present) UL_DCCH_Message v_MeasRpt;
+    var template(present) MeasResultList2UTRA_r9 v_MeasResList2UTRA_r9;
+    var template (present) MeasResultUTRA.physCellId v_MeasResultUTRA_PhysCellId;
+    var Frequency_IE_Type v_Frequency_IE_Cell1;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Cell1;
+    var CellIdentity v_CellIdentity_Cell1;
+    var PhysCellId v_PhysCellId_Cell1;
+    var PLMN_Identity v_PLMN_Identity_Cell1;
+    var EUTRA_CellInfo_Type v_CellInfo_Cell1;
+    var template RLF_Report_selectedUTRA_CellId_r11_Type v_SelectedUTRA_CellId_r11; //@sic R5-162772, R5s160259 sic@
+    var template RLF_Report_failedPCellId_v1090_Type v_FailedPCellId_v1090 := *; //@sic R5-172830 sic@
+    var template RLF_Report_r9 v_RLF_Report;
+    var integer v_Band; //@sic R5-172830 sic@
+    var template (value) PLMN_List v_EquivalentPLMN1; //@sic R5s200532, R5-201111 sic@#
+    
+    v_CellPowerList_AtT0 := {
+      cs_CellPower ( eutra_Cell1, tsc_ServingCellRS_EPRE ),
+      cs_CellPower ( eutra_Cell12, tsc_NonSuitableOffCellRS_EPRE)
+    };
+    
+    v_CellPowerList_AtT1 := {
+      cs_CellPower ( eutra_Cell1, -80 )
+    };
+    
+    v_CellPowerList_AtT2 := {
+      cs_CellPower ( eutra_Cell1, tsc_NonSuitableOffCellRS_EPRE )
+    };
+    
+    v_CellPowerList_AtT3 := {
+      cs_CellPower ( eutra_Cell12, -70 )
+    };
+    
+    //Initialize testcase
+    f_EUTRA_Init(c4);
+
+    v_EquivalentPLMN1 := cs_PLMN_List_1PLMN (f_Asn2Nas_PlmnId(f_EUTRA_CellInfo_GetGutiPLMN (eutra_Cell1))); //@sic R5s200532, R5-201111 sic@#
+    v_Frequency_IE_Cell1 := f_EUTRA_CellInfo_GetFrequencyIEs(eutra_Cell1);
+    v_ChBandDependency_Cell1 := f_EUTRA_BandDependentParam(v_Frequency_IE_Cell1.DL_ChBandwidth,
+                                                           v_Frequency_IE_Cell1.UL_ChBandwidth);
+
+    v_PhysCellId_Cell1 := f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell1);
+
+    v_CellInfo_Cell1 := f_EUTRA_CellInfo_Get(eutra_Cell1);
+    v_CellIdentity_Cell1 := v_CellInfo_Cell1.CellIds.CellIdentity;
+    v_PLMN_Identity_Cell1 := v_CellInfo_Cell1.NAS_Parameters.Guti_Parameters.PLMN_Identity;
+
+    //Acquire information of UTRAN cells
+    v_UTRANSysInfo := f_IRAT_WaitForCoOrd_SysInfo(UTRAN);
+    if (ischosen(v_UTRANSysInfo.Utran[0].FDD)) {
+      v_UTRAN_FDD_TDD := UTRAN_FDD;
+      v_UTRAN_ARFCN_f10 := v_UTRANSysInfo.Utran[0].FDD.Freq;
+      v_UTRAN_PhysChId_Cell9 := v_UTRANSysInfo.Utran[0].FDD.ScramblingCode;
+    }
+    else {
+      v_UTRAN_FDD_TDD := UTRAN_TDD;
+      v_UTRAN_ARFCN_f10 := v_UTRANSysInfo.Utran[0].TDD.Freq;
+      v_UTRAN_PhysChId_Cell9 := v_UTRANSysInfo.Utran[0].TDD.CellParametersID;
+    }
+    
+    //Set EPRE for RF Initial
+    f_EUTRA_CellInfo_InitMaxReferencePower ( eutra_Cell1, -80 );
+    f_EUTRA_CellInfo_InitMaxReferencePower ( eutra_Cell12, -70 );
+   
+    //Create and configure Cell1
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell12);
+    
+    //Send relevant EUTRA cell12 info to UTRAN PTC
+    f_IRAT_Send_EUTRA_SysInfoToOtherPort(UTRAN,
+                                         f_EUTRA_CellInfo_GetEARFCN_DL_r9(eutra_Cell12), // @sic R5-165892 sic@
+                                         f_ConvertDL_BandwidthToInteger (f_EUTRA_CellInfo_GetDL_ChBandwidth (eutra_Cell12)),
+                                         cs_EUTRA_HOInfo (f_ConvertUL_BandwidthToInteger (f_EUTRA_CellInfo_GetUL_ChBandwidth (eutra_Cell12)),
+                                                          f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell12),
+                                                          f_EUTRA_CellInfo_GetRootSequenceIndex (eutra_Cell12)),
+                                         -, -, -, -, -, -, f_EUTRA_CellInfo_GetUL_CarrierNotDefaultTxRx(eutra_Cell12)); // @sic R5-217955 sic@
+    //Preamble
+    //The UE is registered on PLMN1 (Cell 1) using the procedure described in TS 36.508[18] clause 4.5.2.3
+    //except that the ATTACH ACCEPT message indicates PLMN2 in the Equivalent PLMN list as described in Table 8.6.5.1a.3.3-1.
+    //The UE is in state Generic RB Established (state 3) on Cell 1.
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_SwitchOnUEandStartIP(eutra_Cell1);
+    
+    //Bring UE to initial state with Equivalent PLMN2
+    f_EUTRA_InitialRegistration(eutra_Cell1,
+                                PREAMBLE,
+                                STATE2_IDLEUPDATE, NORMAL, -, // @sic R5-160947 sic@
+                                cs_PLMN_List_1PLMN(f_Asn2Nas_PlmnId(f_EUTRA_CellInfo_GetGutiPLMN(eutra_Cell12))));
+    f_EUTRA_RbEst_Def(eutra_Cell1);
+    
+    f_EUTRA_SendAuthParameters(eutra_Cell1, UTRAN);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1-2" siclog@
+    //The SS transmits an RRCConnectionReconfiguration message to setup inter-RAT measurement on Cell 1.
+    //The UE transmits an RRCConnectionReconfigurationComplete message on Cell 1.
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      f_EUTRA_RRCConnectionReconfiguration_MeasConfig(eutra_Cell1,
+                                                      cs_RRCConnectionReconfiguration_8_6_5_1a_Step1_FDD(v_RRC_TI,
+                                                                                                         v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-172830 sic@
+                                                                                                         v_ChBandDependency_Cell1.AllowedMeasBandwidth,
+                                                                                                         v_UTRAN_ARFCN_f10,
+                                                                                                         v_UTRAN_PhysChId_Cell9));
+    }
+    else{
+      f_EUTRA_RRCConnectionReconfiguration_MeasConfig(eutra_Cell1,
+                                                      cs_RRCConnectionReconfiguration_8_6_5_1a_Step1_TDD(v_RRC_TI,
+                                                                                                         v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-172830 sic@
+                                                                                                         v_ChBandDependency_Cell1.AllowedMeasBandwidth,
+                                                                                                         v_UTRAN_ARFCN_f10,
+                                                                                                         v_UTRAN_PhysChId_Cell9));
+    }
+    
+    //@siclog "Step 3" siclog@
+    //The SS changes Cell 1 and Cell 9 parameters according to the row "T1" in Table 8.6.5.1a.3.2-1.
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 4" siclog@
+    //The UE transmits a MeasurementReport message on Cell 1.
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      v_MeasRpt := cr_MeasurementReport_Utran_1Entry_FDD_RSCP(1, v_UTRAN_PhysChId_Cell9);
+    }
+    else {
+      v_MeasRpt := cr_MeasurementReport_Utran_1Entry_TDD(1, v_UTRAN_PhysChId_Cell9);
+    }
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell1, v_MeasRpt));
+    
+    //Backup Auth params and NAS count.
+    v_Auth_Params_Native := f_EUTRA_Security_Get();
+    v_NasCountInfo := f_EUTRA_NB_SS_NAS_CountGet(NASCTRL);
+    
+    //@siclog "Step 5" siclog@
+    //The SS changes Cell 1 parameter according to the row "T2" in Table 8.6.5.1a.3.2-1.
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT2);
+    
+    // Update security params when authentication done on UTRAN side
+    f_EUTRA_InterRAT_InitialiseAuthParams (UTRAN);
+    
+    //Wait for trigger from UTRAN side at step 14
+    f_IRAT_WaitForCoOrd_Trigger(UTRAN);
+    
+    //@siclog "Step 14" siclog@
+    //The SS changes Cell 9 and Cell 12 parameters according to the row "T3" in Table 8.6.5.1a.3.2-1.
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT3);
+
+    //Make HO specific steps for interRAT HO
+    // Configure C-RNTI based contention resolution in target cell
+    f_EUTRA_SS_ConfigRachProcedure(eutra_Cell12, tsc_C_RNTI_Def2, cs_RachProcedureConfig_CRNTI_Dedicated (f_EUTRA_CellInfo_GetRAR_TA(eutra_Cell12),
+                                                                                                          f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell12) )); //@sic R5s150517 sic@
+    
+    //Save new C-RNTI in cell configuration for p_TargetCellId
+    f_EUTRA_CellInfo_SetC_RNTI ( eutra_Cell12, tsc_C_RNTI_Def2 ); //@sic R5s150517 sic@
+    
+    f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT(eutra_Cell12);      // @sic R5s150517, R5s150338: new function f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT sic@
+    
+    //Configure UL grant configuration ("OnSR", periodic TA is NOT started) in target cell (cell 1)
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell12, cas_ULGrantAllocation_Def_REQ(eutra_Cell12, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_None)); //@sic R5s150517 sic@
+    
+    //@siclog "Step 17" siclog@
+    //Check: Does the UE transmit an RRCConnectionReconfigurationComplete message with radio link failure information on Cell 12?
+    SRB.receive( car_SRB1_RrcPdu_IND( eutra_Cell12, cr_RRCConnectionReconfigurationComplete_r10( v_RRC_TI, true_, omit)));
+    
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.6.5.1a Step 17");
+    
+    //Start periodic sending of TA command in target cell (cell 12)
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell12, cas_PUCCH_Synch_Config_REQ(eutra_Cell12, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_Auto_Def, false)); //@sic R5s150517 sic@
+    
+    // configure RACH procedure for target cell back to default
+    f_EUTRA_SS_ConfigRachProcedure_Def(eutra_Cell12, -, -, -, -, -, false); //@sic R5s150517 sic@
+    
+    //@siclog "Step 18" siclog@
+    //Generic test procedure in TS 36.508 subclause 6.4.2.10 is performed on Cell 12.
+    //NOTE: The UE performs tracking area updating procedure without ISR and security reconfiguration after successful completion of handover from UTRA.The TAU is accepted with PLMN1 listed as an Equivalent PLMN
+    f_EUTRA_508Check_TrackingAreaUpdating_AfterHO(eutra_Cell12, v_Auth_Params_Native, v_NasCountInfo, v_EquivalentPLMN1); //@sic R5-201111 sic@
+    
+    //@siclog "Step 18Aa1 - 18Aa2b1" siclog@
+    if (pc_IMS) { // @sic R5-181149 sic@
+      f_EUTRA_DelayForUserPlaneSignalling(waitForIMS);
+    }
+    //@siclog "Step 19" siclog@
+    //The SS transmits a UEInformationRequest message on Cell 12.
+    SRB.send(cas_SRB1_RrcPdu_REQ(eutra_Cell12,
+                                 cs_TimingInfo_Now,
+                                 cs_508_UEInformationRequest_noLogMeasReport(tsc_RRC_TI_Def, -, true))); //@sic R5s150664 sic@
+    
+    //@siclog "Step 20" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on Cell 12?
+    if (v_UTRAN_FDD_TDD == UTRAN_FDD) {
+      v_MeasResultUTRA_PhysCellId := cr_MeasResultUTRA_PhysCellId_FDD(v_UTRAN_PhysChId_Cell9);
+      v_MeasResList2UTRA_r9 := cr_MeasResultList2UTRA_r9_1Entry(v_UTRAN_ARFCN_f10, v_MeasResultUTRA_PhysCellId, omit, *, *); //@sic R5-155792 sic@
+      v_SelectedUTRA_CellId_r11 := cr_RLF_Report_selectedUTRA_CellId_r11_FDD(v_UTRAN_ARFCN_f10, v_UTRAN_PhysChId_Cell9) ifpresent; //@sic R5-162772, R5s160259 sic@
+    } else {
+      v_MeasResultUTRA_PhysCellId := cr_MeasResultUTRA_PhysCellId_TDD(v_UTRAN_PhysChId_Cell9);
+      v_MeasResList2UTRA_r9 := cr_MeasResultList2UTRA_r9_1Entry(v_UTRAN_ARFCN_f10, v_MeasResultUTRA_PhysCellId, omit, *, omit); //@sic R5-155792 sic@
+      v_SelectedUTRA_CellId_r11 := cr_RLF_Report_selectedUTRA_CellId_r11_TDD(v_UTRAN_ARFCN_f10, v_UTRAN_PhysChId_Cell9) ifpresent; //@sic R5-162772, R5s160259 sic@
+    }
+
+    v_Band := f_EUTRA_CellInfo_GetBand (eutra_Cell3); // @sic R5-172830 sic@
+    if (v_Band>64) {   //@sic R5-172830 sic@
+        v_FailedPCellId_v1090 := cr_RLF_Report_failedPCellId_v1090(v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq_v9e0);
+    } else {
+        v_FailedPCellId_v1090 := omit;
+    }
+    v_RLF_Report := cr_RLF_Report_1Entry(?,
+                                         *,
+                                         cr_MeasResultNeighCells_r9(-, v_MeasResList2UTRA_r9),
+                                         *,
+                                         (cr_FailedPCellId_CellGlobalId(cr_Cgi(v_PLMN_Identity_Cell1, v_CellIdentity_Cell1)),
+                                          cr_FailedPCellId_Pci_Arfcn(v_PhysCellId_Cell1, v_Frequency_IE_Cell1.UL_DL_Earfcn.dl_CarrierFreq)),
+                                         omit,
+                                         omit,
+                                         rlf,
+                                         omit,
+                                         v_FailedPCellId_v1090, //@sic R5-172830 sic@
+                                         cr_RLF_Report_basicFields_r11(?, t310_Expiry, ?),
+                                         omit,
+                                         v_SelectedUTRA_CellId_r11); //@sic R5-162772, R5s160259, R5s150517 sic@
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell12, cr_UEInformationResponse_Common(tsc_RRC_TI_Def, -, v_RLF_Report)));
+                                                                    
+    
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.6.5.1a Step 20");
+    
+    //@siclog "Step 21" siclog@
+    //Check: Does the test result of generic test procedure in TS 36.508 subclause 6.4.2.3 indicate that the UE is in E-UTRA RRC_CONNECTED state on Cell 12?
+    f_EUTRA_508Check_ConnectedState(eutra_Cell12);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //tell the UTRAN component that the test is over
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    
+    f_EUTRA_Postamble(eutra_Cell12, E2_CONNECTED);
+  }
+
+}

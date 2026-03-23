@@ -1,0 +1,750 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-09-05 15:42:38 +0200 (ju., 05 sep. 2024) $
+// $Rev: 39504 $
+/******************************************************************************/
+
+module SMSoverNAS_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from SMS_Templates all;
+  import from SMS_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  group LocalFunctions {
+
+  /*
+   * @desc      Transmission of AT Command series to trigger 3 short messages p_Index, +1, +2
+   * @param     p_Index
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NG_SMS_AT_3_SMS_Multiple(integer p_Index) runs on NR_BASE_PTC
+  {
+    f_UT_SendStored_3_Messages(UT, p_Index);
+  }
+
+  /*
+   * @desc      Decode given bitstring as CP_PDU and match it against the expected CP_PDU with the objective to identify incorrect usage
+   *            if the bitstring cannot be fully decoded verdict FAIL or INCONC is assigned
+   *            if the bitstring matches the checked CP_PDU verdict FAIL or INCONC is assigned as the CP_PDU was used by error
+   * @param     p_EncodedSMS_Message
+   * @param     p_Checked_CP_PDU
+   * @param     p_Testcase
+   * @param     p_Step
+   * @return    boolean
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NG_SMS_CP_PDU_Check(bitstring p_EncodedSMS_Message,
+                                 template CP_PDU_Type p_Checked_CP_PDU,
+                                 charstring p_Testcase,
+                                 charstring p_Step) runs on NR_BASE_PTC return boolean
+  {
+    var CP_PDU_Type v_Received_CP_PDU;
+    var integer v_DecodeResult := decvalue(p_EncodedSMS_Message, v_Received_CP_PDU);
+    
+    if (v_DecodeResult != 0) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, p_Testcase & ": SMS_CP_PDU cannot be decoded in " & p_Step);
+    }
+    if (match(v_Received_CP_PDU, p_Checked_CP_PDU))  {
+      //* @verdict fail Received decoded template matches with the expected template (but this is an error situation)
+      f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, p_Testcase & ": Unexpected SMS_CP_PDU in " & p_Step);
+    }
+    return false;
+  }
+
+  /*
+   * @desc      Decode given bitstring as CP_PDU and match it against the expected CP_PDU with the objective to identify incorrect usage
+   *            if the bitstring cannot be fully decoded verdict FAIL or INCONC is assigned
+   *            if the bitstring matches the checked CP_PDU verdict FAIL or INCONC is assigned as the CP_PDU was used by error
+   * @param     p_NR_CellId
+   * @param     p_SRB_ForSMS
+   * @param     p_NAS_TxMsgContainer_SMS
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NG_SMS_CP_PDU_Send(NR_CellId_Type p_NR_CellId,
+                                NR_RadioBearerId_Type p_SRB_ForSMS,
+                                octetstring p_NAS_TxMsgContainer_SMS) runs on NR_BASE_PTC
+  {
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSMSMsg),
+                                            omit,
+                                            cs_PayloadContainer (omit, p_NAS_TxMsgContainer_SMS));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(p_NR_CellId,
+                                   p_SRB_ForSMS,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_PduToSend.Msg)));
+  }
+
+  } // end of group LocalFunctions
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.8.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_8_1_NR5GC() runs on NR5GC_PTC
+  {
+    //SMS over NAS / MO and MT SMS over NAS - Idle mode
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1, NG_AllCellsOnSamePLMN);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+
+    //Configure the SMS as per PIXIT using the appropriate AT commands - powering required
+    //Provide the UE with a valid 5G NAS security context to make it send a REGISTRATION REQUEST message including also non-cleartext IEs.
+    f_NG_SMS_AT_Config_WithPowering_EnterState_0B (v_NGC_NASCellA); //@sic R5-201089, R5s200311, R5s201075, R5s201247 sic@
+    
+    f_NR_TestBody_Set(true);
+    fl_TC_9_1_8_1_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A); //@sic R5s200311 sic@
+  }
+
+  /*
+   * @desc      test body of TC_9_1_8_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_8_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var NG_NAS_GutiParameters_Type v_GutiParams_A := f_NR5GC_CellInfo_GetGutiParameters(v_NGC_NASCellA);
+    var template (present) NG_MobileIdentity v_S_TMSI_A := f_NG_S_TMSI2MobileIdentity(omit, v_GutiParams_A);
+    var octetstring v_NAS_RcvMsgContainer_SMS;
+    var bitstring v_NAS_RcvBitsMsgContainer_SMS;
+    var octetstring v_NAS_TxMsgContainer_SMS;
+    var CP_PDU_Type v_RcvSMS_CP_PDU;
+    var template CP_PDU_Type v_ExpSMS_CP_PDU;
+    var B3_Type v_TI_Value;
+    var TransactionIdentifier_Type v_MO_TI_FromSS;
+    var TransactionIdentifier_Type v_MO_TI_FromUE;
+    var O1_Type v_RpMsgRefRcvd;
+    var NR_RadioBearerId_Type v_SRB_ForSMS := tsc_NR_RbId_SRB2; //@sic R5s200311 sic@
+    var float v_TimerT3512Max := f_NR_SetTimerToleranceMax (v_NGC_NASCellA, nasTimer, 180.0); // 3 minutes + tolerance
+    var float v_TimerT3512Min := f_NR_SetTimerToleranceMin (v_NGC_NASCellA, nasTimer, 180.0); // 3 minutes - tolerance
+    timer t_TimerT3512Max := 0.0; // set later
+    timer t_TimerT3512Min := 0.0; // set later
+
+    //@siclog "Step 1" siclog@
+    //The UE is switched ON
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    
+    //@siclog "Step 2-4" siclog@
+    //UE establishes RRC connection by executing steps 2-4 of Table 4.5.2.2-2 in TS 38.508-1
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+
+    //@siclog "Steps 5" siclog@
+    //Check: Does UE transmit a REGISTRATION REQUEST message including 5GS update type IE with SMS requested bit set to "SMS over NAS supported"?
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_Secure,
+                                           -, -, -, -, -, -, -, -, -, -,
+                                           -, -, -, -, -, -, -, -, -, -,
+                                           -, -,
+                                           cr_NG_Update (-, '1'B) //SMS over NAS supported
+                                           )) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 5");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    //@siclog "Step 6-14" siclog@
+    //Steps 5 to 13 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 are performed.
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                v_NGC_NASCellA,
+                                v_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA)),
+                                TESTMode_OFF,
+                                Initial_Secure);
+
+    //@siclog "Step 15" siclog@
+    // SS transmits REGISTRATION ACCEPT message including 5GS registration result with SMS allowed bit set to "SMS over NAS allowed" and T3512 value set to 3 minutes.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   f_NR5GC_GetMobileIdGUTI (v_NGC_NASCellA),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA)),
+                                                                                {bit2oct(f_NR_CellInfo_GetTAC(v_NGC_NASCellA))}),
+                                                   -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI('5E'O, tsc_Gprs3TimerUnit_1min, '00011'B), //T3512 value = 3 mins, @sic R5s200311 sic@
+                                                   -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   '1'B); // SMS over NAS allowed
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   tsc_NR_RbId_SRB1,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 16 - 21a1" siclog@
+    // Steps 15 to 20a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1
+    f_NR5GC_RRC_Idle_Steps15_20 (v_NGC_NASCellA, TESTMode_OFF); //@sic R5-211403, R5-212101 sic@
+
+    //@siclog "Step 21A" siclog@
+    // Wait for the expiry of T3512.
+    //@sic R5-211403, R5-212101 sic@
+    // timer T3512 start
+    t_TimerT3512Max.start(v_TimerT3512Max);
+    t_TimerT3512Min.start(v_TimerT3512Min);
+
+    //@siclog "Step 22-24" siclog@
+    //Check: Does UE perform periodic Registration after Periodic_Timer expires, including 5GS update type IE with SMS requested bit set to "SMS over NAS supported"?
+    t_TimerT3512Min.timeout; // after this timeout retransmission is acceptable
+    alt{
+    [] t_TimerT3512Max.timeout
+      {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "T3512 timeout, UE does not react within T3512");
+      }
+    [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(v_NGC_NASCellA, cr_38508_RRCSetupRequest))) { // assuming this is the RRC Connection to transmit the REGISTRATION REQUEST
+        t_TimerT3512Max.stop; //@sic R5s200311 sic@
+      }
+    }
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+
+    //@siclog "Steps 25" siclog@
+    // Check: Does UE perform periodic Registration, including 5GS update type IE with SMS requested bit set to "SMS over NAS supported"?
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Periodic,
+                                           -, -, -, -, -, -, -, -, -, -,
+                                           -, -, -, -, -, -, -, -, -, -,
+                                           -, -,
+                                           cr_NG_Update (-, '1'B) //SMS over NAS supported
+                                           )) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 25");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 25");
+
+    //@siclog "Step 26 - 34" siclog@
+    //Void @sic R5-201089, R5s200311 sic@
+
+    //Create the RGISTRATION ACCEPT for Step 35
+    //@siclog "Step 35" siclog@
+    //SS transmits REGISTRATION ACCEPT message including 5GS registration result with SMS allowed bit set to "SMS over NAS allowed" and T3512 value set to 3 minutes.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   f_NR5GC_GetMobileIdGUTI (v_NGC_NASCellA),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA)),
+                                                                                {bit2oct(f_NR_CellInfo_GetTAC(v_NGC_NASCellA))}),
+                                                   -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI('5E'O, tsc_Gprs3TimerUnit_1min, '00011'B), //T3512 value = 3 mins,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   '1'B); // SMS over NAS allowed
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   tsc_NR_RbId_SRB1,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 35A" siclog@
+    //The UE transmits a REGISTRATION COMPLETE message
+    f_NR5GC_Registration_Complete(v_NGC_NASCellA);
+
+    //@siclog "Step 36" siclog@
+    //The SS transmits an RRCRelease message
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    //@siclog "Step 37" siclog@
+    //Sending of a 160 character MO SMS is initiated at the UE via MMI or  AT command
+    if (px_SMS_MsgFrmt=="1") {
+      // Set text mode parameters to trigger status report.
+      // bit 7(RP) 6(UDHI) 5(SRR) 4 3(VPF) 2(RD) 1 0(MIT)
+      //     0     0       1      1 0      0     0 1
+      f_NG_SMS_AT_CSMP(49, 167, 0);
+      // Write message to memory storage
+      f_NG_SMS_AT_CMGW_Text("""1111111111""", 129, tsc_Fox);
+    }
+    else { // PDU mode
+      // Write message to memory storage
+      f_NG_SMS_AT_CMGW_PDU(153, tsc_Fox_PDU);
+    }
+    // Send message from storage.
+    f_NG_SMS_AT_CMSS(px_SMS_IndexOffset);
+
+    //@siclog "Step 38" siclog@
+    // The UE establishes RRC connection and transmits a SERVICE REQUEST message by executing steps 2-4 of Table 4.5.4.2-2 in TS 38.508-1.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu,
+                                      cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (),
+                                                                 tsc_NasKsi_NativeSecurityContext),
+                                      v_S_TMSI_A,
+                                      '0000'B //signalling
+                                           )) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 38");
+    }
+
+    //@siclog "Step 39 - 42" siclog@
+    // Steps 5 to 8 of Table 4.5.4.2-3 of the generic procedure in TS 38.508-1 are performed.
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(v_NGC_NASCellA, v_ReceivedMsg);
+
+    //@siclog "Step 43" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-DATA RPDU (SMS SUBMIT TPDU) encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, f_SMS_CP_UserData_SUBMIT()); // re-used existing function
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.1", "Step 43");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 43");
+       
+    // Note TI value used by the UE and set TI variables accordingly
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd :=  v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+
+    //@siclog "Step 44" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS Transport message.
+    v_NAS_TxMsgContainer_SMS := f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS));
+
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSMSMsg),
+                                            omit,
+                                            cs_PayloadContainer (omit, v_NAS_TxMsgContainer_SMS));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   v_SRB_ForSMS,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_PduToSend.Msg)));
+
+    //@siclog "Step 45" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a Downlink NAS transport message
+    v_NAS_TxMsgContainer_SMS := f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                                   cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd)));
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSMSMsg),
+                                            omit,
+                                            cs_PayloadContainer (omit, v_NAS_TxMsgContainer_SMS));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   v_SRB_ForSMS,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_PduToSend.Msg)));
+
+    //@siclog "Step 46" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS Transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (v_MO_TI_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.1", "Step 46");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 46");
+
+    //@siclog "Step 47" siclog@
+    //The SS transmits an RRCRelease message
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    //@siclog "Step 48" siclog@
+    //The SS pages the UE using a matched NG-5G-S-TMSI.
+    f_NR_Paging_Def(v_NGC_NASCellA, RRC_IDLE);
+
+    //@siclog "Step 49" siclog@
+    // The UE establishes RRC connection and transmits a SERVICE REQUEST message by executing steps 2-4 of Table 4.5.4.2-3 in TS 38.508-1.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu,
+                                      cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (),
+                                                                 tsc_NasKsi_NativeSecurityContext),
+                                      v_S_TMSI_A,
+                                      '0010'B //mobile terminated services  @sic R5s200311 sic@
+                                           )) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 49");
+    }
+
+    //@siclog "Step 50 - 53" siclog@
+    // Steps 5 to 8 of Table 4.5.4.2-3 of the generic procedure in TS 38.508-1 are performed.
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(v_NGC_NASCellA, v_ReceivedMsg);
+
+    //@siclog "Step 54" siclog@
+    //The SS transmits a CP-DATA containing a RP-DATA RPDU (SMS DELIVER TPDU) encapsulated in a Downlink NAS transport message to the UE.
+    // The SS transmits a CP-DATA containing an RP-DATA RPDU (SMS DELIVER TPDU)
+    // encapsulated in a Downlink NAS transport message to the UE.
+    v_NAS_TxMsgContainer_SMS := f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (cs_MT_TI0_FromSS,
+                                                                   cs_CP_UserData_DELIVER('1133776655'O)));
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSMSMsg),
+                                            omit,
+                                            cs_PayloadContainer (omit, v_NAS_TxMsgContainer_SMS));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   v_SRB_ForSMS,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_PduToSend.Msg)));
+
+    //@siclog "Step 55" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (cr_MT_TI0_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.1", "Step 55");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 55");
+
+    //@siclog "Step 56" siclog@
+    //Check: Does the UE transmit a CP-DATA containing a RP-ACK RPDU encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MT_TI0_FromUE, cr_CP_UserData_RP_ACK_ul);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test Case 9.1.8.1", "Step 56");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 56");
+
+    //@siclog "Step 57" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS transport message to the UE.
+    v_NAS_TxMsgContainer_SMS := f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (cs_MT_TI0_FromSS));
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSMSMsg),
+                                            omit,
+                                            cs_PayloadContainer (omit, v_NAS_TxMsgContainer_SMS));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   v_SRB_ForSMS,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_PduToSend.Msg)));
+    } //End of fl_TC_9_1_8_1_Body
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.8.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_8_2_NR5GC() runs on NR5GC_PTC
+  { //@sic R5-202663 sic@
+    //SMS over NAS / Multiple MO and MT SMS over NAS - CONNECTED mode
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1, NG_AllCellsOnSamePLMN);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+
+    //Configure the SMS as per PIXIT using the appropriate AT commands - powering required
+    //Provide the UE with a valid 5G NAS security context to make it send a REGISTRATION REQUEST message including also non-cleartext IEs.
+    f_NG_SMS_AT_Config_WithPowering_EnterState_0B (v_NGC_NASCellA); //@sic R5-201089, R5s200311, R5s201075, R5s201247, R5s201178 sic@
+
+    //  Bring the UE into state 3N-A, registered with "SMS over NAS supported".
+    f_NR5GC_Preamble_SMSoverNAS(v_NGC_NASCellA);
+
+    f_NR_TestBody_Set(true);
+    fl_TC_9_1_8_2_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_9_1_8_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_8_2_Body() runs on NR_BASE_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var octetstring v_NAS_RcvMsgContainer_SMS;
+    var bitstring v_NAS_RcvBitsMsgContainer_SMS;
+    var CP_PDU_Type v_RcvSMS_CP_PDU;
+    var template CP_PDU_Type v_ExpSMS_CP_PDU;
+    var B3_Type v_TI_Value;
+    var TransactionIdentifier_Type v_MO_TI_FromSS;
+    var TransactionIdentifier_Type v_MO_TI_FromUE;
+    var TransactionIdentifier_Type v_MO_TI_FromUE_Previous;
+    var O1_Type v_RpMsgRefRcvd;
+    var NR_RadioBearerId_Type v_SRB_ForSMS := tsc_NR_RbId_SRB2; //@sic R5s200311 sic@
+
+    //@siclog "Step 1" siclog@
+    //Sending of 3 MO SMS as multiple SMS is initiated at the UE via MMI or AT command
+    if (px_SMS_MsgFrmt=="1") {
+      // Set text mode parameters to trigger status report.
+      // bit 7(RP) 6(UDHI) 5(SRR) 4 3(VPF) 2(RD) 1 0(MIT)
+      //     0     0       1      1 0      0     0 1
+      f_NG_SMS_AT_CSMP(49, 167, 0);  // @sic R5s100773 sic@
+      // Write message with index 0 to memory storage
+      f_NG_SMS_AT_CMGW_Text("""1111111111""", 129, tsc_Fox);
+      // Write message with index 1 to memory storage
+      f_NG_SMS_AT_CMGW_Text("""1111111111""", 129, tsc_Fox);
+      // Write message with index 2 to memory storage
+      f_NG_SMS_AT_CMGW_Text("""1111111111""", 129, tsc_Fox);
+    }
+    else { // PDU mode
+      // Write message with index 0 to memory storage
+      f_NG_SMS_AT_CMGW_PDU(153, tsc_Fox_PDU);
+      // Write message with index 1 to memory storage
+      f_NG_SMS_AT_CMGW_PDU(153, tsc_Fox_PDU);
+      // Write message with index 2 to memory storage
+      f_NG_SMS_AT_CMGW_PDU(153, tsc_Fox_PDU);
+    }
+    
+    // Send 3 messages from storage. Numbered px_SMS_IndexOffset, +1 , +2
+    f_NG_SMS_AT_3_SMS_Multiple(px_SMS_IndexOffset);
+
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-DATA RPDU (SMS SUBMIT TPDU) encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, f_SMS_CP_UserData_SUBMIT()); // re-used existing function
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 2");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+       
+    // Note TI value used by the UE and set TI variables accordingly
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd :=  v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+    // note TI value for later checking
+    v_MO_TI_FromUE_Previous.tI_Value := v_TI_Value; // note new TI value
+    
+    //@siclog "Step 3" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS Transport message.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS)));
+
+    //@siclog "Step 4" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a Downlink NAS transport message
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                             cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd))));
+
+    // Steps 5 and 6
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+
+    //@siclog "Step 5" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS Transport message before the CP-DATA in step 6 is transmitted?
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (?);
+    f_NG_SMS_CP_PDU_Check(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 5");
+
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-DATA RPDU (SMS SUBMIT TPDU) encapsulated in an Uplink NAS transport message?
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, f_SMS_CP_UserData_SUBMIT());  // re-used existing function
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 6");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    // Note TI value used by the UE and set TI variables accordingly
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd := v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+    // check if TI value is different from the previous one
+    if (v_MO_TI_FromUE_Previous.tI_Value != v_TI_Value) {
+      v_MO_TI_FromUE_Previous.tI_Value := v_TI_Value; // note new TI value
+    }
+    else {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 6 - TI incorrect");
+    }
+
+    //@siclog "Step 7" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS Transport message.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS)));
+
+    //@siclog "Step 8" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a Downlink NAS transport message
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                             cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd))));
+
+    // Steps 9 and 10
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+
+    //@siclog "Step 9" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS Transport message before the CP-DATA in step 10 is transmitted?
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (?);
+    f_NG_SMS_CP_PDU_Check(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 9");
+
+    //@siclog "Step 10" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-DATA RPDU (SMS SUBMIT TPDU) encapsulated in an Uplink NAS transport message?
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, f_SMS_CP_UserData_SUBMIT());  // re-used existing function
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 10");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // Note TI value used by the UE and set TI variables accordingly
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd := v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+    // check if TI value is different from the previous one
+    if (v_MO_TI_FromUE_Previous.tI_Value != v_TI_Value) {
+      v_MO_TI_FromUE_Previous.tI_Value := v_TI_Value; // note new TI value
+    }
+    else {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 10 - TI incorrect");
+    }
+
+    //@siclog "Step 11" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS Transport message.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS)));
+
+    //@siclog "Step 12" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a Downlink NAS transport message
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                             cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd))));
+
+    //@siclog "Step 13" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS Transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (v_MO_TI_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 13");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+
+    //@siclog "Step 14" siclog@
+    //The SS transmits a CP-DATA containing an RP-DATA RPDU (SMS DELIVER TPDU) encapsulated in a Downlink NAS transport message to the UE.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (cs_MT_TI0_FromSS,
+                                                             cs_CP_UserData_DELIVER('3377665588'O))));
+
+    //@siclog "Step 15" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (cr_MT_TI0_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 15");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+
+    //@siclog "Step 16" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-ACK RPDU encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MT_TI0_FromUE, cr_CP_UserData_RP_ACK_ul);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test Case 9.1.8.2", "Step 16");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+
+    //@siclog "Step 17" siclog@
+    //The SS transmits a CP-DATA containing an RP-DATA RPDU (SMS DELIVER TPDU) encapsulated in a Downlink NAS transport message to the UE.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (cs_MT_TI1_FromSS,
+                                                             cs_CP_UserData_DELIVER('1133996655'O))));
+
+    //@siclog "Step 18" siclog@
+    //Check: Does the UE transmit a CP-ACK encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (cr_MT_TI1_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 9.1.8.2", "Step 18");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 18");
+
+    //@siclog "Step 19" siclog@
+    //Check: Does the UE transmit a CP-DATA containing an RP-ACK RPDU encapsulated in an Uplink NAS transport message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                      v_SRB_ForSMS,
+                                      cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSMSMsg), omit)) { // @sic R5s201387 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.payload.payload;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MT_TI1_FromUE, cr_CP_UserData_RP_ACK_ul);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test Case 9.1.8.2", "Step 19");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    //@siclog "Step 20" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS transport message to the UE.
+    f_NG_SMS_CP_PDU_Send (v_NGC_NASCellA,
+                          v_SRB_ForSMS,
+                          f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (cs_MT_TI1_FromSS)));
+
+    } //End of fl_TC_9_1_8_2_Body
+
+}

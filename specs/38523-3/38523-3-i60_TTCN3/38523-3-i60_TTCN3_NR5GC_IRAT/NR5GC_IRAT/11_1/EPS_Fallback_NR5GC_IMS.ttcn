@@ -1,0 +1,610 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-01-26 19:58:44 +0100 (Mon, 26 Jan 2026) $
+// $Rev: 42712 $
+/******************************************************************************/
+
+module EPS_Fallback_NR5GC_IMS {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_5G all;
+  import from IMS_Procedures_CallControl4G all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      Generic IMS procedures for EPS fallback according to 34.229-5 A.9.1
+   * @param     p_Preconditions     (default value: pc_Preconditions)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_IMS_EPS_Fallback_Part1(boolean p_Preconditions := pc_Preconditions) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader_Response183;
+    var template SDP_Message v_SdpOffer := ?;
+    var OptionTag_List v_OptionTagsForRequire := tsc_OptionTagList_100rel;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes := omit;
+    var template (value) SDP_Message v_SdpAnswer;
+    var charstring v_Fmt;
+
+    if (p_Preconditions) {   // @sic R5-221489 sic@
+      v_OptionTagsForRequire := v_OptionTagsForRequire & tsc_OptionTagList_precondition;
+      v_PreconditionAttributes := cs_SDP_PreconditionAttributesWithConf(c_none, c_none, c_mandatory, c_mandatory);
+    }
+
+    // Step 1: Receive INVITE without checking the SDP content
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_ReceiveINVITE_Common(-, v_SdpOffer, -, p_Preconditions);       /* @sic R5-223455: p_Preconditions => 'preconditions' option tag for Supported header field sic@ */
+
+    // Steps 2: send 100 Trying
+    f_IMS_MOCallSetup_Send100Trying(v_InviteRequestWithSdp);
+
+    // Steps 3 - 5: send 183 Session Progress without preconditions, receive PRACK, send 200 OK
+    v_Fmt := f_SDP_MediaDescr_GetAMR_WB_16000_1(v_InviteRequestWithSdp.SdpOffer.media_list[0], ?);
+    v_SdpAnswer := f_IMS_BuildSDP_TX(cs_SDP_Media_Audio(v_Fmt),
+                                     cs_SDP_Bandwidth_List_Media(37, 0, 2000),  // hard coded values according to A.9.1
+                                     f_SDP_MediaAttributes_AMR_WB_AudioDef(v_Fmt),
+                                     v_PreconditionAttributes);
+    v_MessageHeader_Response183 := f_IMS_InviteResponse_183_MessageHeaderTX(v_InviteRequestWithSdp.Invite, -, -, v_OptionTagsForRequire);
+    f_IMS_MOCallSetup_Send18X_Reliable(v_InviteRequestWithSdp, c_statusLine183, v_MessageHeader_Response183, v_SdpAnswer);
+
+    f_Delay(0.5); // short delay to ensure last msg (DL) has been transmitted & Ack'd @sic R5s210475 sic@
+    
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      Generic IMS procedures for EPS fallback according to 34.229-5 A.9.2
+   * @param     p_InviteRequestWithSdp
+   * @param     p_CalleeContactUri  (default value: px_IMS_CalleeContactUri)
+   * @param     p_NonceCount        (default value: 2)
+   * @param     p_Preconditions     (default value: pc_Preconditions)
+   * @return    template (omit) IMS_DATA_REQ
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_IMS_EPS_Fallback_Part2(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                    charstring p_CalleeContactUri := px_IMS_CalleeContactUri,
+                                    integer p_NonceCount := 2,
+                                    boolean p_Preconditions := pc_Preconditions) runs on IMS_PTC return template (omit) IMS_DATA_REQ
+  { /* @sic R5-211437: sequence changed, optional REGISTER sic@ */
+    /* @sic R5-221489: sequence changed again sic@ */
+    var template (omit) IMS_DATA_REQ v_IMS_REGISTER_REQ := omit;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    var template (value) MessageHeader v_MessageHeaderTX;
+    var template (present) SDP_attribute_list v_MediaAttributes;
+    var template (present) SDP_attribute_list v_PreconditionAttributes;
+    var template (present) SDP_Message v_SdpOffer;
+    
+    timer t_Timer := 5.0;
+
+    // Wait for indication RAT has changed to EUTRA
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;   /* The coordination message shall be sent by the EUTRA side not before the UE has acknowledged establishment of the IMS default bearer (RRCConnectionReconfigurationComplete)
+                                                                                 * NOTE: There is a potential race condition when the REGISTER/UPDATE is sent very quickly before the EUTRA side has sent the coordination message;
+                                                                                 *       in this case two coordination messages would be needed:
+                                                                                 *       one just before establishment of the default bearer(s) to start the timer and be prepared to receive the REGISTER/UPDATE,
+                                                                                 *       another one after establishment of the default bearer(s) to trigger sending of the 180 Ringing */
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+
+    // Step 1: start timer
+    t_Timer.start;
+    
+    alt {
+      // Step 2a1 - 2a2         Receive REGISTER, send 200 OK
+      [] IMS_Server.receive(car_IMS_Register_Request(cr_REGISTER_Request)) -> value v_IMS_DATA_REQ {
+        f_IMS_Reregistration_C46(v_IMS_DATA_REQ, p_NonceCount);                                         /* @sic R5-221489: Specific message content for REGISTER (Step 2a1) => use of f_IMS_Reregistration_C46 sic@ */
+        v_IMS_REGISTER_REQ := v_IMS_DATA_REQ;
+      }
+
+      [p_Preconditions] IMS_Server.check(receive(car_IMS_Update_Request(cr_UPDATE_Request(?)))) {}      /* @sic R5-221489: UPDATE only if the UE is configured to use preconditions sic@ */
+      
+      [] t_Timer.timeout {}
+    }
+
+    // Step 2a3
+    t_Timer.stop;
+
+    if (p_Preconditions) {                                                                              /* @sic R5-221489: UPDATE is mandatory when the UE is configured to use preconditions sic@ */
+      // Step 3a1 - 3a2       Receive Update, send 200 OK
+      v_MediaAttributes := {
+        cr_SDP_Attribute_rtpmap(-, cr_RTPMAP_AMR_16000),
+        cr_SDP_Attribute_fmtp
+      };
+      v_PreconditionAttributes := cr_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, (c_optional, c_mandatory));
+      v_SdpOffer := f_IMS_BuildSDP_RX(-, cr_SDP_Media_Audio, v_MediaAttributes, v_PreconditionAttributes);      /* SDP with AMR-WB/16000 @sic R5-221489: with preconditions sic@ */
+      f_IMS_MOCallSetup_ReceiveUpdateSend200OK(p_InviteRequestWithSdp.Invite,
+                                               p_CalleeContactUri,
+                                               v_SdpOffer,
+                                               -, -,
+                                               PreconditionRequired);                   /* @sic R5-223455: PreconditionRequired sic@ */
+    }
+
+    // Step 4: Send 180 Ringing
+    v_MessageHeaderTX := f_IMS_InviteResponse_180_MessageHeaderTX(p_InviteRequestWithSdp.Invite);
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo), cs_Response(c_statusLine180, v_MessageHeaderTX)));
+      
+    // Step 5 - 6: Send 200 OK for INVITE, receive ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(p_InviteRequestWithSdp);
+    
+    return v_IMS_REGISTER_REQ;
+  }
+
+  /*
+   * @desc      Common function for the double registrations performed during the preamble
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_IMSFallback_PreambleRegistrations() runs on IMS_PTC
+  {
+    var boolean v_DeregisteredEarly;
+
+    f_IMS_PTC_Init();
+
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+    f_IMS_Registration(OtherIPCAN_E);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+    v_DeregisteredEarly := f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210414 sic@
+    if (not v_DeregisteredEarly) {   // @sic R5s250228 change 2.1.6: f_IMS_GlobalRelease is called in f_IMS_OptionalDeregistrationOrC24Reinvite already sic@
+      f_IMS_GlobalRelease();
+    }
+    
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+  }
+
+  /*
+   * @desc      Common function for registration to step 5 of MTSI MO speech call procedure in 34.229-5 A.9.1
+   * @param     p_Preconditions     (default value: pc_Preconditions)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_IMSFallback_RegistrationToMOSpeechCall(boolean p_Preconditions := pc_Preconditions) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    fl_IMSFallback_PreambleRegistrations();
+    
+    return f_IMS_EPS_Fallback_Part1(p_Preconditions); // @sic R5s221090 sic@
+  }
+
+  /*
+   * @desc      Local function for 11.1.5 for optional behaviour of 34.229-1 C.46
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  altstep a_C46_ParallelBehavior() runs on IMS_PTC
+  {
+   var IMS_DATA_REQ v_IMS_REGISTER_REQ_ByRef;
+   [] a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(cr_SipUri_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName()))), v_IMS_REGISTER_REQ_ByRef) {
+
+      IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_REGISTER_REQ_ByRef.RoutingInfo),
+                                     cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_IMS_REGISTER_REQ_ByRef.Request.Register))));
+      repeat;
+   }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.1.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_1_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    var template (omit) IMS_DATA_REQ v_IMS_DATA_REQ;
+    var boolean v_ExpectReRegister;
+    
+    // @siclog "Step 9 - 13" siclog@
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    v_IMS_DATA_REQ := f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp);
+    v_ExpectReRegister := isvalue(v_IMS_DATA_REQ.Request.Register);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 5");
+    
+    // @siclog "Step 29 - 33" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    // Wait for indication RAT has changed to NR
+    IPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+    
+    if (v_ExpectReRegister) {
+      f_IMS_Reregistration_C46(omit, 3);
+    }
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    f_IMS_IpcanReleaseWithOptionalDeregistration();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.1a.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_1a_NR5GC_IMS1()runs on IMS_PTC
+  { // MO MMTEL enhanced voice service call setup from NR RRC_IDLE / EPS Fallback with redirection / Single registration mode with N26 interface / Success
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    
+    fl_IMSFallback_PreambleRegistrations();
+
+    // @siclog "Step 10 - 14" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    //           100 Trying, 183 Session Progress, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_5(v_InviteRequestWithSdp);
+
+    f_Delay(0.5); // short delay to ensure last msg (DL) has been transmitted & Ack'd
+    // Tell NR to send Redirection to EUTRA
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    // @sic R5s220923 sic@ Wait for indication RAT has changed to EUTRA
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;   /* The coordination message shall be sent by the EUTRA side not before the UE has acknowledged establishment of the IMS default bearer (RRCConnectionReconfigurationComplete)
+                                                                                 * NOTE: There is a potential race condition when the REGISTER/UPDATE is sent very quickly before the EUTRA side has sent the coordination message;
+                                                                                 *       in this case two coordination messages would be needed:
+                                                                                 *       one just before establishment of the default bearer(s) to start the timer and be prepared to receive the REGISTER/UPDATE,
+                                                                                 *       another one after establishment of the default bearer(s) to trigger sending of the 180 Ringing */
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(v_InviteRequestWithSdp);
+
+    //          180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);
+
+    //          200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Table 11.1.1a.3.2-2 Step 7");
+    
+    // @siclog "Step 29 - 33" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    // Wait for indication RAT has changed to NR
+    IPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+    
+    // This is required as re-using the same TC body as 11.1.1
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    f_IMS_IpcanReleaseWithOptionalDeregistration();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.2.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_2_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall(); // @sic R5-223430 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    // @sic R5s220791 sic@
+    
+    f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp);  // @sic R5-223430 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 6");
+    
+    // @siclog "Step 29" siclog@
+    f_Delay(1.0);
+    
+    // @siclog "Step 30" siclog@
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.3.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_3_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall(tsc_SDP_WithoutPreconditions);  // @sic R5s221090 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp, -, -, tsc_SDP_WithoutPreconditions);  // @sic R5s221090 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 1a8/1b6");
+    
+    //Send coordination to EUTRA for Step 27
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    // @siclog "Step 29" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.3a.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_3a_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    
+    fl_IMSFallback_PreambleRegistrations();
+
+    // @siclog "Step 10 - 14" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_5(v_InviteRequestWithSdp);
+    f_Delay(0.5); // @sic R5s221116 sic@
+    
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); //Now tell the Eutra to activate Dedicated EPS bearer
+
+    // @sic R5s220926 sic@ Wait for indication RAT has changed to EUTRA
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;   /* The coordination message shall be sent by the EUTRA side not before the UE has acknowledged establishment of the IMS default bearer (RRCConnectionReconfigurationComplete)
+                                                                                 * NOTE: There is a potential race condition when the REGISTER/UPDATE is sent very quickly before the EUTRA side has sent the coordination message;
+                                                                                 *       in this case two coordination messages would be needed:
+                                                                                 *       one just before establishment of the default bearer(s) to start the timer and be prepared to receive the REGISTER/UPDATE,
+                                                                                 *       another one after establishment of the default bearer(s) to trigger sending of the 180 Ringing */
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+
+    //Carry on with A.4.1a procedure
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(v_InviteRequestWithSdp);
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Table 11.1.3a.3.2-2 Step 7");
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN); // @sic R5s221116 sic@
+    
+    // @siclog "Step 25" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+    
+    f_IMS_IpcanReleaseWithOptionalDeregistration();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.4.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_4_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall ();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 1a8/1b6");
+    
+    //Send coordination to EUTRA for Step 22
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    // @siclog "Step 24" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.5.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_5_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader_Response183;
+    var default v_MyDefaultVar := null;
+    
+    fl_IMSFallback_PreambleRegistrations();
+
+    // @siclog "Step 11" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_ReceiveINVITE_Common(-, -);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s211660 sic@
+    // Wait for indication RAT has changed to EUTRA
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN); // @sic R5s211660 sic@
+
+    //@siclog "Step 28 - 29" siclog@
+
+    v_MyDefaultVar := activate (a_C46_ParallelBehavior ());
+    //Steps 28 - 29 Map to 36.508 Table 4.5A.6.3-1 Steps 9a1- 11a1 which maps to 34.229-1 C.21 Steps 3 -4
+    f_IMS_MOCallSetup_Send100Trying(v_InviteRequestWithSdp);
+
+    v_MessageHeader_Response183 := f_IMS_InviteResponse_183_MessageHeaderTX(v_InviteRequestWithSdp.Invite, px_IMS_CalleeContactUri, omit, -, NORMAL_CALL);
+    f_IMS_MOCallSetup_AnnexC21_Step4(v_InviteRequestWithSdp, v_MessageHeader_Response183); // @sic R5s211660 sic@
+    deactivate (v_MyDefaultVar);
+    // Trigger EUTRA for Dedicated Bearer Setup
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    //Carry on with the C.21 Steps  5-13
+    f_IMS_MOCallSetup_AnnexC21_Steps5_13(v_InviteRequestWithSdp, valueof(v_MessageHeader_Response183));
+       
+    // @siclog "Step 36" siclog@
+    f_Delay(1.0);
+    
+    // @siclog "Step 37" siclog@
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.6.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_6_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    var INVITE_Request v_InviteRequest;
+    var template (present) SipUrl v_SipUrl;
+    var IMS_DATA_REQ v_IMS_REGISTER_REQ_ByRef;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdpVal; /* @sic R5w140112: v_InviteRequestWithSdpVal instead of v_InviteRequest sic@ */
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;              /* @sic R5w140112 sic@ */
+    var IMS_Response_Type v_SessionInProgress183;
+    var SipUrl v_ContactSipUrlUE;
+    
+    fl_IMSFallback_PreambleRegistrations();
+    v_SipUrl := cr_SipUri_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName()); // @sic R5s211708 sic@
+
+    // Wait for indication RAT has changed to EUTRA
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+    
+    // Exception: Optional C.46 before Invite Request
+    alt {
+      [] a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(v_SipUrl)), v_IMS_REGISTER_REQ_ByRef) {
+
+         IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_REGISTER_REQ_ByRef.RoutingInfo),
+                                     cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_IMS_REGISTER_REQ_ByRef.Request.Register))));
+         repeat;
+        
+        }
+      [] OtherIPCAN.receive(cmr_IMS_IPCAN_Trigger) {}
+    }
+        
+    // @siclog "Step 21 - 28" siclog@
+    v_InviteRequestWithSdpVal := f_IMS_MTCallSetup_BuildInviteRequestWithSdp();
+    v_InviteRequest := v_InviteRequestWithSdpVal.Invite;
+    v_ResponseWithSdp := f_IMS_MTCallSetup_AnnexC11_Steps1_4(v_InviteRequestWithSdpVal);
+    v_SessionInProgress183 := v_ResponseWithSdp.Response;
+    v_ContactSipUrlUE := f_MessageHeader_GetContactSipUrl(v_SessionInProgress183.msgHeader);
+    
+    // Step 5 - 6. Send PRACK, Receive 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequest, v_SessionInProgress183.msgHeader);     /* @sic R5-181141: steps 5-6 before sending the trigger sic@ */
+
+    // Inform EUTRA: IMS Call established.
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+    
+    //Wait for Co-ordination message from EUTRA
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+
+    // Step 7 - 13
+    f_IMS_MTCallSetup_AnnexC11_Steps7_13(v_InviteRequestWithSdpVal, v_ResponseWithSdp);
+
+    // @siclog "Step 41" siclog@
+    f_Delay(1.0);
+    
+    // @siclog "Step 42" siclog@
+    f_IMS_CallReleaseMT(v_ContactSipUrlUE);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.7.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_7_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_CoordMsg;
+    
+    fl_IMSFallback_PreambleRegistrations();
+    
+    // Wait for EUTRA to say that the RAT has changed
+    OtherIPCAN.receive(cmr_IPCAN_IMS_Response) -> value v_IMS_IPCAN_CoordMsg;
+    f_IMS_PTC_SetRanType(v_IMS_IPCAN_CoordMsg.IPCAN_IMS_Response.IpcanInfo.RanType);
+    
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.7.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_7_NR5GC_IMS2()runs on IMS_PTC
+  {
+    var INVITE_Request v_InviteRequest;
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    // Test Case Body
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyRegistration(-, -, OtherIPCAN_E);  // @sic R5s210616 sic@
+    
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup ();
+    
+    //Release Emergency Call MO
+    //@siclog "Step 22" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_EmergencyCallReleaseMO(v_InviteRequest);
+    
+    // Inform EUTRA: IMS Call released.
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.8.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_8_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    // @siclog "Steps 12 - 16" siclog@
+    f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 1a8/1b6");
+    
+    //Send coordination to EUTRA for Step 31
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    // @siclog "Step 32" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.1.9.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_1_9_NR5GC_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    
+    // @siclog "Step 9 - 13" siclog@
+    v_InviteRequestWithSdp := fl_IMSFallback_RegistrationToMOSpeechCall();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    f_IMS_EPS_Fallback_Part2(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 6");
+    
+    // @siclog "Step 29 - 33" siclog@
+    f_IMS_IPCAN_WaitForTrigger(OtherIPCAN);
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+    
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); // @sic R5s210662 sic@
+  }
+
+}

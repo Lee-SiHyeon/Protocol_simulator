@@ -1,0 +1,1683 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2024-07-10 20:19:16 +0200 (Wed, 10 Jul 2024) $
+// $Rev: 39061 $
+/******************************************************************************/
+
+module EUTRA_Positioning_Functions {
+
+  import from LPP_PDU_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from LCS_Definitions_Arguments language "ASN.1:2002" all with {encode "BER_EncRule"};
+  import from TCAP_Definitions language "ASN.1:2002" all with {encode "BER_EncRule"}; 
+  import from TCAP_Definitions_Para language "ASN.1:2002" all with {encode "DIRECT_EncRule"};
+  import from OMA_LPPE language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from CommonPOS_Functions all;
+  import from CommonPOS_Templates all;
+  import from ComponentsType all;
+  import from EPS_NAS_Templates all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_AuxiliaryCapCheckFunctions all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_LPP_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_POS_ASP_TypeDefs all;
+  import from EUTRA_POS_Component all;
+  import from EUTRA_Positioning_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from LPP_Templates all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from OMA_LPPe_Templates all;
+  import from POS_Parameters all;
+  import from Parameters all;
+  import from PosSystem_ASP_TypeDefs all;
+  import from PosSystem_CommonEUTRA all;
+  import from PosSystem_Control all;
+  import from SS_EncDecComponents all;
+
+  /*
+   * @desc      Objective: To load the required pre-defined EUTRA positioning test scenario
+   *            and start generating positioning signals in the positioning simulator
+   * @param     p_PosSystemListId
+   * @param     p_Scenario
+   * @status    APPROVED (POS)
+   */
+   //@sic R5-170585: Renamed the function to make it applicable to non-satellite positioning systems sic@
+  function f_POS_StartPositioningSimulatorEUTRA(PositioningSystemList_Type p_PosSystemListId,
+                                                ScenarioNumber_Type p_Scenario) runs on EUTRA_POS_PTC
+  {
+    f_PosSystem_LoadScenario(POSSYS, p_PosSystemListId, cs_SatelliteScenario_LTEPos(p_Scenario));
+    f_PosSystem_Start(POSSYS, p_PosSystemListId);
+  }
+
+  /*
+   * @desc      Objective: To stop generating positioning signals in the positioning simulator
+   * @param     p_PosSystemListId
+   * @status    APPROVED (POS)
+   */
+  //@sic R5-170585: Renamed the function to make it applicable to non-satellite positioning systems sic@
+  function f_POS_StopPositioningSimulatorEUTRA(PositioningSystemList_Type p_PosSystemListId) runs on EUTRA_POS_PTC
+  {
+    f_PosSystem_Stop(POSSYS, p_PosSystemListId);
+  }
+
+  /*
+   * @desc      To send LPP ACKNOWLEDGEMENT if requested by the UE
+   * @param     p_CellId
+   * @param     p_RoutingId
+   * @param     p_LppMsgFromUE
+   * @status    APPROVED (POS)
+   */
+  function f_POS_SendLppAck(EUTRA_CellId_Type p_CellId,
+                            octetstring p_RoutingId,
+                            LPP_Message p_LppMsgFromUE) runs on EUTRA_PTC
+  {
+    var octetstring v_EncodedLppMessage := f_POS_EncodeLppMessage(cs_LppAcknowledgement(p_LppMsgFromUE.sequenceNumber));
+    
+    if (isvalue(p_LppMsgFromUE.acknowledgement)) {// UE requested ack
+      SRB.send(cas_SRB_NasPdu_REQ(p_CellId,
+                                  tsc_SRB2,
+                                  cs_TimingInfo_Now,
+                                  cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                 cs_DL_GENERIC_NAS_TRANSPORT(tsc_LPP_MessageContainer,
+                                                                             cs_GenericMsgContainer(v_EncodedLppMessage),
+                                                                             cs_RoutingInfo(p_RoutingId)))));
+    }
+  }
+
+  /*
+   * @desc      Decodes the octetstring p_EncodedReleaseComplete into type RELEASECOMPLETE and matches it with the parameter p_ExpectedReleaseComplete
+   * @param     p_EncodedReleaseComplete
+   * @param     p_ExpectedReleaseComplete
+   * @return    RELEASECOMPLETE
+   * @status    APPROVED (POS)
+   */
+  function f_POS_ReleaseComplete_DecodeAndMatch(octetstring p_EncodedReleaseComplete,
+                                                template (present) RELEASECOMPLETE p_ExpectedReleaseComplete) runs on EUTRA_PTC return RELEASECOMPLETE
+  {
+    var RELEASECOMPLETE v_DecodedReleaseComplete := f_POS_ReleaseComplete_Decode(p_EncodedReleaseComplete);
+    
+    if (not match(v_DecodedReleaseComplete, p_ExpectedReleaseComplete))  {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "RELEASECOMPLETE do not match to template");
+    }
+    return v_DecodedReleaseComplete;
+  }
+
+  /*
+   * @desc      Decodes the octetstring p_EncodedRegister into type REGISTER and matches it with the parameter p_ExpectedRegister
+   * @param     p_EncodedRegister
+   * @param     p_ExpectedRegister
+   * @return    REGISTER
+   * @status    APPROVED (POS)
+   */
+  function f_POS_Register_DecodeAndMatch(octetstring p_EncodedRegister,
+                                         template (present) REGISTER p_ExpectedRegister) runs on EUTRA_PTC return REGISTER
+  {
+    var REGISTER v_DecodedRegister := f_POS_Register_Decode(p_EncodedRegister);
+    
+    if (not match(v_DecodedRegister, p_ExpectedRegister))  {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "REGISTER do not match to template");
+    }
+    return v_DecodedRegister;
+  }
+
+  /*
+   * @desc      Decodes the octetstring p_EncodedComponents into type Components and matches it with the parameter p_ExpectedComponents
+   * @param     p_EncodedComponents
+   * @param     p_ExpectedComponents
+   * @return    Components
+   * @status    APPROVED (POS)
+   */
+  function f_POS_EUTRA_FacilityIE_Components_DecodeAndMatch(octetstring p_EncodedComponents,
+                                                            template (present) Components p_ExpectedComponents) runs on EUTRA_PTC return Components
+  {
+    var Components v_DecodedComponents := f_SS_ComponentsDecode(p_EncodedComponents); //@sic R5-140685 sic@
+    
+    if (not match(v_DecodedComponents, p_ExpectedComponents))  {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Components do not match to template");
+    }
+    return v_DecodedComponents;
+  }
+
+  /*
+   * @desc      Decode LPP message and match against expected PDU
+   * @param     p_EncodedLppMessage
+   * @param     p_ExpectedLppMessage
+   * @return    LPP_Message
+   * @status    APPROVED (POS)
+   */
+  function f_POS_LppMessage_DecodeAndMatch(octetstring p_EncodedLppMessage,
+                                           template (present) LPP_Message p_ExpectedLppMessage) runs on EUTRA_PTC return LPP_Message
+  {
+    var LPP_Message v_DecodedLppMessage := f_POS_LppMessage_Decode(p_EncodedLppMessage);
+    
+    if (not match(v_DecodedLppMessage, p_ExpectedLppMessage))  {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "LPP Message do not match to template");
+    }
+    return v_DecodedLppMessage;
+  }
+
+  /*
+   * @desc      Decode and match OMA LPPE message
+   * @param     p_EncodedOmaLppeMessage
+   * @param     p_ExpectedOmaLppeMessage
+   * @return    OMA_LPPe_MessageExtension
+   * @status    APPROVED (POS)
+   */
+  function f_POS_OmaLppeMessage_DecodeAndMatch(octetstring p_EncodedOmaLppeMessage,
+                                               template (present) OMA_LPPe_MessageExtension p_ExpectedOmaLppeMessage) runs on EUTRA_PTC return OMA_LPPe_MessageExtension
+  {
+    var OMA_LPPe_MessageExtension v_DecodedOmaLppeMessage := f_POS_OmaLppeMessage_Decode(p_EncodedOmaLppeMessage);
+    
+    if (not match(v_DecodedOmaLppeMessage, p_ExpectedOmaLppeMessage))  {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "OMA LPPe Message do not match to template");
+    }
+    return v_DecodedOmaLppeMessage;
+  }
+
+  /*
+   * @desc      Function to configured PRS for OTDOA
+   * @param     p_CellId
+   * @param     p_SYSTEM_CTRL_POSEXT_REQ
+   * @status    APPROVED (POS)
+   */
+  function f_POS_EUTRA_SS_OTDOACellConfig(EUTRA_CellId_Type p_CellId,
+                                          template (value) SYSTEM_CTRL_POSEXT_REQ p_SYSTEM_CTRL_POSEXT_REQ) runs on EUTRA_POS_PTC
+  {
+    SYS_POSEXT.send(p_SYSTEM_CTRL_POSEXT_REQ);
+    if (valueof(p_SYSTEM_CTRL_POSEXT_REQ.Common.ControlInfo.CnfFlag) == true) {
+      SYS_POSEXT.receive ( car_CellConfig_PosExt_CNF (p_CellId) );
+    }
+  }
+
+  /*
+   * @desc      Create and configure cells for OTDOA
+   * @param     p_CellId
+   * @status    APPROVED (POS)
+   */
+  function f_POS_EUTRA_CellConfig_OTDOA(EUTRA_CellId_Type p_CellId) runs on EUTRA_POS_PTC
+  {
+    var PRS_Info v_PrsInfo; //@sic R5-151981 sic@
+    
+    //Change Tcell (timing offset) to 0
+    f_EUTRA_CellInfo_Set_Tcell (p_CellId, 0);
+    f_EUTRA_CellInfo_Set_SfnOffset(p_CellId, 0); // @sic R5s130157 sic@
+    
+    f_EUTRA_CellConfig_Def (p_CellId);
+    
+    v_PrsInfo := f_POS_PrsInfo_Init(p_CellId); //@sic R5s160257 sic@
+       
+    //Configure PRS
+    f_POS_EUTRA_SS_OTDOACellConfig (p_CellId, cas_CellConfig_OTDOA_REQ(p_CellId, v_PrsInfo));
+  }
+
+  /*
+   * @desc      Initialize PRS Info according to 37.571-2, Table 5.4.1.2-1, and depending of FDD/TDD
+   * @param     p_CellId
+   * @return    PRS_Info
+   * @status    APPROVED (POS)
+   */
+   function f_POS_PrsInfo_Init(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC return PRS_Info
+   { // @sic R5-151981 sic@
+     var template (value) PRS_Info v_PrsInfo := cs_PrsInfo_Def;
+     var PRS_Info v_PrsInfo_Tmp; //@sic R5s160257 sic@
+     var EUTRA_FDD_TDD_Mode_Type v_FDD_TDD := f_EUTRA_CellInfo_GetFDD_TDD(p_CellId);
+     
+     if (v_FDD_TDD == TDD) {
+       v_PrsInfo.prs_ConfigurationIndex := 4;
+     }
+     
+     v_PrsInfo_Tmp := f_POS_Set_PrsBandwidth (p_CellId); //@sic R5s160257 sic@
+     v_PrsInfo.prs_Bandwidth := v_PrsInfo_Tmp.prs_Bandwidth; //@sic R5s160257 sic@
+     
+     return valueof(v_PrsInfo);
+   }
+
+  /*
+   * @desc      This functions is used to set the prs Bandwidth info that will be send as OTDOA data
+   * @param     p_CellId
+   * @return    PRS_Info
+   * @status    APPROVED (POS)
+   */
+  function f_POS_Set_PrsBandwidth (EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC return PRS_Info
+  {
+    var Dl_Bandwidth_Type v_Bw := f_EUTRA_CellInfo_GetDL_ChBandwidth (p_CellId);
+    var PRS_Info v_Prs;
+    
+    select (v_Bw) {
+      case (n6) {
+        v_Prs.prs_Bandwidth := n6;
+      }
+      case (n15){
+        v_Prs.prs_Bandwidth := n15;
+      }
+      case (n25){
+        v_Prs.prs_Bandwidth := n25;
+      }
+      case  (n50){
+        v_Prs.prs_Bandwidth := n50;
+      }
+      case (n75){
+        v_Prs.prs_Bandwidth := n75;
+      }
+      case (n100){
+        v_Prs.prs_Bandwidth := n100;
+      }
+    }
+    return v_Prs;
+  }
+
+  /*
+   * @desc      This is the opposite function to f_Asn2NAS_PlmnId, but putting Mcc and Mnc as in ECGI type
+   *            See 24.008, 10.5.1.13
+   *            v_NP[0]    v_NP[1]    v_NP[2]    v_NP[3]    v_NP[4]    v_NP[5]
+   *            v_MCC[1] & v_MCC[0] & v_MNC[2] & v_MCC[2] & v_MNC[1] & v_MNC[0])
+   * @param     p_NAS_PlmnId
+   * @return    ECGI
+   * @status    APPROVED (POS)
+   */
+  function f_POS_NAS_PlmnId2EcgiMccMnc (NAS_PlmnId p_NAS_PlmnId) return ECGI
+  { /* @sic R5s130145 sic@
+     * @status    APPROVED (POS) */
+    var hexstring v_NP := oct2hex (p_NAS_PlmnId);
+    var hexstring v_MNC := (v_NP[5] & v_NP[4] & v_NP[2]);
+    var hexstring v_MCC := (v_NP[1] & v_NP[0] & v_NP[3]);
+    var ECGI v_Ecgi;
+    var integer I;
+    
+    for (I := 0; I < lengthof(v_MCC); I := I + 1) {
+      v_Ecgi.mcc[I] := hex2int (v_MCC[I]);
+    }
+    
+    for (I := 0; I < lengthof(v_MCC); I := I + 1) {
+      if (v_MNC[I]!='F'H) {
+        v_Ecgi.mnc[I] := hex2int (v_MNC[I]);
+      }
+    }
+    
+    return v_Ecgi;
+  }
+
+  /*
+   * @desc      Function to check EUTRA band in OTDOA provide capabilities
+   *            Reference 37.571-2 Table 7.3.1.1.3.3-11
+   * @param     p_OtdoaProvideCapabilities
+   * @status    APPROVED (POS)
+   */
+  function f_POS_OTDOA_CheckEutraBand(OTDOA_ProvideCapabilities  p_OtdoaProvideCapabilities) runs on EUTRA_PTC
+  { // @sic R5-145736 sic@
+    var OTDOA_ProvideCapabilities v_OtdoaProvideCapabilities;
+    var integer i;
+    var integer v_BandEUTRA;
+    var integer v_BitStringIndex;
+    var bitstring v_SuppEutraBandsAccToPICS := f_DeriveSuppEutraBandsFromPics();
+    var bitstring v_SuppEutraBandsAccToPICS_v9a0 := f_DeriveSuppEutraBandsFromPics_v9a0(); // @sic R5-134907 sic@
+    var bitstring v_SuppEutraBandsAccToPICS_Chunk;         // @sic R5-150483 sic@
+
+    v_OtdoaProvideCapabilities := p_OtdoaProvideCapabilities;
+
+    if (not isvalue(v_OtdoaProvideCapabilities.supportedBandListEUTRA)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "SupportedBandListEUTRA not included in OTDOA capabilities"); // @sic R5s150589 sic@
+    }
+    
+    // @sic R5-150483 sic@
+    // It is no longer checked that number of supported EUTRA bands is at least a subset of the PICS parameters (pc_eBanda_Supp)
+    // There may be more bands reported than there are PICS defined for bands
+
+    // Check that all OTDOA reported bands are also set to true in the EUTRA band PICS
+    // Check only the bands for which there are PICS; do not check other bands which may or may not be reported
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 0, 14); // bands 1 - 14
+    f_CheckUE_SupportedEUTRA_Bands_ChunkOtdoa (v_OtdoaProvideCapabilities, v_SuppEutraBandsAccToPICS_Chunk, 0, 14);
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 16, 30); // bands 17 - 46   @sic R5s150589, R5-165506, R5s170733 sic@
+    f_CheckUE_SupportedEUTRA_Bands_ChunkOtdoa (v_OtdoaProvideCapabilities, v_SuppEutraBandsAccToPICS_Chunk, 16, 30); // @sic R5s150589, R5-165506, R5s170733 sic@
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 47, 1); // band 48 @sic R5s170733 sic@
+    f_CheckUE_SupportedEUTRA_Bands_ChunkOtdoa (v_OtdoaProvideCapabilities, v_SuppEutraBandsAccToPICS_Chunk, 47, 1); //@sic R5s170733 sic@
+       
+    if (lengthof(v_OtdoaProvideCapabilities.supportedBandListEUTRA) == maxFBI) {  // @sic R5-134907 sic@
+      //Check supportedBandListEUTRA-v9a0
+      if (isvalue (v_OtdoaProvideCapabilities.supportedBandListEUTRA_v9a0)) {
+        // @sic R5-150483 sic@
+        // It is no longer checked that number of supported EUTRA bands is at least a subset of the PICS parameters (pc_eBanda_Supp)
+        // There may be more bands reported than there are PICS defined for bands
+        // Check that all OTDOA reported bands are also set to true in the EUTRA band PICS
+        for (i := 0; i < lengthof(v_OtdoaProvideCapabilities.supportedBandListEUTRA_v9a0); i := i + 1) { //@sic Band Issue sic@
+          v_BandEUTRA := v_OtdoaProvideCapabilities.supportedBandListEUTRA_v9a0[i].bandEUTRA_v9a0;
+          v_BitStringIndex := v_BandEUTRA - 1;
+       
+          if (not f_Bitstring_BitIsSet(v_SuppEutraBandsAccToPICS_v9a0, v_BitStringIndex)) {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for EUTRA band No. " & int2str(v_BandEUTRA));// @sic R5s240460 add. change sic@
+          }
+        }
+      }
+    }
+    //Checking of interFreqRSTDmeasurement-r10.  @sic R5-134907 sic@
+    if (pc_InterFreq_RSTD_WithGaps) {
+      if (not(v_OtdoaProvideCapabilities.interFreqRSTDmeasurement_r10 == supported)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "interFreqRSTDmeasurement_r10 not reported")
+      }
+    }
+    
+    //Checking of OTDOA measurements
+    //@sic R5-201624 sic@
+    if (pc_OTDOA_interFreqRSTDmeasurement != ispresent (v_OtdoaProvideCapabilities.interFreqRSTDmeasurement_r10)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for interFreqRSTDmeasurement_r10")
+    }
+    if (pc_OTDOA_additionalNeighbourCellInfoList != ispresent (v_OtdoaProvideCapabilities.additionalNeighbourCellInfoList_r10)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for additionalNeighbourCellInfoList_r10")
+    }
+    if (pc_OTDOA_prs_id != ispresent (v_OtdoaProvideCapabilities.prs_id_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for prs_id_r14")
+    }
+    if (pc_OTDOA_tp_separation_via_muting != ispresent (v_OtdoaProvideCapabilities.tp_separation_via_muting_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for tp_separation_via_muting_r14")
+    }
+    if (pc_OTDOA_additional_prs_config != ispresent (v_OtdoaProvideCapabilities.additional_prs_config_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for additional_prs_config_r14")
+    }
+    if (pc_OTDOA_prs_based_tbs != ispresent (v_OtdoaProvideCapabilities.prs_based_tbs_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for prs_based_tbs_r14")
+    }
+    if (pc_OTDOA_additionalPathsReport != ispresent (v_OtdoaProvideCapabilities.additionalPathsReport_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for additionalPathsReport_r14")
+    }
+    if (pc_OTDOA_densePrsConfig != ispresent (v_OtdoaProvideCapabilities.densePrsConfig_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for densePrsConfig_r14")
+    }
+    if (ispresent(v_OtdoaProvideCapabilities.maxSupportedPrsBandwidth_r14)) { //@sic R5s211515 sic@
+      if (v_OtdoaProvideCapabilities.maxSupportedPrsBandwidth_r14 != pc_OTDOA_maxSupportedPrsBandwidth_r14) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for maxSupportedPrsBandwidth_r14")
+      }
+    }
+    if (pc_OTDOA_prsOccGroup != ispresent (v_OtdoaProvideCapabilities.prsOccGroup_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for prsOccGroup_r14")
+    }
+    if (pc_OTDOA_prsFrequencyHopping != ispresent (v_OtdoaProvideCapabilities.prsFrequencyHopping_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for prsFrequencyHopping_r14")
+    }
+    if (ispresent(v_OtdoaProvideCapabilities.maxSupportedPrsConfigs_r14)) { //@sic R5s211515 sic@
+      if (v_OtdoaProvideCapabilities.maxSupportedPrsConfigs_r14 != pc_OTDOA_maxSupportedPrsConfigs_r14) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for maxSupportedPrsConfigs_r14")
+      }
+    }
+    if (pc_OTDOA_periodicalReporting != ispresent (v_OtdoaProvideCapabilities.periodicalReporting_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for periodicalReporting_r14")
+    }
+    if (pc_OTDOA_multiPrbNprs != ispresent (v_OtdoaProvideCapabilities.multiPrbNprs_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for multiPrbNprs_r14")
+    }
+    if (pc_OTDOA_idleStateForMeasurements != ispresent (v_OtdoaProvideCapabilities.idleStateForMeasurements_r14)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for idleStateForMeasurements_r14")
+    }
+    if (ispresent(v_OtdoaProvideCapabilities.numberOfRXantennas_r14)) { //@sic R5s211515 sic@
+      if (v_OtdoaProvideCapabilities.numberOfRXantennas_r14 != pc_OTDOA_numberOfRXantennas_r14) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for numberOfRXantennas_r14")
+      }
+    }
+    if (pc_OTDOA_motionMeasurements != ispresent (v_OtdoaProvideCapabilities.motionMeasurements_r15)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for motionMeasurements_r15")
+    }
+    if (pc_OTDOA_interRAT_RSTDmeasurement != ispresent (v_OtdoaProvideCapabilities.interRAT_RSTDmeasurement_r15)){
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for interRAT_RSTDmeasurement_r15")
+    }
+  }
+
+  /*
+   * @desc      Function to check ECID Measurements supported in ECID provide capabilities
+   *            Reference 37.571-2 Table 7.3.1.1.3.3-12
+   * @param     p_EcidProvideCapabilities
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckCapabilities_Ecid (ECID_ProvideCapabilities  p_EcidProvideCapabilities) runs on EUTRA_PTC
+  {
+    var integer i;
+    var bitstring v_Bitstring := f_ConvertBoolToBit(pc_ECID_Rsrp) &
+                                 f_ConvertBoolToBit(pc_ECID_Rsrq) &
+                                 f_ConvertBoolToBit(pc_ECID_UeRxTx);
+    
+    for (i := 0; i < 2; i := i + 1) {
+      if (not (v_Bitstring[i] == p_EcidProvideCapabilities.ecid_MeasSupported[i])) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for ECID measurements");
+      }
+    }
+    //@sic R5-201624 sic@
+    if (pc_ECID_ueRxTxSupTDD != ispresent(p_EcidProvideCapabilities.ueRxTxSupTDD_r13)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for ECID ueRxTxSupTDD");
+    }
+    if (pc_ECID_periodicalReporting != ispresent(p_EcidProvideCapabilities.periodicalReporting_r14)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for ECID periodicalReporting");
+    }
+    if (pc_ECID_triggeredReporting != ispresent(p_EcidProvideCapabilities.triggeredReporting_r14)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for ECID triggeredReporting");
+    }
+    if (pc_ECID_idleStateForMeasurements != ispresent(p_EcidProvideCapabilities.idleStateForMeasurements_r14)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for ECID idleStateForMeasurements");
+    }
+  }
+
+  /*
+   * @desc      Function to check GNSS_GenericAssistanceDataSupport elements
+   *            Reference 37.571-2 Table 7.3.1.1.3.3-8
+   * @param     p_GenericAssisDataElement
+   * @param     p_GNSS_TimeModSup
+   * @param     p_GNSS_DGNSS_Sup
+   * @param     p_GNSS_NavModSup
+   * @param     p_GNSS_RTISup
+   * @param     p_GNSS_DataBitsSup
+   * @param     p_GNSS_AcquAssistSup
+   * @param     p_GNSS_AlmanacSup
+   * @param     p_GNSS_UTCModSup
+   * @param     p_GNSS_AuxInfoSup
+   * @param     p_BDS_DiffCorr      (default value: omit)
+   * @param     p_BDS_GridMod       (default value: omit)
+   * @param     p_GNSS_RTK_Obs      (default value: omit)
+   * @param     p_Glo_RTK_BiasInfo  (default value: omit)
+   * @param     p_GNSS_RTK_MAC      (default value: omit)
+   * @param     p_GNSS_RTK_Res      (default value: omit)
+   * @param     p_GNSS_RTK_FKP      (default value: omit)
+   * @param     p_GNSS_SSR_Orbit    (default value: omit)
+   * @param     p_GNSS_SSR_Clock    (default value: omit)
+   * @param     p_GNSS_SSR_Code     (default value: omit)
+   * @param     p_GNSS_SSR_URA      (default value: omit)
+   * @param     p_GNSS_SSR_PhaseBias (default value: omit)
+   * @param     p_GNSS_SSR_STEC     (default value: omit)
+   * @param     p_GNSS_SSR_GridCorr (default value: omit)
+   * @param     p_Navic_DGNSS       (default value: omit)
+   * @param     p_Navic_GridModel   (default value: omit)
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckGenericAssistanceDataSupport(GNSS_GenericAssistDataSupportElement p_GenericAssisDataElement,
+                                                   boolean p_GNSS_TimeModSup,
+                                                   boolean p_GNSS_DGNSS_Sup,
+                                                   boolean p_GNSS_NavModSup,
+                                                   boolean p_GNSS_RTISup,
+                                                   boolean p_GNSS_DataBitsSup,
+                                                   boolean p_GNSS_AcquAssistSup,
+                                                   boolean p_GNSS_AlmanacSup,
+                                                   boolean p_GNSS_UTCModSup,
+                                                   boolean p_GNSS_AuxInfoSup,
+                                                   template (omit) boolean p_BDS_DiffCorr := omit,
+                                                   template (omit) boolean p_BDS_GridMod := omit,
+                                                   template (omit) boolean p_GNSS_RTK_Obs := omit,
+                                                   template (omit) boolean p_Glo_RTK_BiasInfo := omit,
+                                                   template (omit) boolean p_GNSS_RTK_MAC := omit,
+                                                   template (omit) boolean p_GNSS_RTK_Res := omit,
+                                                   template (omit) boolean p_GNSS_RTK_FKP := omit,
+                                                   template (omit) boolean p_GNSS_SSR_Orbit := omit,
+                                                   template (omit) boolean p_GNSS_SSR_Clock := omit,
+                                                   template (omit) boolean p_GNSS_SSR_Code := omit,
+                                                   template (omit) boolean p_GNSS_SSR_URA := omit, // @sic R5-205211 sic@
+                                                   template (omit) boolean p_GNSS_SSR_PhaseBias := omit, // @sic R5-205211 sic@
+                                                   template (omit) boolean p_GNSS_SSR_STEC := omit, // @sic R5-205211 sic@
+                                                   template (omit) boolean p_GNSS_SSR_GridCorr := omit, // @sic R5-205211 sic@
+                                                   template (omit) boolean p_Navic_DGNSS := omit, // @sic R5-205211 sic@
+                                                   template (omit) boolean p_Navic_GridModel := omit) runs on EUTRA_PTC  // @sic R5-205211 sic@
+  {
+    if (isvalue (p_GenericAssisDataElement.sbas_ID) and (p_GenericAssisDataElement.gnss_ID.gnss_id != sbas)) {
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID));
+    }
+    if (p_GNSS_TimeModSup != ispresent(p_GenericAssisDataElement.gnss_TimeModelsSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-TimeModelsSupport");
+    }
+    if (p_GNSS_DGNSS_Sup != ispresent(p_GenericAssisDataElement.gnss_DifferentialCorrectionsSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-DifferentialCorrectionsSupport");
+    }
+    if (p_GNSS_NavModSup != ispresent(p_GenericAssisDataElement.gnss_NavigationModelSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-NavigationModelSupport");
+    }
+    if (p_GNSS_RTISup != ispresent(p_GenericAssisDataElement.gnss_RealTimeIntegritySupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-RealTimeIntegritySupport");
+    }
+    if (p_GNSS_DataBitsSup != ispresent(p_GenericAssisDataElement.gnss_DataBitAssistanceSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-DataBitAssistanceSupport");
+    }
+    if (p_GNSS_AcquAssistSup != ispresent(p_GenericAssisDataElement.gnss_AcquisitionAssistanceSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-AcquisitionAssistanceSupport");
+    }
+    if (p_GNSS_AlmanacSup != ispresent(p_GenericAssisDataElement.gnss_AlmanacSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-AlmanacSupport");
+    }
+    if (p_GNSS_UTCModSup != ispresent(p_GenericAssisDataElement.gnss_UTC_ModelSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-UTC-ModelSupport");
+    }
+    if (p_GNSS_AuxInfoSup != ispresent(p_GenericAssisDataElement.gnss_AuxiliaryInformationSupport)) { //@sic R5s150805 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-AuxiliaryInformationSupport");
+    }
+    if (isvalue(p_BDS_DiffCorr) and valueof(p_BDS_DiffCorr)) { // @sic R5-145737,  R5-145098 sic@
+      if (not isvalue (p_GenericAssisDataElement.bds_DifferentialCorrectionsSupport_r12)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "bds-DifferentialCorrectionsSupport-r12");
+      }
+    }
+    if (isvalue(p_BDS_GridMod) and valueof(p_BDS_GridMod)) { // @sic R5-145737,  R5-145098 sic@
+      if (not isvalue (p_GenericAssisDataElement.bds_GridModelSupport_r12)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "bds-GridModelSupport-r12");
+      }
+    }
+    if (isvalue(p_GNSS_RTK_Obs) and valueof(p_GNSS_RTK_Obs)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_RTK_ObservationsSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-RTK-ObservationsSupport-r15");
+      }
+    }
+    if (isvalue(p_Glo_RTK_BiasInfo) and valueof(p_Glo_RTK_BiasInfo)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.glo_RTK_BiasInformationSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "glo-RTK-BiasInformationSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_RTK_MAC) and valueof(p_GNSS_RTK_MAC)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_RTK_MAC_CorrectionDifferencesSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-RTK-MAC-CorrectionDifferencesSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_RTK_Res) and valueof(p_GNSS_RTK_Res)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_RTK_ResidualsSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-RTK-ResidualsSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_RTK_FKP) and valueof(p_GNSS_RTK_FKP)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_RTK_FKP_GradientsSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-RTK-FKP-GradientsSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_Orbit) and valueof(p_GNSS_SSR_Orbit)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_OrbitCorrectionsSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "   gnss-SSR-OrbitCorrectionsSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_Clock) and valueof(p_GNSS_SSR_Clock)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_ClockCorrectionsSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-ClockCorrectionsSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_Code) and valueof(p_GNSS_SSR_Code)) { // @sic R5-192381 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_CodeBiasSupport_r15)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-CodeBiasSupport-r15");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_URA) and valueof(p_GNSS_SSR_URA)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_URA_Support_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-URA-Support-r16");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_PhaseBias) and valueof(p_GNSS_SSR_PhaseBias)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_PhaseBiasSupport_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-PhaseBiasSupport-r16");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_STEC) and valueof(p_GNSS_SSR_STEC)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_STEC_CorrectionSupport_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-STEC-CorrectionSupport-r16");
+      }
+    }
+    if (isvalue(p_GNSS_SSR_GridCorr) and valueof(p_GNSS_SSR_GridCorr)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.gnss_SSR_GriddedCorrectionSupport_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-GriddedCorrectionSupport-r16");
+      }
+    }
+    if (isvalue(p_Navic_DGNSS) and valueof(p_Navic_DGNSS)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.navic_DifferentialCorrectionsSupport_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "gnss-SSR-GriddedCorrectionSupport-r16");
+      }
+    }
+    if (isvalue(p_Navic_GridModel) and valueof(p_Navic_GridModel)) { // @sic R5-205211 sic@
+      if (not isvalue (p_GenericAssisDataElement.navic_GridModelSupport_r16)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for" & f_POS_GnssId2charstring(p_GenericAssisDataElement.gnss_ID) & "navic-GridModelSupport-r16");
+      }
+    }
+  }
+
+  /*
+   * @desc      To check GNSS Support List in A-GNSS capabilities
+   * @param     p_GnssSupportList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckGnssSupportList(GNSS_SupportList p_GnssSupportList) runs on EUTRA_PTC
+  {
+    var boolean v_GpsFound := false;
+    var boolean v_SbasFound := false;
+    var boolean v_QzssFound := false;
+    var boolean v_GalileoFound := false;
+    var boolean v_GlonassFound := false;
+    var boolean v_BdsFound := false;
+    var integer i;
+    
+    for (i:=0; i < lengthof(p_GnssSupportList); i:=i+1) { //@sic R5s150353 sic@
+      select (p_GnssSupportList[i].gnss_ID.gnss_id) {
+        case (gps) {
+          v_GpsFound := true;
+          if (pc_A_GPS_L1C_A or pc_A_GPS_L1C_A_MGPS) {
+            //Check sbas-id not present
+            if (isvalue (p_GnssSupportList[i].sbas_IDs)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for gps");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes))) {  //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps agnss-Modes");
+            }
+            //Check signals
+            if (not((f_ConvertBoolToBit(pc_A_GPS_L1C_A) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0]) and  //Check L1 C/A
+                    (f_ConvertBoolToBit(pc_A_GPS_L1C) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[1]) and    //Check L1C
+                    (f_ConvertBoolToBit(pc_A_GPS_L2C) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[2]) and    //Check L2C
+                    (f_ConvertBoolToBit(pc_A_GPS_L5) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[3]))) {      //Check L5
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue(p_GnssSupportList[i].fta_MeasSupport) ) {// @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) {  //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_A_GPS_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_A_GPS_ADR) {
+              if (not (pc_A_GPS_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_A_GPS_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463 sic@
+            if (pc_A_GPS_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps");
+          }
+        }
+        case (sbas) {
+          v_SbasFound := true;
+          if (pc_A_SBAS) {
+            //Check sbas-id is present
+            if (not(isvalue (p_GnssSupportList[i].sbas_IDs))) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID not present for sbas");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes))) { //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas agnss-Modes");
+            }
+            //Check signals
+            if (not((f_ConvertBoolToBit(pc_A_SBAS) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0]))) {  //Check L1
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue (p_GnssSupportList[i].fta_MeasSupport)) { // @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) {  //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_SBAS_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_SBAS_ADR) {
+              if (not (pc_SBAS_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_SBAS_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463, R5s200581 sic@
+            if (pc_SBAS_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for sbas");
+          }
+        }
+        case (qzss) {
+          v_QzssFound := true;
+          if (pc_A_QZSS) {
+            //Check sbas-id not present
+            if (isvalue (p_GnssSupportList[i].sbas_IDs)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for qzss");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes)))  {  //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss agnss-Modes");
+            }
+            //Check signals
+            if (not((f_ConvertBoolToBit(pc_QZSS_QZS_L1)  == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0]) and  //Check QZS L1
+                    (f_ConvertBoolToBit(pc_QZSS_QZS_L1C) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[1]) and  //Check L1C
+                    (f_ConvertBoolToBit(pc_QZSS_QZS_L2C) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[2]) and  //Check L2C
+                    (f_ConvertBoolToBit(pc_QZSS_QZS_L5)  == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[3]))) {  //Check L5
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue(p_GnssSupportList[i].fta_MeasSupport)) {// @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) {  //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_QZSS_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_QZSS_ADR) {
+              if (not (pc_QZSS_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for QZSS ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_QZSS_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463, R5s200581 sic@
+            if (pc_QZSS_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for QZSS HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for qzss");
+          }
+        }
+        case (galileo) {
+          v_GalileoFound := true;
+          if (pc_A_Galileo) {
+            //Check sbas-id not present
+            if (isvalue (p_GnssSupportList[i].sbas_IDs)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for galileo");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes)))  {  //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for galileo agnss-Modes");
+            }
+            //Check signals
+            if (not((f_ConvertBoolToBit(pc_GALILEO_E1) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0]) and   //Check E1
+                    (f_ConvertBoolToBit(pc_GALILEO_E5a) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[1]) and  //Check E5a
+                    (f_ConvertBoolToBit(pc_GALILEO_E5b) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[2]) and  //Check E5b
+                    (f_ConvertBoolToBit(pc_GALILEO_E6) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[3]) and   //Check E6
+                    (f_ConvertBoolToBit(pc_GALILEO_E5aE5b) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[4]))) {   //Check E5a+E5b
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for galileo gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue(p_GnssSupportList[i].fta_MeasSupport)) {// @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) {   //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for gps FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_GALILEO_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for galileo ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_GALILEO_ADR) {
+              if (not (pc_GALILEO_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for GALILEO ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_GALILEO_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for galileo velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463, R5s200581 sic@
+            if (pc_GALILEO_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for GALILEO HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for galileo");
+          }
+        }
+        case (glonass) {
+          v_GlonassFound := true;
+          if (pc_A_GLONASS) {
+            //Check sbas-id not present
+            if (isvalue (p_GnssSupportList[i].sbas_IDs)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for glonass");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes)))  {  //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass agnss-Modes");
+            }
+            //Check signals
+            if (not((f_ConvertBoolToBit(pc_GLONASS_G1) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0]) and  //Check G1
+                    (f_ConvertBoolToBit(pc_GLONASS_G2) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[1]) and    //Check G2
+                    (f_ConvertBoolToBit(pc_GLONASS_G3) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[2]))) {      //Check G3
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue(p_GnssSupportList[i].fta_MeasSupport)) {// @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) { //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_GLONASS_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_GLONASS_ADR) {
+              if (not (pc_GLONASS_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for GLONASS ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_GLONASS_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463, R5s200581 sic@
+            if (pc_GLONASS_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for GLONASS HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for glonass");
+          }
+        }
+        case (bds) { // @sic R5-145737,  R5-145098 sic@
+          v_BdsFound := true;
+          if (pc_A_BDS) {
+            //Check sbas-id not present
+            if (isvalue (p_GnssSupportList[i].sbas_IDs)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "sbas-ID present for bds");
+            }
+            //Check positioning modes
+            if (not(f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].agnss_Modes)))  {  //@sic R5s170432 sic@
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds agnss-Modes");
+            }
+            //Check signals
+            if (not(f_ConvertBoolToBit(pc_BDS_B1I) == p_GnssSupportList[i].gnss_Signals.gnss_SignalIDs[0])) {      //Check B1I
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds gnss-signals");
+            }
+            //Check FTA MeasSupport
+            if (isvalue(p_GnssSupportList[i].fta_MeasSupport) ) {// @sic R5s130468 sic@
+              if (not((f_ConvertBoolToBit(pc_GNSS_FTA and (pc_eFDD or pc_eTDD)) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[0]) and  //Check FTA for EUTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_UTRA) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[1]) and  //Check FTA for UTRA
+                      (f_ConvertBoolToBit(pc_GNSS_FTA and pc_GERAN) == p_GnssSupportList[i].fta_MeasSupport.cellTime.accessTypes[2]) and
+                      (f_POS_CheckAgnssPositioningModes(p_GnssSupportList[i].fta_MeasSupport.mode, true)))) {  //@sic R5s170432 sic@
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds FTA Measurements");
+              }
+            }
+            else { // @sic R5s130468 sic@
+              if (pc_GNSS_FTA or pc_GNSS_FTA_UEB or pc_GNSS_FTA_UEA) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match: FTA=supported but no FTA Measurements included");
+              }
+            }
+            //Check ADR support
+            if (not (pc_BDS_ADR == p_GnssSupportList[i].adr_Support)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds ADR support");
+            }
+            //Check ADR enhancements support
+            //@sic R5-192381 sic@
+            if (pc_BDS_ADR) {
+              if (not (pc_BDS_ADR_ENH and (p_GnssSupportList[i].adrEnhancementsSupport_r15 == true_))) {
+                f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for BDS ADR enhancements support");
+              }
+            }
+            //Check velocity measurement support
+            if (not (pc_BDS_VelocityMeas == p_GnssSupportList[i].velocityMeasurementSupport)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds velocity measurement support");
+            }
+            //Check High Accuracy for GNSS modes support
+            //@sic R5-192381, R5s190463, R5s200581 sic@
+            if (pc_BDS_HA xor isvalue(p_GnssSupportList[i].ha_gnss_Modes_r15)) {
+              f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for BDS HA for GNSS modes support");
+            }
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for bds");
+          }
+        }
+      }
+    }
+    //Check if the UE did not report capabilities for any of the supported GNSS
+    if (not(((pc_A_GPS_L1C_A == v_GpsFound) or (pc_A_GPS_L1C_A_MGPS == v_GpsFound)) and
+            (pc_A_SBAS == v_SbasFound) and
+            (pc_A_QZSS == v_QzssFound) and
+            (pc_A_Galileo == v_GalileoFound) and
+            (pc_A_GLONASS == v_GlonassFound) and
+            (pc_A_BDS == v_BdsFound))) { // @sic R5-145737,  R5-145098 sic@
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Not all supported GNSS were reported by the UE");
+    }
+  }
+
+  /*
+   * @desc      Function to check A-GNSS provide capabilities
+   *            Reference 37.571-2 Table 7.3.1.1.3.3-6
+   * @param     p_AgnssProvideCapabilities
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckCapabilities_Agnss(A_GNSS_ProvideCapabilities p_AgnssProvideCapabilities) runs on EUTRA_PTC
+  {
+    var integer i;
+    var template LocationCoordinateTypes v_LocationCoordinateTypesCap := cr_LocationCoordinateTypesCap; //@sic R5s190462 sic@
+    
+    //Check gnss-SupportList
+    f_POS_CheckGnssSupportList (p_AgnssProvideCapabilities.gnss_SupportList);
+    
+    //Check assistanceDataSupportList
+    // - CommonAssistanceDataSupport
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_RefTimeSup, "pc_GNSS_RefTimeSup", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_ReferenceTimeSupport)); //@sic R5s150805 sic@
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_RefLocSup, "pc_GNSS_RefLocSup", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_ReferenceLocationSupport)); //@sic R5s150805 sic@
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_IonoModSup, "pc_GNSS_IonoModSup", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_IonosphericModelSupport)); //@sic R5s150805 sic@
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_EOPSup, "pc_GNSS_EOPSup", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_EarthOrientationParametersSupport)); //@sic R5s150805 sic@
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_RTK_RefStationInfo, "pc_GNSS_RTK_RefStationInfo", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_RTK_ReferenceStationInfoSupport_r15)); //@sic R5-192381 sic@
+    f_EUTRA_CheckPICS_PresenceOfReceivedField(pc_GNSS_RTK_AuxStationInfo, "pc_GNSS_RTK_AuxStationInfo", ispresent(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_CommonAssistanceDataSupport.gnss_RTK_AuxiliaryStationDataSupport_r15)); //@sic R5-192381 sic@
+        
+    // - GenericAssistanceDataSupport
+    for (i:=0; i < lengthof(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport); i:=i+1) { //@sic R5s150353 sic@
+      select (p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i].gnss_ID.gnss_id) {
+        case (gps) {
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_Gps,
+                                                  (pc_GNSS_DGNSS_Sup_Gps or pc_GNSS_DGNSS_Sup_Gps_L5), //@sic R5-206444 sic@
+                                                  pc_GNSS_NavModSup_Gps,
+                                                  pc_GNSS_RTISup_Gps,
+                                                  pc_GNSS_DataBitsSup_Gps,
+                                                  pc_GNSS_AcquAssistSup_Gps,
+                                                  pc_GNSS_AlmanacSup_Gps,
+                                                  pc_GNSS_UTCModSup_Gps,
+                                                  pc_GNSS_AuxInfoSup_Gps,
+                                                  -,-,
+                                                  (pc_GNSS_RTK_OBS_Gps or pc_GNSS_RTK_OBS_Gps_L5), //@sic R5-192381, R5-206444 sic@
+                                                  -,
+                                                  pc_GNSS_RTK_MAC_CorrectionDifferences_Gps,
+                                                  pc_GNSS_RTK_Residuals_Gps,
+                                                  pc_GNSS_RTK_FKP_Gradients_Gps,
+                                                  pc_GNSS_RTK_SSR_OrbitCorrections_Gps,
+                                                  pc_GNSS_RTK_SSR_ClockCorrections_Gps,
+                                                  (pc_GNSS_RTK_SSR_CodeBias_Gps or pc_GNSS_RTK_SSR_CodeBias_Gps_L5), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_URA_Gps, //@sic R5-206444 sic@
+                                                  (pc_GNSS_SSR_PhaseBias_Gps_L1CA or pc_GNSS_SSR_PhaseBias_Gps_L5), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_STEC_CorrSupp_Gps, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_GridCorrSupp_Gps, //@sic R5-206444 sic@
+                                                  pc_Navic_DGNSS_Sup, //@sic R5-206444 sic@
+                                                  pc_Navic_GridModelSupp); //@sic R5-206444 sic@
+        }
+        case (sbas) {
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_Sbas,
+                                                  pc_GNSS_DGNSS_Sup_Sbas,
+                                                  pc_GNSS_NavModSup_Sbas,
+                                                  pc_GNSS_RTISup_Sbas,
+                                                  pc_GNSS_DataBitsSup_Sbas,
+                                                  pc_GNSS_AcquAssistSup_Sbas,
+                                                  pc_GNSS_AlmanacSup_Sbas,
+                                                  pc_GNSS_UTCModSup_Sbas,
+                                                  pc_GNSS_AuxInfoSup_Sbas);
+        }
+        case (qzss) {
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_Qzss,
+                                                  pc_GNSS_DGNSS_Sup_Qzss,
+                                                  pc_GNSS_NavModSup_Qzss,
+                                                  pc_GNSS_RTISup_Qzss,
+                                                  pc_GNSS_DataBitsSup_Qzss,
+                                                  pc_GNSS_AcquAssistSup_Qzss,
+                                                  pc_GNSS_AlmanacSup_Qzss,
+                                                  pc_GNSS_UTCModSup_Qzss,
+                                                  pc_GNSS_AuxInfoSup_Qzss,
+                                                  -,-,-,-,-,-,-,-,-,-,
+                                                  pc_GNSS_SSR_URA_Qzss, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_PhaseBias_Qzss, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_STEC_CorrSupp_Qzss, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_GridCorrSupp_Qzss, //@sic R5-206444 sic@
+                                                  pc_Navic_DGNSS_Sup, //@sic R5-206444 sic@
+                                                  pc_Navic_GridModelSupp); //@sic R5-206444 sic@
+        }
+        case (galileo) {
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_Galileo,
+                                                  (pc_GNSS_DGNSS_Sup_Galileo or pc_GNSS_DGNSS_Sup_Galileo_E5A), //@sic R5-206444 sic@
+                                                  pc_GNSS_NavModSup_Galileo,
+                                                  pc_GNSS_RTISup_Galileo,
+                                                  pc_GNSS_DataBitsSup_Galileo,
+                                                  pc_GNSS_AcquAssistSup_Galileo,
+                                                  pc_GNSS_AlmanacSup_Galileo,
+                                                  pc_GNSS_UTCModSup_Galileo,
+                                                  pc_GNSS_AuxInfoSup_Galileo,
+                                                  -,-,
+                                                  (pc_GNSS_RTK_OBS_Galileo or pc_GNSS_RTK_OBS_Galileo_E5A), //@sic R5-192381, R5-206444 sic@
+                                                  -,
+                                                  pc_GNSS_RTK_MAC_CorrectionDifferences_Galileo,
+                                                  pc_GNSS_RTK_Residuals_Galileo,
+                                                  pc_GNSS_RTK_FKP_Gradients_Galileo,
+                                                  pc_GNSS_RTK_SSR_OrbitCorrections_Galileo,
+                                                  pc_GNSS_RTK_SSR_ClockCorrections_Galileo,
+                                                  (pc_GNSS_RTK_SSR_CodeBias_Galileo or pc_GNSS_RTK_SSR_CodeBias_Galileo_E5A), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_URA_Galileo, //@sic R5-206444 sic@
+                                                  (pc_GNSS_SSR_PhaseBias_Galileo_E1 or pc_GNSS_SSR_PhaseBias_Galileo_E5A), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_STEC_CorrSupp_Galileo, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_GridCorrSupp_Galileo, //@sic R5-206444 sic@
+                                                  pc_Navic_DGNSS_Sup, //@sic R5-206444 sic@
+                                                  pc_Navic_GridModelSupp); //@sic R5-206444 sic@
+        }
+        case (glonass) {
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_Glonass,
+                                                  pc_GNSS_DGNSS_Sup_Glonass,
+                                                  pc_GNSS_NavModSup_Glonass,
+                                                  pc_GNSS_RTISup_Glonass,
+                                                  pc_GNSS_DataBitsSup_Glonass,
+                                                  pc_GNSS_AcquAssistSup_Glonass,
+                                                  pc_GNSS_AlmanacSup_Glonass,
+                                                  pc_GNSS_UTCModSup_Glonass,
+                                                  pc_GNSS_AuxInfoSup_Glonass,
+                                                  -,-,
+                                                  pc_GNSS_RTK_OBS_Glonass,  //@sic R5-192381 sic@
+                                                  pc_GNSS_RTK_BiasInfo_Glonass,
+                                                  pc_GNSS_RTK_MAC_CorrectionDifferences_Glonass,
+                                                  pc_GNSS_RTK_Residuals_Glonass,
+                                                  pc_GNSS_RTK_FKP_Gradients_Glonass,
+                                                  pc_GNSS_RTK_SSR_OrbitCorrections_Glonass,
+                                                  pc_GNSS_RTK_SSR_ClockCorrections_Glonass,
+                                                  pc_GNSS_RTK_SSR_CodeBias_Glonass,
+                                                  pc_GNSS_SSR_URA_Glonass, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_PhaseBias_Glonass, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_STEC_CorrSupp_Glonass, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_GridCorrSupp_Glonass, //@sic R5-206444 sic@
+                                                  pc_Navic_DGNSS_Sup, //@sic R5-206444 sic@
+                                                  pc_Navic_GridModelSupp); //@sic R5-206444 sic@
+        }
+        case (bds) { // @sic R5-145737,  R5-145098 sic@
+          f_POS_CheckGenericAssistanceDataSupport(p_AgnssProvideCapabilities.assistanceDataSupportList.gnss_GenericAssistanceDataSupport[i],
+                                                  pc_GNSS_TimeModSup_BDS,
+                                                  (pc_GNSS_DGNSS_Sup_BDS or pc_GNSS_DGNSS_Sup_Bds_B1C), //@sic R5-206444 sic@
+                                                  pc_GNSS_NavModSup_BDS,
+                                                  pc_GNSS_RTISup_BDS,
+                                                  pc_GNSS_DataBitsSup_BDS,
+                                                  pc_GNSS_AcquAssistSup_BDS,
+                                                  pc_GNSS_AlmanacSup_BDS,
+                                                  pc_GNSS_UTCModSup_BDS,
+                                                  pc_GNSS_AuxInfoSup_BDS,
+                                                  (pc_BDS_DiffCorr or pc_Bds_DiffCorr_B1C), //@sic R5-206444 sic@
+                                                  pc_BDS_GridMod,
+                                                  (pc_GNSS_RTK_OBS_Bds or pc_GNSS_RTK_OBS_Bds_B1C), //@sic R5-192381, R5-206444 sic@
+                                                  -,
+                                                  pc_GNSS_RTK_MAC_CorrectionDifferences_Bds,
+                                                  pc_GNSS_RTK_Residuals_Bds,
+                                                  pc_GNSS_RTK_FKP_Gradients_Bds,
+                                                  pc_GNSS_RTK_SSR_OrbitCorrections_Bds,
+                                                  pc_GNSS_RTK_SSR_ClockCorrections_Bds,
+                                                  (pc_GNSS_RTK_SSR_CodeBias_Bds or pc_GNSS_RTK_SSR_CodeBias_Bds_B1C), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_URA_Bds, //@sic R5-206444 sic@
+                                                  (pc_GNSS_SSR_PhaseBias_Bds_B1I or pc_GNSS_SSR_PhaseBias_Bds_B1C), //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_STEC_CorrSupp_Bds, //@sic R5-206444 sic@
+                                                  pc_GNSS_SSR_GridCorrSupp_Bds, //@sic R5-206444 sic@
+                                                  pc_Navic_DGNSS_Sup, //@sic R5-206444 sic@
+                                                  pc_Navic_GridModelSupp); //@sic R5-206444 sic@
+        }
+      }
+    }
+    //Check Location Coordinate Types and Velocity Types
+    if (pc_UEB_AGNSS) {
+      if (not isvalue (p_AgnssProvideCapabilities.locationCoordinateTypes)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "LocationCoordinateTypes missing");
+      }
+      //@sic R5s190462 sic@
+      if (not(pc_A_GPS_HA or pc_GLONASS_HA or pc_BDS_HA or pc_QZSS_HA or pc_GALILEO_HA or pc_SBAS_HA)) { //High Accuracy not supported
+        v_LocationCoordinateTypesCap := cr_LocationCoordinateTypesCap (omit, omit); //capabilities related to HA will not be reported
+      }
+      if (not match (p_AgnssProvideCapabilities.locationCoordinateTypes, v_LocationCoordinateTypesCap)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for locationCoordinateTypes");
+      }
+      if (not isvalue (p_AgnssProvideCapabilities.velocityTypes)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "velocityTypes missing");
+      }
+      if (not match (p_AgnssProvideCapabilities.velocityTypes, cr_VelocityTypesCap)) {
+        f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "PICS does not match reported capability for velocityTypes");
+      }
+    }
+  }
+
+  /*
+   * @desc      Capability Transfer procedure initiated at the start of the tests to preempt any unsolicited LPP PROVIDE CAPABILITIES message.
+   *            (According to TS 36.305 clause 7.1.2.5  and TS 36.355 clause 5.1.2, a UE may at any time send  capability information
+   *            to the server if a Capability Transfer procedure has not already been performed.) @sic R5-134909 sic@
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CapabilityTransferProcedure () runs on EUTRA_PTC
+  {
+    var octetstring v_Octetstring;
+    var octetstring v_EncodedLppMessage;
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var LPP_Message v_LppMessage;
+
+    //@siclog "Step 0" siclog@
+    //SS sends LPP REQUEST CAPABILITIES
+    v_EncodedLppMessage := f_POS_EncodeLppMessage(cs_LppRequestCapabilities(tsc_POS_TransactionNumber));
+    SRB.send(cas_SRB_NasPdu_REQ(eutra_Cell1,
+                                tsc_SRB2,
+                                cs_TimingInfo_Now,
+                                cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                               cs_DL_GENERIC_NAS_TRANSPORT(tsc_LPP_MessageContainer,
+                                                                           cs_GenericMsgContainer(v_EncodedLppMessage),
+                                                                           cs_RoutingInfo(tsc_POS_RoutingId)))));
+    //@siclog "Step 0a" siclog@
+    //Receive LPP PROVIDE CAPABILITIES
+    SRB.receive(car_SRB2_NasPdu_IND(eutra_Cell1,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_UL_GENERIC_NAS_TRANSPORT(tsc_LPP_MessageContainer,
+                                                                                  cr_RoutingInfo(tsc_POS_RoutingId)))))
+      -> value v_ReceivedAsp;
+    
+    v_Octetstring := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_GENERIC_NAS_TRANSPORT.genericMessageContainer.genericMsgContainerValue;
+    v_LppMessage := f_POS_LppMessage_DecodeAndMatch(v_Octetstring, cr_LppProvideCapabilities_NoEpdu (tsc_POS_TransactionNumber)); //@sic R5-210258 sic@
+    
+    // Further matching is required according to PICS values:
+    f_POS_CheckCapabilities (v_LppMessage, false); //@sic R5s190056 sic@
+    
+    //@siclog "Step 0b" siclog@
+    //SS sends LPP ACKNOWLEDGEMENT if requested by the UE at step 2
+    f_POS_SendLppAck(eutra_Cell1, tsc_POS_RoutingId, v_LppMessage);
+  }
+
+  /*
+   * @desc      Compares the capability received with the values in the PICS
+   * @param     p_LppMessage
+   * @param     p_CheckEpduCap
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckCapabilities (LPP_Message p_LppMessage, boolean p_CheckEpduCap) runs on EUTRA_PTC //@sic R5s190056 sic@
+  {
+    var octetstring v_Octetstring; //@sic R5s160257 sic@
+    
+    //CommonIEs
+    if (pc_LPP_MsgSegmentation) { //@sic R5-1803169, R5-1804037 sic@
+      if (not isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.commonIEsProvideCapabilities)) {
+         f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in Common capabilities PICS");
+      }
+      else {
+        if (not match(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.commonIEsProvideCapabilities, cr_CommonIEsProvideCapabilities)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in LPP-Segmentation capabilities");
+        }
+      }
+    }
+    //AGNSS
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.a_gnss_ProvideCapabilities) and (pc_UEB_AGNSS or pc_UEA_AGNSS)) { //@sic R5s15805 sic@ @sic R5s160257 sic@
+      f_POS_CheckCapabilities_Agnss(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.a_gnss_ProvideCapabilities);
+    }
+    else if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.a_gnss_ProvideCapabilities) or pc_UEB_AGNSS or pc_UEA_AGNSS) { //@sic R5s160257 sic@
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in A-GNSS capabilities PICS");
+    }
+    //OTDOA
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.otdoa_ProvideCapabilities)) { //@sic R5s15805, R5s160257, R5s160967 sic@
+      if (not (p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.otdoa_ProvideCapabilities.otdoa_Mode[0]== '1'B) and pc_OTDOA) { //@sic R5s160967 sic@
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE reported OTDOA UE-Assisted mode not supported");
+      }
+      else if((p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.otdoa_ProvideCapabilities.otdoa_Mode[0]== '1'B) and pc_OTDOA){ //@sic R5s160967 sic@
+        f_POS_OTDOA_CheckEutraBand(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.otdoa_ProvideCapabilities);
+      }
+    }
+    else if (pc_OTDOA) { //@sic R5s160257, R5s160967 sic@
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in OTDOA capabilities PICS");
+    }
+    //ECID
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.ecid_ProvideCapabilities) and pc_ECID) { //@sic R5s15805 sic@ @sic R5s160257 sic@
+      f_POS_CheckCapabilities_Ecid(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.ecid_ProvideCapabilities);
+    }
+    else if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.ecid_ProvideCapabilities) or pc_ECID) {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in ECID capabilities PICS");
+    }
+    //LPPe
+    if(p_CheckEpduCap){ //@sic R5s190056 sic@
+      if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.epdu_ProvideCapabilities) and pc_OMA_LPPe) { //@sic R5s160257 sic@
+        v_Octetstring := p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.epdu_ProvideCapabilities[0].ePDU_Body;
+        f_POS_OmaLppeMessage_DecodeAndMatch(v_Octetstring, cr_OmaLppe_ProvideCapabilities);
+      }
+      else if(isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.epdu_ProvideCapabilities) or pc_OMA_LPPe) { //@sic R5s160257 sic@
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Error in EPDU capabilities PICS!");
+      }
+    }
+    //MBS
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.tbs_ProvideCapabilities_r13)) { //@sic R5-165996: MBS inclusion sic@
+      if (not(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.tbs_ProvideCapabilities_r13.tbs_Modes_r13[1]=='1'B and pc_UEA_MBS)){
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE reported UE-Assisted MBS not supported");
+      }
+    }
+    //WLAN
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.wlan_ProvideCapabilities_r13)) { //@sic R5-165996: iPOS inclusion sic@
+      if (not(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.wlan_ProvideCapabilities_r13.wlan_Modes_r13[1]=='1'B and pc_WLAN)){
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE reported UE-Assisted WLAN not supported");
+      }
+    }
+    //Sensor
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.sensor_ProvideCapabilities_r13)) { //@sic R5-165996: iPOS inclusion sic@
+      if (not(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.sensor_ProvideCapabilities_r13.sensor_Modes_r13[1]=='1'B and pc_Sens)){
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE reported UE-Assisted Sensor not supported");
+      }
+    }
+    //Bluetooth
+    if (isvalue(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.bt_ProvideCapabilities_r13)) { //@sic R5-165996: iPOS inclusion sic@
+      if (not(p_LppMessage.lpp_MessageBody.c1.provideCapabilities.criticalExtensions.c1.provideCapabilities_r9.bt_ProvideCapabilities_r13.bt_Modes_r13[1]=='1'B and pc_Bluetooth)){
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE reported UE-Assisted Bluetooth not supported");
+      }
+    }
+  }
+
+  /*
+   * @desc      To check the presence of the capability field with the PICS
+   *            If PICS=true the capability field shall be present
+   *            If PICS=false the capability field shall be omitted
+   * @param     p_PicsStatement
+   * @param     p_PicsName
+   * @param     p_ReceivedField
+   * @status    APPROVED (POS)
+   */
+  function f_EUTRA_CheckPICS_PresenceOfReceivedField(boolean p_PicsStatement,
+                                                     charstring p_PicsName,
+                                                     boolean p_ReceivedField) runs on EUTRA_PTC
+  { //@sic R5s150805 sic@
+    if (p_PicsStatement != p_ReceivedField) {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, p_PicsName & " not matching the received statement");
+    }
+  }
+
+  /*
+   * @desc      Auxiliary function to send LPP message with or without ack
+   * @param     p_PrevLppMessage
+   * @param     p_TransactionNumber
+   * @param     p_Initiator
+   * @param     p_AgnssProvideAssistData
+   * @param     p_OtdoaProvideAssistData
+   * @status    APPROVED (POS)
+   */
+  function f_POS_SendLppMessage(LPP_Message p_PrevLppMessage,
+                                TransactionNumber p_TransactionNumber,
+                                Initiator p_Initiator,
+                                template (omit) A_GNSS_ProvideAssistanceData p_AgnssProvideAssistData,
+                                template (omit) OTDOA_ProvideAssistanceData p_OtdoaProvideAssistData) runs on EUTRA_PTC
+  {
+    var template (omit) Acknowledgement v_Acknowledgement := omit;
+    var octetstring v_EncodedLppMessage; //@sic R5-160354 sic@
+
+    if (ispresent(p_PrevLppMessage.acknowledgement)) {  // UE requested ack
+      v_Acknowledgement := cs_Acknowledgement(false, p_PrevLppMessage.sequenceNumber);
+    }
+    v_EncodedLppMessage := f_POS_EncodeLppMessage(cs_LppProvideAssistData(p_TransactionNumber,
+                                                                          p_Initiator,
+                                                                          p_AgnssProvideAssistData,
+                                                                          p_OtdoaProvideAssistData,
+                                                                          v_Acknowledgement));
+    SRB.send(cas_SRB_NasPdu_REQ(eutra_Cell1,
+                                tsc_SRB2,
+                                cs_TimingInfo_Now,
+                                cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                               cs_DL_GENERIC_NAS_TRANSPORT(tsc_LPP_MessageContainer,
+                                                                           cs_GenericMsgContainer(v_EncodedLppMessage),
+                                                                           cs_RoutingInfo(tsc_POS_RoutingId)))));
+  }
+
+  /*
+   * @desc      Retrieves adequate data from satellite simulator depending on the supported GNSSs
+   * @param     p_GNSS_List
+   * @return    ProvideAssistanceData_r9_IEs
+   * @status    APPROVED (POS)
+   */
+  function f_POS_RetrieveEUTRA_DataGNSS(PositioningSystemList_Type p_GNSS_List) runs on EUTRA_POS_PTC return ProvideAssistanceData_r9_IEs
+  { //@sic R5-172963 sic@
+   
+    var ProvideAssistanceData_r9_IEs v_ProvideAssistData;
+    var template (value) A_GNSS_RequestAssistanceData v_RequestAssistData;
+    
+    //Note: In order to simplify the code, all GNSS Assistance data IEs for the supported GNSSs will be requested to the Satellite simulator, but only those
+    //      indicated in TS 37.571-5 Table 6.1.3.3-1 will be later sent to the UE.
+    v_RequestAssistData := cs_A_GNSS_RequestAssistanceData (f_POS_SelectTemplateReq_ReferenceTime(),
+                                                            f_POS_SelectTemplateReq_IonosphModel(),
+                                                            f_POS_SelectTemplateReq_GenericAssistData());
+    
+    v_ProvideAssistData := f_POS_EUTRA_RetrieveData(p_GNSS_List, cs_RequestAssistData(v_RequestAssistData));
+    
+    return v_ProvideAssistData;
+  }
+
+  /*
+   * @desc      To provide Assitance Data for A-GNSS depending on the GNSS supported by the UE
+   * @param     p_UEB
+   * @param     p_TransactionNumber
+   * @param     p_RoutingId
+   * @param     p_ProvideAssistData
+   * @param     p_OtdoaProvideAssistData
+   * @param     p_MbsProvideAssistanceData (default value: omit)
+   * @status    APPROVED (POS)
+   */
+  function f_POS_SendLppProvideAssistanceData_GNSS(boolean p_UEB,
+                                                   TransactionNumber p_TransactionNumber,
+                                                   octetstring p_RoutingId,
+                                                   ProvideAssistanceData_r9_IEs p_ProvideAssistData,
+                                                   template (omit) OTDOA_ProvideAssistanceData p_OtdoaProvideAssistData,
+                                                   template (omit) TBS_ProvideAssistanceData_r14 p_MbsProvideAssistanceData := omit) runs on EUTRA_PTC
+  {
+    var octetstring v_EncodedLppMessage;
+    var template (value) A_GNSS_ProvideAssistanceData v_GNSS_ProvideAssistData;
+    
+    v_GNSS_ProvideAssistData := cs_AgnssProvideAssistData(f_POS_SelectTemplateProv_ReferenceTime(p_ProvideAssistData),
+                                                          f_POS_SelectTemplateProv_ReferenceLocation(p_ProvideAssistData, p_UEB),
+                                                          f_POS_SelectTemplateProv_IonosphericModel(p_ProvideAssistData, p_UEB),
+                                                          f_POS_SelectTemplateProv_GenericAssistData(p_ProvideAssistData, p_UEB));
+    
+    
+    v_EncodedLppMessage := f_POS_EncodeLppMessage(cs_LppProvideAssistData(p_TransactionNumber,
+                                                                          locationServer,
+                                                                          v_GNSS_ProvideAssistData,
+                                                                          p_OtdoaProvideAssistData,
+                                                                          -,
+                                                                          p_MbsProvideAssistanceData));
+    SRB.send(cas_SRB_NasPdu_REQ(eutra_Cell1,
+                                tsc_SRB2,
+                                cs_TimingInfo_Now,
+                                cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                               cs_DL_GENERIC_NAS_TRANSPORT(tsc_LPP_MessageContainer,
+                                                                           cs_GenericMsgContainer(v_EncodedLppMessage),
+                                                                           cs_RoutingInfo(p_RoutingId)))));
+  }
+
+  /*
+   * @desc      To clear any assistance data the may be stored in the UE. TS 36.509, 5.5.1, 6.9
+   * @param     p_CellId
+   * @param     p_UEPosTech
+   * @status    APPROVED (POS)
+   */
+  function f_POS_ClearStoredData(EUTRA_CellId_Type p_CellId,
+                                 bitstring p_UEPosTech) runs on EUTRA_PTC
+  {
+    SRB.send(cas_SRB_NasPdu_REQ(p_CellId,
+                                tsc_SRB2,
+                                cs_TimingInfo_Now,
+                                cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                               cs_EUTRA_RESETUEPOSITIONINGSTOREDINFORMATION (p_UEPosTech))));
+  }
+
+  /*
+   * @desc      To check the measurements reported by the UE for different GNSS method and signals
+   * @param     p_GNSS_MeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckGnssMeasurementList(GNSS_MeasurementList p_GNSS_MeasList) runs on EUTRA_PTC
+  { // NOTE: Function previously called f_POS_CheckAgnssMultiFreq. Renamed as now also non multifrequency signals are checked
+    // @sic R5-198966, R5s210633 sic@
+    var integer i;
+    var boolean v_AgpsSignalSupported := pc_A_GPS_L1C_A or pc_A_GPS_L1C or pc_A_GPS_L2C or pc_A_GPS_L5;
+    var boolean v_GlonassSignalSupported := pc_GLONASS_G1 or pc_GLONASS_G2 or pc_GLONASS_G3;
+    var boolean v_GalileoSignalSupported := pc_GALILEO_E1 or pc_GALILEO_E5a or pc_GALILEO_E5b or pc_GALILEO_E6 or pc_GALILEO_E5aE5b;
+    var boolean v_QzssSignalSupported := pc_QZSS_QZS_L1 or pc_QZSS_QZS_L1C or pc_QZSS_QZS_L2C or pc_QZSS_QZS_L5;
+    var boolean v_BdsSignalSupported := pc_BDS_B1I or pc_BDS_B1C or pc_BDS_B2a or pc_BDS_B3I; //@sic R5-230336 sic@
+    
+    //Check the measurements reported by the UE
+    for (i:=0; i<lengthof(p_GNSS_MeasList); i:=i+1) {
+      select (p_GNSS_MeasList[i].gnss_ID.gnss_id){
+        case(gps){
+          if (v_AgpsSignalSupported){
+            f_POS_CheckSignalsGps(p_GNSS_MeasList[i].gnss_SgnMeasList);
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Measurement reported for A-GPS but not supported by UE");
+          }
+        }
+        case(glonass){
+          if (v_GlonassSignalSupported){
+            f_POS_CheckSignalsGlonass(p_GNSS_MeasList[i].gnss_SgnMeasList);
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Measurement reported for Glonass but not supported by UE");
+          }
+        }
+        case(galileo){
+          if (v_GalileoSignalSupported){
+            f_POS_CheckSignalsGalileo(p_GNSS_MeasList[i].gnss_SgnMeasList);
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Measurement reported for Galileo but not supported by UE");
+          }
+        }
+        case(qzss){
+          if (v_QzssSignalSupported){
+            f_POS_CheckSignalsQzss(p_GNSS_MeasList[i].gnss_SgnMeasList);
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Measurement reported for Qzss but not supported by UE");
+          }
+        }
+        case(bds){
+          if (v_BdsSignalSupported){
+            f_POS_CheckSignalsBds(p_GNSS_MeasList[i].gnss_SgnMeasList);
+          }
+          else {
+            f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Measurement reported for Bds but not supported by UE");
+          }
+        }
+        case else {
+          f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "UE reported method different to GPS, GLONASS, GALILEO, QZSS or BDS");
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      To check the A-GPS signals reported by the UE
+   * @param     p_GNSS_SgnMeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckSignalsGps(GNSS_SgnMeasList p_GNSS_SgnMeasList) runs on EUTRA_PTC
+  {// @sic R5-198966, R5s210633 sic@
+   var integer i;
+   var boolean v_A_GPS_L1C_A_Reported := false;
+   var boolean v_A_GPS_L1C_Reported := false;
+   var boolean v_A_GPS_L2C_Reported := false;
+   var boolean v_A_GPS_L5_Reported := false;
+   
+   for (i:=0; i<lengthof(p_GNSS_SgnMeasList); i:=i+1) {
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(0))) {
+       v_A_GPS_L1C_A_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(1))) {
+       v_A_GPS_L1C_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(2))) {
+       v_A_GPS_L2C_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(3))) {
+       v_A_GPS_L5_Reported := true;
+     }
+   } //@sic R5s210887 sic@
+   if (not((v_A_GPS_L1C_A_Reported == pc_A_GPS_L1C_A) and (v_A_GPS_L1C_Reported == pc_A_GPS_L1C) and (v_A_GPS_L2C_Reported == pc_A_GPS_L2C) and (v_A_GPS_L5_Reported == pc_A_GPS_L5)))
+   {
+     f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "A-GPS signals not reported correctly");
+   }
+  }
+
+  /*
+   * @desc      To check the GLONASS signals reported by the UE
+   * @param     p_GNSS_SgnMeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckSignalsGlonass(GNSS_SgnMeasList p_GNSS_SgnMeasList) runs on EUTRA_PTC
+  {// @sic R5-198966, R5s210633 sic@
+   var integer i;
+   var boolean v_GLONASS_G1_Reported := false;
+   var boolean v_GLONASS_G2_Reported := false;
+   var boolean v_GLONASS_G3_Reported := false;
+   
+   for (i:=0; i<lengthof(p_GNSS_SgnMeasList); i:=i+1) {
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(0))) {
+       v_GLONASS_G1_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(1))) {
+       v_GLONASS_G2_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(2))) {
+       v_GLONASS_G3_Reported := true;
+     }
+   } //@sic R5s210887 sic@
+   if (not((v_GLONASS_G1_Reported == pc_GLONASS_G1) and (v_GLONASS_G2_Reported == pc_GLONASS_G2) and (v_GLONASS_G3_Reported == pc_GLONASS_G3)))
+   {
+     f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "GLONASS signals not reported correctly");
+   }
+  }
+
+  /*
+   * @desc      To check the GALILEO signals reported by the UE
+   * @param     p_GNSS_SgnMeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckSignalsGalileo(GNSS_SgnMeasList p_GNSS_SgnMeasList) runs on EUTRA_PTC
+  {// @sic R5-198966, R5s210633 sic@
+   var integer i;
+   var boolean v_GALILEO_E1_Reported := false;
+   var boolean v_GALILEO_E5a_Reported := false;
+   var boolean v_GALILEO_E5b_Reported := false;
+   var boolean v_GALILEO_E6_Reported := false;
+   var boolean v_GALILEO_E5aE5b_Reported := false;
+   
+   for (i:=0; i<lengthof(p_GNSS_SgnMeasList); i:=i+1) {
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(0))) {
+       v_GALILEO_E1_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(1))) {
+       v_GALILEO_E5a_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(2))) {
+       v_GALILEO_E5b_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(3))) {
+       v_GALILEO_E6_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(4))) {
+       v_GALILEO_E5aE5b_Reported := true;
+     }
+   } //@sic R5s210887 sic@
+   if (not((v_GALILEO_E1_Reported == pc_GALILEO_E1) and (v_GALILEO_E5a_Reported == pc_GALILEO_E5a) and (v_GALILEO_E5b_Reported == pc_GALILEO_E5b) and
+           (v_GALILEO_E6_Reported == pc_GALILEO_E6) and (v_GALILEO_E5aE5b_Reported == pc_GALILEO_E5aE5b)))
+   {
+     f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "Galileo signals not reported correctly");
+   }
+  }
+
+  /*
+   * @desc      To check the QZSS signals reported by the UE
+   * @param     p_GNSS_SgnMeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckSignalsQzss(GNSS_SgnMeasList p_GNSS_SgnMeasList) runs on EUTRA_PTC
+  {// @sic R5-198966, R5s210633 sic@
+   var integer i;
+   var boolean v_QZSS_QZS_L1_Reported := false;
+   var boolean v_QZSS_QZS_L1C_Reported := false;
+   var boolean v_QZSS_QZS_L2C_Reported := false;
+   var boolean v_QZSS_QZS_L5_Reported := false;
+   
+   for (i:=0; i<lengthof(p_GNSS_SgnMeasList); i:=i+1) {
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(0))) {
+       v_QZSS_QZS_L1_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(1))) {
+       v_QZSS_QZS_L1C_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(2))) {
+       v_QZSS_QZS_L2C_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(3))) {
+       v_QZSS_QZS_L5_Reported := true;
+     }
+   } //@sic R5s210887 sic@
+   if (not ((v_QZSS_QZS_L1_Reported == pc_QZSS_QZS_L1) and (v_QZSS_QZS_L1C_Reported == pc_QZSS_QZS_L1C) and
+            (v_QZSS_QZS_L2C_Reported == pc_QZSS_QZS_L2C) and (v_QZSS_QZS_L5_Reported == pc_QZSS_QZS_L5)))
+   {
+     f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "QZSS signals not reported correctly");
+   }
+  }
+
+  /*
+   * @desc      To check the BDS signals reported by the UE
+   * @param     p_GNSS_SgnMeasList
+   * @status    APPROVED (POS)
+   */
+  function f_POS_CheckSignalsBds(GNSS_SgnMeasList p_GNSS_SgnMeasList) runs on EUTRA_PTC
+  {// @sic R5s210633 sic@
+   var integer i;
+   var boolean v_BDS_B1I_Reported := false;
+   var boolean v_BDS_B1C_Reported := false;
+   var boolean v_BDS_B2a_Reported := false; //@sic R5-230336 sic@
+   var boolean v_BDS_B3I_Reported := false; //@sic R5-230336 sic@
+   
+   for (i:=0; i<lengthof(p_GNSS_SgnMeasList); i:=i+1) {
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(0))) {
+       v_BDS_B1I_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(7, (9,10,11)))) {
+       v_BDS_B1C_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(7, (12,13,14)))) { //@sic R5-230336 sic@
+       v_BDS_B2a_Reported := true;
+     }
+     if (match(p_GNSS_SgnMeasList[i], cr_GNSS_SgnMeasElement(3))) { //@sic R5-230336 sic@
+       v_BDS_B3I_Reported := true;
+     }
+   }
+   if (not ((v_BDS_B1I_Reported == pc_BDS_B1I) and (v_BDS_B1C_Reported == pc_BDS_B1C) and (v_BDS_B2a_Reported == pc_BDS_B2a) and (v_BDS_B3I_Reported == pc_BDS_B3I))) //@sic R5-230336 sic@
+   {
+       f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, "BDS signals not reported correctly");
+   }
+  }
+
+}

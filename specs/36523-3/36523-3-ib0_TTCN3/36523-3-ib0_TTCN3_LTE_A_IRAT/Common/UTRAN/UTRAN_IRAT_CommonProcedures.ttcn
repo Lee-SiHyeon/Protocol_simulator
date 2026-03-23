@@ -1,0 +1,1156 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-03-07 11:38:54 +0100 (Fri, 07 Mar 2025) $
+// $Rev: 40727 $
+/******************************************************************************/
+
+module UTRAN_IRAT_CommonProcedures {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_AuthenticationCommon all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_Parameters all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_SysInfo_Templates all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      additional default behaviour to receive routingAreaUpdateRequest;
+   *            if there has a routingAreaUpdateRequest been received already verdict FAIL or INCONC is assigned.
+   * @param     p_UplinkDirectTransfer - set to true if called during a CSPS Handover, set to false if called in Idle Mode or CS only Handover // @sic R5s120070, R5s130561 sic@
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_ReceiveRauRequest(boolean p_UplinkDirectTransfer) runs on UTRAN_PTC
+  {
+    var RRC_DATA_IND v_RAUReq_IND;
+    
+    //Receive any Routing Area Update Request message
+    [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AnyRAU)) -> value v_RAUReq_IND
+      {
+        if (f_UTRAN_MsgInDefault_CheckRAU()){          //Check if the default has already received the message
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Multiple Routing Area Update Request messages have been received");
+        }
+        if (p_UplinkDirectTransfer) { // @sic R5s120070, R5s130561 sic@
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "RAU should be received in Uplink Direct Transfer");
+        }
+        else{
+          f_UTRAN_MsgInDefault_SetRAU(v_RAUReq_IND);
+        }
+        repeat;
+      }
+    // @sic R5s120070 sic@
+    [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AnyRAU)) -> value v_RAUReq_IND
+      {
+        if (f_UTRAN_MsgInDefault_CheckRAU()){          //Check if the default has already received the message
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Multiple Routing Area Update Request messages have been received");
+        }
+        if (not p_UplinkDirectTransfer) {
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "RAU should be received in Initial Direct Transfer");
+        }
+        else{
+          f_UTRAN_MsgInDefault_SetRAU(v_RAUReq_IND);
+        }
+        repeat;
+      }
+  }
+
+  /*
+   * @desc      Complete GMM_IdleUpdated handling NMO I and II, Operation Mode A and Automatic Switch On
+   * @param     p_CellId
+   * @param     p_PDPCxtForIMS      (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_GMMOnly_Attach(UTRAN_CellId_Type p_CellId,
+                                  boolean p_PDPCxtForIMS := false) runs on UTRAN_IRAT_PTC
+  {
+    var START_Value v_START_Value_ps := '00000000000000000000'B;
+    var START_Value v_START_Value_cs := '00000000000000000000'B;
+    var RB_ConfigType v_CellConfig;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var boolean v_NewKeyFlag := true;
+    var B2_Type v_NMO := f_UTRAN_CellInfo_GetNMO(p_CellId);
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    
+    timer t_WaitForIMS := 10.0;  // @sic R5-160730 sic@
+
+    f_UTRAN_RRC_ConnEst(p_CellId); // Establish RRC connection
+    v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);  // Updated in RRC Conn Est
+    
+    alt {
+      [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AttachReq(cr_AttachType(?, (tsc_I_AttachTypeGPRSAtt, tsc_I_AttachTypeCombined)))))
+        -> value v_RRC_DataInd {
+        v_START_Value_ps := v_RRC_DataInd.ttcn_start;
+        f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+      }
+      [pc_SupportOpModeA and ((v_NMO == tsc_NMO_II) or not pc_AutomaticAttachSwitchON)] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_LocationUpdatingRequest))
+        -> value v_RRC_DataInd {
+        v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+        f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value_cs);
+        
+        if ((v_NMO == tsc_NMO_II) and  pc_AutomaticAttachSwitchON) { // need to wait for Attach Req before finishing LAU
+          U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AttachReq(cr_AttachType(?, (tsc_I_AttachTypeGPRSAtt, tsc_I_AttachTypeCombined)))))
+            -> value v_RRC_DataInd;
+          v_START_Value_ps := v_RRC_DataInd.ttcn_start;
+          f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+          f_UTRAN_LocationUpdate_WithoutLAUReq(p_CellId, v_START_Value_cs, true);
+          
+        } else { // else finish LAU first @sic R5s110705, R5s110801 sic@
+          f_UTRAN_LocationUpdate_WithoutLAUReq(p_CellId, v_START_Value_cs, true);
+          // then trigger the Attach Req
+          select (v_CellConfig) {
+            case (cell_FACH) {
+              f_UTRAN_RRC_ConnRel(p_CellId, cell_Fach_Dcch);
+            }
+            case else {
+              f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch);
+            }
+          }
+          f_Delay(1.0);
+          f_UT_TriggerAttach(UT);
+          f_UTRAN_RRC_ConnEst(p_CellId); // Establish RRC connection
+          
+          U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AttachReq(cr_AttachType(?, (tsc_I_AttachTypeGPRSAtt, tsc_I_AttachTypeCombined)))))
+            -> value v_RRC_DataInd;
+          v_START_Value_ps := v_RRC_DataInd.ttcn_start;
+          f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+        }
+      }
+    }
+    
+    f_UTRAN_GMM_Authentication();
+    f_UTRAN_RRC_Security(p_CellId,                        // SECURITY MODE COMMAND, SECURITY MODE COMPLETE
+                         v_NewKeyFlag,
+                         ps_domain);
+    
+    f_UTRAN_AttachAccept(p_CellId, v_RRC_DataInd.msg.attachRequest.attachType.attachType);       // ATTACH ACCEPT, ATTACH COMPLETE
+    
+    select (v_CellConfig) {
+      case (cell_FACH) {
+        f_UTRAN_RRC_ConnRel(p_CellId, cell_Fach_Dcch, p_PDPCxtForIMS); // @sic R5-160730 sic@
+      }
+      case else {
+        f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch, p_PDPCxtForIMS); // @sic R5-160730 sic@
+      }
+    }
+    v_SecurityInfo := f_UTRAN_Security_Get(); // @sic R5s160643 sic@
+    if (p_PDPCxtForIMS and pc_IMS) { // @sic R5-160730 sic@
+      t_WaitForIMS.start;
+      alt {
+      [] t_WaitForIMS.timeout{} // do nothing as IMS and PDP Context not required
+      [] U_TM.check (receive(car_RRC_ConnReq(p_CellId,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8(?))))
+        { // UE wants to establish a connection to create a PDP context for IMS
+          // must still end in idle mode
+            t_WaitForIMS.stop;
+            // Store flag to be sent to LTE later; @sic R5-163054 sic@
+            v_SecurityInfo.authKeys.IMS_Registered_WithExtraPDP := true;
+            f_UTRAN_Security_Set(v_SecurityInfo);
+            select (v_CellConfig) {
+               case (cell_FACH) {
+                 f_UTRAN_UE_FACH_PS_Rb_Est (p_CellId, waitForIMS, UE_INITIATED_IMS);
+                 f_UTRAN_RRC_ConnRel(p_CellId, cell_Fach_Dcch);
+               }
+               case else {
+                 f_UTRAN_UE_64kPS_Rb_Est (p_CellId, waitForIMS, UE_INITIATED_IMS);
+                 f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch);
+               }
+            }
+        }
+      }
+    }
+
+  }
+
+  /*
+   * @desc      Procedure to bring UE, depending on PS/CS and Operation mode of UE, in to a state
+   *            Registered, Idle Mode (state 2) on an UTRAN cell.
+   * @param     p_CellId
+   * @param     p_PDPCxtForIMS      (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_IdleUpdated(UTRAN_CellId_Type p_CellId,
+                               boolean p_PDPCxtForIMS := false) runs on UTRAN_IRAT_PTC // Set to true if need to possibly configure PDP context to handle IMS Registration
+  {
+    if (pc_CS and not pc_PS) {
+      f_UTRAN_RRC_ConnEst(p_CellId); // Establish RRC connection
+      f_UTRAN_LocationUpdate(p_CellId, true);
+      f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch);
+    } else { // PS only or PS and CS
+      f_UTRAN_GMMOnly_Attach(p_CellId, p_PDPCxtForIMS); // @sic R5-160730 sic@
+    }
+  }
+
+  /*
+   * @desc      Procedure to be used in the test case preamble when UE should be brought to state
+   *            Registered, Idle Mode (state 2) on an UTRAN cell.
+   * @param     p_CellId
+   * @param     p_PDPCxtForIMS      (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_Preamble(UTRAN_CellId_Type p_CellId,
+                            boolean p_PDPCxtForIMS := false) runs on UTRAN_IRAT_PTC // p_PDPCxtForIMS Set to true if need to possibly configure PDP context to handle IMS Registration
+  { /* @sic R5s130347: local GuardTimer sic@ */
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var Common_AuthenticationParams_Type v_AuthCS;
+    
+    timer t_GuardTimer := tsc_GuardTimePreamble;
+    
+    t_GuardTimer.start;
+    
+    //  Switch cell power on
+    f_UTRAN_SetCellPower(p_CellId, tsc_AttenuationServingCell);
+    
+    //  Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+    
+    //  Establish RRC Connection, perform Authentication, Security Mode procedure,
+    //  Attach procedure and release RRC Connection
+    f_UTRAN_IdleUpdated(p_CellId, p_PDPCxtForIMS); // @sic R5-160730 sic@
+    
+    // Now get the security parameters that have been updated
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    // AuthCS not the same structure as AuthPS
+    v_AuthCS := v_SecurityInfo.authKeys.AuthPS;
+    v_AuthCS.CK := v_SecurityInfo.authKeys.AuthCS.CKey;
+    v_AuthCS.IK := v_SecurityInfo.authKeys.AuthCS.IKey;
+    v_AuthCS.KeySeq := v_SecurityInfo.authKeys.AuthCS.CKeySeq;
+    
+    EUTRA.send(cms_IRAT_AuthInfo(v_SecurityInfo.authKeys.AuthPS,
+                                 v_AuthCS,
+                                 omit,  // may need to send this eventually
+                                 v_SecurityInfo.authKeys.CSinOtherRAT,
+                                 -, -, -, -, v_SecurityInfo.authKeys.IMS_Registered_WithExtraPDP)); // @sic R5-163054 sic@
+    t_GuardTimer.stop;
+  }
+
+  /*
+   * @desc      This procedure is according to 36.523-3 cl. 10.1.5 CS fallback procedure
+   * @param     p_CellId
+   * @param     p_AttachType
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_CS_Fallback(UTRAN_CellId_Type p_CellId,
+                               UTRAN_GERAN_ATTACH_Type p_AttachType) runs on UTRAN_PTC
+  {
+    var B2_Type v_Nmo := f_UTRAN_CellInfo_GetNMO(p_CellId);
+    var UTRA_POSTAMBLE_CONDITIONS v_Utra_Postamble_Condition := f_UTRA_SetPostambleCondition(p_AttachType); // @sic R5s110176 sic@
+    var RRC_DATA_IND v_RRC_DATA_IND;
+    var B3_Type v_UpdateType := '111'B; // dummy value to avoid runtime error
+    var octetstring v_PLMN := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(p_CellId));
+    var octetstring v_LAC := f_UTRAN_CellInfo_GetLAC(p_CellId);
+    var octetstring v_RAC := f_UTRAN_CellInfo_GetRAC(p_CellId);
+    var default v_MyDefaultVar := null;
+    
+    if (v_Utra_Postamble_Condition != UTRA_C4) { // UE will send LAU only
+      //Activate additional default behaviour to capture the Routing Area Update Request message
+      v_MyDefaultVar := activate(a_UTRAN_ReceiveRauRequest(false)); // @sic R5s120228 sic@
+    }
+    
+    alt {
+      //Step 1a1: Receive CM Service Request
+      [] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                             tsc_RB3,
+                                             cr_U_ServReqAny(?)))
+        {
+          //Step 1a2: Send CM Service Reject with reject cause #32 (Service Option not supported)
+          U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                                   tsc_RB3,
+                                   cs_U_CM_ServRej(tsc_ServiceOptionNotSupported)));
+        }
+      //Step 1b1: Receive Paging Response
+      [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                                tsc_RB3,
+                                                cr_U_PagRsp(?, ?)))
+        {}//Do nothing
+    }
+    
+    //Step 2a1 - 2a5/ 7b1 - 7b5: Perform Location Updating procedure for the scenario @sic R5s120228 sic@
+    // - C4 or (NMO2 and C3)
+    if (v_Utra_Postamble_Condition == UTRA_C4 or (v_Nmo == tsc_NMO_II and v_Utra_Postamble_Condition == UTRA_C3)) {
+      f_UTRAN_LocationUpdate(p_CellId);
+    }
+    
+    if (v_Utra_Postamble_Condition != UTRA_C4) { // UE will send LAU only
+      // @sic R5s120228 sic@
+      //Step 1 in parallel behaviour: Receive Routing Area Update Request (if it has not yet been received)
+      //Deactivate the default
+      deactivate(v_MyDefaultVar);
+      
+      if (f_UTRAN_MsgInDefault_CheckRAU()) {   //Check if the default has already received the message
+        
+        v_RRC_DATA_IND := f_UTRAN_MsgInDefault_GetRAU();
+        
+        if (not match(v_RRC_DATA_IND, car_PS_InitDirectTransfer(utran_CellDedicated,
+                                                                tsc_RB3,
+                                                                cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI)))))) { // @sic R5-125545 sic@
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 1 in parallel behaviour - Routing Area Update Request message is incorrect");
+        }
+      }
+      else {                                 //Wait till UE sends Routing Area Update Request message
+        U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                               tsc_RB3,
+                                               cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI))))) -> value v_RRC_DATA_IND; // @sic R5-125545 sic@
+      }
+      //SECURITY MODE COMMAND and SECURITY MODE COMPLETE
+      f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_RRC_DATA_IND.ttcn_start);
+      f_UTRAN_RRC_Security(p_CellId, false, ps_domain);
+      
+        //Send ROUTING AREA UPDATE ACCEPT
+      v_UpdateType := f_UG_RauReq_GetUpdateValueForRauAcc(v_RRC_DATA_IND.msg.routingAreaUpdateRequest); /* @sic R5s120019 Additional Changes sic@ */
+      U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_RA_UpdAcc3(cs_GMM_UpdateResult(v_UpdateType),
+                                               cs_RAI(omit, cs_LAI(omit, v_PLMN, v_LAC), v_RAC),
+                                               cs_PTMSI_Signature(px_PTMSI_SigDef),
+                                               cs_MobileIdTMSIorPTMSI('18'O, px_PTMSI_Def),
+                                               v_RRC_DATA_IND.msg.routingAreaUpdateRequest.pDP_ContextStatus))); // @sic R5-133584 sic@
+      
+      //Receive ROUTING AREA UPDATE COMPLETE
+      U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_RAUpdComplete));
+    }
+    
+    //Step 7a1-7a5: UE will perform combined RAU if initial one was RA Only
+    if (v_UpdateType == tsc_I_UpdateTypeRAOnly) { // @sic R5-121779 sic@
+      // @sic R5-142985 sic@
+      f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch, true);
+      f_UTRAN_RRC_ConnEst(p_CellId);
+      f_UTRAN_GMM_RAU (p_CellId, false);
+    }
+    //Step 8-9: Send RRC Connection Release and receive RRC Connection Release Complete
+    f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch);
+  }
+
+  /*
+   * @desc      Function to bring UE to switched/powered off state after test case execution in UTRA PTC
+   *            This procedure is according to 36.523-3 cl. 10.1
+   * @param     p_CellId
+   * @param     p_UTRA_POSTAMBLE_STATE - as defined in 36.508 cl. 6.4.3.2
+   * @param     p_AttachType        (default value: NotSpecified)
+   * @param     p_TI_S              (default value: cs_TI_MO)
+   * @param     p_RB_Id             (default value: tsc_RB20)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_Postamble(UTRAN_CellId_Type         p_CellId,
+                             UTRA_POSTAMBLE_STATE_Type p_UTRA_POSTAMBLE_STATE,
+                             UTRAN_GERAN_ATTACH_Type p_AttachType := NotSpecified,
+                             template (value) TI  p_TI_S:= cs_TI_MO,
+                             integer p_RB_Id := tsc_RB20) runs on UTRAN_IP_PTC
+  {//@sic R5s120086 sic@
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    
+    select (p_UTRA_POSTAMBLE_STATE) {
+      case (U1_IDLE) {
+        //Switch/Power off UE
+        f_UTRAN_SwitchPower_Off(p_CellId, U1_IDLE, p_AttachType, -, -, p_RB_Id); // @sic R5s110176, R5s160385 sic@
+      }
+      case (U2_CONNECTED) {
+        //Switch/Power off UE
+        f_UTRAN_SwitchPower_Off(p_CellId, U2_CONNECTED, p_AttachType, -, -, p_RB_Id); // @sic R5s110176 sic@
+      }
+      case (U3_HANDOVER) {
+        //Routing Area Procedures
+        f_UTRAN_PS_RAU_HO(p_CellId, p_AttachType); // @sic R5s110176 sic@
+        f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch); // @sic R5s140552 sic@
+        
+        //Switch/Power off UE
+        f_UTRAN_SwitchPower_Off(p_CellId, U1_IDLE, p_AttachType, -, -, p_RB_Id); // @sic R5s110176, R5s140552, R5s160385 sic@
+      }
+      case (U4_CSFALLBACK) {
+        //Perform CS Fallback procedure
+        f_UTRAN_CS_Fallback(p_CellId, p_AttachType); // @sic R5s110176 sic@
+        
+        //Switch/Power off UE
+        f_UTRAN_SwitchPower_Off(p_CellId, U1_IDLE, p_AttachType, -, -, p_RB_Id); // @sic R5s110176, R5-121779, R5s160385 sic@
+      }
+      case (U5_CSCALL) {
+        //Disconnect the active CC call
+        f_UTRAN_CC_Disconnect(p_TI_S); //@sic R5s120086 sic@
+        // @sic R5-142985 sic@
+        f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch, true);
+        f_UTRAN_RRC_ConnEst(p_CellId);
+        f_UTRAN_GMM_RAU (p_CellId, false);
+        f_UTRAN_RRC_ConnRel(p_CellId, cell_Dch); // @sic R5s140552 sic@
+        
+        //Switch/Power off UE
+        f_UTRAN_SwitchPower_Off(p_CellId, U1_IDLE, p_AttachType, -, -, p_RB_Id); // @sic R5s110176, R5s140552, R5s160385 sic@
+      }
+      case (U6_DEREGISTERED) {
+        //If the UE can be switched off
+        if (pc_SwitchOnOff == true) {
+          //Simply switch the UE off
+          f_UT_SwitchOffUE(UT, false);
+        } else {//just remove power from UE
+          f_UT_PowerOffUE(UT);
+        }
+      }
+      case else {//No state defined - just remove power from UE
+        f_UT_PowerOffUE(UT);
+      }
+    }
+    //Release the UTRAN cell
+    f_UTRAN_ReleaseCell(p_CellId, v_CellConfig); // @sic R5s110176 sic@
+  }
+
+  /*
+   * @desc      additional default behaviour to receive Service Request
+   * @param     p_CellId
+   * @param     p_UsedStoredNsapi   (default value: false)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_RxdServiceReq(UTRAN_CellId_Type p_CellId,
+                                boolean p_UsedStoredNsapi := false) runs on UTRAN_PTC
+  { // @sic R5-173011 sic@
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var RRC_DATA_IND v_RRC_DataInd;
+    var U_RLC_AM_IND v_U_RLC_AM_IND;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    
+    [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                              tsc_RB3,
+                                              cr_U_ServiceRequest(cr_ServiceType('001'B),//Service type 'data'
+                                                                  cr_MobileIdAny,
+                                                                  ?))) -> value v_RRC_DataInd
+      {  // @sic R5-142919, R5s140710 sic@
+        f_UTRAN_RRC_Security(p_CellId, false, ps_domain);
+        v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);  // @sic R5s150057 sic@
+        select (v_CellConfig){
+          case (cell_FACH) {
+            f_UTRAN_RB_SetUp_PS_RAB(p_CellId, cell_FACH_PS, false, -, p_UsedStoredNsapi); // @sic R5s150057, R5s150919 sic@
+          }
+          case else {
+            f_UTRAN_RB_SetUp_PS_RAB(p_CellId, cell_DCH_64kPS_RAB_SRB, false, -, p_UsedStoredNsapi); // @sic R5s140710 R5s141127 R5s150919 sic@
+          }
+        }
+        U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated, //@sic R5s110210 sic@
+                                      tsc_RB2,
+                                      cr_108_RB_SetUpCmpl (tsc_RRC_TI))) -> value v_U_RLC_AM_IND;
+        v_SecurityInfo := f_UTRAN_Security_Get();
+        v_SecurityInfo.start_PS := v_U_RLC_AM_IND.data.aM_message.uL_DCCH_Message.message_.radioBearerSetupComplete.start_Value;
+        f_UTRAN_Security_Set(v_SecurityInfo);
+      }
+  }
+
+  /*
+   * @desc      Optional IMS registration or deregistration is performed.
+   *            This procedure is according to 36.523-3 table 10.1.2.1-2
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_UsedStoredNsapi
+   * @param     p_EstCause          (default value: complement (detach))
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_Optional_IMS_Reg(UTRAN_CellId_Type p_CellId,
+                                     timer p_Timer,
+                                     boolean p_UsedStoredNsapi,
+                                     template (present) EstablishmentCause p_EstCause := complement (detach))
+    runs on UTRAN_PTC
+  { // @sic R5-173011, R5-174656, R5-182560  sic@
+    
+    [] U_TM.check(receive(car_RRC_ConnReq(p_CellId,
+                                          tsc_RB0,
+                                          cr_108_RRC_ConnReq_r8(p_EstCause)))) { // @sic R5s170747, R5-182560 sic@
+      p_Timer.stop; // @sic R5-174656 sic@
+      f_UTRAN_RRC_ConnEst(p_CellId);
+      a_UTRAN_RxdServiceReq(p_CellId, p_UsedStoredNsapi);
+    }
+  }
+
+  /*
+   * @desc      Brings UE from UTRA idle (U1) state or UTRA connected (U2) state to UTRA State Off
+   *            This procedure is according to 36.523-3 cl. 10.1.2 (Switch/Power off procedure)
+   * @param     p_CellId
+   * @param     p_Utra_Postamble_State
+   * @param     p_AttachType
+   * @param     p_USIM_Rmvd         (default value: false)
+   * @param     p_UsedStoredNsapi   (default value: false)
+   * @param     p_RB_Id             (default value: tsc_RB20)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_SwitchPower_Off(UTRAN_CellId_Type         p_CellId,
+                                   UTRA_POSTAMBLE_STATE_Type p_Utra_Postamble_State, // @sic R5s150895 sic@
+                                   UTRAN_GERAN_ATTACH_Type p_AttachType,
+                                   boolean p_USIM_Rmvd := false,
+                                   boolean p_UsedStoredNsapi := false,
+                                   integer p_RB_Id := tsc_RB20) //@sic R5s141127 sic@
+    runs on UTRAN_IP_PTC
+  {
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var RRC_Rel_Status v_RRC_Rel_Status := cell_Dch;
+    var UTRA_POSTAMBLE_CONDITIONS v_Utra_Postamble_Condition := f_UTRA_SetPostambleCondition(p_AttachType); // @sic R5s110176 sic@
+    var boolean v_DeregisteredEarly := false;
+    timer t_WaitForOptional_IMS_Dereg := 2.0;
+    timer t_Dummy;
+        
+    if (v_CellConfig == cell_FACH or v_CellConfig == cell_FACH_NoConn or v_CellConfig == cell_FACH_PS) { //@sic R5s150302 sic@
+      v_RRC_Rel_Status := cell_Fach_Dcch;
+    }
+    if (f_UTRAN_Global_IP_NoOfPDPContexts_Get() != 0) { // @sic R5s180056, R5s180247 sic@
+      f_IP_ChangeDrbMappingUTRAN(IP, utran_CellDedicated, p_RB_Id); // @sic R5s160394 sic@
+    }
+    
+    // Step 0A
+    t_WaitForOptional_IMS_Dereg.start; // @sic R5-174656 sic@
+    // Step 0Ba1 - 10
+    alt { // @sic R5-174656 sic@
+      [] a_UTRAN_Optional_IMS_Reg (p_CellId, t_WaitForOptional_IMS_Dereg, p_UsedStoredNsapi)
+        {
+          v_DeregisteredEarly := true;
+        }
+      [] t_WaitForOptional_IMS_Dereg.timeout {}
+    }
+    
+    //Step 1: The UE can be switched off or USIM removed
+    if (pc_SwitchOnOff or p_USIM_Rmvd and pc_USIM_Removal) { // @sic R5s120597r1 sic@
+      //Step 1: The UE is switched off
+      f_UT_SwitchOffUE(UT, p_USIM_Rmvd);
+        
+      alt {
+        // Step 1A
+        [not v_DeregisteredEarly]  a_UTRAN_Optional_IMS_Reg (p_CellId, t_Dummy, p_UsedStoredNsapi) {  // @sic R5-174656 sic@
+          v_DeregisteredEarly := true;
+          repeat;
+        }
+        //Step 2-4: RRC Connection establishment when UE is in UTRA idle end state
+        [p_Utra_Postamble_State == U1_IDLE and not v_DeregisteredEarly] U_TM.check(receive(car_RRC_ConnReq(p_CellId,
+                                                                                                           tsc_RB0,
+                                                                                                           cr_108_RRC_ConnReq_r8(?)))) {
+          f_UTRAN_RRC_ConnEst(p_CellId); // @sic R5s140572, R5s150899 sic@
+          repeat;
+        } // @sic R5s150895 sic@
+        [] a_UTRAN_DeactivatePDPContext_MO () { // @sic R5-168426 sic@
+          repeat;
+        }
+        [] a_UTRAN_UE_DetachAfterSwitchOff_Common (p_CellId, v_Utra_Postamble_Condition); // @sic R5s150895 sic@
+      } // End of alt
+      //Step 6-7: Release RRC connection when the UE has been switched off
+      f_UTRAN_RRC_ConnRel_AfterSwitchOff(p_CellId, v_RRC_Rel_Status);
+    }
+    //Step 1: The power must be removed from the UE
+    else {
+      f_UT_PowerOffUE (UT);
+    }
+  } // f_UTRAN_SwitchPower_Off
+
+  /*
+   * @desc      Procedure which aims at checking whether the UE is camping on a new UTRAN cell
+   *            of a test case or not. The procedure is defined in 36.508 table 6.4.2.8-1.
+   * @param     p_CellId
+   * @param     p_RRC_RelStatus     (default value: cell_Fach_Dcch)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_508CheckCampOnNewUtranCell(UTRAN_CellId_Type p_CellId,
+                                              RRC_Rel_Status p_RRC_RelStatus :=  cell_Fach_Dcch) runs on UTRAN_PTC
+  {
+    
+    //Step 1-3: Establish RRC Connection
+    f_UTRAN_RRC_ConnEst(p_CellId);
+    
+    //Step 4-8: Routing Area Update, Authentication and RRC Security
+    f_UTRAN_GMM_RAU_MappedContext(p_CellId);
+    
+    //Step 9-10: Release RRC Connection
+    f_UTRAN_RRC_ConnRel(p_CellId, p_RRC_RelStatus);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "UTRAN Check Camp On New Utran Cell");
+  }
+
+  /* @desc      Step 1-16 of 34.108 cl. 7.2.3.2
+   * @param     p_CellId
+   * @param     p_DoAuth            (default value: true)
+   * @param     p_PS_RB_Already_Est (default value: false)
+   * @param     p_DoCS_Security (default value: true)
+   *            if p_DoAuth is true, p_DoCS_Security shall also be true
+   * @param     p_StopAtU4State (default value: false) to stop after Alerting message @sic R5-150590 sic@
+   * @return    TI
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_UTRAN_MO_SpeechCall(UTRAN_CellId_Type p_CellId,
+                                 boolean           p_DoAuth := true,
+                                 boolean           p_PS_RB_Already_Est := false,
+                                 boolean           p_DoCS_Security := true,
+                                 boolean           p_StopAtU4State := false) runs on UTRAN_PTC return TI
+  {
+    var template (present) EstablishmentCause v_EstCause := originatingConversationalCall;
+    var START_Value v_START_Value := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var TI v_TI_R;
+    
+    // Trigger UE to make an outgoing call
+    f_UT_RequestCSCall(UT);
+    
+    // Steps 2-4
+    f_UTRAN_RRC_ConnEst(p_CellId, v_EstCause);
+    
+    // Step 5 Receive CM Service Request
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                        tsc_RB3,
+                                        cr_U_ServReqAny(?)))-> value v_RRC_DataInd; // @sic R5s150213 sic@
+    
+    v_START_Value := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value);
+    v_TI_R := f_UTRAN_MO_SpeechCall_Steps6_16 (p_CellId, p_DoAuth, p_PS_RB_Already_Est, p_DoCS_Security, p_StopAtU4State); // @sic  R5-150590 sic@
+    
+    return v_TI_R;
+  }
+
+  /* @desc      Step 6-16 of 34.108 cl. 7.2.3.2
+   * @param     p_CellId
+   * @param     p_DoAuth            (default value: true)
+   * @param     p_PS_RB_Already_Est (default value: false)
+   * @param     p_DoCS_Security (default value: true)
+   *            if p_DoAuth is true, p_DoCS_Security shall also be true
+   * @param     p_StopAtU4State (default value: false) to stop after Alerting message @sic R5-150590 sic@
+   * @return    TI
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_MO_SpeechCall_Steps6_16(UTRAN_CellId_Type p_CellId,
+                                           boolean           p_DoAuth := true,
+                                           boolean           p_PS_RB_Already_Est := false,
+                                           boolean           p_DoCS_Security := true,
+                                           boolean           p_StopAtU4State := false) runs on UTRAN_PTC return TI
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var TI v_TI_R;
+    var RRC_DATA_IND v_RRC_DataInd;
+    
+    f_CheckDTMFHandling (); // @sic R5s150330 sic@
+    
+    //Steps 6-7: Authentication Request and Authentication Response
+    if (p_DoAuth) {
+      v_SecurityInfo := f_UTRAN_Security_Get();
+      v_SecurityInfo.authKeys.CSinOtherRAT := true;
+      f_UTRAN_Security_Set(v_SecurityInfo);
+      f_UTRAN_MM_Authentication();
+    }
+    
+    //Step 8-9
+    //Security Mode procedure
+    if (p_DoCS_Security) {
+      f_UTRAN_RRC_Security(p_CellId, p_DoAuth, cs_domain);
+    }
+    
+    //Step 10
+    //Receive Set Up
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_SetupMOCall(cr_BcapSpeechMO))) // @sic R5s110580 sic@
+      -> value v_RRC_DataInd;
+    v_TI_R := v_RRC_DataInd.msg.setupul.ti;
+
+    f_UTRAN_MO_SpeechCall_Steps11_16 (p_CellId, v_TI_R, p_PS_RB_Already_Est, p_StopAtU4State); // @sic R5-142954 sic@
+    return v_TI_R; // @sic R5-145740 sic@
+  }
+
+  /* @desc      Step 11-16 of 34.108 cl. 7.2.3.2
+   * @param     p_CellId
+   * @param     p_TI_R
+   * @param     p_PS_RB_Already_Est (default value: false)
+   * @param     p_StopAtU4State (default value: false) to stop after Alerting message @sic R5-150590 sic@
+   * @param     p_USIM    (default value: true)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_MO_SpeechCall_Steps11_16(UTRAN_CellId_Type p_CellId,
+                                            TI                 p_TI_R,
+                                            boolean            p_PS_RB_Already_Est := false,
+                                            boolean            p_StopAtU4State := false,
+                                            boolean            p_USIM := true) runs on UTRAN_PTC
+  {
+    var TI v_TI_S := p_TI_R;
+    v_TI_S.tiFlag := '1'B;
+    
+    //Step 11  -  Send Call PROCEEDING
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_U_CallProc(v_TI_S)));
+
+    //Step 12-13 - Radio Bearer Establishment
+    if (p_PS_RB_Already_Est){
+      f_UTRAN_Setup_RAB_PS_and_ConvSpeech(p_CellId);
+    }
+    else {
+      f_UTRAN_RB_SetUp_Speech(p_CellId, p_USIM);  /* @sic R5s120139 - Additional Changes sic@  @sic R5s210654 sic@ */
+    }
+    
+    //Step 14  -  Send Alerting
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_U_Alert(v_TI_S)));
+    
+    if (not p_StopAtU4State) { // @sic R5-150590 sic@
+      //Step 15  -  Send Connect
+      U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_U_Connect(v_TI_S)));
+    
+      //Step 16  -  Receive CONNECT ACKOWLEDGE
+      U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_ConnAck(p_TI_R)));
+    }
+  }
+
+  /*
+   * @desc      This procedure is according to 36.508 cl. 6.4.3.9.5 for SRVCC/aSRVCC
+   * @param     p_CellId
+   * @param     p_PDP_ContextStatus (default value: omit)
+   * @param     p_UplinkDirectTransfer (default value: false)
+   * @param     p_FOP               (default value: '1'B)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_SRVCC_WithHandover(UTRAN_CellId_Type p_CellId,
+                                      template (omit) PDP_ContextStatus p_PDP_ContextStatus := omit,
+                                      boolean p_UplinkDirectTransfer := false,
+                                      B1_Type p_FOP := '1'B) runs on UTRAN_PTC // @sic R5-133604 R5s140096 R5-144667 sic@
+  {
+    var RRC_DATA_IND v_RRC_DATA_IND;
+    var B3_Type v_UpdateType;
+    var default v_MyDefaultVar := null;
+    var DRX_CycleLengthStructure v_DRX_CycleLengthStructure := f_UTRAN_CellInfo_GetDRX_CycleLength(p_CellId);
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var PLMN_Identity v_PLMN_Identity := f_UTRAN_CellInfo_GetPLMNIdentity(p_CellId);
+    var octetstring v_PLMN := f_U_Asn2Nas_PlmnId(v_PLMN_Identity);
+    var octetstring v_LAC := f_UTRAN_CellInfo_GetLAC(p_CellId);
+    var octetstring v_RAC := f_UTRAN_CellInfo_GetRAC(p_CellId);
+    var octetstring v_PSSpecificNAS_Info := v_RAC & bit2oct(f_UTRAN_CellInfo_GetNMO(p_CellId));
+    var octetstring v_CSSpecificNAS_Info := f_UTRAN_CellInfo_GetT3212(p_CellId) & int2oct(f_UTRAN_CellInfo_GetAttFlag(p_CellId), 1);
+    var template (omit) PDP_ContextStatus v_PDP_ContextStatus;
+    var START_Value v_START_Value := '00000000000000000000'B;
+    
+    //Step 1: Receive HANDOVER TO UTRAN COMPLETE
+    U_AM.receive (car_RLC_Data_Ind(utran_CellDedicated, // @sic R5s130561 sic@
+                                   tsc_RB2,
+                                   cr_HandoverToUTRANComplete));
+    
+    //Activate additional default behaviour to capture the Routing Area Update Request message
+    v_MyDefaultVar := activate(a_UTRAN_ReceiveRauRequest(p_UplinkDirectTransfer)); // @sic R5s130807 sic@
+    
+    //Steps 2-3
+    f_UTRAN_ConfigureIntegrityAfterHO(p_CellId, cs_domain);
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    
+    //Step 4-5
+    f_UTRAN_MobilityInformation(p_CellId, cs_CNInfo_PSCS(v_PLMN_Identity,
+                                                         v_LAC,
+                                                         v_DRX_CycleLengthStructure,
+                                                         v_PSSpecificNAS_Info,
+                                                         v_CSSpecificNAS_Info));
+    
+    //Step 6
+    U_Dc.send (cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_TMSI_ReallocCmd(v_PLMN, v_LAC, cs_MobileIdTMSIorPTMSI(omit, px_TMSI_Def)))); // @sic R5s130807 sic@
+    
+    //Step 7
+    //Receive TMSI Reallocation Complete
+    alt {
+      [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_TMSI_ReallocCmpl))
+        {}
+      [] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_TMSI_ReallocCmpl))
+        {}
+    }
+    
+    //Step 1 in parallel behaviour: Receive Routing Area Update Request (if it has not yet been received)
+    //deactivate the default which checks for RAU
+    deactivate(v_MyDefaultVar);
+    if (f_UTRAN_MsgInDefault_CheckRAU()) {   //Check if the default has already received the message
+      v_RRC_DATA_IND := f_UTRAN_MsgInDefault_GetRAU(); //@sic R5s140096 sic@
+      if (not (match(v_RRC_DATA_IND, car_PS_InitDirectTransfer(utran_CellDedicated, // @sic R5s130561 sic@
+                                                              tsc_RB3,
+                                                               cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI))))) // @sic R5-125545 sic@
+          or match(v_RRC_DATA_IND,car_PS_UplinkDirectTransfer(utran_CellDedicated, // @sic R5s130561 sic@
+                                                              tsc_RB3,
+                                                              cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI))))))) { // @sic R5-125545, R5s150853 sic@
+        f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 1 in parallel behaviour - Routing Area Update Request message is incorrect");
+      }
+    }
+    else {         //Wait till UE sends Routing Area Update Request message
+      alt { //@sic R5s140096 sic@
+        [not p_UplinkDirectTransfer] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, // @sic R5s130561 sic@
+                                                                            tsc_RB3,
+                                                                            cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI)))))  // @sic R5-125545 sic@
+          -> value v_RRC_DATA_IND
+          {}
+        [p_UplinkDirectTransfer] U_Dc.receive (car_PS_UplinkDirectTransfer(utran_CellDedicated, // @sic R5s130561 sic@
+                                                                           tsc_RB3,
+                                                                           cr_U_RA_UpdReqAny(cr_GMM_UpdateType(?, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined, tsc_I_UpdateTypeCombinedWithIMSI))))) // @sic R5-125545 sic@
+          -> value v_RRC_DATA_IND
+          {}
+      }
+    }
+    //@sic R5s130561 sic@
+    //SMC in PS domain
+    // @sic R5s130904 sic@
+    
+    //Step 8: Transmit Routing Area Update Accept
+    v_UpdateType := f_UG_RauReq_GetUpdateValueForRauAcc(v_RRC_DATA_IND.msg.routingAreaUpdateRequest);
+    
+    // @sic R5s150440 sic@
+    if (ispresent(v_RRC_DATA_IND.ttcn_start)) {
+      v_START_Value := v_RRC_DATA_IND.ttcn_start;
+    } else {
+      v_START_Value := v_SecurityInfo.start_PS; // current value.  If not previously set, default value is all zeros
+    }
+    f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value); // @sic R5s150440 sic@
+    f_UTRAN_RRC_Security(p_CellId, false, ps_domain);
+    
+    if (isvalue(p_PDP_ContextStatus)) { // @sic R5-133584 sic@
+      v_PDP_ContextStatus := p_PDP_ContextStatus;
+    } else {
+      v_PDP_ContextStatus := v_RRC_DATA_IND.msg.routingAreaUpdateRequest.pDP_ContextStatus;
+    }
+    U_Dc.send (cas_DataReq_PS(utran_CellDedicated, tsc_RB3, cs_U_RA_UpdAcc3(cs_GMM_UpdateResult(v_UpdateType, p_FOP), // @sic R5-144667 sic@
+                                                                            cs_RAI(omit, cs_LAI(omit, v_PLMN, v_LAC), v_RAC),
+                                                                            cs_PTMSI_Signature(px_PTMSI_SigDef),
+                                                                            cs_MobileIdTMSIorPTMSI('18'O, px_PTMSI_Def ),
+                                                                            v_PDP_ContextStatus))); // @sic R5s133604 sic@
+    
+    //Step 9: Receive Routing Area Update Complete
+    U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_RAUpdComplete)); // @sic R5s130561 sic@
+  }
+
+  /*
+   * @desc      1.2s delay acc. to 34.108 cl. <FSS> to allow user-plane signalling
+   * @param     p_WaitForIMS (default value: noDelay)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_DelayForUserPlaneSignalling(DelayForUserPlaneSignalling_Type p_WaitForIMS := noDelay) runs on UTRAN_IRAT_PTC
+  { /* NOTE: there is no reason to apply any tolerances for the delay */
+    /* @sic R5s130384 sic@ */
+    /* @sic R5s160133 - use of f_IPCAN_DelayForUserPlaneSignalling sic@ */
+    f_IPCAN_DelayForUserPlaneSignalling(IMS[tsc_Index_IMS1], p_WaitForIMS);
+  }
+
+  /*
+   * @desc      Handling of async. queries sent from the IMS PTC
+   * @param     p_ImsCoorPort
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_IMS_QueryHandler(IMS_IPCAN_CO_ORD_PORT p_ImsCoorPort) runs on UTRAN_PTC
+  {
+    [] p_ImsCoorPort.receive(cmr_IMS_IPCAN_Command(IPCAN_QUERY))
+      {
+        p_ImsCoorPort.send(cms_IPCAN_IMS_QueryResponse(f_UTRAN_IMS_IpcanInfo()));
+        repeat;
+      }
+  }
+
+  /*
+   * @desc      Performs UTRA PS RB Establishment according to TS 34.108 subclause 7.4.2 in a UTRAN cell.
+   * @param     p_CellId
+   * @param     p_RB_Configuration
+   * @param     p_TriggerType       (default value: TRIGGER_UE)
+   * @param     p_APN               (default value: tsc_RandomAPN)
+   * @param     p_DedicatedId       (default value: 1)
+   * @param     p_UseReceivedNSAPI  (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_UE_PsRB_Est(UTRAN_CellId_Type p_CellId,
+                               RB_ConfigType p_RB_Configuration,
+                               UTRAN_PDPContextTrigger_Type p_TriggerType := TRIGGER_UE, // @sic R5-160730 sic@
+                               charstring p_APN := tsc_RandomAPN, // @sic R5s160680 sic@
+                               integer p_DedicatedId := 1,
+                               boolean p_UseReceivedNSAPI := false ) runs on UTRAN_IRAT_PTC
+  { //@sic R5s160897 added p_UseReceivedNSAPI sic@
+    var RB_ConfigType v_CellConfiguration := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActPdpContextReq;
+    var template (value) PktDataProtoAddr v_ExpectedPDN_Address;
+    var boolean v_NewKeyFlag := true;
+    var TI v_Ti_R; // Transaction Identifier. r = value used to receive CC PDU
+    var TI v_Ti_S; // Transaction Identifier. s = value used to send CC PDU.
+    var template (value) QualityOfService v_QualityOfService;
+    var octetstring v_LAC;
+    var octetstring v_RAC;
+    var bitstring v_Ptmsi_Def := oct2bit(px_PTMSI_Def);
+    var CoOrd_GUTIParam_Type v_GUTI;
+    var boolean v_IPv4AllocationViaNasFlag := true;
+    var template (omit) ProtocolConfigOptions v_PcoToUE := omit;
+    var integer v_NoOfPDPContexts;
+    var boolean v_StoreNSAPI := false;
+    
+    //Init QoS and PDN Address parameters only if PS RAB is to be configured
+    select (p_RB_Configuration) {
+      case (cell_DCH_64kPS_RAB_SRB,
+            cell_DCH_HS_DSCH,
+            cell_DCH_E_HS,
+            cell_FACH_PS,
+            cell_FACH_HS) {
+        v_ExpectedPDN_Address := f_UG_GetPktDataProtoAddr (true);
+        v_QualityOfService := f_UTRAN_InitialiseQoS (p_CellId, p_RB_Configuration);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Configuration not supported");
+      }
+    }
+    
+    if (p_TriggerType == TRIGGER_UE) { // @sic R5s120097, R5-160730 sic@
+      //Initiate an outgoing PS call
+      if (f_UTRAN_Global_IP_NoOfPDPContexts_Get() == 0) { // @sic R5s160394 sic@
+        f_UT_ActivatePDPContextUG (UT, p_DedicatedId, f_ConvertQoS_ForATCommand(v_QualityOfService), p_APN); // @sic R5-152145, R5-192186 sic@
+      } else {
+        f_UT_ActivatePDPContextUG (UT, 6, f_ConvertQoS_ForATCommand(v_QualityOfService), tsc_RandomAPN); // @sic R5s160394, R5-192186 sic@
+        v_StoreNSAPI := true; // @sic R5-152145 sic@ This is the 2nd PDP context configured
+      }
+    }
+    if (p_UseReceivedNSAPI) { v_StoreNSAPI := true}; //@sic R5s160897 sic@
+    
+    select (v_CellConfiguration) {
+      case (cell_DCH_StandAloneSRB_NoConn, cell_FACH_NoConn) {
+        
+        //Steps 1-3 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+        f_UTRAN_RRC_ConnEst (p_CellId, ?);  // @sic R5s160394 sic@
+        
+        // Step 4 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+        f_UTRAN_GMM_ServReq (); // @sic R5s110465, R5s150838 sic@
+        
+        //Perform NAS session activation procedure for packet switched sessions (34.108 cl. 7.4.2.4.2)
+        //Steps 1-2 in 34.108 cl. 7.4.2.4.2: Generate authentication and run authentication procedure
+        f_UTRAN_GMM_Authentication();
+        
+       // Activate for DHCP/ICMPv6/IMS before RAB is established @sic R5-125676, R5-160730 sic@
+        f_UTRAN_IP_Handling_Start_Configuration(PDN_1, p_RB_Configuration);  //@sic R5s130512 sic@
+
+        //Step 3-4 in 34.108 cl. 7.4.2.4.2: Transmit Security Mode Comamnd & Receive Security Mode Comlpete
+        f_UTRAN_RRC_Security(p_CellId, v_NewKeyFlag, ps_domain);
+        
+        //Step 5 in 34.108 cl. 7.4.2.4.2: Receive PDP Context Activation Request
+        v_ActPdpContextReq := f_UTRAN_PS_SessionAct_ReceivePDP_Req (-, v_StoreNSAPI); //@sic R5s110465, R5s110771, R5-152145 sic@
+        
+        //Assign v_RAB_Id (BITSTRING[8]) with the NSAPI (BITSTRING[4]) value received in ACTIVATE PDP CONTEXT REQUEST message:
+        //v_RAB_Id := int2bit (bit2int (v_ActPdpContextReq.requestedNSAPI.nSAPI_Value), 8);
+        //Radio Bearer Identity is set according to 34.108 cl 9.1.1 RADIO BEARER SETUP message for condition A3, A6 or A9.
+        v_Ti_R := v_ActPdpContextReq.ti;
+        v_Ti_S.tiFlag := '1'B;
+        v_Ti_S.tiVal := v_Ti_R.tiVal;
+        
+        v_NoOfPDPContexts := f_UTRAN_Global_IP_NoOfPDPContexts_Increment();
+        f_UTRAN_Global_IP_PDPInfo_Set((v_NoOfPDPContexts-1), true, PDN_1);
+        
+        if (p_TriggerType == UE_INITIATED_IMS) { // @sic R5-160730 sic@
+        // need to check specific message contents
+          if (not (match(v_ActPdpContextReq.requestedNSAPI.nSAPI_Value, '0101'B) and
+                   match(v_ActPdpContextReq.requestedLLC_SAPI.llcSapiValue, '0011'B) and
+                   match (v_ActPdpContextReq.pDP_Address.pDP_TypeOrg, '0001'B) and
+                   match (v_ActPdpContextReq.pDP_Address.pDP_TypeNo, ('21'O, '57'O, '8D'O)))) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDP Context Req does not match IMS requirements");
+          }
+        
+          if (isvalue(v_ActPdpContextReq.protocolConfOpts)) {
+            v_IPv4AllocationViaNasFlag := f_CheckPCOforIPallocationViaNas (v_ActPdpContextReq.protocolConfOpts);
+            v_PcoToUE := f_GetDefaultProtocolConfigOptions(v_ActPdpContextReq.protocolConfOpts);
+          } else {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDP Context Req PCO not present");
+          }
+          v_ExpectedPDN_Address := f_UG_GetPktDataProtoAddr (v_IPv4AllocationViaNasFlag);
+        }
+
+        //Step 1-3 in 34.108 cl. 7.4.2.6.2.3: Radio access bearer establishment procedure for PS mobile originated calls.
+        //Step 1-2 in 34.108 cl. 7.4.2.6.2.3: Send RADIO BEARER SETUP and receive COMPLETE
+        f_UTRAN_RB_SetUp_PS_RAB(p_CellId, p_RB_Configuration, -, -, p_UseReceivedNSAPI);  /* @sic R5s120139 - Additional Changes sic@ */
+        
+        //Step 3 in 34.108 cl. 7.4.2.6.2.3: Send ACTIVATE PDP CONTEXT ACCEPT
+        f_UTRAN_SendActivatePDP_Accept (v_ExpectedPDN_Address.pDP_TypeNo,
+                                        v_ExpectedPDN_Address.addrInfo,
+                                        v_ExpectedPDN_Address.iel,
+                                        v_Ti_S,
+                                        v_QualityOfService,
+                                        p_RB_Configuration,
+                                        v_PcoToUE); // @sic R5-160730 sic@
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Cell is not properly configured");
+      }
+    }
+    if (p_TriggerType != UE_INITIATED_IMS) { // @sic R5-160730 sic@
+        // Now transfer over the security parameters @sic R5s120097 sic@
+        v_LAC := f_UTRAN_CellInfo_GetLAC(p_CellId);
+        v_RAC := f_UTRAN_CellInfo_GetRAC(p_CellId);
+        v_GUTI.MME_GroupId := oct2bit(v_LAC);
+        v_GUTI.MME_Code := substr (v_Ptmsi_Def, 8, 8);
+        v_GUTI.M_TMSI := '11'B & substr (v_Ptmsi_Def, 2, 6) & oct2bit(v_RAC) & substr (v_Ptmsi_Def, 16, 16);
+        v_GUTI.PTMSI_Sig := omit; // @sic R5s201259 sic@
+        
+        f_UTRAN_SendAuthCoOrdParameters (EUTRA, v_GUTI);
+    }
+  }
+
+  /*
+   * @desc      Start the IMS handler and determine the delay for user plane signalling before configuring a PS RAB
+   * @param     p_CellId
+   * @param     p_RB_Configuration
+   * @param     p_DelayForUserPlaneSignalling
+   * @param     p_TriggerUE         (default value: TRIGGER_UE)
+   * @param     p_UseReceivedNSAPI  (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_UE_PsRB_Est_InitialRegistration(UTRAN_CellId_Type p_CellId,
+                                                   RB_ConfigType p_RB_Configuration,
+                                                   DelayForUserPlaneSignalling_Type p_DelayForUserPlaneSignalling,
+                                                   UTRAN_PDPContextTrigger_Type p_TriggerUE := TRIGGER_UE,
+                                                   boolean p_UseReceivedNSAPI := false) runs on UTRAN_IRAT_PTC
+  { //@sic R5s160897 added p_UseReceivedNSAPI sic@
+    var DelayForUserPlaneSignalling_Type v_DelayForUserPlaneSignalling := p_DelayForUserPlaneSignalling;
+    var default v_DefaultVar := null;
+
+    if (p_DelayForUserPlaneSignalling == waitForIMS) {
+      if (pc_IMS) {
+        v_DefaultVar := activate(a_UTRAN_IMS_QueryHandler(IMS[tsc_Index_IMS1]));
+        f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_IpcanInd);     /* @sic R5s160133: sic@ send trigger to inform IMS_DefaultHandler that 'OtherIPCAN' shall be used as coordination port during IMS registration
+                                                                                      @sic R5-163201: support of WLAN offload sic@ */
+      } else {
+        v_DelayForUserPlaneSignalling := dontWaitForIMS;
+      }
+    }
+    f_UTRAN_UE_PsRB_Est(p_CellId, p_RB_Configuration, p_TriggerUE, -, -, p_UseReceivedNSAPI);  // @sic R5-160730 sic@
+    // Optional 1.2s delay acc. to 34.108 cl. 7.2.6 to allow user-plane signalling
+    f_UTRAN_DelayForUserPlaneSignalling(v_DelayForUserPlaneSignalling); // @sic R5s130384 sic@
+    deactivate(v_DefaultVar);
+  }
+
+  /*
+   * @desc      Configure a UTRA PS Radio Bearer in UE and SS according to TS 34.108 subclause 6.10.2.4.1.26
+   *            Interactive or background / UL:64 DL: 64 kbps / PS RAB + UL:3.4 DL:3.4 kbps SRBs for DCCH
+   * @param     p_CellId
+   * @param     p_WaitDataSignalling (default value: noDelay)
+   * @param     p_TriggerUE         (default value: TRIGGER_UE)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_UE_64kPS_Rb_Est(UTRAN_CellId_Type p_CellId,
+                                   DelayForUserPlaneSignalling_Type p_WaitDataSignalling := noDelay,
+                                   UTRAN_PDPContextTrigger_Type p_TriggerUE := TRIGGER_UE) runs on UTRAN_IRAT_PTC
+  {
+    f_UTRAN_UE_PsRB_Est_InitialRegistration(p_CellId, cell_DCH_64kPS_RAB_SRB, p_WaitDataSignalling, p_TriggerUE); // @sic R5s160133 sic@
+  }
+
+  /*
+   * @desc      Configure a PS Radio Bearer in UE and SS according to TS
+   *            Interactive or background / UL:64 DL: 64 kbps / PS RAB + UL:3.4 DL:3.4 kbps SRBs for DCCH
+   * @param     p_CellId
+   * @param     p_WaitDataSignalling (default value: noDelay)
+   * @param     p_TriggerUE         (default value: TRIGGER_UE)
+   * @param     p_UseReceivedNSAPI  (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_UE_FACH_PS_Rb_Est(UTRAN_CellId_Type p_CellId,
+                                     DelayForUserPlaneSignalling_Type p_WaitDataSignalling := noDelay,
+                                     UTRAN_PDPContextTrigger_Type p_TriggerUE := TRIGGER_UE,
+                                     boolean p_UseReceivedNSAPI := false) runs on UTRAN_IRAT_PTC
+  { //@sic R5s160897 added p_UseReceivedNSAPI sic@
+    f_UTRAN_UE_PsRB_Est_InitialRegistration(p_CellId, cell_FACH_PS, p_WaitDataSignalling, p_TriggerUE, p_UseReceivedNSAPI); // @sic R5s160133 sic@
+  }
+
+  /*
+   * @desc      Step 7 to 11 of test procedure in TS 34.123-1 subclause 12.9.14.4
+   *            The UE performs Network initiated RAB re-establishment in a UTRAN cell
+   * @param     p_CellId
+   * @param     p_RB_Configuration
+   * @param     p_LoopbackRLC_PDU   (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_UTRAN_MT_RAB_ReEst(UTRAN_CellId_Type p_CellId,
+                                RB_ConfigType p_RB_Configuration,
+                                boolean p_LoopbackRLC_PDU := false)   // @sic R5s130195 PDCP sic@
+    runs on UTRAN_IP_PTC
+  {
+    // Activate DHCP and ICMPv6 @sic R5-125676 sic@
+    f_UTRAN_IP_Handling_Start_Configuration(PDN_1, p_RB_Configuration); //@sic R5s130512 sic@
+
+    f_UTRAN_Page(p_CellId, terminatingBackgroundCall, oct2bit(px_PTMSI_Def)); // @sic R5s0673 sic@
+    f_UTRAN_RRC_ConnEst(p_CellId, terminatingBackgroundCall); // @sic R5s0673 sic@
+    
+    // RRC connection establishment procedure for MO PS calls on DCH
+    f_UTRAN_GMM_ServReq(); // @sic R5s150838 sic@
+    
+    // Transmit Security Mode Comamnd & Receive Security Mode Comlpete
+    f_UTRAN_RRC_Security(p_CellId, false, ps_domain);
+    
+    f_UTRAN_RB_SetUp_PS_RAB(p_CellId, p_RB_Configuration, -, p_LoopbackRLC_PDU);  /* @sic R5s120139 - Additional Changes sic@ */
+  }
+
+  /*
+   * @desc      To initialise the UTRAN global variables
+   * @param     p_ConfiguredPTCs    (default value: EUTRA_UTRAN)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_Init(IRAT_ConfiguredPTCs_Type p_ConfiguredPTCs := EUTRA_UTRAN) runs on UTRAN_IRAT_PTC
+  { /* @sic R5-113805, R5-113696, R5-113734 sic@ */
+    /* f_UTRAN_Init is used as dummy function (without parameters)  for the UTRAN PTC when the UTRAN PTC is needed just to get the UTRAN system information */
+    var UTRAN_CellIdList_Type v_CellIdList := {utran_Cell5, utran_Cell7, utran_Cell8, utran_Cell9};
+    var integer v_Index;
+    var integer i;
+    
+    vc_UTRAN_Global.Ctrl.Default := null;
+    vc_UTRAN_Global.Ctrl.TestBody := false;
+    vc_UTRAN_Global.CellArray := f_UTRAN_CellArray_Init();
+    vc_UTRAN_Global.MobileInfo.ue_EUTRA_Capability := omit;    // @sic R5s120641 sic@
+    vc_UTRAN_Global.MobileInfo.ue_OperationMode := omit;
+    vc_UTRAN_Global.MobileInfo.ue_Release := rel_8;  //Default value, will be updated upon receipt of RRC CONNECTION REQUEST
+    
+    // Initialise ConfigurationInfo
+    vc_UTRAN_Global.ConfigurationInfo.PdcpConfiguration := false;                             // @sic R5s130195 PDCP sic@
+    vc_UTRAN_Global.ConfigurationInfo.TestCaseRelease := f_GetDefaultTestCaseRelease();       // @sic R5-130195 Utran Release sic@
+    vc_UTRAN_Global.ConfigurationInfo.NR_IsFR1 := false;
+    
+    vc_UTRAN_Global_IP.NoOfPDPContexts := 0; // @sic R5-160730 sic@
+    vc_UTRAN_Global_IP.PDPInfo := omit;
+
+    // Now update sys info with inter RAT parameters for all cells
+    select (p_ConfiguredPTCs)
+    {
+      case (EUTRA_UTRAN) {
+        vc_UTRAN_Global.CellArray := f_UTRAN_IR_SIB19_Init(vc_UTRAN_Global.CellArray, f_IRAT_InitialCoOrd(EUTRA, f_UTRAN_IR_SysInfoInit(vc_UTRAN_Global.CellArray)));
+      }
+      case (EUTRA_UTRAN_GERAN) {
+        vc_UTRAN_Global.CellArray := f_UTRAN_IR_SIB11And19_Init(vc_UTRAN_Global.CellArray, f_IRAT_InitialCoOrd_2Ports(EUTRA, GERAN, f_UTRAN_IR_SysInfoInit(vc_UTRAN_Global.CellArray)));
+
+        for (i := 0; i < lengthof(v_CellIdList); i := i + 1) {  // @sic R5s130433 sic@
+          v_Index := f_UTRAN_CellInfo_GetIndex(v_CellIdList[i]);
+          f_UTRAN_SysInfo_SetMIB_SetSIB5bisType(vc_UTRAN_Global.CellArray[v_Index].cellId, cs_MIB_UTRAN_GERAN_Def(vc_UTRAN_Global.CellArray[i].plmnId));   //@sic R5s150943 sic@
+          f_UTRAN_SysInfo_SetSB1(vc_UTRAN_Global.CellArray[v_Index].cellId, cs_SB1_UTRAN_GERAN_Def);
+        }
+      }
+    }
+    //The first security initialisation is done with px_UTRAN_CipheringAlgorithm @sic R5-150124 sic@
+    vc_UTRAN_Global.Security := f_UTRAN_SecurityInfo_Init(px_UTRAN_CipheringAlgorithm);
+    
+    vc_UTRAN_Global.MsgInDefault := f_UTRAN_MsgInDefault_Init();
+    
+    f_UTRAN_ActivateDefault(StandardDefault);
+  }
+
+  /*
+   * @desc      To handle UE initiated Deactivate PDP Context procedure
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_DeactivatePDPContext_MO() runs on UTRAN_PTC
+  {
+    var RRC_DATA_IND v_RRCDataInd;
+    var TI v_TI;
+    
+    [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_DeactPdpContextReq(cr_Deact_PDP_ContextReq_MO))) -> value v_RRCDataInd
+      {
+        v_TI := v_RRCDataInd.msg.deactivatePDPContextRequest.ti;
+        v_TI.tiFlag := not4b v_TI.tiFlag; // @sic R5s170094 sic@
+        U_Dc.send (cas_DataReq_PS(utran_CellDedicated, tsc_RB3, cs_U_DeactPdpContextAcp(cs_DeactPdpContextAcp(v_TI)))); // @sic R5s170028 sic@
+      }
+  }
+
+}

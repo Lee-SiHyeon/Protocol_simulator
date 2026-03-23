@@ -1,0 +1,1020 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-03-04 09:21:59 +0100 (Wed, 04 Mar 2026) $
+// $Rev: 43179 $
+/******************************************************************************/
+
+module IP_PTC_IMS_Handler {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_IMS_Templates all;
+  import from IP_PTC_Templates all;
+  import from TCP_Functions all;
+  import from UDP_Functions all;
+
+  type enumerated IMS_RequestResponse_Type {request, response}; /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  type record IMS_LocalRemotePort_Type {                        /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    PortNumber_Type  Local,
+    PortNumber_Type  Remote
+  };
+
+  template (value) IPSEC_CONFIG_REQ cas_IPSEC_Config_REQ(template (value) IPsec_SecurityAssociationList_Type p_SA_List,
+                                                         IPsec_SecurityKeys_Type p_SecurityKeys) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    Configure := {
+      SA_List := p_SA_List,
+      SecurityKeys := p_SecurityKeys
+    }
+  };
+
+  template (value) IPSEC_CONFIG_REQ cas_IPSEC_Release_REQ(template (value) IPsec_SecurityAssociationList_Type p_SA_List) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    Release := {
+      SA_List := p_SA_List
+    }
+  };
+
+  template (present) IPSEC_CONFIG_CNF car_IPSEC_CONFIG_CNF := {Confirm := true};  /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  template (value) IMS_SecurityContextInfo_Type cs_IMS_SecurityContextInfo_Unprotected :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    Unprotected := {
+      Port_us := tsc_IMS_PortNumber_5060,
+      Port_ps := tsc_IMS_PortNumber_5060
+    }
+  };
+
+  template (value) IMS_SecurityContextInfo_Type cs_IMS_SecurityContextInfo_Protected(IMS_SecurityInfo_Type p_SecurityInfo) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    Protected := p_SecurityInfo
+  };
+
+  template (value) IMS_SecurityContext_Type cs_IMS_SecurityContext(template (value) IMS_SecurityContextInfo_Type p_SecurityContextInfo) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    SecurityInfo := p_SecurityContextInfo,
+    TcpClient := omit,
+    TcpServer := omit
+  };
+
+  /*
+   * @desc      Check whether IMS server is started
+   * @param     p_ImsServer
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_ImsServer_IsStarted(IMS_Server_Type p_ImsServer) return boolean
+  {
+    return isvalue(p_ImsServer.PdnIndex); /* @sic R5s150648 Change 3 sic@ */
+  }
+
+  /*
+   * @desc      return template for IMS server address:
+   *            - if the UE is not registerred yet: IPv4 or IPv6 address
+   *            - if the UE is registerred: IP address as used for registration
+   * @param     p_ImsServer
+   * @return    template (present) IP_AddrInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_GetServerAddrRX(IMS_Server_Type p_ImsServer) return template (present) IP_AddrInfo_Type
+  {
+    var template (present) IP_AddrInfo_Type v_ServerAddr := ?;
+
+    if (f_ImsServer_IsStarted(p_ImsServer)) {
+      if (ispresent(p_ImsServer.RegistrationAddress.NW)) {              /* @sic R5s160735: fl_ImsServer_UeIsRegistered removed sic@ @sic R5s170604 sic@ */
+        v_ServerAddr := p_ImsServer.RegistrationAddress.NW;
+      } else {
+        v_ServerAddr := (p_ImsServer.IPv4Addr, p_ImsServer.IPv6Addr);
+      }
+    }
+    return v_ServerAddr;
+  }
+
+  /*
+   * @desc      return respective security context (or omit if the context is not configured)
+   * @param     p_ImsServer
+   * @param     p_SecurityContextEnum
+   * @return    template (omit) IMS_SecurityContext_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_GetSecurityContext(IMS_Server_Type p_ImsServer,
+                                            IMS_SecurityContextEnum_Type p_SecurityContextEnum) return template (omit) IMS_SecurityContext_Type
+  {
+    select (p_SecurityContextEnum) {
+      case (unprotected)       { return p_ImsServer.UnprotectedContext; }
+      case (protectedContext1) { return p_ImsServer.ProtectedContext1; }
+      case (protectedContext2) { return p_ImsServer.ProtectedContext2; }
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      update given security context
+   * @param     p_ImsServer         (by reference)
+   * @param     p_SecurityContextEnum
+   * @param     p_SecurityContext
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_SetSecurityContext(inout IMS_Server_Type p_ImsServer,
+                                            IMS_SecurityContextEnum_Type p_SecurityContextEnum,
+                                            template (omit) IMS_SecurityContext_Type p_SecurityContext)
+  {
+    var IMS_SecurityContext_Type v_SecurityContext;
+    
+    if (isvalue(p_SecurityContext)) {
+      v_SecurityContext := valueof(p_SecurityContext);
+      select (p_SecurityContextEnum) {
+        case (unprotected)       { p_ImsServer.UnprotectedContext := v_SecurityContext; }
+        case (protectedContext1) { p_ImsServer.ProtectedContext1 := v_SecurityContext; }
+        case (protectedContext2) { p_ImsServer.ProtectedContext2 := v_SecurityContext; }
+      }
+    } else {
+      FatalError(__FILE__, __LINE__, "p_SecurityContext expected to be present");     /* p_SecurityContext is declared as "template (omit)" just to avoid "valueof" at the calling side */
+    }
+  }
+
+  /*
+   * @desc      return true if given security context is started
+   * @param     p_ImsServer
+   * @param     p_SecurityContextEnum
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_SecurityContext_IsStarted(IMS_Server_Type p_ImsServer,
+                                                   IMS_SecurityContextEnum_Type p_SecurityContextEnum) return boolean
+  {
+    return isvalue(fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum));
+  }
+
+  /*
+   * @desc      Close all TCP connections of the given security context
+   *            @sic R5w250115, R5s260058 sic@: due to use of a_IP_PTC_ReceiveCNF_NonBlocking fl_TCP_Close (used by f_TcpClient_CloseConnection and f_TcpServer_CloseConnection)
+   *                                            can wait for confirmation of closing of the TCP connections (i.e. acknowledgement of the FIN and there is no need for handling of pending security contexts anymore
+   * @param     p_ImsServer         (by reference)
+   * @param     p_SecurityContextEnum
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_SecurityContextCloseTCP(inout IMS_Server_Type p_ImsServer,
+                                                 IMS_SecurityContextEnum_Type p_SecurityContextEnum) runs on IP_PTC
+  { /* @sic R5w250115, R5s260058: p_WaitForCNF removed, return value removed sic@ */
+    var template (omit) IMS_SecurityContext_Type v_SecurityContext := fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum);
+    
+    if (isvalue(v_SecurityContext)) {
+      f_TcpClient_CloseConnection(v_SecurityContext.TcpClient);         /* @sic R5w250115, R5s260058: no return value anymore as f_TcpClient_CloseConnection returns not before the TCP_CLOSE_CNF sic@ */
+      f_TcpServer_CloseConnection(v_SecurityContext.TcpServer);         /* @sic R5w250115, R5s260058: no return value anymore as f_TcpServer_CloseConnection returns not before the TCP_CLOSE_CNF sic@ */
+      v_SecurityContext.TcpClient := omit;
+      v_SecurityContext.TcpServer := omit;
+      fl_IMS_Server_SetSecurityContext(p_ImsServer, p_SecurityContextEnum, v_SecurityContext);
+    }
+  }
+
+  /*
+   * @desc      handle closing of TCP connection (closed by the UE)
+   * @param     p_ImsServer         (by reference)
+   * @param     p_SecurityContextEnum
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IMS_Server_SecurityContextCloseTCP(inout IMS_Server_Type p_ImsServer,
+                                               IMS_SecurityContextEnum_Type p_SecurityContextEnum) runs on IP_PTC
+  {
+    var template (omit) IMS_SecurityContext_Type v_SecurityContext := fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum);
+    var boolean v_ClientIsConnected := isvalue(v_SecurityContext.TcpClient);
+    var boolean v_ServerIsConnected := isvalue(v_SecurityContext.TcpServer);
+    
+    [v_ClientIsConnected] a_TcpServer_CloseConnection(valueof(v_SecurityContext.TcpClient))
+      {
+        v_SecurityContext.TcpClient := omit;
+        fl_IMS_Server_SetSecurityContext(p_ImsServer, p_SecurityContextEnum, v_SecurityContext);
+      }
+    [v_ServerIsConnected] a_TcpServer_CloseConnection(valueof(v_SecurityContext.TcpServer))
+      {
+        v_SecurityContext.TcpServer := omit;
+        fl_IMS_Server_SetSecurityContext(p_ImsServer, p_SecurityContextEnum, v_SecurityContext);
+      }
+  }
+
+  /*
+   * @desc      to accept TCP connections
+   * @param     p_ImsServer         (by reference)
+   * @param     p_SecurityContextEnum
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IMS_Server_SecurityContextAcceptTCP(inout IMS_Server_Type p_ImsServer,
+                                                IMS_SecurityContextEnum_Type p_SecurityContextEnum) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var template (present) IP_AddrInfo_Type v_ServerAddr := fl_IMS_Server_GetServerAddrRX(p_ImsServer);
+    var template (omit) IMS_SecurityContext_Type v_SecurityContext := fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum);
+    var template (present) IMS_LocalRemotePort_Type v_LocalRemotePort := fl_IP_IMS_GetPortsRX(v_SecurityContext);
+    var boolean v_TcpServerIsStarted := isvalue(v_SecurityContext);
+    var IP_Connection_Type v_NewConnectionByRef;          /* @sic R5s250228 change 2.1.8: no template (omit) anymore sic@ */
+    var IMS_SecurityContext_Type v_SecurityContextValue;
+    var IP_Connection_Type v_NewConnection;
+    
+    [v_TcpServerIsStarted] a_TcpServer_AcceptConnection(v_NewConnectionByRef,
+                                                        cr_IP_Socket(v_ServerAddr, v_LocalRemotePort.Local),
+                                                        cr_IP_Socket(?, v_LocalRemotePort.Remote))  /* remote port is ? for unprotected connection;
+                                                                                                       for protected connection the remote port is needed to distinguish the context */
+      {
+        v_NewConnection := v_NewConnectionByRef;
+        v_SecurityContextValue := valueof(v_SecurityContext);
+        if (isvalue(v_SecurityContextValue.TcpServer)) {
+          if (v_SecurityContextValue.TcpServer != v_NewConnection) {
+            /* NOTE: this may happen e.g. in IMS test case 12.2A when the UE changes IPv4/IPv6 after the 504 response and before the new REGISTER,
+             *        but does not close the old TCP connection (=> if this happens in practice we may need to accept it even though it is bad UE implementation) */
+            FatalError(__FILE__, __LINE__, "Cannot accept further TCP connection");
+          } else {
+            f_ErrorLog(__FILE__, __LINE__, "Accept for existing connection -> ignored");
+          }
+        } else {
+          v_SecurityContextValue.TcpServer := v_NewConnection;
+          fl_IMS_Server_SetSecurityContext(p_ImsServer, p_SecurityContextEnum, v_SecurityContextValue);
+        }
+      }
+  }
+
+  /*
+   * @desc      configure IPsec and start servers for secure signalling
+   * @param     p_ImsServer         (by reference)
+   * @param     p_RegistrationInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_AddSecurityContext(inout IMS_Server_Type p_ImsServer,
+                                            IMS_RegistrationInfo_Type p_RegistrationInfo) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var IP_AddrInfo_Type v_LocalIpAddr := p_RegistrationInfo.NW_Address;
+    var IP_AddrInfo_Type v_RemoteIpAddr := p_RegistrationInfo.UE_Address;
+    var IMS_SecurityInfo_Type v_SecurityInfo := p_RegistrationInfo.SecurityInfo;
+    var IMS_ProtectedPorts_Type v_ProtectedPorts := v_SecurityInfo.ProtectedPorts;
+    var PortNumber_Type v_LocalPortServer := v_ProtectedPorts.Port_ps;
+    var PortNumber_Type v_LocalPortClient := v_ProtectedPorts.Port_pc;
+    var IMS_SecurityContext_Type v_SecurityContext := valueof(cs_IMS_SecurityContext(cs_IMS_SecurityContextInfo_Protected(v_SecurityInfo)));
+    var IP_DrbInfo_Type v_DrbInfo := valueof(f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(p_ImsServer.PdnIndex)); /* @sic R5s150648 Change 3 sic@
+                                                                                                             @sic R5s211657 - Additional change: valueof (the PDN can be considered as started for this function) sic@ */
+    var boolean v_IsSecondContext := false;
+
+    if (fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1)) {
+      /* A 2nd security context gets added e.g. as at re-registration the network responds with 401 Unauthorized indicating a new security context (e.g. 34.229-1 test case 11.2 and 19.5.7 or 34.229-5 test case 6.3);
+         the old security context is still used to send the 401 Unauthorized and for sending SIP messages of a 'pending transaction' in terms of 33.203 clause 7.4.1a;
+         RFC 3261 clause 17 specifies especially in case of an INVITE which messages belong to a transaction (-> test case 19.5.7 and R5_150267);
+         according to 33.203 clause 7.4.1a the old security context shall be released when it is expired or when there has been a message sent by the P-CSCF using the new security context */
+      if (fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext2)) {
+        FatalError(__FILE__, __LINE__, "Not more than two security contexts supported at the same time");
+      }
+      if (v_LocalPortServer != p_ImsServer.ProtectedContext1.SecurityInfo.Protected.ProtectedPorts.Port_ps) {
+        FatalError(__FILE__, __LINE__, "re-configuration of TCP/UDP server not supported");
+        /* NOTE: if the server port changes during re-authentication we would need to have 2 TCP and 2 UDP servers in parallel until re-authentication has finished */
+      }
+      if (v_LocalPortClient == p_ImsServer.ProtectedContext1.SecurityInfo.Protected.ProtectedPorts.Port_pc) {
+        FatalError(__FILE__, __LINE__, "re-authentication: client port of new security context shall differ from the old one");    /* in general a new port shall be assigned at the IMS PTC by means of f_IMS_PTC_Security_Init */
+      }
+      p_ImsServer.ProtectedContext2 := v_SecurityContext;
+      v_IsSecondContext := true;
+    } else {
+      p_ImsServer.ProtectedContext1 := v_SecurityContext;
+    }
+    
+    // get SPIs for the network side:
+    // v_SecurityInfo.SPIs := f_SPIs_SetNetworkValues(v_SPIs);  // @sic R5s130266 change 1.3, 4, 5 - MCC160 Implementation: SPIs are set at the IMS PTC now sic@ */
+
+    fl_IPsec_Configure(v_LocalIpAddr, v_RemoteIpAddr, v_SecurityInfo, p_ImsServer.SecurityKeys);
+    
+    if (not v_IsSecondContext) {     /* servers need to be started only for the first context */
+      f_UdpServer_Start(v_LocalIpAddr, v_LocalPortServer, v_DrbInfo);
+      f_TcpServer_Start(v_LocalIpAddr, v_LocalPortServer, v_DrbInfo);
+    }
+    
+    f_UdpClient_Start(v_LocalIpAddr, v_LocalPortClient, v_DrbInfo);  /* @sic R5s130113 change 4 sic@ */
+  }
+
+  /*
+   * @desc      Stop/Release IPsec: if there is more than one context release the older one
+   * @param     p_ImsServer         (by reference)
+   * @param     p_SecurityReleaseMode
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IMS_Server_RemoveSecurityContexts(inout IMS_Server_Type p_ImsServer,
+                                                IMS_SecurityReleaseMode_Type p_SecurityReleaseMode) runs on IP_PTC
+  { /* @sic R5s141154: new parameter p_WaitForCNF sic@ */
+    /* @sic R5-145732: support of 2nd security context sic@ */
+    /* @sic R5s160735: p_SecurityReleaseMode sic@ */
+    /* @sic R5w250115, R5s260058: p_WaitForCNF removed sic@ */
+    var IP_AddrInfo_Type v_NW_Address;
+    var IMS_SecurityInfo_Type v_SecurityInfo;
+    var PortNumber_Type v_LocalPortServer;
+    var PortNumber_Type v_LocalPortClient;
+    var IMS_SecurityContext_Type v_SecurityContext;
+    
+    while (fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1)) { /* @sic R5s160735: "while" sic@
+                                                                                         NOTE: After the first security context has been removed, the second one (if any) gets first one */
+      
+      v_NW_Address := p_ImsServer.RegistrationAddress.NW;
+      v_SecurityInfo := p_ImsServer.ProtectedContext1.SecurityInfo.Protected;
+      v_LocalPortServer := v_SecurityInfo.ProtectedPorts.Port_ps;
+      v_LocalPortClient := v_SecurityInfo.ProtectedPorts.Port_pc;
+      
+      // stop UDP client
+      f_UdpClient_Stop(v_NW_Address, v_LocalPortClient);
+      
+      // Close TCP connection
+      fl_IMS_Server_SecurityContextCloseTCP(p_ImsServer, protectedContext1);
+      v_SecurityContext := valueof(fl_IMS_Server_GetSecurityContext(p_ImsServer, protectedContext1));  /* valueof can be used as protectedContext1 still exists */
+      
+      if (not fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext2)) {   // if there is no other security context ...
+        // ... stop TCP and UDP server
+        f_UdpServer_Stop(v_NW_Address, v_LocalPortServer);
+        f_TcpServer_Stop(v_NW_Address, v_LocalPortServer);
+        p_ImsServer.ProtectedContext1 := omit;
+      }
+      else {
+        p_ImsServer.ProtectedContext1 := p_ImsServer.ProtectedContext2;
+        p_ImsServer.ProtectedContext2 := omit;
+      }
+      
+      /* Release security association  @sic R5w250115, R5s260058: there is no pending security context anymore as fl_TCP_Close waits TCP_CLOSE_CNF sic@ */
+      fl_IPsec_Release(p_ImsServer.RegistrationAddress.NW,
+                       p_ImsServer.RegistrationAddress.UE,
+                       v_SecurityContext.SecurityInfo.Protected);
+
+      if (p_SecurityReleaseMode == oldestProtectedContextOnly) { /* @sic R5s160735 sic@ */
+        break;
+      }
+    }
+    if (not fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1)) {  /* => all protected contexts are released now
+                                                                                           @sic R5s160825: p_ImsServer.RegistrationAddress needs to be reset as in case of IPv6 the UE may come up with a different interface ID at the registration sic@
+                                                                                           @sic R5s170231 - Additional changes: moved to here from a_IP_IMS_Config sic@
+                                                                                           @sic R5s180112: For TCs like 12.2a the UE may change IP address from IPv6 to IPv4 => RegistrationAddress to reset indepedent from p_SecurityReleaseMode sic@ */
+      p_ImsServer.RegistrationAddress := omit;
+    }
+
+    if (p_SecurityReleaseMode == full) {  /* @sic R5s170231 - r1 of MCC160 comments: unprotected security context shall not be released in case of "oldestProtectedContextOnly" and no security context has been established yet sic@ */
+      fl_IMS_Server_SecurityContextCloseTCP(p_ImsServer, unprotected);                  /* @sic R5s170231 - Additional changes: moved to here from a_IP_IMS_Config sic@ */
+    }
+  }
+
+  /*
+   * @desc      Configure IPsec
+   * @param     p_NW_Address
+   * @param     p_UE_Address
+   * @param     p_SecurityInfo
+   * @param     p_SecurityKeys
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IPsec_Configure(IP_AddrInfo_Type p_NW_Address,
+                              IP_AddrInfo_Type p_UE_Address,
+                              IMS_SecurityInfo_Type p_SecurityInfo,
+                              IPsec_SecurityKeys_Type p_SecurityKeys) runs on IP_PTC
+  {
+    var IPsec_IntegrityAlgorithm_Type v_IntegrityAlgorithm := p_SecurityInfo.IntegrityAlgorithm;
+    var IPsec_CipheringAlgorithm_Type v_CipheringAlgorithm := p_SecurityInfo.CipheringAlgorithm;
+    var template (value) IPsec_SecurityAssociationList_Type v_SA_List := f_IPsec_SA_List(p_NW_Address, p_UE_Address, p_SecurityInfo, v_IntegrityAlgorithm, v_CipheringAlgorithm);
+
+    IPSEC_CTRL.send(cas_IPSEC_Config_REQ(v_SA_List, p_SecurityKeys));
+    IPSEC_CTRL.receive(car_IPSEC_CONFIG_CNF);
+  }
+
+  /*
+   * @desc      configure SS to release IPsec
+   * @param     p_NW_Address
+   * @param     p_UE_Address
+   * @param     p_SecurityInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IPsec_Release(IP_AddrInfo_Type p_NW_Address,
+                            IP_AddrInfo_Type p_UE_Address,
+                            IMS_SecurityInfo_Type p_SecurityInfo) runs on IP_PTC
+  {
+    var template (value) IPsec_SecurityAssociationList_Type v_SA_List := f_IPsec_SA_List(p_NW_Address, p_UE_Address, p_SecurityInfo);
+
+    IPSEC_CTRL.send(cas_IPSEC_Release_REQ(v_SA_List));
+    IPSEC_CTRL.receive(car_IPSEC_CONFIG_CNF);
+  }
+
+  template (value) IMS_Server_Type cs_IMS_Server_Init :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    UnprotectedContext := cs_IMS_SecurityContext(cs_IMS_SecurityContextInfo_Unprotected),  /* @sic R5-145732: support of 2nd security context sic@ */
+    ProtectedContext1 := omit,                                                             /* @sic R5-145732: support of 2nd security context sic@ */
+    ProtectedContext2 := omit,                                                             /* @sic R5-145732: support of 2nd security context sic@ */
+    IPv4Addr := omit,
+    IPv6Addr := omit,
+    SecurityKeys := omit,
+    RegistrationAddress := omit,                                                           /* @sic R5-145732: support of 2nd security context sic@ */
+    PdnIndex := omit                                                                       /* @sic R5s150648 Change 3 sic@ */
+  };
+
+  /*
+   * @desc      start IMS server
+   * @param     p_ImsServer
+   * @param     p_P_CSCF_IPv4Address
+   * @param     p_P_CSCF_IPv6Address
+   * @param     p_PdnIndex
+   * @return    IMS_Server_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_IMS_Start(IMS_Server_Type p_ImsServer,
+                          charstring p_P_CSCF_IPv4Address,
+                          charstring p_P_CSCF_IPv6Address,
+                          PDN_Index_Type p_PdnIndex) runs on IP_PTC return IMS_Server_Type
+  { /* @sic R5s150648 Change 3: p_DrbInfo replaced by p_PdnIndex sic@ */
+    var IMS_Server_Type v_ImsServer := p_ImsServer;
+    var PortNumber_Type v_PortNumber := v_ImsServer.UnprotectedContext.SecurityInfo.Unprotected.Port_ps;
+    var IP_DrbInfo_Type v_DrbInfo := valueof(f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(p_PdnIndex));   /* @sic R5s150648 Change 3 sic@
+                                                                                                     @sic R5s211657 - Additional change: valueof (the PDN can be considered as started for this function) sic@ */
+
+    v_ImsServer.IPv4Addr := valueof(cs_IPv4Addr(p_P_CSCF_IPv4Address));
+    v_ImsServer.IPv6Addr := valueof(cs_IPv6Addr(p_P_CSCF_IPv6Address));
+    v_ImsServer.PdnIndex := p_PdnIndex;        /* @sic R5s150648 Change 3 sic@ */
+
+    /* Start UDP servers for the given PDN;
+     * Note: if there is already a UDP server using the same IP address and port, f_UdpServer_Start will cause an error raised by the SS;
+     *       => it is implicitly checked that different PDNs have different addresses as requested by 36.523-3 cl. 4.2.4.6 */
+    f_UdpServer_Start(v_ImsServer.IPv4Addr, v_PortNumber, v_DrbInfo);
+    f_UdpServer_Start(v_ImsServer.IPv6Addr, v_PortNumber, v_DrbInfo);
+
+    /* Start TCP servers for the given PDN */
+    f_TcpServer_Start(v_ImsServer.IPv4Addr, v_PortNumber, v_DrbInfo);
+    f_TcpServer_Start(v_ImsServer.IPv6Addr, v_PortNumber, v_DrbInfo);
+
+    return v_ImsServer;
+  }
+
+  /*
+   * @desc      Stop IMS server and the related TCP/UDP servers
+   * @param     p_ImsServer
+   * @return    IMS_Server_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_IMS_Stop(IMS_Server_Type p_ImsServer) runs on IP_PTC return IMS_Server_Type
+  {
+    var IMS_Server_Type v_ImsServer := p_ImsServer;
+
+    if (f_ImsServer_IsStarted(v_ImsServer)) {
+
+      fl_IMS_Server_RemoveSecurityContexts(p_ImsServer, full);    /* @sic R5-145732, R5s151044: release all security contexts sic@
+                                                                     @sic R5s170231 - Additional changes: "full" including release of unprotected TCP connections sic@ */
+      f_UdpServer_Stop(v_ImsServer.IPv4Addr, tsc_IMS_PortNumber_5060);
+      f_UdpServer_Stop(v_ImsServer.IPv6Addr, tsc_IMS_PortNumber_5060);
+      
+      f_TcpServer_Stop(v_ImsServer.IPv4Addr, tsc_IMS_PortNumber_5060);
+      f_TcpServer_Stop(v_ImsServer.IPv6Addr, tsc_IMS_PortNumber_5060);
+
+      v_ImsServer := valueof(cs_IMS_Server_Init);
+    }
+    return v_ImsServer;
+  }
+
+  /*
+   * @desc      Function to get the pair of ports for messages sent in DL (TX);
+   * @param     p_SecurityContext
+   * @param     p_Protocol
+   * @param     p_RequestResponse
+   * @return    IMS_LocalRemotePort_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_GetPortsTX(IMS_SecurityContext_Type p_SecurityContext,
+                                InternetProtocol_Type p_Protocol,                             // udp or tcp
+                                IMS_RequestResponse_Type p_RequestResponse)                   // request or response
+    return IMS_LocalRemotePort_Type
+  { /* NOTE: function returns a value even for the unprotected local tcp port when the SS is client (GIBA only);
+     *       this port shall be ignored and instead an ephemeral port shall be assigned by the system */
+    /* @sic R5-145732: support of 2nd security context sic@ */
+
+    var IMS_ProtectedPorts_Type v_ProtectedPorts;
+    var IMS_LocalRemotePort_Type v_LocalRemotePort;
+
+    if (ischosen(p_SecurityContext.SecurityInfo.Unprotected)) {
+      v_LocalRemotePort.Local  := p_SecurityContext.SecurityInfo.Unprotected.Port_ps;
+      v_LocalRemotePort.Remote := p_SecurityContext.SecurityInfo.Unprotected.Port_us;
+    }
+    else {
+      v_ProtectedPorts := p_SecurityContext.SecurityInfo.Protected.ProtectedPorts;
+      select (p_Protocol) {
+        case (udp) {
+          v_LocalRemotePort.Local  := v_ProtectedPorts.Port_pc;
+          v_LocalRemotePort.Remote := v_ProtectedPorts.Port_us;
+        }
+        case (tcp) {
+          select (p_RequestResponse) {
+            case (request) {
+              v_LocalRemotePort.Local  := v_ProtectedPorts.Port_pc;
+              v_LocalRemotePort.Remote := v_ProtectedPorts.Port_us;
+            }
+            case (response) {
+              v_LocalRemotePort.Local  := v_ProtectedPorts.Port_ps;
+              v_LocalRemotePort.Remote := v_ProtectedPorts.Port_uc;
+            }
+          }
+        }
+      }
+    }
+    return v_LocalRemotePort;
+  }
+
+  /*
+   * @desc      return port numbers needed to receive UDP data in UL and to accept TCP connections
+   *            applicable to receive UDP data (sent from Port_uc to Port_ps) and to accept TCP connections;
+   *            in case of unprotected connections Port_uc can be any port whereas in case of protected connections Port_uc shall be acc. to the given security context
+   * @param     p_SecurityContext
+   * @return    template (present) IMS_LocalRemotePort_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_GetPortsRX(template (omit) IMS_SecurityContext_Type p_SecurityContext)
+    return template (present) IMS_LocalRemotePort_Type
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var IMS_SecurityContext_Type v_SecurityContext;
+    var template (present) IMS_LocalRemotePort_Type v_LocalRemotePort := {?, ?};  // dummy only
+
+    if (isvalue(p_SecurityContext)) {
+      v_SecurityContext := valueof(p_SecurityContext);
+      if (ischosen(v_SecurityContext.SecurityInfo.Unprotected)) {
+        v_LocalRemotePort.Local := v_SecurityContext.SecurityInfo.Unprotected.Port_ps;
+      } else {
+        v_LocalRemotePort.Local := v_SecurityContext.SecurityInfo.Protected.ProtectedPorts.Port_ps;
+        v_LocalRemotePort.Remote := v_SecurityContext.SecurityInfo.Protected.ProtectedPorts.Port_uc;
+      }
+    }
+    return v_LocalRemotePort;
+  }
+
+  /*
+   * @desc      for UDP client and server are not distinguished in terms of portnumbers (i.e. UE sends both reponses and requests to the NW's server port)
+   *            => to get out whether we've received a response or a request we need to evaluate the message content
+   * @param     p_Data
+   * @return    IMS_RequestResponse_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_UL_ResponseOrRequest(Datagram_Content_Type p_Data) return IMS_RequestResponse_Type
+  {
+    var charstring v_SIP_Message := oct2char(substr(p_Data, 0, 20));                        // @sic R5s130514 sic@
+    var template charstring v_AnyResponse := pattern "SIP/[1-9][.][0-9] [1-9][0-9][0-9]*";  // @sic R5s130514 additional change sic@
+
+    if (match(v_SIP_Message, v_AnyResponse)) {
+      return response;
+    } else {
+      return request;
+    }
+  }
+
+  /*
+   * @desc      send request from the UE to the IMS PTC which is connected to the given port
+   * @param     p_Port
+   * @param     p_RoutingInfo
+   * @param     p_Data
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_UL_DecodeAndSendRequest(IP_IMS_SERVER_PORT p_Port,
+                                             template (value) IMS_RoutingInfo_Type p_RoutingInfo,
+                                             bitstring p_Data)
+  {
+    var IMS_Request_Type v_Request;
+    
+    if (decvalue(p_Data, v_Request) != 0) {
+      FatalError(__FILE__, __LINE__, "IMS Request cannot be decoded");
+      return;
+    }
+
+    /* p_Port.checkstate: new TTCN-3 feature acc. to V4.3.2 (clause 22.5.5);
+       as long as this operation is not used we will get a runtime error when sending on a port what is not connected (i.e. when there is no IMS PTC on the other side) */
+
+/*     if (not p_Port.checkstate("Connected")) { */
+/*       FatalError(__FILE__, __LINE__, "no IMS handling for this PDN"); */
+/*     } */
+
+    p_Port.send(cas_IMS_DATA_REQ(p_RoutingInfo, v_Request));
+  }
+
+  /*
+   * @desc      decode UL IMS response and hand it over to the IMS PTC
+   * @param     p_Port
+   * @param     p_RoutingInfo
+   * @param     p_Data
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_UL_DecodeAndSendResponse(IP_IMS_CLIENT_PORT p_Port,
+                                              template (value) IMS_RoutingInfo_Type p_RoutingInfo,
+                                              bitstring p_Data)
+  { /* send response from the UE to the IMS PTC which is connected to the given port */
+    var IMS_Response_Type v_Response;
+    
+    if (decvalue(p_Data, v_Response) != 0) {
+      FatalError(__FILE__, __LINE__, "IMS Response cannot be decoded");
+      return;
+    }
+
+    /* p_Port.checkstate: new TTCN-3 feature acc. to V4.3.2 (clause 22.5.5);
+       as long as this operation is not used we will get a runtime when sending on a port what is not connected (i.e. when there is no IMS PTC on the other side) */
+
+/*     if (not p_Port.checkstate("Connected")) { */
+/*       FatalError(__FILE__, __LINE__, "no IMS handling for this PDN"); */
+/*     } */
+
+    p_Port.send(cas_IMS_DATA_RSP(p_RoutingInfo, v_Response));
+  }
+
+  /*
+   * @desc      foreward message sent by the UE to the IMS PTC which is started for the given PDN
+   * @param     p_PdnIndex
+   * @param     p_RequestResponse
+   * @param     p_RoutingInfo
+   * @param     p_Data
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_UL_DecodeAndSend(integer p_PdnIndex,
+                                      IMS_RequestResponse_Type p_RequestResponse,
+                                      template (value) IMS_RoutingInfo_Type p_RoutingInfo,
+                                      Datagram_Content_Type p_Data) runs on IP_PTC
+  {
+    var bitstring v_Bitstring := oct2bit(p_Data);
+    
+    select (p_RequestResponse) {
+      case (request) {
+        fl_IP_IMS_UL_DecodeAndSendRequest(IMS_Server[p_PdnIndex], p_RoutingInfo, v_Bitstring);
+      }
+      case (response) {
+        fl_IP_IMS_UL_DecodeAndSendResponse(IMS_Client[p_PdnIndex], p_RoutingInfo, v_Bitstring);
+      }
+    }
+  }
+
+  /*
+   * @desc      handling of UL IMS messages via TCP for protected and unprotected security context
+   * @param     p_ImsServer
+   * @param     p_PdnIndex
+   * @param     p_SecurityContextEnum
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_Server_ReceiveTCP(IMS_Server_Type p_ImsServer,
+                                     integer p_PdnIndex,
+                                     IMS_SecurityContextEnum_Type p_SecurityContextEnum) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var template (omit) IMS_SecurityContext_Type v_SecurityContext := fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum);
+    var boolean v_ClientIsConnected := isvalue(v_SecurityContext.TcpClient);
+    var boolean v_ServerIsConnected := isvalue(v_SecurityContext.TcpServer);
+    var template (omit) IP_AddrInfo_Type v_NW_Address := omit;
+    var template (omit) IP_AddrInfo_Type v_UE_Address := omit;
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+    var Datagram_Content_Type v_Data;
+
+    [v_ClientIsConnected] IP_SOCK_DATA.receive(cr_TCP_DATA_IND(valueof(v_SecurityContext.TcpClient)))
+      -> value v_IP_SOCKET_IND
+      {
+        v_Data := v_IP_SOCKET_IND.DATA.Ind.TCP.Recv;
+        v_RoutingInfo := cs_IMS_RoutingInfo(tcp, p_SecurityContextEnum);
+        fl_IP_IMS_UL_DecodeAndSend(p_PdnIndex, response, v_RoutingInfo, v_Data);
+      }
+    [v_ServerIsConnected] IP_SOCK_DATA.receive(cr_TCP_DATA_IND(valueof(v_SecurityContext.TcpServer)))
+      -> value v_IP_SOCKET_IND
+      { /* @sic R5s160735: fl_ImsServer_UeIsRegistered removed - IP addresses are handed over to IMS for all kinds of requests sic@ */
+        v_NW_Address := v_IP_SOCKET_IND.DATA.ConnectionId.Local.IpAddr;
+        v_UE_Address := v_IP_SOCKET_IND.DATA.ConnectionId.Remote.IpAddr;
+        v_Data := v_IP_SOCKET_IND.DATA.Ind.TCP.Recv;
+        v_RoutingInfo := cs_IMS_RoutingInfo(tcp, p_SecurityContextEnum, v_UE_Address, v_NW_Address);
+        fl_IP_IMS_UL_DecodeAndSend(p_PdnIndex, request, v_RoutingInfo, v_Data);  /* @sic R5s141322 change 1 sic@ */
+      }
+  }
+
+  /*
+   * @desc      handling of UL IMS messages via UDP for protected and unprotected security context
+   * @param     p_ImsServer
+   * @param     p_PdnIndex
+   * @param     p_SecurityContextEnum
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_Server_ReceiveUDP(IMS_Server_Type p_ImsServer,
+                                     integer p_PdnIndex,
+                                     IMS_SecurityContextEnum_Type p_SecurityContextEnum) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var template (present) IP_AddrInfo_Type v_ServerAddr := fl_IMS_Server_GetServerAddrRX(p_ImsServer);
+    var template (omit) IMS_SecurityContext_Type v_SecurityContext := fl_IMS_Server_GetSecurityContext(p_ImsServer, p_SecurityContextEnum);
+    var template (present) IMS_LocalRemotePort_Type v_LocalRemotePort := fl_IP_IMS_GetPortsRX(v_SecurityContext);
+    var boolean v_UdpServerIsStarted := isvalue(v_SecurityContext);
+    var template (omit) IP_AddrInfo_Type v_NW_Address := omit;
+    var template (omit) IP_AddrInfo_Type v_UE_Address := omit;
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+    var Datagram_Content_Type v_Data;
+    var IMS_RequestResponse_Type v_RequestResponse;
+
+    // receive UDP data
+    [v_UdpServerIsStarted] IP_SOCK_DATA.receive(cr_UDP_DATA_IND(cr_IP_Socket(v_ServerAddr, v_LocalRemotePort.Local),
+                                                                cr_IP_Socket(?, v_LocalRemotePort.Remote)))  /* remote port is ? for unprotected connection;
+                                                                                                                for protected connection the remote port is needed to distinguish the context */
+      -> value v_IP_SOCKET_IND
+      { /* @sic R5s160735: fl_ImsServer_UeIsRegistered removed - IP addresses are handed over to IMS for all kinds of requests sic@ */
+        v_Data := v_IP_SOCKET_IND.DATA.Ind.UDP.RecvFrom.Buffer;
+        v_RequestResponse := fl_IP_IMS_UL_ResponseOrRequest(v_Data); /* for UDP Requests and Responses are sent by the UE from Port_uc to Port_ps,
+                                                                      * i.e. there is not data for Port_us to Port_pc and therefore Requests and Responses
+                                                                      * cannot be distinguished by the port on which they have been received */
+        if (v_RequestResponse == request) {
+          v_NW_Address := v_IP_SOCKET_IND.DATA.ConnectionId.Local.IpAddr;
+          v_UE_Address := v_IP_SOCKET_IND.DATA.ConnectionId.Remote.IpAddr;
+        }
+
+        v_RoutingInfo := cs_IMS_RoutingInfo(udp, p_SecurityContextEnum, v_UE_Address, v_NW_Address);
+        fl_IP_IMS_UL_DecodeAndSend(p_PdnIndex, v_RequestResponse, v_RoutingInfo, v_Data);
+      }
+  }
+
+  /*
+   * @desc      receive UDP datagram from protected or unprotected port
+   * @param     p_ImsServer
+   * @param     p_PdnIndex
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_UL_Handler(IMS_Server_Type p_ImsServer,
+                              integer p_PdnIndex) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    /* NOTE: for UDP Requests and Responses both are sent by the UE from Port_uc to Port_ps, i.e. we don't need to listen at the port Port_pc */
+
+    var boolean v_ImsServer_IsStarted := f_ImsServer_IsStarted(p_ImsServer);
+    var boolean v_SecurityContext1_IsStarted := v_ImsServer_IsStarted and fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1);
+    var boolean v_SecurityContext2_IsStarted := v_ImsServer_IsStarted and fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext2);
+ 
+    [v_ImsServer_IsStarted] a_IP_IMS_Server_ReceiveUDP(p_ImsServer, p_PdnIndex, unprotected);
+    [v_SecurityContext1_IsStarted] a_IP_IMS_Server_ReceiveUDP(p_ImsServer, p_PdnIndex, protectedContext1);
+    [v_SecurityContext2_IsStarted] a_IP_IMS_Server_ReceiveUDP(p_ImsServer, p_PdnIndex, protectedContext2);
+    
+    [v_ImsServer_IsStarted] a_IP_IMS_Server_ReceiveTCP(p_ImsServer, p_PdnIndex, unprotected);
+    [v_SecurityContext1_IsStarted] a_IP_IMS_Server_ReceiveTCP(p_ImsServer, p_PdnIndex, protectedContext1);
+    [v_SecurityContext2_IsStarted] a_IP_IMS_Server_ReceiveTCP(p_ImsServer, p_PdnIndex, protectedContext2);
+  }
+
+  /*
+   * @desc      Send IMS message in DL either on protected or on unprotected port
+   *            Routing:
+   *            there are several assumptions regarding the routing:
+   *            - when there are multiple PDNs there shall be different P-CSCF addresses for each PDN
+   *            - IP PTC shall be configured with the IP addresses to be used immediately after the initial REGISTER has been sent by the UE
+   *              => even when there is more than one address the IP PTC knows which one to use
+   *            - when security is started, network and UE address are stored together with the security association
+   *              => on protected ports the routing is well-known at the IP-PTC
+   * @param     p_ImsServer         (by reference)
+   * @param     p_RoutingInfo
+   * @param     p_RequestResponse
+   * @param     p_Data
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_IMS_Server_SendDL(inout IMS_Server_Type p_ImsServer,
+                                   IMS_RoutingInfo_Type p_RoutingInfo,
+                                   IMS_RequestResponse_Type p_RequestResponse,
+                                   bitstring p_Data) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var InternetProtocol_Type v_Protocol := p_RoutingInfo.Protocol;
+    var IMS_SecurityContextEnum_Type v_SecurityContextEnum;
+    var IMS_SecurityContext_Type v_SecurityContext;
+    var IMS_LocalRemotePort_Type v_LocalRemotePort;
+    var template (omit) PortNumber_Type v_LocalPort;
+    var PortNumber_Type v_RemotePort;
+    var IP_AddrInfo_Type v_UE_Address;
+    var IP_AddrInfo_Type v_NW_Address;
+    var template (value) IP_Socket_Type v_LocalSocket;
+    var template (value) IP_Socket_Type v_RemoteSocket;
+    var template (omit) IP_Connection_Type v_TCP_Connection := omit;
+    var IP_Connection_Type v_NewTcpConnectionByRef;
+    var Datagram_Content_Type v_Data := bit2oct(p_Data);
+    var boolean v_IsUnprotected;
+    var IP_DrbInfo_Type v_DrbInfo;
+
+    if (isvalue(p_RoutingInfo.Security)) {
+      /* Security may be omitted by the IMS PTC when the IMS message shall be sent protected or unprotected based on whether security is configured or not;
+         in case of the initial REGISTER response security is already configured but the reponse needs to be sent unprotected (as the UE has not fully configured security yet)
+         => at least in this case the IMS PTC shall set the "Security" field of the RoutingInfo */
+      v_SecurityContextEnum := p_RoutingInfo.Security;
+    } else {
+      if (fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext2)) {         /* the latest security context is preferred */
+        v_SecurityContextEnum := protectedContext2;
+      } else if (fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1)) {
+        v_SecurityContextEnum := protectedContext1;
+      } else {
+        v_SecurityContextEnum := unprotected;
+      }
+    }
+
+    if (not fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, v_SecurityContextEnum)) {
+      FatalError(__FILE__, __LINE__, "IMS security not established");
+    }
+    v_SecurityContext := valueof(fl_IMS_Server_GetSecurityContext(p_ImsServer, v_SecurityContextEnum));
+    v_IsUnprotected := (v_SecurityContextEnum == unprotected);
+    
+    v_LocalRemotePort := fl_IP_IMS_GetPortsTX(v_SecurityContext, v_Protocol, p_RequestResponse);
+    v_LocalPort  := v_LocalRemotePort.Local;
+    v_RemotePort := v_LocalRemotePort.Remote;
+
+    if (isvalue(p_RoutingInfo.NW_Address) and isvalue(p_RoutingInfo.UE_Address)) {
+      v_NW_Address := p_RoutingInfo.NW_Address;
+      v_UE_Address := p_RoutingInfo.UE_Address;
+    } else if (ispresent(p_ImsServer.RegistrationAddress)) {              /* @sic R5s160735: fl_ImsServer_UeIsRegistered removed sic@ */
+      v_NW_Address := p_ImsServer.RegistrationAddress.NW;
+      v_UE_Address := p_ImsServer.RegistrationAddress.UE;
+    } else {
+      FatalError(__FILE__, __LINE__, "missing IP addresses");
+    }
+
+    select (v_Protocol) {
+      case (udp) {
+        v_LocalSocket  := cs_IP_Socket(v_NW_Address, v_LocalPort);
+        v_RemoteSocket := cs_IP_Socket(v_UE_Address, v_RemotePort);
+        IP_SOCK_DATA.send(cs_UDP_DATA_REQ(v_LocalSocket, v_RemoteSocket, v_Data));
+      }
+      case (tcp) {
+        select (p_RequestResponse) {
+          case (response) {
+            v_TCP_Connection := v_SecurityContext.TcpServer;
+          }
+          case (request) {
+            v_TCP_Connection := v_SecurityContext.TcpClient;
+            if (not isvalue(v_TCP_Connection)) {
+              if (v_IsUnprotected) {
+                v_LocalPort := omit;  // in case of an unprotected TCP connection to UE there is no need to specify any specific local port but we can use an ephemeral port instead
+              }
+              v_NewTcpConnectionByRef := f_TcpClient_ConnectReq(cs_IP_Socket(v_NW_Address, v_LocalPort), cs_IP_Socket(v_UE_Address, v_RemotePort), ims);
+              v_DrbInfo := valueof(f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(p_ImsServer.PdnIndex));   /* @sic R5s150648 Change 3 sic@
+                                                                                                     @sic R5s211657 - Additional change: valueof (the PDN can be considered as started for this function) sic@ */
+              alt {
+                [] a_IP_IMS_TCP_ConnectionControl(p_ImsServer) {  /* @sic R5s140713 - MCC160 implementation sic@ */
+                  repeat;
+                }
+                [] a_TcpClient_ConnectCnf(v_NewTcpConnectionByRef, v_DrbInfo) {
+                  v_SecurityContext.TcpClient := v_NewTcpConnectionByRef;
+                  fl_IMS_Server_SetSecurityContext(p_ImsServer, v_SecurityContextEnum, v_SecurityContext); // @sic R5s141322 change 2 sic@
+                  v_TCP_Connection := v_NewTcpConnectionByRef;
+                }
+              }
+            }
+          }
+        }
+
+        if (not isvalue(v_TCP_Connection)) {
+          /* @sic R5s150270 change 2: just skip the data sic@
+             there can be a race condion when the UE does not wait for any 200 OK but immediately closes the TCP connection with the server
+             => when TTCN wants to send the 200 OK the connection is gone already */
+        } else {
+          IP_SOCK_DATA.send(cs_TCP_DATA_REQ(valueof(v_TCP_Connection), v_Data));
+        }
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid protocol");
+        return;
+      }
+    }
+  }
+
+  /*
+   * @desc      handle requests or responses from the IMS PTC
+   * @param     p_ImsServer         (by reference)
+   * @param     p_PdnIndex
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_DL_Handler(inout IMS_Server_Type p_ImsServer,
+                              integer p_PdnIndex) runs on IP_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var bitstring v_Data;
+
+    [] IMS_Server[p_PdnIndex].receive(cr_IMS_DATA_RSP_Any) -> value v_IMS_DATA_RSP
+      {
+        v_Data := encvalue(v_IMS_DATA_RSP.Response);
+        fl_IP_IMS_Server_SendDL(p_ImsServer, v_IMS_DATA_RSP.RoutingInfo, response, v_Data);
+      }
+    [] IMS_Client[p_PdnIndex].receive(cr_IMS_DATA_REQ_Any) -> value v_IMS_DATA_REQ
+      {
+        v_Data := encvalue(v_IMS_DATA_REQ.Request);
+        fl_IP_IMS_Server_SendDL(p_ImsServer, v_IMS_DATA_REQ.RoutingInfo, request, v_Data);
+      }
+  }
+
+  /*
+   * @desc      handle configuration from the IMS PTC
+   * @param     p_ImsServer         (by reference)
+   * @param     p_Port
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_Config(inout IMS_Server_Type p_ImsServer,
+                          IP_IMS_CTRL_PORT p_Port) runs on IP_PTC
+  { /* @sic R5s130266 change 1.3, 4, 5 - MCC160 Implementation: SPIs and protected ports are fully controlled by the IMS PTC sic@ */
+    /* @sic R5s130900 - MCC160 implementation for re-authentication sic@ */
+    var IMS_CONFIG_REQ v_IMS_CONFIG_REQ;
+    var IMS_PortsAndSecurityConfigReq_Type v_PortsAndSecurityConfig;
+    var template (omit) IMS_RegistrationInfo_Type v_RegistrationInfo;
+    var IMS_SecurityRelease_Type v_SecurityRelease;
+
+    [] p_Port.receive(car_IMS_InstallKey_REQ) -> value v_IMS_CONFIG_REQ
+      {
+        p_ImsServer.SecurityKeys := v_IMS_CONFIG_REQ.InstallKey;
+        p_Port.send(cas_IMS_InstallKey_CNF);
+      }
+
+    [] p_Port.receive(car_IMS_PortsAndSecurityConfig_REQ) -> value v_IMS_CONFIG_REQ
+      {
+        v_PortsAndSecurityConfig := v_IMS_CONFIG_REQ.PortsAndSecurityConfig;
+        v_RegistrationInfo := v_PortsAndSecurityConfig.RegistrationInfo;
+        if (not isvalue(p_ImsServer.RegistrationAddress) and isvalue(v_RegistrationInfo)) {                                 /* @sic R5s150268 change 4 sic@ */
+          p_ImsServer.RegistrationAddress.NW := valueof(v_RegistrationInfo.NW_Address);
+          p_ImsServer.RegistrationAddress.UE := valueof(v_RegistrationInfo.UE_Address);
+        }
+        
+        if (isvalue(v_PortsAndSecurityConfig.UnprotectedPort_us)) {
+          p_ImsServer.UnprotectedContext.SecurityInfo.Unprotected.Port_us := v_PortsAndSecurityConfig.UnprotectedPort_us;   /* set UE's port number as requested by the UE */
+        } else {
+          p_ImsServer.UnprotectedContext.SecurityInfo.Unprotected.Port_us := tsc_IMS_PortNumber_5060;                       /* restore port number e.g. if it has been set to other value in previous session */
+        }
+        
+        if (isvalue(v_RegistrationInfo.SecurityInfo)) {                                                                     /* non-GIBA   @sic R5s120858 change 6..8 - MCC160 implementation sic@ */
+          if (not isvalue(p_ImsServer.SecurityKeys)) {
+            FatalError(__FILE__, __LINE__, "security keys missing");
+          }
+          fl_IMS_Server_AddSecurityContext(p_ImsServer, valueof(v_RegistrationInfo));                                       /* @sic R5-145732: support of 2nd security context sic@ */
+        }                                                                                                                   /* @sic R5s220609 - Additional changes: else-branch removed () sic@
+                                                                                                                               else-branch has been fl_IMS_Server_RemoveSecurityContext(p_ImsServer, keepUnprotected);
+                                                                                                                               in case of issues security contexts shall be removed explicitly using SecurityRelease before PortsAndSecurityConfig */
+        p_Port.send(cas_IMS_PortsAndSecurityConfig_CNF);
+      }
+    [] p_Port.receive(car_IMS_SecurityRelease_REQ) -> value v_IMS_CONFIG_REQ
+      {
+        v_SecurityRelease := v_IMS_CONFIG_REQ.SecurityRelease;
+        fl_IMS_Server_RemoveSecurityContexts(p_ImsServer, v_SecurityRelease.Mode);                                          /* @sic R5s170231 - Additional changes sic@
+                                                                                                                               @sic R5w250115, R5s260058: WaitForCNF removed sic@ */
+        p_Port.send(cas_IMS_SecurityRelease_CNF);
+      }
+    /* @sic R5w250115, R5s260058: CloseTCP branch removed sic@ */
+    [] p_Port.receive(car_IMS_RestartPCSCF_REQ) -> value v_IMS_CONFIG_REQ                                                   /* @sic R5-213534: support of 2nd P-CSCF sic@ */
+      {
+        p_ImsServer := f_IP_IMS_Stop(p_ImsServer);
+        p_ImsServer := f_IP_IMS_Start(p_ImsServer,
+                                      v_IMS_CONFIG_REQ.RestartPCSCF.IPAddressIPv4,
+                                      v_IMS_CONFIG_REQ.RestartPCSCF.IPAddressIPv6,
+                                      v_IMS_CONFIG_REQ.RestartPCSCF.PdnIndex);
+        p_Port.send(cas_IMS_RestartPCSCF_CNF);
+      }
+  }
+
+  /*
+   * @desc      handle TCP connection establishment and release initiated by the UE (protected or unprotected)
+   * @param     p_ImsServer         (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_TCP_ConnectionControl(inout IMS_Server_Type p_ImsServer) runs on IP_PTC
+  { /* @sic R5-145732: support of 2nd security context sic@ */
+    var boolean v_ImsServer_IsStarted := f_ImsServer_IsStarted(p_ImsServer);
+    var boolean v_SecurityContext1_IsStarted := v_ImsServer_IsStarted and fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext1);
+    var boolean v_SecurityContext2_IsStarted := v_ImsServer_IsStarted and fl_IMS_Server_SecurityContext_IsStarted(p_ImsServer, protectedContext2);
+
+    /* @sic R5w250115, R5s260058: a_IMS_TCP_Close_CNF_Handler removed as fl_TCP_Close handles TCP_CLOSE_CNF (a_IP_PTC_ReceiveCNF_NonBlocking) sic@ */
+
+    [v_ImsServer_IsStarted] a_IMS_Server_SecurityContextAcceptTCP(p_ImsServer, unprotected);
+    [v_SecurityContext1_IsStarted] a_IMS_Server_SecurityContextAcceptTCP(p_ImsServer, protectedContext1);
+    [v_SecurityContext2_IsStarted] a_IMS_Server_SecurityContextAcceptTCP(p_ImsServer, protectedContext2);
+
+    [v_ImsServer_IsStarted] a_IMS_Server_SecurityContextCloseTCP(p_ImsServer, unprotected);
+    [v_SecurityContext1_IsStarted] a_IMS_Server_SecurityContextCloseTCP(p_ImsServer, protectedContext1);
+    [v_SecurityContext2_IsStarted] a_IMS_Server_SecurityContextCloseTCP(p_ImsServer, protectedContext2);
+  }
+
+  /*
+   * @desc      receive IMS messages from IP PTC
+   * @param     p_IMS_Info          (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_IP_IMS_Handler(inout IP_PTC_IMS_Info_Type p_IMS_Info) runs on IP_PTC
+  {
+    var IMS_Server_Type v_ImsServer_PDN1 := p_IMS_Info.Server[tsc_Index_IMS1];
+    var IMS_Server_Type v_ImsServer_PDN2 := p_IMS_Info.Server[tsc_Index_IMS2];
+
+    [] a_IP_IMS_TCP_ConnectionControl(v_ImsServer_PDN1) {        // @sic R5s260058 change 2.6: a_IP_IMS_TCP_ConnectionControl moved to the top sic@
+      p_IMS_Info.Server[tsc_Index_IMS1] := v_ImsServer_PDN1;     // @sic R5s130378 sic@
+    }
+    [] a_IP_IMS_TCP_ConnectionControl(v_ImsServer_PDN2) {        // @sic R5s260058 change 2.6: a_IP_IMS_TCP_ConnectionControl moved to the top sic@
+      p_IMS_Info.Server[tsc_Index_IMS2] := v_ImsServer_PDN2;     // @sic R5s130378 sic@
+    }
+
+    [] a_IP_IMS_UL_Handler(v_ImsServer_PDN1, tsc_Index_IMS1);
+    [] a_IP_IMS_UL_Handler(v_ImsServer_PDN2, tsc_Index_IMS2);
+
+    [] a_IP_IMS_DL_Handler(v_ImsServer_PDN1, tsc_Index_IMS1) {   // @sic R5s130454 sic@
+      p_IMS_Info.Server[tsc_Index_IMS1] := v_ImsServer_PDN1;
+    }
+
+    [] a_IP_IMS_DL_Handler(v_ImsServer_PDN2, tsc_Index_IMS2) {   // @sic R5s130454 sic@
+      p_IMS_Info.Server[tsc_Index_IMS2] := v_ImsServer_PDN2;
+    }
+
+    [] a_IP_IMS_Config(v_ImsServer_PDN1, IMS_CTRL[tsc_Index_IMS1]) {
+      p_IMS_Info.Server[tsc_Index_IMS1] := v_ImsServer_PDN1;     // configuration for PDN1 has been modified
+    }
+    [] a_IP_IMS_Config(v_ImsServer_PDN2, IMS_CTRL[tsc_Index_IMS2]) {
+      p_IMS_Info.Server[tsc_Index_IMS2] := v_ImsServer_PDN2;     // configuration for PDN2 has been modified
+    }
+  }
+
+}

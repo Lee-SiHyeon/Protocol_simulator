@@ -1,0 +1,450 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2018-09-09 14:06:46 +0200 (do., 09 sep. 2018) $
+// $Rev: 22283 $
+/******************************************************************************/
+
+module Idle_PLMNSelection_A {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_IdleMode all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_Timing all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.1.1.7
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_6_1_1_7_EUTRA() runs on EUTRA_PTC
+  { /* PLMN selection / Periodic reselection / MinimumPeriodicSearchTimer */
+    
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT2;
+    var EUTRA_CellId_Type v_CellId := eutra_Cell13;
+    var EUTRA_ATTACH_Type v_ForcedAttach := NORMAL;
+    
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NAS_KsiValue v_KsiValue;  // @sic R5s140195 sic@
+    var GutiParameters_Type v_GutiParams;  // @sic R5s140195 sic@
+    var B3_Type v_EpsUpdate_TypeValue := f_GetEPSTAUType(v_ForcedAttach);
+    var template (omit) EPS_BearerContextStatus v_EPS_ContextStatus;
+    var template AdditionalUpdateType v_AdditionalUpdateType_Expected := f_GetAdditionalUpdateType(v_ForcedAttach);
+    
+    var NAS_PlmnId v_PLMN; // @sic R5s140195 sic@
+    var NAS_Lac v_LAC; // @sic R5s140195 sic@
+    var TrackingAreaCode v_Tac; // @sic R5s140195 sic@
+    var template (omit)  LocAreaId v_LAI; // @sic R5s140195 sic@
+    var template (value) TrackingAreaIdList v_TaiList; // @sic R5s140195 sic@
+    var template (omit)  MobileIdentity v_MSId := f_GetMSId(v_ForcedAttach);
+    
+    timer t_HpPlmn_lower;
+    timer t_HpPlmn_upper;
+    timer t_IdleMode_GenericTimer := tsc_IdleMode_GenericTimer;
+    
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(eutra_Cell13, tsc_ServingCellRS_EPRE)
+    };
+    v_CellPowerList_AtT2 := {
+      cs_CellPower(eutra_Cell1, tsc_ServingCellRS_EPRE)
+    };
+    
+    //Initialise all cell, security and mobile parameters
+    f_EUTRA_Init(c1);//SIB2 & SIB3 are transmitted
+    
+    //Set Sys info and cell info for cell 12, &13 to be used @ creation
+    f_EUTRA_CellInfo_SetPLMN_1Entry(eutra_Cell12, cs_HPLMN_001_11);  //PLMN1
+    f_EUTRA_CellInfo_SetPLMN_1Entry(eutra_Cell13, cs_HPLMN_001_21);  //PLMN2
+   
+    //Set TAC for Cell1, Cell12, &Cell13
+    //TAC for Cell1 is set to 1 in f_EUTRA_Init
+    f_EUTRA_CellInfo_SetTAC(eutra_Cell12, tsc_IdleMode_TAC_Cell12);
+    f_EUTRA_CellInfo_SetTAC(eutra_Cell13, tsc_IdleMode_TAC_Cell13);
+
+    //Configure and activate all cells
+    //Cell power level will be -85 dBm/15kHz & attenuation set so that cell is seen as OFF
+    f_EUTRA_CellConfig_Def(eutra_Cell12);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell13);
+    
+    // initialization of variables used @sic R5s140195 sic@
+    v_GutiParams:= f_EUTRA_CellInfo_GetGuti(v_CellId);
+    v_LAC := f_EUTRA_CellInfo_GetLocationAreaCode(v_CellId);
+    v_Tac := f_EUTRA_CellInfo_GetTAC(v_CellId);
+    v_PLMN := f_Asn2Nas_PlmnId(v_GutiParams.PLMN_Identity);
+    v_LAI := f_GetLAI(v_PLMN, v_LAC, v_ForcedAttach);
+    v_TaiList := cds_TAIListNonConsecutive_tlv(v_PLMN, { bit2oct(v_Tac) });
+    
+    //Equip UE with a USIM containing default values except for those shown in Table 6.1.1.7.3.1-2
+    f_UT_USIM_Insert(UT, "36.523-1 Table 6.1.1.7.3.1-2");
+    
+    //Preamble to ensure UE is in known state - EF EPSLOCI=PLMN1
+    f_EUTRA_Preamble(eutra_Cell12, STATE2_IDLEUPDATE);
+    f_EUTRA_UE_Detach_SwitchOffUe(eutra_Cell12, RRC_IDLE);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //Adjust cell configuration according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 2" siclog@
+    //Power on UE
+    t_HpPlmn_lower.start(f_EUTRA_SetTimerToleranceMin(eutra_Cell12, nasTimer, 120.0)); // @sic R5s140195 sic@ @sic R5s140361 sic@
+    f_EUTRA_SwitchOnUEandStartIP(eutra_Cell12, CNF_REQUIRED); // @sic R5s140195 sic@
+    t_HpPlmn_upper.start(f_EUTRA_SetTimerToleranceMax(eutra_Cell12, nasTimer, 420.0)); // @sic R5s140195 sic@
+    
+    //@siclog "Step 3-18" siclog@
+    f_EUTRA_InitialRegistration(eutra_Cell12, PREAMBLE, STATE2_IDLEUPDATE,  NORMAL); // @sic R5-160947 sic@
+    
+    //@siclog "Step 19" siclog@
+    f_UT_PLMN_Check(UT, "00111");
+    
+    //@siclog "Step 20" siclog@
+    //Check for RRCConnectionRequest on Cell13 / PLMN4
+    alt {
+      [] SRB.receive(car_SRB0_RrcPdu_IND(eutra_Cell13, cr_508_RRCConnectionRequest))
+        {
+          //* @verdict fail RRCConnectionRequest received on PLMNN2 / Cell 13 within t_HpPlmn_lower time
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 20");
+        }
+      [] t_HpPlmn_lower.timeout
+        {
+          if (f_EUTRA_RRC_ConnectionRequest_Common(eutra_Cell13, t_HpPlmn_upper)) {
+            //* @verdict pass RRC Connection request received on PLMN2 / Cell 13 after t_HpPlmn_lower time but before t_HpPlmn_upper
+            f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 20");
+          }
+          else {
+            //* @verdict fail No RRCConnectionRequest received
+            f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 20");
+          }
+        }
+    }
+    
+    t_HpPlmn_upper.start(f_EUTRA_SetTimerToleranceMin(eutra_Cell13, nasTimer, 420.0)); // @sic R5s140195 sic@
+    v_KsiValue := f_EUTRA_SecurityKSIasme_Get(); // @sic R5s140195 sic@
+    
+    //@siclog "Step 21 - 25" siclog@
+    //Perform TAU procedure steps 2 to 6
+    
+    //Step 21: Send RRC Connection Setup on SRB0 (CCCH) and switch on UL grant assignments:
+    f_EUTRA_RRC_ConnectionSetup_Def(v_CellId, -, tsc_RRC_TI_Def);
+    
+    // UE shall establish SRB1 acc. to 36.331 cl. 5.3.3.4 and 5.3.9
+    // UE enters RRC_CONNECTED state
+    // SRB1 is established: no ciphering, no integrity protection for NAS/RRC
+    
+    //Step 22: Receive RRCConnectionSetupComplete which includes a TRACKING AREA UPDATE REQUEST message
+    v_NasInd := f_EUTRA_RRCConnectionSetupComplete_Def(v_CellId,
+                                                       cr_508_RRCConnectionSetupComplete(tsc_RRC_TI_Def, ?),
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                         cr_508_TAU_Request(v_EpsUpdate_TypeValue,
+                                                                                            v_KsiValue,
+                                                                                            cr_DRXparameter_Any('5C'O) ifpresent,
+                                                                                            v_AdditionalUpdateType_Expected)));
+    v_EPS_ContextStatus := v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus; // Send this back in the Accept
+    
+    /* Step 23: send TAU ACCEPT and receive TAU COMPLETE; */
+    SRB.send(cas_SRB1_NasPdu_REQ(v_CellId,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_TAU_Accept(v_EpsUpdate_TypeValue,
+                                                                  f_GutiParameters2MobileIdentity(tsc_IEI_Guti, v_GutiParams),
+                                                                  v_TaiList,
+                                                                  v_EPS_ContextStatus,
+                                                                  v_LAI,
+                                                                  v_MSId,
+                                                                  f_GetAdditionalUpdateResult(v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType, v_ForcedAttach))))); // @sic R5s150903 sic@
+    
+    /* Step24: receive TAU COMPLETE */
+    SRB.receive(car_SRB1_NasPdu_IND(v_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_TAU_Complete)));
+    
+    //Step 25: Release RRC connection
+    f_EUTRA_RRC_ConnectionRelease(v_CellId, tsc_RRC_TI_Def);
+    
+    //@siclog "Step 26" siclog@
+    //Check if PLMN2 is indicated by UE
+    f_UT_PLMN_Check(UT, "00121");
+    //* @verdict pass PLMN2 is indicated by UE
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 26");
+    
+    //@siclog "Step 27" siclog@
+    //Adjust cell power level according to T2
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT2);
+    
+    //@siclog "Step 28" siclog@
+    //Check for RRCConnectionRequest on Cell1 / PLMN4
+    alt {
+      [] SRB.receive( car_SRB0_RrcPdu_IND(eutra_Cell1, cr_508_RRCConnectionRequest))
+        {
+          //* @verdict fail RRCConnectionRequest received on PLMNN4 / Cell 1 within t_HpPlmn_Upper time
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 28");
+        }
+      [] t_HpPlmn_upper.timeout
+        {
+          t_IdleMode_GenericTimer.start; // @sic R5s140195 sic@
+          f_EUTRA_RRC_ConnectionRequest_Def(eutra_Cell1);
+          t_IdleMode_GenericTimer.stop; // @sic R5s140195 sic@
+          //* @verdict pass RRC Connection request received on PLMN4 / Cell 1 after t_HpPlmn_Upper time
+          f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 28");
+        }
+    }
+
+    //@siclog "Step 29 - 33" siclog@
+    //Perform TAU procedure steps 2 to 6
+    f_EUTRA_TrackingAreaUpdate_WithoutRrcConnReq(eutra_Cell1);
+    
+    //@siclog "Step 34" siclog@
+    //Check if PLMN4 is indicated by UE
+    f_UT_PLMN_Check(UT, "00101");
+    //* @verdict pass PLMN4 is indicated by UE
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7 Step 34");
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);
+  } //end of f_TC_6_1_1_7_EUTRA
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.1.1.7a
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_6_1_1_7a_EUTRA() runs on EUTRA_PTC
+  { /* PLMN selection / Periodic reselection / MinimumPeriodicSearchTimer / Single Frequency operation */
+    
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT3; // @sic R5s141214 sic@
+    var EUTRA_CellId_Type v_CellId := eutra_Cell4;
+    var EUTRA_ATTACH_Type v_ForcedAttach := NORMAL;
+    
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NAS_KsiValue v_KsiValue;
+    var GutiParameters_Type v_GutiParams;
+    var B3_Type v_EpsUpdate_TypeValue := f_GetEPSTAUType(v_ForcedAttach);
+    var template (omit) EPS_BearerContextStatus v_EPS_ContextStatus;
+    var template AdditionalUpdateType v_AdditionalUpdateType_Expected := f_GetAdditionalUpdateType(v_ForcedAttach);
+    
+    var NAS_PlmnId v_PLMN;
+    var NAS_Lac v_LAC;
+    var TrackingAreaCode v_Tac;
+    var template (omit)  LocAreaId v_LAI;
+    var template (value) TrackingAreaIdList v_TaiList;
+    var template (omit)  MobileIdentity v_MSId := f_GetMSId(v_ForcedAttach);
+    
+    timer t_HpPlmn_lower;
+    timer t_HpPlmn_upper;
+    timer t_IdleMode_GenericTimer := tsc_IdleMode_GenericTimer;
+    
+    v_CellPowerList_AtT1 := { // @sic R5s141214 sic@
+      cs_CellPower(eutra_Cell2, -79),
+      cs_CellPower(eutra_Cell4, tsc_ServingCellRS_EPRE)
+    };
+    v_CellPowerList_AtT2 := {
+      cs_CellPower(eutra_Cell2, tsc_ServingCellRS_EPRE),
+      cs_CellPower(eutra_Cell4, -79)
+    };
+    v_CellPowerList_AtT3 := {
+      cs_CellPower(eutra_Cell1, -79),
+      cs_CellPower(eutra_Cell2, tsc_NonSuitableOffCellRS_EPRE),
+      cs_CellPower(eutra_Cell4, tsc_ServingCellRS_EPRE)
+    };
+    
+    //Initialise all cell, security and mobile parameters
+    f_EUTRA_Init(c1);
+    
+    //Set maximum cell power level for Cell 1, 2 & 4 to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(eutra_Cell1, -79);
+    f_EUTRA_CellInfo_InitMaxReferencePower(eutra_Cell2, -79); // @sic R5s141214 sic@
+    f_EUTRA_CellInfo_InitMaxReferencePower(eutra_Cell4, -79);
+    
+    //Set Sys info and cell info for cell 2, &4 to be used @ creation
+    f_EUTRA_CellInfo_SetPLMN_1Entry(eutra_Cell2, cs_HPLMN_001_11);  //PLMN1
+    f_EUTRA_CellInfo_SetPLMN_1Entry(eutra_Cell4, cs_HPLMN_001_21);  //PLMN2
+    
+    //Set TAC for Cell2, &Cell4
+    //TAC for Cell1 is set to 1 in f_EUTRA_Init
+    f_EUTRA_CellInfo_SetTAC(eutra_Cell2, tsc_IdleMode_TAC_Cell2);
+    f_EUTRA_CellInfo_SetTAC(eutra_Cell4, tsc_IdleMode_TAC_Cell4);
+
+    //Configure and activate all cells
+    //Cell power level will be -85 dBm/15kHz & attenuation set so that cell is seen as OFF
+    f_EUTRA_CellConfig_Def(eutra_Cell2);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell4);
+    
+    // initialization of variables
+    v_GutiParams:= f_EUTRA_CellInfo_GetGuti(v_CellId);
+    v_LAC := f_EUTRA_CellInfo_GetLocationAreaCode(v_CellId);
+    v_Tac := f_EUTRA_CellInfo_GetTAC(v_CellId);
+    v_PLMN := f_Asn2Nas_PlmnId(v_GutiParams.PLMN_Identity);
+    v_LAI := f_GetLAI(v_PLMN, v_LAC, v_ForcedAttach);
+    v_TaiList := cds_TAIListNonConsecutive_tlv(v_PLMN, { bit2oct(v_Tac) });
+    
+    //Equip UE with a USIM containing default values except for those shown in Table 6.1.1.7a.3.1-2
+    f_UT_USIM_Insert(UT, "36.523-1 Table 6.1.1.7a.3.1-2");
+    
+    //Preamble to ensure UE is in known state - EF EPSLOCI=PLMN1
+    f_EUTRA_Preamble(eutra_Cell2, STATE2_IDLEUPDATE);
+    f_EUTRA_UE_Detach_SwitchOffUe(eutra_Cell2, RRC_IDLE);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //Adjust cell configuration according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 2" siclog@
+    //Power on UE
+    t_HpPlmn_lower.start(f_EUTRA_SetTimerToleranceMin(eutra_Cell2, nasTimer, 120.0));
+    f_EUTRA_SwitchOnUEandStartIP(eutra_Cell2, CNF_REQUIRED);
+    t_HpPlmn_upper.start(f_EUTRA_SetTimerToleranceMax(eutra_Cell2, nasTimer, 420.0));
+    
+    //@siclog "Step 3-18" siclog@
+    //Steps 2 to 17 of the registration procedure described in TS 36.508 subclause 4.5.2.3 are performed on Cell 2.
+    //NOTE: The UE performs registration and the RRC connection is released.
+    f_EUTRA_InitialRegistration(eutra_Cell2, PREAMBLE, STATE2_IDLEUPDATE,  NORMAL); // @sic R5-160947 sic@
+    
+    //@siclog "Step 19" siclog@
+    //UE selects PLMN1
+    f_UT_PLMN_Check(UT, "00111");
+    
+    //@siclog "Step 19A" siclog@
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT2); // @sic R5s141214 sic@
+    
+    //@siclog "Step 20" siclog@
+    //Check: Does the UE send an RRCConnectionRequest on Cell 4 after 120 seconds, but before 420 seconds from power on?
+    alt {
+      [] SRB.receive(car_SRB0_RrcPdu_IND(eutra_Cell4, cr_508_RRCConnectionRequest))
+        {
+          //* @verdict fail RRCConnectionRequest received on PLMNN2 / Cell 4 within t_HpPlmn_lower time
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 20");
+        }
+      [] t_HpPlmn_lower.timeout
+        {
+          if (f_EUTRA_RRC_ConnectionRequest_Common(eutra_Cell4, t_HpPlmn_upper)) {
+            //* @verdict pass RRC Connection request received on PLMN2 / Cell 4 after t_HpPlmn_lower time but before t_HpPlmn_upper
+            f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 20");
+          }
+          else {
+            //* @verdict fail No RRCConnectionRequest received
+            f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 20");
+          }
+        }
+    }
+    
+    t_HpPlmn_upper.start(f_EUTRA_SetTimerToleranceMin(eutra_Cell4, nasTimer, 420.0));
+    v_KsiValue := f_EUTRA_SecurityKSIasme_Get();
+    
+    //@siclog "Step 21 - 25" siclog@
+    //Steps 2 to 6 of the generic test procedure in TS 36.508 subclause 6.4.2.7 are performed on Cell 4.
+    //NOTE: The UE performs a TAU procedure and the RRC connection is released.
+    //Step 21: Send RRC Connection Setup on SRB0 (CCCH) and switch on UL grant assignments:
+    f_EUTRA_RRC_ConnectionSetup_Def(v_CellId, -, tsc_RRC_TI_Def);
+    
+    // UE shall establish SRB1 acc. to 36.331 cl. 5.3.3.4 and 5.3.9
+    // UE enters RRC_CONNECTED state
+    // SRB1 is established: no ciphering, no integrity protection for NAS/RRC
+    
+    //Step 22: Receive RRCConnectionSetupComplete which includes a TRACKING AREA UPDATE REQUEST message
+    v_NasInd := f_EUTRA_RRCConnectionSetupComplete_Def(v_CellId,
+                                                       cr_508_RRCConnectionSetupComplete(tsc_RRC_TI_Def, ?),
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                         cr_508_TAU_Request(v_EpsUpdate_TypeValue,
+                                                                                            v_KsiValue,
+                                                                                            cr_DRXparameter_Any('5C'O) ifpresent,
+                                                                                            v_AdditionalUpdateType_Expected)));
+    v_EPS_ContextStatus := v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus; // Send this back in the Accept
+    
+    /* Step 23: send TAU ACCEPT and receive TAU COMPLETE; */
+    SRB.send(cas_SRB1_NasPdu_REQ(v_CellId,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_TAU_Accept(v_EpsUpdate_TypeValue,
+                                                                  f_GutiParameters2MobileIdentity(tsc_IEI_Guti, v_GutiParams),
+                                                                  v_TaiList,
+                                                                  v_EPS_ContextStatus,
+                                                                  v_LAI,
+                                                                  v_MSId,
+                                                                  f_GetAdditionalUpdateResult(v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType, v_ForcedAttach)))));
+    /* Step24: receive TAU COMPLETE */
+    SRB.receive(car_SRB1_NasPdu_IND(v_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_TAU_Complete)));
+    
+    //Step 25: Release RRC connection
+    f_EUTRA_RRC_ConnectionRelease(v_CellId, tsc_RRC_TI_Def);
+    
+    //@siclog "Step 26" siclog@
+    //Check if PLMN2 is indicated by UE
+    f_UT_PLMN_Check(UT, "00121");
+    //* @verdict pass PLMN2 is indicated by UE
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 26");
+    
+    //@siclog "Step 27" siclog@
+    //Adjust cell power level according to T3
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT3); // @sic R5s141214 sic@
+    
+    //@siclog "Step 28" siclog@
+    //Check for RRCConnectionRequest on Cell1 / PLMN4
+    alt {
+      [] SRB.receive( car_SRB0_RrcPdu_IND(eutra_Cell1, cr_508_RRCConnectionRequest))
+        {
+          //* @verdict fail RRCConnectionRequest received on PLMNN4 / Cell 1 within t_HpPlmn_Upper time
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 28");
+        }
+      [] t_HpPlmn_upper.timeout
+        {
+          t_IdleMode_GenericTimer.start;
+          f_EUTRA_RRC_ConnectionRequest_Def(eutra_Cell1);
+          t_IdleMode_GenericTimer.stop;
+          //* @verdict pass RRC Connection request received on PLMN4 / Cell 1 after t_HpPlmn_Upper time
+          f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 28");
+        }
+    }
+    
+    //@siclog "Step 29 - 33" siclog@
+    //Steps 2 to 6 of the generic test procedure in TS 36.508 subclause 6.4.2.7 are performed on Cell 1.
+    //NOTE: The UE performs a TAU procedure and the RRC connection is released.
+    f_EUTRA_TrackingAreaUpdate_WithoutRrcConnReq(eutra_Cell1);
+    
+    //@siclog "Step 34" siclog@
+    //Check if PLMN4 is indicated by UE
+    f_UT_PLMN_Check(UT, "00101");
+    //* @verdict pass PLMN4 is indicated by UE
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.1.7a Step 34");
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);
+  } //end of f_TC_6_1_1_7a_EUTRA
+
+}

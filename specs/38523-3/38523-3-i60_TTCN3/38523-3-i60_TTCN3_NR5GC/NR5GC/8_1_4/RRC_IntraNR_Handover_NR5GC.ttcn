@@ -1,0 +1,733 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-06-04 21:33:28 +0200 (mi., 04 jun. 2025) $
+// $Rev: 41228 $
+/******************************************************************************/
+
+module RRC_IntraNR_Handover_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_Handover all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_DrbDefs all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_DCI_Configuration all;
+  import from NR_Measurement_Functions all;
+  import from NR_Measurement_Templates all;
+  import from NR_RRC_Templates all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      default handler to catch additional REGISTRATION REQUEST sent by the UE, acc. Table 8.1.4.1.2.3.2-4
+   * @param     p_NR_CellId
+   * @status    APPROVED (NR5GC)
+   */
+  altstep a_NR5GC_AdditionalRegistrationReq(NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+
+    [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+        if (f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedAsp.Signalling.Nas[0].Pdu, Mobility, ?, -,-,-,-,-,-, *)) {
+         //do nothing
+        }
+      }
+  }
+
+  /*
+   * @desc      default to handle RTP packets send by the UE during Handover in TC 8.1.4.1.10
+   * @status    APPROVED (NR5GC)
+   */
+  altstep a_Handle_RTP_Packets() runs on NR_BASE_PTC
+  { //@sic R5s250154 sic@
+     [] DRB.receive (cr_NR_DRB_COMMON_IND_Any) {repeat;}
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.4.1.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_4_1_2_NR5GC() runs on NR5GC_PTC
+  { // Intra NR handover / Success / Inter-frequency
+
+    f_NR5GC_Init(NR_4); //@sic R5s200309 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -79, -82); //@sic R5-237355 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, -82); //@sic R5-237355 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // Preamble: If pc_IP_Ping is set to TRUE then, the UE is in 5GS state 3N-A according to TS 38.508-1 [4], clause 4.4A.2 Table 4.4A.2-3.
+    //           Else, the UE is in 5GS state 3N-A and Test Loop Function (On) with UE test loop mode B on NR Cell 1 according to 38.508-1[4], clause 4.4A.2 Table 4.4A.2-3.
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A, PING_Or_TEST_LOOPModeB_ON); //@sic R5-204450 sic@
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_4_1_2_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell3, STATE_CONNECTED_3A); //@sic R5s200309 sic@
+  } // End of f_TC_8_1_4_1_2_NR5GC
+
+  /*
+   * @desc      test body of TC_8_1_4_1_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_4_1_2_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+    var NR_AbsoluteCellPower_Type v_CellPower_Serving_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_EntryCondition_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_Leaving_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_Serving_FR2;
+    var NR_AbsoluteCellPower_Type v_CellPower_EntryCondition_FR2;
+    var NR_AbsoluteCellPower_Type v_CellPower_Leaving_FR2;
+    var integer v_Rsrp;
+
+    var template (value) MeasObjectParamsList_Type v_MeasuredObjectList;
+    var template (value) ReportConfigToAddModList v_ReportConfigList;
+    var template (value) MeasConfig v_MeasConfig;
+    var PhysCellId v_PhysCellIdServing;
+    var PhysCellId v_PhysCellIdNeighbour;
+    var template (value) RACH_ConfigGeneric v_RACH_ConfigGeneric;
+    var SIB1 v_SIB1;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var integer v_DRBId;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var PLMN_Identity v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1); //@sic R5-221440 sic@
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN); //@sic R5-221440 sic@
+    var UE_NR_DeltaValues_Type  v_UE_NR_DeltaValues;
+    var default v_DefaultRef; //@sic R5-221440 sic@
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters; //@sic R5s240586 sic@
+
+
+    //Power levels of NR cell 1 and cell 3 FR1 acc. Table 8.1.4.1.2.3.2-1, Table 8.1.4.1.2.3.2-2
+    /*    FR1  |   Cell 1   |  Cell 3
+     * -------------------------------
+     *   T0    |    -85     |   -91
+     * -------------------------------
+     *   T1    |    -85     |   -79
+     * -------------------------------
+     *   T2    |    -79     |   -85
+     * -------------------------------
+     *   T3    |    -88     |   -78
+     *
+     *    FR2  |   Cell 1   |  Cell 3
+     * -------------------------------
+     *   T0    |    -91     |   -100
+     * -------------------------------
+     *   T1    |    -91     |   -82
+     * -------------------------------
+     *   T2    |    -82     |   -91
+     * -------------------------------
+     *   T3    |    -91     |   -82
+     */
+
+    v_CellPower_Serving_FR1 := -85;
+    v_CellPower_Leaving_FR1 := -91;
+    v_CellPower_EntryCondition_FR1 := -79;
+    v_CellPower_Serving_FR2 := -91; //@sic R5-237355 sic@
+    v_CellPower_Leaving_FR2 := -100; //@sic R5-237355 sic@
+    v_CellPower_EntryCondition_FR2 := -82; //@sic R5-237355 sic@
+
+    v_CellPowerList_AtT0 := {cs_NR_CellPower(nr_Cell1, v_CellPower_Serving_FR1, v_CellPower_Serving_FR2), //@sic R5-237355 sic@
+                             cs_NR_CellPower(nr_Cell3, v_CellPower_Leaving_FR1, v_CellPower_Leaving_FR2)}; //@sic R5-237355 sic@
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell3, v_CellPower_EntryCondition_FR1, v_CellPower_EntryCondition_FR2)}; //@sic R5-237355 sic@
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell1, v_CellPower_EntryCondition_FR1, v_CellPower_EntryCondition_FR2), //@sic R5-237355 sic@
+                             cs_NR_CellPower(nr_Cell3, v_CellPower_Serving_FR1, v_CellPower_Serving_FR2)}; //@sic R5-237355 sic@
+    v_CellPowerList_AtT3 := {cs_NR_CellPower(nr_Cell1, -88, -91), //@sic R5-237355 sic@
+                             cs_NR_CellPower(nr_Cell3, -78, -82)}; //@sic R5-201477, R5-237355 sic@
+    //Set power level to T0
+    f_NR_SetCellPowerList (v_CellPowerList_AtT0);
+
+    //@siclog "Steps 1-2" siclog@
+    //The SS transmits an RRCReconfiguration message including MeasConfig to setup intra NR measurement and reporting for inter-frequency event A3.
+    //The UE transmits an RRCReconfigrationComplete message
+    if(f_NR_CellInfo_GetIsFR1(nr_Cell1))
+    {
+       v_Rsrp := 6;
+    }
+    else
+    { //@sic R5-237355 sic@
+      v_UE_NR_DeltaValues := f_NR_MobileInfo_GetDeltaValues();
+      v_Rsrp := (2 + v_UE_NR_DeltaValues.DeltaPrimaryBand.DeltaNRf2 - v_UE_NR_DeltaValues.DeltaPrimaryBand.DeltaNRf1);
+    }
+
+    v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell3), cs_MeasObjectId2(nr_Cell1)};  //@sic R5s200309 sic@
+    v_ReportConfigList := {cs_NR_ReportConfigEventA3(tsc_NR_IdReportConfigId1, v_Rsrp, r1, 0, -, cs_NR_MeasReportQuantity_Rsrp, ms640)};
+    v_MeasConfig := f_NR_GenerateMeasurementConfigNR(v_MeasuredObjectList, v_ReportConfigList, -, cds_MeasGapConfig_UE(f_NR_GetGapConfig_InterFreqOdd(nr_Cell1, nr_Cell3))); //@sic R5-199013 sic@
+
+    f_NR_SendRRCReconfiguration_MeasNR(nr_Cell1, v_MeasConfig, -, tsc_NR_MeasObjectId2); // @sic R5s201303 sic@
+
+    //@siclog "Step 3" siclog@
+    //SS adjusts the cell-specific reference signal level according to row "T1".
+    f_NR_SetCellPowerList (v_CellPowerList_AtT1);
+
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE transmit a MeasurementReport message to report event A3 with the measured RSRP value for NR Cell 3?
+    v_PhysCellIdServing := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1);
+    v_PhysCellIdNeighbour := f_NR_CellInfo_GetPhysicalCellId(nr_Cell3);
+    f_NR_ReceiveMeasurementReports(nr_Cell1, v_PhysCellIdServing, tsc_NR_MeasId1, -, -, cr_NR_MeasResults_MeasResultNeighCells_NR({cr_NR_MeasResultNR_CellResults(v_PhysCellIdNeighbour, cr_NR_MeasQuantityResults_Rsrp)}));
+
+    //@siclog "Steps 5-6" siclog@
+    //The SS transmits an RRCReconfiguration message including reconfigurationWithSync with rach-ConfigDedicated, keySetChangeIndicator set to true and including nas-Container IE to order the UE to perform inter-frequency handover to NR Cell 3
+    //Check: Does the UE transmit RRCReconfigurationComplete message in NR Cell 3?
+    v_RACH_ConfigGeneric := f_NR_CellInfo_GetRACH_ConfigGeneric(nr_Cell1, tsc_NR_BWP_Id);
+    f_NR5GC_508RRC_IntraNR_HO_InterCell(nr_Cell1,
+                                        nr_Cell3,
+                                        -,
+                                        -, // RBConfig_KeyChange := true
+                                        cs_NR_MeasConfigRemove(cs_MeasObjectToRemoveList_2Entry(tsc_NR_MeasObjectId1, tsc_NR_MeasObjectId2), {tsc_NR_MeasId1}), //@sic R5-204237 sic@
+                                        -,
+                                        -,
+                                        cs_MasterKeyUpdate(true, 0, f_BuildIntraN1TransparentContainer ()), //@sic R5-202641 sic@
+                                        cs_NR_RACH_ConfigDedicated_Uplink(cs_38508_RACH_ConfigDedicated(v_RACH_ConfigGeneric, -, f_NR_CellInfo_GetSSB_Index(nr_Cell3))));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    //@siclog "Step 6A" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.1 indicate that the UE is capable of exchanging IP data on DRB #n associated with the first PDU session on NR Cell 3?
+    //@sic R5-204450 sic@
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    f_NR5GC_CheckDataPath(nr_Cell3,
+                          f_NR5GC_GetPdnIndex(v_PDUSessionInfoList[0]),
+                          dedicatedBearer,
+                          v_DRBId,
+                          "Step 6A");
+
+    //@siclog "Steps 7-8" siclog@
+    //The SS transmits an RRCReconfiguration message including MeasConfig to setup intra NR measurement and reporting for inter-frequency event A3.
+    //The UE transmits an RRCReconfigrationComplete message
+    v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell1), cs_MeasObjectId2(nr_Cell3)};  //@sic R5s200309 sic@
+    v_ReportConfigList := {cs_NR_ReportConfigEventA3(tsc_NR_IdReportConfigId1, v_Rsrp, r1, 0, -, cs_NR_MeasReportQuantity_Rsrp, ms640)};
+    v_MeasConfig := f_NR_GenerateMeasurementConfigNR(v_MeasuredObjectList, v_ReportConfigList, -, -, -, nr_Cell3); //@sic R5s201303 sic@
+
+    f_NR_SendRRCReconfiguration_MeasNR(nr_Cell3, v_MeasConfig, -, tsc_NR_MeasObjectId2); //@sic R5s201303 sic@
+
+    //@siclog "Step 9" siclog@
+    //SS adjusts the cell-specific reference signal level according to row "T2".
+    f_NR_SetCellPowerList (v_CellPowerList_AtT2);
+
+    //@siclog "Step 10" siclog@
+    //Check: Does the UE transmit a MeasurementReport message to report event A3 with the measured RSRP value for NR Cell 1?
+    v_PhysCellIdServing := f_NR_CellInfo_GetPhysicalCellId(nr_Cell3);
+    v_PhysCellIdNeighbour := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1);
+    f_NR_ReceiveMeasurementReports(nr_Cell3, v_PhysCellIdServing, tsc_NR_MeasId1, -, -, cr_NR_MeasResults_MeasResultNeighCells_NR({cr_NR_MeasResultNR_CellResults(v_PhysCellIdNeighbour, cr_NR_MeasQuantityResults_Rsrp)}));
+
+    //@siclog "Steps 11-12" siclog@
+    //The SS transmits an RRCReconfiguration message including reconfigurationWithSync without rach-ConfigDedicated and keySetChangeIndicator set to true to order the UE to perform inter-frequency handover to NR Cell 1
+    //Check: Does the UE transmit RRCReconfigurationComplete message in NR Cell 1?
+    //@sic R5s200309 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell(nr_Cell3,
+                                        nr_Cell1,
+                                        -,
+                                        -, // RBConfig_KeyChange := true
+                                        cs_NR_MeasConfigRemove(cs_MeasObjectToRemoveList_2Entry(tsc_NR_MeasObjectId1, tsc_NR_MeasObjectId2), {tsc_NR_MeasId1}), //@sic R5-204237 sic@
+                                        -,
+                                        -,
+                                        cs_MasterKeyUpdate(true, 0, f_BuildIntraN1TransparentContainer ())); //@sic R5-202641 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    //@siclog "Step 12A" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.1 indicate that the UE is capable of exchanging IP data on DRB #n associated with the first PDU session on NR Cell 1?
+    //@sic R5-204450 sic@
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    f_NR5GC_CheckDataPath(nr_Cell1,
+                          f_NR5GC_GetPdnIndex(v_PDUSessionInfoList[0]),
+                          dedicatedBearer,
+                          v_DRBId,
+                          "Step 12A");
+
+    //@siclog "Step 13" siclog@
+    //SS adjusts the cell-specific reference signal level according to row "T3".
+    f_NR_SetCellPowerList (v_CellPowerList_AtT3);
+
+    //@siclog "Steps 14-15" siclog@
+    //The SS transmits an RRCReconfiguration including dedicatedSIB1-Delivery containing SIB1 of NR Cell 3 to order the UE to perform handover to NR Cell 3
+    //Check: Does the UE transmit an RRCReconfigurationComplete message on NR Cell 3?
+    v_SIB1 := f_NR_GetSIB1(nr_Cell3);
+    v_SIB1.cellAccessRelatedInfo.plmn_IdentityInfoList[0].trackingAreaCode := int2bit(2,24);  //@sic R5s211526 BASELINE MOVING 2021 sic@
+    f_NR_CellInfo_SetTAC(nr_Cell3, int2bit(2,24)); //@sic R5s200309 sic@
+
+    v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(nr_Cell3); //@sic R5s240586 sic@
+
+    //@sic R5s201303 R5s210135 sic@
+    //To avoid a possible collision between the final clean of the target cell and the UE sending a RegistrationRequest, the HO procedure is split
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Steps1_12(nr_Cell1,
+                                                  nr_Cell3,
+                                                  -,
+                                                  false, // RBConfig_KeyChange := false
+                                                  -,
+                                                  v_SIB1, // SIB1
+                                                  -,-,-,
+                                                  cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, tsc_C_RNTI_Value3, 160)); //@sic R5s240586 sic@: Msg4 UL grant set to 160 bits
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+
+    //@siclog "Step 16" siclog@
+    //Check: Does UE transmit a REGISTRATION REQUEST message to update the registration of the actual tracking area?
+    //This message will be received in SRB2, as this SRB was established after the HO
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell3, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; //@sic R5s200309 sic@
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedAsp.Signalling.Nas[0].Pdu, Mobility, ?, -,-,-,-,-,-, cr_NG_TAI(v_PLMN, int2oct(1,3)))) { //@sic R5-221440 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    }
+
+    //@sic R5s201303 R5s210135 sic@
+    //Final clean up of the target cell
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_16(nr_Cell1, nr_Cell3);
+
+    //Table 8.1.4.1.2.3.2-4: Parallel behaviour
+    //@sic R5-221440 sic@
+    v_DefaultRef := activate(a_NR5GC_AdditionalRegistrationReq(nr_Cell3));
+
+    //@siclog "Step 16A" siclog@
+    //SS transmits SIB1 with TAC=2 on NR Cell 3
+    // Note: SIB1 already updated with TAC=2 in steps 14-15 above
+    //@sic R5-221440 sic@
+    f_NR_ModifySysinfo(nr_Cell3, false); //Modify Sysinfo in SS
+
+    //@siclog "Steps 17-18" siclog@
+    //SS responds with REGISTRATION ACCEPT message
+    //The UE send a REGISTRATION COMPLETE message
+    //@sic R5s200309 sic@
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell3,
+                                          v_GMM_MobilityInfo,
+                                          -, -,
+                                          noRrcConnectionRelease,
+                                          -,
+                                          tsc_NR_RbId_SRB2); // On SRB2
+
+    //@siclog "Step 19" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.1 indicate that the UE is capable of exchanging IP data on DRB #n associated with the first PDU session on NR Cell 3?
+    //@sic R5-204450 sic@
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    f_NR5GC_CheckDataPath(nr_Cell3,
+                          f_NR5GC_GetPdnIndex(v_PDUSessionInfoList[0]),
+                          dedicatedBearer,
+                          v_DRBId,
+                          "Step 19");
+
+    //@sic R5-221440 sic@
+    deactivate(v_DefaultRef);
+
+  }// End of fl_TC_8_1_4_1_2_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.4.1.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_4_1_5_NR5GC() runs on NR5GC_PTC
+  { // Intra NR handover / Failure / Re-establishment successful
+
+    f_NR5GC_Init(NR_2);
+
+    //Set Table 8.1.4.1.5.3.3-1: SIB1
+    f_NR_CellInfo_SetSIB1_PreambleTransMax(nr_Cell1, n50);
+    f_NR_CellInfo_SetSIB1_PreambleTransMax(nr_Cell2, n50);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_4_1_5_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A); //@sic R5s210162 R5-211332 sic@
+  } //End of f_TC_8_1_4_1_5_NR5GC
+
+  /*
+   * @desc      test body of TC_8_1_4_1_5
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_4_1_5_TestBody () runs on NR5GC_PTC
+  {
+    var template (value) DL_DCCH_Message v_RRCReconfigurationHO;
+    //Power level as per Table 8.1.4.1.5.3.2-1
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1 := { cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2 := { cs_NR_CellPower(nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2)}; //@sic R5s220824 R5-224130 sic@
+
+    // Reconfigure nr_Cell2 to no respond to any RA Preamble
+    // Table 8.1.4.1.5.3.2-4: The UE attempts to perform the handover using MAC Random Access Preamble on NR Cell 2. SS does not respond.
+    f_NR_SS_RachProcedureConfig(nr_Cell2, cs_NR_RachProcedureConfig_NoResponse);
+
+    //@siclog "Step 1" siclog@
+    // The SS changes the power level setting according to the row "T1".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //@siclog "Step 2" siclog@
+    // The SS transmits an RRCReconfiguration message on NR Cell 1 to order the UE to perform handover to NR Cell 2.
+    // Note: failure case UE doesn't go to nr_Cell2 => the standard function need not be used
+    v_RRCReconfigurationHO := f_NR5GC_RRCReconfiguration_IntraNR_HO(nr_Cell2);
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1, cs_TimingInfo_Now, v_RRCReconfigurationHO));
+    //@sic R5s220176 sic@
+
+    //@siclog "Step 3" siclog@
+    //The SS changes the power level setting according to the row "T2".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    //@siclog "Steps 4-6B" siclog@
+    //Check: Does the UE transmit an RRCReestablishmentRequest message on NR Cell 1?
+    //@sic R5-206369, R5-206336 sic@
+    f_NR5GC_RRCReestablishment_Def(nr_Cell1, nr_Cell1, -, 2, -, "Step 4");
+
+    //@siclog "Step 7" siclog@
+    //The SS changes the power level setting according to the row "T1".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //@siclog "Step 8" siclog@
+    //The SS transmits an RRCReconfiguration message on NR Cell 1 to order the UE to perform handover to NR Cell 2.
+    //@sic R5s220201 sic@
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1,  cs_TimingInfo_Now, v_RRCReconfigurationHO));
+
+    //@sic R5s210162 sic@
+    //EXCEPTION: In parallel to the events described in step 9 the steps specified in Table 8.1.4.1.5.3.2-4 should take place.
+    //Nothing to do nr_Cell2 already configured to not respond to any RA Preamble
+
+    //@siclog "Step 9" siclog@
+    //The SS changes the power level setting according to the row "T2".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);    //@sic R5s210162 R5-211332 sic@
+
+    //@siclog "Step 10-12B" siclog@
+    // Check: Does the UE transmit an RRCReestablishmentRequest message on NR Cell 1?
+    //@sic R5-206369, R5-206336, R5s210162 R5-211332 sic@
+    f_NR5GC_RRCReestablishment_Def(nr_Cell1, nr_Cell1, -, 2, -, "Step 12");
+
+    //@siclog "Step 13" siclog@
+    //The SS transmits an RRCRelease message on NR Cell 1.
+    //@sic R5s210162 R5-211332 sic@
+    f_NR_RRCRelease(nr_Cell1);
+
+  } // End of fl_TC_8_1_4_1_5_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.4.1.6
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_4_1_6_NR5GC() runs on NR5GC_PTC
+  { //Intra NR handover / Failure / Re-establishment failure
+    f_NR5GC_Init(NR_2);
+
+    //Set Table 8.1.4.1.6.3.3-1: SIB1
+    f_NR_CellInfo_SetSIB1_PreambleTransMax(nr_Cell1, n50);
+    f_NR_CellInfo_SetSIB1_PreambleTransMax(nr_Cell2, n50);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_4_1_6_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+
+  } //End of f_TC_8_1_4_1_6_NR5GC
+
+  /*
+   * @desc      test body of TC_8_1_4_1_6
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_4_1_6_TestBody () runs on NR5GC_PTC
+  {
+    var RNTI_Value v_RNTI_Value := f_NR_CellInfo_GetRNTI(nr_Cell1);
+    var PhysCellId v_PhysCellId := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1);
+    var ShortMAC_I v_ShortMAC_I;
+    var template (value) DL_DCCH_Message v_RRCReconfigurationHO;
+    var NextHopChainingCount v_NextHopChainingCount;
+    var float v_T304Min := f_NR_SetTimerToleranceMin(nr_Cell1, rrcTimer, 1.0); //T304 is ms1000 according to 38.508-1 Table 4.6.3-19.
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1 := { cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR1) }; //As per Table 8.1.4.1.6.3.2-1
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2 := { cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2),  //@sic R5-237355 sic@
+                                                                         cs_NR_CellPower(nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2) }; //As per Table 8.1.4.1.6.3.2-1 @sic R5s220824 R5-224130 sic@
+    var IntegerList_Type v_DrbIdList := f_NR_GetActiveDRBs(nr_Cell1);     //@sic R5s201221 sic@
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(nr_Cell1);
+    var NG_NAS_MSG_Indication_Type v_NasInd;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    timer t_T304Min;
+
+    // Reconfigure nr_Cell2 to no respond to any RA Preamble
+    // Table 8.1.4.1.6.3.2-4: The UE attempts to perform the handover using MAC Random Access Preamble on NR Cell 2. SS does not respond.
+    f_NR_SS_RachProcedureConfig(nr_Cell2, cs_NR_RachProcedureConfig_NoResponse);
+
+    //@siclog "Step 1" siclog@
+    // The SS changes the power level setting according to the row "T1".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //@siclog "Step 2" siclog@
+    //The SS transmits an RRCReconfiguration message on NR Cell 1 to order the UE to perform handover to NR Cell 2.
+    v_RRCReconfigurationHO := f_NR5GC_RRCReconfiguration_IntraNR_HO(nr_Cell2);
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1, cs_TimingInfo_Now, v_RRCReconfigurationHO));
+    t_T304Min.start(v_T304Min);
+
+    //EXCEPTION: In parallel to the events described in step 9 the steps specified in Table 8.1.4.1.6.3.2-4 should take place.
+    //Nothing to do nr_Cell2 already configured to not respond to any RA Preamble
+
+    //@siclog "Step 3" siclog@
+    //The SS changes the power level setting according to the row "T2".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+    v_ShortMAC_I := f_NR_Calculate_ShortMAC(nr_Cell1, nr_Cell1);
+
+    //UE re-establish SRB1 - UE releases SRB2 and DRB
+    //In SS: re-establish SRB1 and SRB2 - Release DRBs
+    //In SS: It helps with clearing the RB buffer handling reconfiguration retx
+    //@sic R5s201221  R5s210197 sic@
+    f_NR_SS_SRBs_DRBs_Release(nr_Cell1, cs_TimingInfo_Now, v_DrbIdList, true);
+    f_NR_SS_SRBs_DRBs_Config(nr_Cell1, cs_TimingInfo_Now, omit, true);
+
+    // Target Cell: Reconfigure DCCH/DTCH DCI on CSS and reconfigure RACH procedure contention-based with UE Contention Resolution Identity MAC CE and with a new C-RNTI.
+    f_NR_CellInfo_SetRNTI(nr_Cell1, tsc_C_RNTI_Value4);
+    f_NR_SS_C_RNTI_Config(nr_Cell1, tsc_C_RNTI_Value4, -, tsc_NoCnfReq, true);
+
+    f_NR_SS_CommonCellConfig(nr_Cell1, cads_NR_RachProcedure_DcchDtchToCSS_Config_REQ(nr_Cell1, cs_TimingInfo_Now, tsc_CnfReq,
+                                                                                               cs_NR_RachProcedureConfig_CBRA_Msg4Based(v_NR_PhysicalParameters, cs_NR_RachProcedureMsg4WithNoRrcMsg), //@sic R5s2211094 sic@
+                                                                                               cs_NR_SearchSpaceDlDciAssignment_CSSType1(v_NR_PhysicalParameters),
+                                                                                               cs_NR_SearchSpaceUlDciAssignmentCSS(v_NR_PhysicalParameters, cs_NR_DciFormat_0_0_Params)));
+
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE transmit an RRCReestablishmentRequest message on NR Cell 1?
+    t_T304Min.timeout;
+    SRB.receive(car_NR_SRB0_RrcPdu_IND(nr_Cell1, cr_38508_RRCReestablishmentRequest(cr_NR_ReestabUE_Identity (v_RNTI_Value, v_PhysCellId, v_ShortMAC_I), handoverFailure)));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    //@sic R5s220197 sic@
+
+    //@siclog "Step 5" siclog@
+    //The SS transmits an RRCReestablishment message to resume SRB1 operation and re-activate security on NR Cell 1.
+    //Note: RRCReestablishment includes a wrong nextHopChainingCount value causing an integrity check failure.
+    //@sic R5-200185 R5s220197 sic@
+    v_NextHopChainingCount := 7;
+    f_NR_SS_AS_ActivateSecurity_Current(nr_Cell1, 3, -, true); //Use a different value than UE to generate an integrity failure (step 6) @sic R5s201221 sic@
+    SRB.send (cas_NR_SRB1_RrcPdu_REQ(nr_Cell1, cs_TimingInfo_Now, cs_38508_RRCReestablishment_Def(tsc_NR_RRC_TI_Def,v_NextHopChainingCount)));
+
+    //Reconfigure UL DCCH DCI on USS
+    f_NR_SS_CommonCellConfig(nr_Cell1, cads_NR_SearchSpaceUlDciAssignment_REQ(nr_Cell1, cs_TimingInfo_Now, f_NR_SearchSpaceUlDciAssignment(v_NR_PhysicalParameters)));
+
+    // Stop periodic TA
+    f_NR_ULGrantConfiguration_Stop(nr_Cell1,cs_TimingInfo_Now);
+
+    //@siclog "Step 6" siclog@
+    //Check: Does the test result of test procedure in TS 38.508-1 [4] subclause 4.9.5 indicate that the UE has performed mobility registration on NR cell 1 started in NR RRC_IDLE?
+    // Expect RRCSetup before doing local SS reconfiguration to avoid the race condition of UE sending RRCSetupRequest and SS applying Local configurations
+    //@sic R5-200185 R5s220197 sic@
+    f_NR_RRC_SetupRequest_Def(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2A");
+
+    //In SS: re-establish SRB1 and SRB2 - Release DRBs
+    //UE re-establish SRB1 - UE releases SRB2 and DRB as part of mobility registration
+    f_NR_SS_RRC_ReleaseSecurity(nr_Cell1,cs_TimingInfo_Now);
+    v_DrbIdList := f_NR_GetActiveDRBs(nr_Cell1);
+    f_NR_SS_SRBs_DRBs_Release(nr_Cell1, cs_TimingInfo_Now, v_DrbIdList, true);
+    f_NR_SS_SRBs_DRBs_Config(nr_Cell1, cs_TimingInfo_Now, omit, true);
+
+    //SS transmit an RRCConnectionSetup message on on the NGC Cell 23.
+    f_NR_RRCSetup_Def (nr_Cell1);
+
+    //Check: Does the UE transmits an RRCConnectionSetupComplete message to confirm the successful completion of the connection establishment and a REGISTRATION REQUEST message indicating "mobility registration updating" is sent to update the registration of the actual tracking area?
+    v_NasInd := f_NR_RRCSetupComplete_Def(nr_Cell1,
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                          tsc_SHT_IntegrityProtected);
+
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_NasInd.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    //The SS transmits a SecurityModeCommand message.
+    //The UE transmits a SecurityModeComplete message.
+    f_NR_RRC_ActivateSecurity (nr_Cell1, v_NasInd.SecurityProtection.NasCount);
+
+    //Steps 4-5 of TS 38.508-1 Table 4.9.5.2.2-1 of the generic procedure are performed.
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell1, v_GMM_MobilityInfo);
+
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.4.1.10
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_4_1_10_NR5GC() runs on NR5GC_PTC
+  { // eCall Only mode / Intra NR handover / Success / Inter-frequency
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 [4], subclause 4.4.3.1.2. SIB1 indicates ims-EmergencySupport and ECallOverIMS-Support
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -85, -91);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -79, -82); // @sic R5s201076 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // Insert USIM for eCall
+    f_UT_USIM_Insert (UT, "38.508-1 Table 6.4.1-24");
+
+    // Preamble: An automatic eCall is established by following the test procedure as defined in TS 38.508-1 [4], subclause 4.9.29.
+    // -------------------------------------------------
+    f_NR5GC_ECallOnly(nr_Cell1, AUTOMATIC);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_4_1_10_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell3, STATE_CONNECTED_3A);
+  } // End of f_TC_8_1_4_1_10_NR5GC
+
+  /*
+   * @desc      test body of TC_8_1_4_1_10
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_4_1_10_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var NR_AbsoluteCellPower_Type v_CellPower_Serving_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_EntryCondition_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_Leaving_FR1;
+    var NR_AbsoluteCellPower_Type v_CellPower_Serving_FR2;
+    var NR_AbsoluteCellPower_Type v_CellPower_EntryCondition_FR2;
+    var NR_AbsoluteCellPower_Type v_CellPower_Leaving_FR2;
+    var integer v_Rsrp;
+    var template (value) MeasObjectParamsList_Type v_MeasuredObjectList;
+    var template (value) ReportConfigToAddModList v_ReportConfigList;
+    var template (value) MeasConfig v_MeasConfig;
+    var PhysCellId v_PhysCellIdServing;
+    var PhysCellId v_PhysCellIdNeighbour;
+    var template (value) RACH_ConfigGeneric v_RACH_ConfigGeneric;
+    var UE_NR_DeltaValues_Type  v_UE_NR_DeltaValues;
+    var default v_Default; //@sic R5s250154 sic@
+
+
+    //Power levels of NR cell 1 and cell 3
+    //  FR1 acc. Table 8.1.4.1.10.3.2-1.
+    /*         |   Cell 1   |  Cell 3
+     * -------------------------------
+     *   T0    |    -85     |   -91
+     * -------------------------------
+     *   T1    |    -85     |   -79
+     * -------------------------------
+     */
+    // FR2 acc. Table 8.1.4.1.10.3.2-1A.
+    /*         |   Cell 1   |  Cell 3
+     * -------------------------------
+     *   T0    |    -91     |   -100
+     * -------------------------------
+     *   T1    |    -91     |   -82
+     * -------------------------------
+     */
+    v_CellPower_Serving_FR1 := -85;
+    v_CellPower_Leaving_FR1 := -91;
+    v_CellPower_EntryCondition_FR1 := -79;
+    v_CellPower_Serving_FR2 := -91; // @sic R5-235290 sic@
+    v_CellPower_Leaving_FR2 := -100; // @sic R5-235290 sic@
+    v_CellPower_EntryCondition_FR2 := -82; // @sic R5-235290 sic@
+
+    v_CellPowerList_AtT0 := {cs_NR_CellPower(nr_Cell1, v_CellPower_Serving_FR1, v_CellPower_Serving_FR2), // @sic R5-235290 sic@
+                             cs_NR_CellPower(nr_Cell3, v_CellPower_Leaving_FR1, v_CellPower_Leaving_FR2)}; // @sic R5-235290 sic@
+    v_CellPowerList_AtT1 := {cs_NR_CellPower(nr_Cell3, v_CellPower_EntryCondition_FR1, v_CellPower_EntryCondition_FR2)}; // @sic R5-235290 sic@
+
+    //Set power level to T0
+    f_NR_SetCellPowerList (v_CellPowerList_AtT0);
+
+    //@siclog "Steps 1-2" siclog@
+    //The SS transmits an RRCReconfiguration message including MeasConfig to setup intra NR measurement and reporting for inter-frequency event A3.
+    //The UE transmits an RRCReconfigurationComplete message
+    if(f_NR_CellInfo_GetIsFR1(nr_Cell1))
+    {
+      v_Rsrp := 2;  // @sic R5-235290 sic@
+    }
+    else
+    { // @sic R5-235290 sic@
+      v_UE_NR_DeltaValues := f_NR_MobileInfo_GetDeltaValues();
+      v_Rsrp := (2 + v_UE_NR_DeltaValues.DeltaPrimaryBand.DeltaNRf2 - v_UE_NR_DeltaValues.DeltaPrimaryBand.DeltaNRf1);
+    }
+
+    v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell3), cs_MeasObjectId2(nr_Cell1)};  //@sic R5s200309 sic@
+    v_ReportConfigList := {cs_NR_ReportConfigEventA3(tsc_NR_IdReportConfigId1, v_Rsrp, r1, 0, -, cs_NR_MeasReportQuantity_Rsrp, ms640)};
+    v_MeasConfig := f_NR_GenerateMeasurementConfigNR(v_MeasuredObjectList, v_ReportConfigList, -, cds_MeasGapConfig_UE(f_NR_GetGapConfig_InterFreqOdd(nr_Cell1, nr_Cell3))); //@sic R5-199013 sic@
+
+    f_NR_SendRRCReconfiguration_MeasNR(nr_Cell1, v_MeasConfig, -, tsc_NR_MeasObjectId2); // @sic R5s201303 sic@
+
+    //@siclog "Step 3" siclog@
+    //SS adjusts the cell-specific reference signal level according to row "T1".
+    f_NR_SetCellPowerList (v_CellPowerList_AtT1);
+
+    //@siclog "Step 4" siclog@
+    //The UE transmits a MeasurementReport message to report event A3 with the measured RSRP value for NR Cell 3
+    v_PhysCellIdServing := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1);
+    v_PhysCellIdNeighbour := f_NR_CellInfo_GetPhysicalCellId(nr_Cell3);
+    f_NR_ReceiveMeasurementReports(nr_Cell1, v_PhysCellIdServing, tsc_NR_MeasId1, -, -, cr_NR_MeasResults_MeasResultNeighCells_NR({cr_NR_MeasResultNR_CellResults(v_PhysCellIdNeighbour, cr_NR_MeasQuantityResults_Rsrp)}));
+
+    //@siclog "Steps 5-6" siclog@
+    //The SS transmits an RRCReconfiguration message including reconfigurationWithSync with rach-ConfigDedicated, keySetChangeIndicator set to true and including nas-Container IE to order the UE to perform inter-frequency handover to NR Cell 3
+    //Check: Does the UE transmit RRCReconfigurationComplete message in NR Cell 3?
+    v_RACH_ConfigGeneric := f_NR_CellInfo_GetRACH_ConfigGeneric(nr_Cell1, tsc_NR_BWP_Id);
+    v_Default := activate(a_Handle_RTP_Packets());//Handle RTP packets during Handover @sic R5s250154 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell(nr_Cell1,
+                                        nr_Cell3,
+                                        -,
+                                        -, // RBConfig_KeyChange := true
+                                        cs_NR_MeasConfigRemove(cs_MeasObjectToRemoveList_2Entry(tsc_NR_MeasObjectId1, tsc_NR_MeasObjectId2), {tsc_NR_MeasId1}), //@sic R5-204237 sic@
+                                        -,
+                                        -,
+                                        cs_MasterKeyUpdate(true, 0, f_BuildIntraN1TransparentContainer ()), //@sic R5-202641 sic@
+                                        cs_NR_RACH_ConfigDedicated_Uplink(cs_38508_RACH_ConfigDedicated(v_RACH_ConfigGeneric, -, f_NR_CellInfo_GetSSB_Index(nr_Cell3))));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    f_IP_ChangeNrCell(IP, nr_Cell3); // @sic R5s230685 sic@
+    deactivate(v_Default); //@sic R5s250154 sic@
+
+    //@siclog "Step 7" siclog@
+    //Release eCall over IMS using the generic procedure described in TS 34.229-5 [41] subclause A.8.
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2]); //This step is done in the IMS PTC
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2]);
+
+  }// End of fl_TC_8_1_4_1_10_TestBody
+
+}

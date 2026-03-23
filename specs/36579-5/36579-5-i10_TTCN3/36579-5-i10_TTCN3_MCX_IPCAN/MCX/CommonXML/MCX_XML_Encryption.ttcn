@@ -1,0 +1,443 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-06-07 16:39:31 +0200 (Fri, 07 Jun 2024) $
+// $Rev: 38760 $
+/******************************************************************************/
+
+module MCX_XML_Encryption {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from IMS_Component all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_Common all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_SecurityFunctions all;
+  import from http_www_w3_org_2000_09_xmldsig language "XSD" all;
+  import from http_www_w3_org_2001_04_xmlenc language "XSD" all;
+
+  const charstring tsc_XML_EncryptionAlgorithm_KW_AES256 := "http://www.w3.org/2001/04/xmlenc#kw-aes256";               /* @status    APPROVED (MCX) */
+
+  const charstring tsc_XML_EncryptionAlgorithm_AES128_GCM := "http://www.w3.org/2009/xmlenc11#aes128-gcm";              /* @status    APPROVED (MCX) */
+
+  const charstring tsc_XML_EncryptionContentType := "http://www.w3.org/2001/04/xmlenc#Content";                         /* @status    APPROVED (MCX) */
+
+  template (present) EncryptionMethodType cr_XMLENC_EncryptionMethod(charstring p_Algorithm) :=
+  { /* @status    APPROVED (MCX) */
+    embed_values := {},  // @sic R5s230776: workaround removed sic@
+    algorithm := p_Algorithm,
+    keySize := omit,
+    oAEPparams := omit,
+    elem_list := {}
+  };
+
+  template (value) EncryptionMethodType cs_XMLENC_EncryptionMethod(charstring p_Algorithm) :=
+  { /* @status    APPROVED (MCX) */
+    embed_values := {},
+    algorithm := p_Algorithm,
+    keySize := omit,
+    oAEPparams := omit,
+    elem_list := {}
+  };
+
+  template (value) KeyInfoType cs_XMLDSIG_KeyInfo_KeyName(charstring p_KeyName) :=
+  { /* @status    APPROVED (MCX) */
+    embed_values := {},
+    id := omit,
+    choice_list := {
+      {
+        keyName := p_KeyName
+      }
+    }
+  };
+
+  template (present) KeyInfoType cr_XMLDSIG_KeyInfo_KeyName(template (present) charstring p_KeyName) :=
+  { /* @status    APPROVED (MCX) */
+    embed_values := ?,
+    id := *,
+    choice_list := {
+      {
+        keyName := p_KeyName
+      }
+    }
+  };
+
+  template (present) EncryptedDataType cr_XMLENC_EncryptedData(charstring p_KeyName) :=
+  { /* 36.579-1 Table 5.5.13.2-1 */
+    /* @status    APPROVED (MCX) */
+    encoding := omit,
+    id := omit,
+    mimeType := omit,
+    type_ := tsc_XML_EncryptionContentType ifpresent,
+    encryptionMethod := cr_XMLENC_EncryptionMethod(tsc_XML_EncryptionAlgorithm_AES128_GCM) ifpresent,
+    keyInfo := cr_XMLDSIG_KeyInfo_KeyName(p_KeyName) ifpresent,
+    cipherData := {
+      choice := {
+        cipherValue := ?
+      }
+    },
+    encryptionProperties := omit
+  };
+
+  template (value) EncryptedDataType cs_XMLENC_EncryptedData(charstring p_KeyName,
+                                                             octetstring p_CipherValue) :=
+  { /* 36.579-1 Table 5.5.13.2-2 */
+    /* @status    APPROVED (MCX) */
+    encoding := omit,
+    id := omit,
+    mimeType := omit,
+    type_ := tsc_XML_EncryptionContentType,
+    encryptionMethod := cs_XMLENC_EncryptionMethod(tsc_XML_EncryptionAlgorithm_AES128_GCM),
+    keyInfo := cs_XMLDSIG_KeyInfo_KeyName(p_KeyName),
+    cipherData := {
+      choice := {
+        cipherValue := p_CipherValue
+      }
+    },
+    encryptionProperties := omit
+  };
+
+  /*
+   * @desc      according to 24.379 clause 6.6.2.3.4 the user info of a URI containing an encrypted URI consists of
+   *            - base64 encoded encrypted URI
+   *            - "iv" parameter with IV value
+   *            - "key-id" parameter with base64 encoded XPK-ID
+   *            - "alg" parameter with value "128-aes-gcm"
+   *            (seperated by ";")
+   *            The function returns a list with the base64 encoded encrypted URI and the values of the three parameters
+   * @param     p_UserInfo
+   * @param     p_XPK
+   * @return    CharStringList_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_XML_EncryptedUriUserInfo_GetParamValueList(charstring p_UserInfo,
+                                                             MCX_SecurityKey_Type p_XPK) return CharStringList_Type
+  {
+    var charstring v_RegexpPatternList[1 .. 3] := {
+      "iv=(?+)",
+      "key-id=(" & f_Base64Encode(p_XPK.Id) & ")",                      // base64encoded as according to 24.379 clause 6.6.2.3.4
+      "alg=(128-aes-gcm)"
+    };
+    var CharStringList_Type v_UserInfoParts;
+    var charstring v_Value;
+    var integer i;
+
+    v_UserInfoParts := f_StringSplit(p_UserInfo, {";"});
+
+    if (lengthof(v_UserInfoParts) != 4) { return {}; }
+
+    for (i := 1; i < 4; i := i + 1) {
+      v_Value := regexp(v_UserInfoParts[i], v_RegexpPatternList[i], 0);
+      if (v_Value == "") { return {}; }
+      v_UserInfoParts[i] := v_Value;
+    }
+    return v_UserInfoParts;
+  }
+
+  /*
+   * @desc      decryption of URI attribute (24.379 clause 6.6.2.3.4)
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_XPK
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_DecryptAttributeUri(universal charstring p_URI,
+                                         charstring p_MCServiceID,
+                                         template (omit) MCX_SecurityKey_Type p_XPK) return universal charstring
+  {
+    var MCX_SecurityKey_Type v_XPK;
+    var template UserInfo v_UserInfo := ?;
+    var template (present) charstring v_Host := "mc1-encryption.3gppnetwork.org";
+    var template (present) UriComponents v_SipUriComponents := cr_SipUriComponent(v_UserInfo, v_Host);
+    var template SemicolonParam_List v_UriParameters := omit;
+    var charstring v_CharString := f_UniCharstring2Charstring(p_URI);
+    var SipUrl v_SipUrl := f_SIP_ParseURI(v_CharString);
+    var CharStringList_Type v_UserInfoParts;
+    var bitstring v_CipherKey;
+    var octetstring v_EncryptedURI;
+    var octetstring v_IV;
+    
+    if (isvalue(p_XPK) and tsc_MCX_XML_ConfidentialityProtection) {
+      v_XPK := valueof(p_XPK);
+      if (match(v_SipUrl, cr_SipUrl_Common(c_sipScheme, v_SipUriComponents, v_UriParameters))) {
+        v_UserInfoParts := fl_MCX_XML_EncryptedUriUserInfo_GetParamValueList(v_SipUrl.components.sip.userInfo.userOrTelephoneSubscriber, v_XPK);
+        if (lengthof(v_UserInfoParts) > 0) {
+          v_CipherKey := f_MCX_XML_GenerateProtectionKey(v_XPK, tsc_MCX_FC_Confidentiality, p_MCServiceID);
+          v_EncryptedURI := bit2oct(f_Base64Decode(v_UserInfoParts[0]));
+          v_IV           := bit2oct(f_Base64Decode(v_UserInfoParts[1]));
+          return oct2char(fx_XML_Decrypt(v_EncryptedURI, AES_128_GCM, v_CipherKey, v_IV));         /* according to 24.379 clause 6.6.2.3.4 the encryption is as specified in RFC 5288;
+                                                                                                      RFC 5288 clause 3 refers to AEAD_AES_128_GCM and AEAD_AES_256_GCM as described in RFC 5116;
+                                                                                                      according RFC 5116 clause 5.1 the ciphertext consists of the ciphered data and the authentication tag */
+        }
+      }
+      return "";
+    }
+    return p_URI;
+  }
+
+  /*
+   * @desc      Decrypt URI Attribute (if any)
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_XPK
+   * @return    template (omit) universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_DecryptOptionalAttributeUri(template (omit) universal charstring p_URI,
+                                                 charstring p_MCServiceID,
+                                                 template (omit) MCX_SecurityKey_Type p_XPK) return template (omit) universal charstring
+  {
+    var template (omit) universal charstring v_URI := omit;
+    if (isvalue(p_URI)) {
+      v_URI := f_MCX_XML_DecryptAttributeUri(valueof(p_URI), p_MCServiceID, p_XPK);
+    }
+    return v_URI;
+  }
+
+  /*
+   * @desc      encryption of URI attribute (24.379 clause 6.6.2.3.4)
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_EncryptAttributeUri(universal charstring p_URI,
+                                         charstring p_MCServiceID,
+                                         template (omit) MCX_SecurityKey_Type p_CSK) return universal charstring
+  {
+    var MCX_SecurityKey_Type v_CSK;
+    var bitstring v_CipherKey;
+    var octetstring v_IV;
+    var octetstring v_OctetString;
+    var CharStringList_Type v_UserInfoParts;
+
+    if (isvalue(p_CSK) and tsc_MCX_XML_ConfidentialityProtection) {
+      v_CSK := valueof(p_CSK);
+      v_CipherKey := f_MCX_XML_GenerateProtectionKey(v_CSK, tsc_MCX_FC_Confidentiality, p_MCServiceID);
+      v_IV := '5A5A5A5A5A5A5A5A5A5A5A5A'O;                        // arbitrarily selected
+      v_OctetString := fx_XML_Encrypt(unichar2oct(p_URI), AES_128_GCM, v_CipherKey, v_IV);
+      v_UserInfoParts := {
+        f_Base64Encode(oct2bit(v_OctetString)),
+        "iv=" & f_Base64Encode(oct2bit(v_IV)),
+        "key-id=" & f_Base64Encode(v_CSK.Id),
+        "alg=128-aes-gcm"
+      };
+      return "sip:" & f_StringJoin(v_UserInfoParts, ";") & "@mc1-encryption.3gppnetwork.org";
+    }
+    return p_URI;
+  }
+
+  /*
+   * @desc      encryption of URI attribute (if any)
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    template (omit) universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_EncryptOptionalAttributeUri(template (omit) universal charstring p_URI,
+                                                 charstring p_MCServiceID,
+                                                 template (omit) MCX_SecurityKey_Type p_CSK) return template (omit) universal charstring
+  {
+    var template (omit) universal charstring v_URI := omit;
+    if (isvalue(p_URI)) {
+      v_URI := f_MCX_XML_EncryptAttributeUri(valueof(p_URI), p_MCServiceID, p_CSK);
+    }
+    return v_URI;
+  }
+
+  /*
+   * @desc      Setup XCAP expression to access an element taking into account potential namespaces
+   * @param     p_Expression
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_XPATH_ExpressionForAnyNamespaces(charstring p_Expression) return charstring
+  {
+    var charstring v_String := regexp(p_Expression, "//(*)", 0);
+    var CharStringList_Type v_ElementList;
+    var charstring v_Element;
+    var charstring v_Expression;
+    var charstring v_IndexExpr;
+    var charstring v_RegExp;
+    var integer i;
+    
+    if (v_String == "") {
+      v_Expression := p_Expression;
+    } else {
+      v_ElementList := f_StringSplit(v_String, {"/"});
+      for (i := 0; i < lengthof(v_ElementList); i := i + 1) {
+        v_Element := v_ElementList[i];
+        v_RegExp := "(*)([[][0-9]+[]])";                // NOTE: "[[]", "[\[]" and "\[" are equivalent as well as "[]]", "[\]]" and "\]"
+        v_IndexExpr := regexp(v_Element, v_RegExp, 1);
+        if (v_IndexExpr != "") {
+          v_Element := regexp(v_Element, v_RegExp, 0);
+        }
+        v_ElementList[i] := "*[local-name()='" & v_Element & "']" & v_IndexExpr;
+      }
+      v_Expression := "//" & f_StringJoin(v_ElementList, "/");
+    }
+    return v_Expression;
+  }
+
+  /*
+   * @desc      Wrapper function to get content of an element
+   * @param     charstring
+   * @param     p_XmlPath
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_XML_Document_GetElementContent(universal charstring p_XmlElement,
+                                            charstring p_XmlPath) return universal charstring
+  {
+    var charstring v_XpathExpression := f_XPATH_ExpressionForAnyNamespaces(p_XmlPath);
+    return fx_XML_GetElementContent(p_XmlElement, v_XpathExpression);
+  }
+
+  /*
+   * @desc      Wrapper function to replace content of an element
+   * @param     charstring
+   * @param     p_XmlPath
+   * @param     charstring
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_XML_Document_ReplaceElementContent(universal charstring p_XmlElement,
+                                                charstring p_XmlPath,
+                                                universal charstring p_NewContent) return universal charstring
+  {
+    var charstring v_XpathExpression := f_XPATH_ExpressionForAnyNamespaces(p_XmlPath);
+    return fx_XML_SetElementContent(p_XmlElement, v_XpathExpression, p_NewContent);
+  }
+
+  /*
+   * @desc      decrypt element content according to 24.379 clause 6.6.2.3.3, https://www.w3.org/TR/xmlenc-core1 clause 4.3, https://www.w3.org/TR/xmlenc-core1 clause 5.2.4:
+   *            according to https://www.w3.org/TR/xmlenc-core1 clause 5.2.4 the cipher text is
+   *              IV & encrypted octets & T
+   *            with IV: 96 bit Initialization Vector; T: 128 bit Authentication Tag
+   *            returns plaintext or "" if the content is not a <EncryptedData> element or it does not match cr_XMLENC_EncryptedData
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_XML_EncryptedData_Decrypt(universal charstring p_Content,
+                                        charstring p_MCServiceID,
+                                        MCX_SecurityKey_Type p_CSK) runs on IMS_PTC return universal charstring
+  { /* p_Content can be a complete XML document or any fragment of it */
+    var bitstring v_CipherKey;
+    var EncryptedData v_EncryptedData;
+    var charstring v_KeyId;
+    var octetstring v_OctStr;
+    var octetstring v_IV;
+    var universal charstring v_DecryptedContent := "";
+    var bitstring v_Bitstring := f_Unichar2Bit(p_Content);
+    
+    if (decvalue(v_Bitstring, v_EncryptedData) == 0) {                          // first parameter is inout
+      v_KeyId := f_Base64Encode(p_CSK.Id);                                      // base64encoded as according to 33.180 clause 9.3.4.2
+      if (match(v_EncryptedData, cr_XMLENC_EncryptedData(v_KeyId))) {
+        v_CipherKey := f_MCX_XML_GenerateProtectionKey(p_CSK, tsc_MCX_FC_Confidentiality, p_MCServiceID);
+        v_OctStr := v_EncryptedData.cipherData.choice.cipherValue;              /* ciphered data is base64 encoded acc. to https://www.w3.org/TR/xmlenc-core1/ clause 4.3 and 4.4;
+                                                                                   nevertheless as cipherValue is of type XSD.Base64Binary, the codec does the base64 decoding (ES 201 873-9 clause 6.2.11) */
+        v_IV := substr(v_OctStr, 0, 12);                                        // 96 bit Initialization Vector (IV) at the beginning of the cipher text (https://www.w3.org/TR/xmlenc-core1/ clause 5.2.4)
+        v_OctStr := substr(v_OctStr, 12, lengthof(v_OctStr) - 12);              // v_OctStr still consists of the encrypted data and the 128 bit Authentication Tag (T)
+        v_OctStr := fx_XML_Decrypt(v_OctStr, AES_128_GCM, v_CipherKey, v_IV);
+        v_DecryptedContent := oct2unichar(v_OctStr);
+      } else {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid EncryptedData");
+      }
+    }
+    
+    return v_DecryptedContent;
+  }
+
+  type enumerated XML_Document_DecryptElementContent_Result_Type { OK, NOT_ENCRYPTED, NOT_FOUND };                      /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      return XML document with decrypted element; if the element cannot be decrypted the XML document is not changed
+   * @param     charstring          (by reference)
+   * @param     p_XmlPath
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    XML_Document_DecryptElementContent_Result_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_XML_Document_DecryptElementContent(inout universal charstring p_XmlDocument,
+                                                charstring p_XmlPath,
+                                                charstring p_MCServiceID,
+                                                MCX_SecurityKey_Type p_CSK) runs on IMS_PTC return XML_Document_DecryptElementContent_Result_Type
+  {
+    var universal charstring v_ElementContent;
+    var universal charstring v_DecryptedContent;
+
+    v_ElementContent := f_XML_Document_GetElementContent(p_XmlDocument, p_XmlPath);
+    if (v_ElementContent == "") {
+      return NOT_FOUND;
+    }
+    v_DecryptedContent := fl_XML_EncryptedData_Decrypt(v_ElementContent, p_MCServiceID, p_CSK);
+    if (v_DecryptedContent == "") {
+      return NOT_ENCRYPTED;
+    }
+    p_XmlDocument := f_XML_Document_ReplaceElementContent(p_XmlDocument, p_XmlPath, v_DecryptedContent);
+    return OK;
+  }
+
+  /*
+   * @desc      Encrypt element content  according to 24.379 clause 6.6.2.3.2
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    template (value) EncryptedDataType
+   * @status    APPROVED (MCX)
+   */
+  function fl_XML_EncryptedData_Encrypt(universal charstring p_Content,
+                                        charstring p_MCServiceID,
+                                        MCX_SecurityKey_Type p_CSK) return template (value) EncryptedDataType
+  {
+    var bitstring v_CipherKey := f_MCX_XML_GenerateProtectionKey(p_CSK, tsc_MCX_FC_Confidentiality, p_MCServiceID);
+    var octetstring v_IV := 'A5A5A5A5A5A5A5A5A5A5A5A5'O;                        // arbitrarily selected
+    var octetstring v_OctetString := unichar2oct(p_Content);
+
+    v_OctetString := fx_XML_Encrypt(v_OctetString, AES_128_GCM, v_CipherKey, v_IV);    // fx_XML_Encrypt returns encrypted data and the 128 bit Authentication Tag (T)
+    v_OctetString := v_IV & v_OctetString;                                             // 96 bit Initialization Vector (IV) at the beginning of the cipher text (https://www.w3.org/TR/xmlenc-core1/ clause 5.2.4)
+
+    return cs_XMLENC_EncryptedData(f_Base64Encode(p_CSK.Id), v_OctetString);           // v_OctetString gets base64 encoded by the codec (ES 201 873-9 clause 6.2.11)
+  }
+
+  /*
+   * @desc      XML element content encryption
+   * @param     charstring          (by reference)
+   * @param     p_XmlPath
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @status    APPROVED (MCX)
+   */
+  function f_XML_Document_EncryptElementContent(inout universal charstring p_XmlDocument,
+                                                charstring p_XmlPath,
+                                                charstring p_MCServiceID,
+                                                template (omit) MCX_SecurityKey_Type p_CSK)
+  { // NOTE: The function can be called independent from whether or not the element addressed by p_XmlPath exists in the given document
+    var universal charstring v_ElementContent;
+    var template (value) EncryptedData v_EncryptedData;
+    var universal charstring v_NewContent;
+
+    if (isvalue(p_CSK) and tsc_MCX_XML_ConfidentialityProtection) {
+      v_ElementContent := f_XML_Document_GetElementContent(p_XmlDocument, p_XmlPath);
+      if (v_ElementContent != "") {  // the element exists and has content
+        v_EncryptedData := fl_XML_EncryptedData_Encrypt(v_ElementContent, p_MCServiceID, valueof(p_CSK));
+        v_NewContent := f_Bit2Unichar(encvalue(v_EncryptedData));
+        p_XmlDocument := f_XML_Document_ReplaceElementContent(p_XmlDocument, p_XmlPath, v_NewContent);
+      }
+    }
+  }
+
+}

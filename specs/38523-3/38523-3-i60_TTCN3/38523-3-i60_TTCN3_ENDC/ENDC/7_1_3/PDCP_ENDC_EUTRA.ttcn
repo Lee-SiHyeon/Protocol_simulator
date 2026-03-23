@@ -1,0 +1,555 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-12-09 15:14:38 +0100 (Mon, 09 Dec 2024) $
+// $Rev: 40197 $
+/******************************************************************************/
+module PDCP_ENDC_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EUTRA38_CommonProcedures all;
+  import from EUTRA38_ENDC_CommonProcedures all;
+  import from EUTRA38_Handover all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_Component_5GS all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_LoopBack all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from EUTRA_NR_Parameters all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecuritySteps all;
+  import from EUTRA_Timing all;
+
+  /*
+   * @desc      Test step 1-2 for integrity test cases
+   * @param     p_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (ENDC)
+   */
+  function f_EUTRA_CheckUeCapabilityEnquiry(EUTRA_CellId_Type  p_CellId,
+                                           template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on EUTRA_5GS_PTC
+  {
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var octetstring v_NR_MRDC_Freqs;
+
+    f_EUTRA_NR_SendCoOrd(NR, cms_EUTRA_NR_OctetData (int2oct(f_EUTRA_CellInfo_GetBand (p_CellId), 1), "EUTRA Band"));
+    v_NR_MRDC_Freqs := f_EUTRA_NR_WaitForCoOrd_Data(NR, "MRDC_Freq");
+
+    //@siclog "Step 1" sic@ The SS sends UECapabilityEnquiry message to the UE integrity protected. siclog@
+    SRB.send(cas_SRB1_RrcPdu_REQ( p_CellId,
+                                    p_TimingInfo,
+                                    cs_508_UeCapabilityEnquiry_MRDC_r15(tsc_RRC_TI_Def, cs_UE_CapabilityRequest_EUTRA_NR, v_NR_MRDC_Freqs))); // @sic R5s190476 change 4.22 sic@
+    //@siclog "Step 2" sic@ Does the UE send a UECapabilityInformation message integrity protected? siclog@
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_UeCapabilityInformation(v_RRC_TI, cr_EUTRA_NRCapInfo))); // @sic R5s190476 change 4.21, R5s200046 sic@
+
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, " Step 2");
+  }
+
+  /*
+   * @desc Initiates common PDCP Pre-test condition
+   * @param     p_AM                (default value: 1)
+   * @param     p_UM                (default value: 0)
+   * @status    APPROVED (ENDC)
+   */
+  function f_EUTRA_PDCP_Init(integer p_AM := 1, integer p_UM:= 0 ) runs on EUTRA_5GS_PTC
+  {//@sic R5-197012 sic@
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Only, RRC_IDLE);
+
+    //Procedure to enter UE in state 2A
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, p_AM, p_UM, TEST_LOOPModeA_ON);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_X_EUTRA_TestBody ();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc Wrapper function to Checks the maintenance of PDCP Sequence Numbers.Test body of TC_7_1_3_X_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_X_EUTRA_TestBody() runs on EUTRA_5GS_PTC
+  {
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.1.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_1_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {// Maintenance of PDCP sequence numbers / User plane / 18 bit SN
+    f_EUTRA_PDCP_Init();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.1.2.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_1_2_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Maintenance of PDCP sequence numbers / User plane / 12 bit SN
+   f_EUTRA_PDCP_Init();
+  }
+
+  /*
+   * @desc  7.1.3.2.X  NR PDCP Integrity common pre-test conditions
+   * @param     p_AS_IntegrityProtAlgorithm
+   * @status    APPROVED (ENDC)
+   */
+  function fl_EUTRA_PDCP_Integrity(IntegrityProtAlgorithm_Type p_AS_IntegrityProtAlgorithm) runs on EUTRA_5GS_PTC
+  {//@sic R5-202614 sic@
+   var ENDC_SRB_DRB_Configuration_Type v_SecondaryConfig:= NR_PDCP_SRB1_2;
+   if (pc_srb3){
+      v_SecondaryConfig := NR_PDCP_SRB1_2_SRB3;
+   }
+  
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Set integrity algorithm
+    f_EUTRA_AS_IntegrityAlgorithm_Set(p_AS_IntegrityProtAlgorithm);//@sic R5-202614 sic@
+    //Preamble to enter UE in state 2A . NR PDCP is configured on SRB1 and SRB2 and SRB 3
+    //@sic R5-195339 sic@
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTMode_OFF, MCG_SCG, RRC_CONNECTED);//@sic R5s190476 sic@ ch 4.8 @sic R5s211168 sic@
+    f_EUTRA38_IntraLTE_HO_IntraPSCell_NR_PDCP (eutra_Cell1, v_SecondaryConfig,1); //@sic R5s190476 sic@ ch 4.9
+    
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    
+     //@siclog "Step 1a1-1a2" siclog@
+     //@sic R5-212370 sic@
+    //IF Connectivity is EN-DC or NGEN-DC, the SS sends EUTRA RRC UECapabilityEnquiry including RAT-Type eutra message to the UE.
+    //Check: Does the UE send a EUTRA RRC UECapabilityInformation message?
+    //@sic R5s201545 sic@
+    //@sic R5-206327 sic@
+    f_EUTRA_CheckUeCapabilityEnquiry(eutra_Cell1);
+
+    if (pc_srb3)
+    {
+       //@siclog "Step 2a4" siclog@
+       //Does the UE send SCGFailureInformationNR with failureType as srb3-IntegrityFailure on SRB1?
+       SRB.receive (car_SRB1_RrcPdu_IND(eutra_Cell1, cr_508_SCGFailureInformationNR_r15(cr_FailureReportSCG_NR_r15(srb3_IntegrityFailure, *)))); /* @sic R5s221124 sic@ */
+       f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    }
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+    f_EUTRA_TestBody_Set(false);
+    
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.2.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_2_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Integrity protection / Correct functionality of integrity algorithm SNOW3G / SRB / DRB
+    fl_EUTRA_PDCP_Integrity(eia1); //@sic R5-202614 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.2.2.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_2_2_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Integrity protection / Correct functionality of integrity algorithm AES / SRB / DRB
+    fl_EUTRA_PDCP_Integrity(eia2);//@sic R5-202615 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.2.3.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_2_3_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Integrity protection / Correct functionality of integrity algorithm ZUC / SRB / DRB
+    fl_EUTRA_PDCP_Integrity(eia3_v1130);//@sic R5-202616 sic@
+  }
+
+  /*
+   * @desc 7.1.3.3.X Common pre-test procedure for PDCP Ciphering test cases
+   * @param     p_AS_CipheringAlgorithm
+   * @status    APPROVED (ENDC)
+   */
+  function fl_EUTRA_PDCP_Ciphering(CipheringAlgorithm_r12 p_AS_CipheringAlgorithm) runs on EUTRA_5GS_PTC
+  {//@sic R5-202617 sic@
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_AS_CipheringAlgorithm_Set(p_AS_CipheringAlgorithm); //@sic R5-202617 sic@
+    //Preamble to enter UE in state 2. NR PDCP is configured on SRB1 and SRB2
+    //@sic R5-195340 R5-212417 sic@
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_SCG, RRC_CONNECTED); //@sic R5s190554 sic@ ch 4.1
+    f_EUTRA38_IntraLTE_HO_IntraPSCell_NR_PDCP (eutra_Cell1, NR_PDCP_MCG_SRB1_2,1);//@sic R5s190554 sic@ ch 4.9
+    f_EUTRA_CloseUE_TestLoopModeA (eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_NoScaling);
+    // @sic R5s190918 sic@
+    f_EUTRA_TestBody_Set(true);
+    //@sic R5s201545 sic@
+    //@sic R5-206328 sic@
+    //@siclog "Step 1a1-1a2" siclog@
+    //@sic R5-212371 sic@
+    //IF Connectivity is EN-DC or NGEN-DC, the SS sends EUTRA RRC UECapabilityEnquiry including RAT-Type eutra message to the UE.
+    //Check: Does the UE send a EUTRA RRC UECapabilityInformation message?
+    f_EUTRA_CheckUECapability (eutra_Cell1, cs_TimingInfo_Now);//@sic R5s190554 sic@ ch 4.25
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 1a2");
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger); //@sic R5s200514 sic@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+    //@siclog "Step 3" siclog@
+    //SS transmits PDCP PDU on MCG DRB ciphered.
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE transmit looped back PDCP PDU ciphered on MCG DRB?
+    f_EUTRA_CheckDataPath(eutra_Cell1, NR_PDCP, defaultBearer, "Step 4", tsc_RbId_DRB8,-, false); //@sic R5s190554 sic@ ch 4.28
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.3.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_3_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Ciphering and deciphering / Correct functionality of encryption algorithm SNOW3G / SRB / DRB
+   fl_EUTRA_PDCP_Ciphering(eea1);//@sic R5-202617 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.3.2.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_3_2_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Ciphering and deciphering / Correct functionality of encryption algorithm AES / SRB / DRB
+   fl_EUTRA_PDCP_Ciphering(eea2); //@sic R5-201431 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.3.3.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_3_3_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//Ciphering and deciphering / Correct functionality of encryption algorithm ZUC / SRB / DRB
+   fl_EUTRA_PDCP_Ciphering(eea3_v1130); //@sic R5-201432 sic@
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_4_1_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_4_1_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+  {
+    f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, SCG_RBConfig,1); //@sic R5s190844, R5s200063 sic@
+    
+    f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, SCG_RBConfig,2); //@sic R5s190844, R5s200063  sic@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.4.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_4_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//PDCP handover / Lossless handover / PDCP sequence number maintenance
+   // PDCP status report to convey the information on missing or acknowledged PDCP SDUs at handover
+   // In-order delivery and duplicate elimination in the downlink
+   f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Only, RRC_IDLE);
+
+    //Procedure to enter UE in state 2A
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_4_1_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_4_2_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_4_2_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+  {
+    f_EUTRA38_RRC_PSCellChange_IntraCell(eutra_Cell1, -, -, false); //@sic R5s190370, R5s200910 sic@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.4.2.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_4_2_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//PDCP handover / Non-lossless handover / PDCP sequence number maintenance
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Only, RRC_IDLE);
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0); //@sic R5s190370 sic@
+    //Procedure to enter UE in state 2A
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_4_2_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+   
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_5_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//PDCP Discard
+    f_EUTRA_PDCP_Init(0,1);  // SCG is a UM Bearer test loop Mode A is on
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_5_2_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_5_2_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+  {
+    //@siclog "Step 0B" siclog@
+   f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, RBConfig_Only); //@sic R5-204426 sic@
+   f_EUTRA_NR_SendCoOrd(NR,cms_EUTRA_NR_Trigger);//@sic R5s220567 sic@
+   //@siclog "Step 2B" siclog@
+   f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, RBConfig_Only); //@sic R5-220641 sic@
+   f_EUTRA_NR_SendCoOrd(NR,cms_EUTRA_NR_Trigger);//@sic R5s220567 sic@
+   //@siclog "Step 6" siclog@
+   f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, RBConfig_Only); //@sic R5-220641 sic@
+   f_EUTRA_NR_SendCoOrd(NR,cms_EUTRA_NR_Trigger);//@sic R5s220567 sic@
+   
+   f_EUTRA_NR_WaitForCoOrd_Trigger(NR);//@sic R5s220808 sic@
+  
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.2.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_5_2_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//PDCP Uplink Routing / Split DRB
+    var template (omit) RadioBearerList_Type v_DrbConfigAtSS := omit;
+
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Split, RRC_IDLE);
+    //Set null cipher Algorithm
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0);
+    //Procedure to enter UE in state 2A
+    v_DrbConfigAtSS := { cs_RadioBearer_Reconfig_SplitDRB2 (nr_Cell1) };
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON,-, -, -, -, v_DrbConfigAtSS, MCG_Split); //@sic R5-200338, R5s211399 sic@
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_5_2_EUTRA_TestBody ();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_5_3_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_5_3_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+  {
+    var template (omit)  RadioResourceConfigDedicated v_RadioResourceConfigDedicated;
+    var template (value) RadioBearerList_Type v_ConfigDrbSS;
+    
+    v_RadioResourceConfigDedicated := cds_RadioResourceConfigDedicated_SrbDrbConfig (-, {cs_508_DRB_ToAddMod_ENDC_Split});
+    v_ConfigDrbSS := {cs_RadioBearer_Reconfig_SplitDRB2(nr_Cell1)};
+    f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, SCG_RBConfig, -, -, -, v_RadioResourceConfigDedicated, v_ConfigDrbSS); // @sic R5s191042, R5-198180 sic@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.3.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_5_3_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  { // PDCP Data Recovery
+
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Only, RRC_IDLE);
+    //Set null cipher Algorithm
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0);
+    //Procedure to enter UE in state 2A
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_5_3_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+   
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_5_4_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+    function fl_TC_7_1_3_5_4_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+    {
+     var SubFrameTiming_Type v_SubframeTiming;
+     var template (value) TimingInfo_Type v_TimingInfo;
+     f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+     v_SubframeTiming := f_EUTRA_GetNextSendOccasion(eutra_Cell1, 100);
+     v_TimingInfo := cs_TimingInfo_SubFrameOffset(v_SubframeTiming.SFN.Number, v_SubframeTiming.Subframe.Number, v_SubframeTiming.HSFN.Number);
+     f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, RBConfig_Only, -, -, -, -, -, -,-, v_TimingInfo);
+     f_EUTRA38_SendTimeToNR(eutra_Cell1, v_SubframeTiming);
+     f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+    }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.4.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_5_4_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  {//PDCP reordering / Maximum re-ordering delay below t-Reordering / t-Reordering timer operations
+   f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Only, RRC_IDLE);
+
+    //Procedure to enter UE in state 2A
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_5_4_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_7_1_3_5_5_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_7_1_3_5_5_EUTRA_TestBody()runs on EUTRA_5GS_PTC
+  {
+    var template (omit)  RadioResourceConfigDedicated v_RadioResourceConfigDedicated;
+    
+    v_RadioResourceConfigDedicated := cds_RadioResourceConfigDedicated_SrbDrbConfig (-, {cs_508_DRB_ToAddMod_ENDC_Split});
+    f_EUTRA38_508_ENDC_Reconfiguration (eutra_Cell1, SCG_RBConfig, -, -, -, v_RadioResourceConfigDedicated); // @sic R5s191042, R5-198180, R5s230417 sic@
+    
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+    //@siclog "Step 9" siclog@
+    //The SS stops allocating any UL grant for the AM RLC secondary entity. @sic R5-204429 sic@
+
+    f_EUTRA_StopULGrantTransmission(eutra_Cell1, cs_TimingInfo_Now); // @sic R5-204429 sic@
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger); //@sic R5s210376 sic@
+    
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+    //@siclog "Step 12" siclog@
+    //The SS resumes normal UL grant allocation for the AM RLC secondary entity.. @sic R5-204429 sic@
+    f_EUTRA_StartDefULGrantTransmission(eutra_Cell1); // @sic R5-204429 sic@
+    
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.5.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_7_1_3_5_5_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  { // PDCP Data Duplication
+
+    var template (omit) RadioBearerList_Type v_DrbConfigAtSS := omit;
+    
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Preamble to enter UE in state 2
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, TESTModeA_ON, MCG_Split, RRC_IDLE);
+    //Set null cipher Algorithm
+    f_EUTRA_AS_CipheringAlgorithm_Set(eea0);
+    //Procedure to enter UE in state 2A
+    //@sic R5s210376 sic@
+    v_DrbConfigAtSS := {
+                    cs_RadioBearer_Reconfig_SplitDRB2 (nr_Cell1)
+                    };
+    f_EUTRA38_ENDC_ConfigAM_UM (eutra_Cell1, 1, 0, TEST_LOOPModeA_ON,-, -, -, -, v_DrbConfigAtSS, MCG_Split);
+   
+    f_EUTRA_TestBody_Set(true);
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    fl_TC_7_1_3_5_5_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+    
+    // f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1); @sic R5s230130 sic@
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED); // @sic R5-204475 sic@
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+   
+  }
+
+}

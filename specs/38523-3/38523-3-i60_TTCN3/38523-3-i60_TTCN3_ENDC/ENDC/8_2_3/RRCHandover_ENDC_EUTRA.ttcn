@@ -1,0 +1,244 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2023-09-06 15:38:02 +0200 (Wed, 06 Sep 2023) $
+// $Rev: 36807 $
+/******************************************************************************/
+
+module RRCHandover_ENDC_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA38_CommonProcedures all;
+  import from EUTRA38_ENDC_CommonProcedures all;
+  import from EUTRA38_Handover all;
+  import from EUTRA38_SecurityFunctions all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_AspCommon_Templates all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_Component_5GS all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_LoopBack all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from EUTRA_NR_Parameters all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from EUTRA_Timing all;
+  import from IP_PTC_CtrlMsgs all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.3.13.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_3_13_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  { // PCell Handover with SCG change / Reconfiguration with sync / SCG DRB / EN-DC
+    
+    f_EUTRA38_Init(EN_DC, c1);
+    
+    f_EUTRA_CellInfo_InitMaxReferencePower(eutra_Cell2, -79); // @sic R5s190587 sic@
+
+    //Create and configure cells
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    f_EUTRA_CellConfig_Def(eutra_Cell2);
+    // Set eutra_Cell2 power level "T0" in Table 8.2.3.13.1.3.2-1 / Table 8.2.3.13.1.3.2-2
+    f_EUTRA38_SetCellPower(eutra_Cell2, -91, -91); // FR2 branch removed as test requires two EUTRA OTA cells (R5_234799)
+    
+    //Preamble to enter state RRC_CONNECTED using generic procedure parameter Connectivity (EN-DC) with MCG and SCG DRBs established
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, PING_Or_TEST_LOOPModeB_ON, MCG_SCG, RRC_CONNECTED); // @sic R5s200342 sic@
+
+    // Set eutra_Cell1 power levels "T0" in Table 8.2.3.13.1.3.2-1 / Table 8.2.3.13.1.3.2-2
+    f_EUTRA38_SetCellPower(eutra_Cell1, -85, -85); // FR2 not applicable @sic R5-234799 sic@
+   
+    f_EUTRA_TestBody_Set(true);
+    fl_TC_8_2_3_13_1_ENDC_EUTRA_TestBody ();
+    f_EUTRA_TestBody_Set(false);
+    
+    if(not pc_IP_Ping) { // @sic R5s201127 sic@
+      f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell2); // Note: UE SRBs are now on eutra_Cell2
+    }
+    f_EUTRA38_ENDC_Postamble(eutra_Cell2, E2_CONNECTED);
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_8_2_3_13_1_ENDC_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+
+  function fl_TC_8_2_3_13_1_ENDC_EUTRA_TestBody() runs on EUTRA_5GS_PTC
+  {
+    var template (omit) octetstring v_NR_SCGConfig := omit;
+    var template (omit) octetstring v_NR_RBConfig := omit;
+    var SubFrameTiming_Type v_Timing;
+    var DRB_IdentityList_AllAndAMonly_Type v_DRB_IdentityList;
+    var EUTRA_SecurityParams_Type v_Auth_Params := f_EUTRA_Security_Get();
+    var NextHopChainingCount v_NextHopChainingCount := 0; //According to 36.508 cl. 4.6.1 RRCConnectionReestablishment
+    var DrxCtrl_Type v_DrxCtrl;
+    var Frequency_IE_Type v_Frequency_IE_TargetCell := f_EUTRA_CellInfo_GetFrequencyIEs (eutra_Cell2);
+    var CellCarrierFreqEUTRA_Type v_CarrierFreqEutra_TargetCell := v_Frequency_IE_TargetCell.UL_DL_Earfcn;
+    var template (omit) CarrierFreqEUTRA_v9e0 v_CarrierFreqEutra_v9e0 := omit;
+    var template (value) MobilityControlInfo v_MobilityControlInfo;
+    var template (value) RadioResourceConfigDedicated v_RadioResourceConfigDedicated := f_Generate_cs_508_RadioResourceConfigDedicated_HO (eutra_Cell2, n4);
+    var template (omit) UplinkGrantCE_Mode_Type v_UplinkGrantCE_Mode := f_EUTRA_SS_InitialiseUplinkGranteCE(eutra_Cell2, false);
+
+    var template (value) RachProcedureConfig_Type v_RachProcedureConfig := cs_RachProcedureConfig_CRNTI_HO(f_EUTRA_CellInfo_GetRAR_TA(eutra_Cell2),
+                                                                                                           f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell2),
+                                                                                                           v_UplinkGrantCE_Mode,
+                                                                                                           f_EUTRA_FirstRB_UL(eutra_Cell2));
+   
+    v_CarrierFreqEutra_v9e0 := cs_CarrierFreqEUTRA_v9e0(v_CarrierFreqEutra_TargetCell.dl_CarrierFreq_r9, v_CarrierFreqEutra_TargetCell.ul_CarrierFreq_r9);
+    v_MobilityControlInfo := f_Generate_cs_MobilityControlInfo_HO(eutra_Cell2, v_CarrierFreqEutra_v9e0);
+    
+    // @siclog "Step 1" siclog@
+    // Set EUTRA power levels according to row "T1" in Table 8.2.3.13.1.3.2-1 / Table 8.2.3.13.1.3.2-2
+    // Eutra_Cell1 power level does not change
+    f_EUTRA38_SetCellPower(eutra_Cell2, -79, -79);  // FR2 not applicable @sic R5-234799 sic@
+    
+    // @siclog "Steps 2-3" siclog@
+    // Build DRB identity list from inputed radiobearer config list
+    v_DRB_IdentityList := f_EUTRA_DRB_IdentityList(cs_DrbConfigList_DRB1_8); // @sic R5s190597 sic@
+    
+    // Step 0: Configuration of DRBs at the target cell
+    f_EUTRA_SS_CommonRadioBearerConfig(eutra_Cell2, cs_DrbConfigList_DRB1_8);   // @sic R5s190597 sic@
+
+    // Step 1: Transfer of the PDCP Count for AM DRBs from source to target cell
+    f_EUTRA_SS_PdcpCount_Handover(eutra_Cell1, eutra_Cell2, v_DRB_IdentityList.AMonly);
+    
+    // Step 2: Tell the SS about the HO
+    f_EUTRA_SS_PdcpHandoverCtrl(eutra_Cell2, cas_PdcpHandoverInit_REQ(eutra_Cell1, eutra_Cell2));
+
+    // Step 3: Configure C-RNTI based contention resolution in target cell
+    f_EUTRA_SS_ConfigRachProcedure(eutra_Cell2, tsc_C_RNTI_Def2, v_RachProcedureConfig);
+    
+    // Save new C-RNTI in cell configuration for eutra_Cell2
+    f_EUTRA_CellInfo_SetC_RNTI(eutra_Cell2, tsc_C_RNTI_Def2);
+      
+    // Step 4: activate RRC security at SS target cell for SRB 1, 2 and 1 AM DRB
+    v_Auth_Params := f_EUTRA_SS_AS_ActivateSecurity_HO_Reest(eutra_Cell2,
+                                                             v_Auth_Params,
+                                                             v_NextHopChainingCount,
+                                                             -,
+                                                             v_DRB_IdentityList.AMonly);
+    f_EUTRA_Security_Set(v_Auth_Params);
+    
+    // Step 5: configure DRX
+    if (f_EUTRA_CellInfo_DrxIsConfigured(eutra_Cell1)) {
+      v_DrxCtrl := f_EUTRA_CellInfo_GetDrxCtrl(eutra_Cell1);
+      f_EUTRA_SS_DrxCtrlConfig(eutra_Cell2, v_DrxCtrl);
+    }
+    
+    // Step 6: stop periodic TA on source cell
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell1, cs_TimingInfo_Now, -, cs_UplinkTimeAlignment_Synch_None, cs_UL_GrantConfig_OnSR);
+
+    // Step 7: configure UL grant configuration on target cell
+    f_EUTRA_ULGrantConfiguration_Common(eutra_Cell2, cs_TimingInfo_Now, cs_DciInfo_CcchDcchDtchUL_Def, cs_UplinkTimeAlignment_Synch_None, cs_UL_GrantConfig_OnSR);
+
+    f_IP_ChangeEutraCell(IP, eutra_Cell2);
+
+    v_NR_SCGConfig := f_EUTRA_NR_WaitForCoOrd_Data(NR, "Reconfig");
+    v_NR_RBConfig := f_EUTRA_NR_WaitForCoOrd_Data(NR, "RB");
+
+    v_Timing := f_EUTRA_GetNextSendOccasion(eutra_Cell1, tsc_EUTRA_DelayBeforeIntraCellHO);
+    //Send v_Timing to NR side
+    f_EUTRA38_SendTimeToNR(eutra_Cell1, v_Timing);
+    
+    f_EUTRA38_ENDC_InitiateAndSendS_gNBKeys(NR,1); //@sic R5s200455 sic@
+    // Step 8, 9: Transmit RRCConnectionReconfiguration/HO command to UE
+    f_EUTRA38_508_ENDC_SendReconfiguration( eutra_Cell1,
+                                            -, //RadioBearerList_Type
+                                            v_RadioResourceConfigDedicated,
+                                            v_NR_SCGConfig,
+                                            v_NR_RBConfig,
+                                            -, 1, -, -, -,  // @sic R5s190587 sic@
+                                            v_MobilityControlInfo,
+                                            -, cs_TimingInfo_EUTRA_NB(v_Timing), -,   //@sic R5s200455 sic@
+                                            cs_508SecurityConfigHO_IntraLTE,
+                                            eutra_Cell2); // @sic R5s190587 sic@
+        
+    // Step 10: configure periodic TA on target cell
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell2, cas_PUCCH_Synch_Config_REQ(eutra_Cell2, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_Auto_Def, tsc_NoCnfReq));
+    
+    // Step 11: Tell the SS about the HO
+    f_EUTRA_SS_PdcpHandoverCtrl(eutra_Cell2, cas_PdcpHandoverComplete_REQ(eutra_Cell2));
+    
+    // Step 12: configure RACH procedure for target cell back to default
+    f_EUTRA_SS_ConfigRachProcedure_Def(eutra_Cell2, -, -, -, -, -, tsc_NoCnfReq);
+
+    f_EUTRA_508RRC_IntraLTE_HO_InterCell_Common_Steps13_14(eutra_Cell1);
+    
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    
+    // Test body now finished
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.3.14.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_3_14_1_ENDC_EUTRA() runs on EUTRA_5GS_PTC
+  { // SCG Change / Reconfiguration with sync / Split DRB / EN-DC
+    f_EUTRA38_Init(EN_DC, c1);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    
+    //Preamble to enter UE into RRC Connected
+    f_EUTRA38_ENDC_Preamble (eutra_Cell1, PING_Or_TEST_LOOPModeB_ON, MCG_Split, RRC_CONNECTED);
+    f_EUTRA38_SetCellPower (eutra_Cell1, -85, -96);
+    f_EUTRA_TestBody_Set(true);
+    fl_TC_8_2_3_14_1_ENDC_EUTRA_TestBody ();
+    f_EUTRA_TestBody_Set(false);
+    
+    if (not pc_IP_Ping) { // @sic R5s190491 sic@
+      f_EUTRA_OpenUE_TestLoopMode_Deactivate_TestMode (eutra_Cell1);
+    }
+    f_EUTRA38_ENDC_Postamble(eutra_Cell1, E2_CONNECTED);
+    // If finishing in E2_CONNECTED, need to wait until connection released before taking down the NR cell!
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_8_2_3_14_1_ENDC_EUTRA
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_3_14_1_ENDC_EUTRA_TestBody() runs on EUTRA_5GS_PTC
+  {
+    var EUTRA38_SecurityParamsExtd_Type v_Security_Params;
+    
+    // @siclog "Steps 1 - 2" siclog@
+    // T1 power levels not changed on EUTRA
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger); // @sic R5s190925 sic@
+
+    // Update SgNB Keys for new SK Counter value
+    v_Security_Params := f_EUTRA38_ENDC_InitiateAndSendS_gNBKeys(NR, 1);
+    
+    // Need to change the link to NR Cell 2
+    f_EUTRA_SS_CommonRadioBearerConfig (eutra_Cell1, {cs_RadioBearer_Reconfig_SplitDRB2(nr_Cell2)});
+    f_EUTRA38_RRC_PSCellChange_InterCell (eutra_Cell1, v_Security_Params.SK_Counter);
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    // @siclog "Steps 3 - 4" siclog@
+    // Send trigger to NR to test DRB2
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger);
+    
+    // Test body now finished @sic R5s190491 sic@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(NR);
+  }
+
+}

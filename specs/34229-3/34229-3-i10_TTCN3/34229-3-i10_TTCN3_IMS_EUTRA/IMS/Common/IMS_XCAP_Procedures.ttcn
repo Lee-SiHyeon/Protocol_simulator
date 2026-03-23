@@ -1,0 +1,258 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-09-14 09:54:06 +0200 (Thu, 14 Sep 2023) $
+// $Rev: 37128 $
+/******************************************************************************/
+
+module IMS_XCAP_Procedures {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from EPS_NAS_Constants all;
+  import from HTTP_XCAP_CoordMsg all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CC_Component all;
+  import from IMS_CC_Parameters all;
+  import from IMS_Component all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from IP_PTC_Templates all;
+  import from WLAN_Parameters all;
+
+  type enumerated AuthenticationRequirement_Type {gbaRequested, gbaPreferred, httpDigestPreferred};   /* @status    APPROVED (IMS) */
+
+  type record XCAP_ServerAddrInfo_Type {    /* @status    APPROVED (IMS) */
+    IP_AddrInfo_Type IPv4,
+    IP_AddrInfo_Type IPv6
+  };
+
+  template (value) XCAP_ServerAddrInfo_Type cs_XCAP_ServerAddrInfo(charstring p_IPAddressIPv4,
+                                                                   charstring p_IPAddressIPv6) :=
+  { /* @status    APPROVED (IMS) */
+    IPv4 := cs_IPv4Addr(p_IPAddressIPv4),
+    IPv6 := cs_IPv6Addr(p_IPAddressIPv6)
+  };
+
+  template (value) HTTP_ConfigurationParams_Type cs_HTTP_ConfigurationParams(template (value) IP_SocketList_Type p_XcapServerAddrAndPort_List,
+                                                                             template (value) IP_SocketList_Type p_BsfServerAddrAndPort_List,
+                                                                             template (omit) IP_DrbInfo_Type p_DrbRoutingInfo,
+                                                                             HTTP_AuthenticationMethod_Type p_AuthenticationMethod,
+                                                                             integer p_XRESLength,
+                                                                             charstring p_XcapUsername,
+                                                                             charstring p_XcapUserId,
+                                                                             charstring p_XcapRootUri := px_XCAP_RootUri) :=
+  { /* @status    APPROVED (IMS) */
+    XcapServerAddrAndPort_List := p_XcapServerAddrAndPort_List,  // @sic R5s150148 sic@
+    BsfServerAddrAndPort_List := p_BsfServerAddrAndPort_List,    // @sic R5s150148 sic@
+    DrbRoutingInfo := p_DrbRoutingInfo,
+    AuthenticationMethod := p_AuthenticationMethod,
+    XRESLength := p_XRESLength,                                  // @sic R5s160710 sic@
+    XcapUsername := p_XcapUsername,
+    XcapUserId := p_XcapUserId,
+    XcapRootUri := p_XcapRootUri
+  };
+
+  template (value) HTTP_TransactionParams_Type cs_HTTP_TransactionParams(float p_MaxDuration,
+                                                                         float p_InactivityDuration) :=
+  { /* @status    APPROVED (IMS) */
+    MaxDuration := p_MaxDuration,
+    InactivityDuration := p_InactivityDuration
+  };
+
+  /*
+   * @desc      send command to the HTTP/XCAP PTC and wait until it has been done
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_Command
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_HTTP_RunCommand(charstring p_FileName,
+                                 LineNo_Type p_LineNo,
+                                 template (value) IMS_HTTP_Command_Type p_Command) runs on IMS_XCAP_PTC return charstring
+  {
+    var template (present) IMS_HTTP_Response_Type v_ExpectedResponse := ?;
+    var IMS_HTTP_Response_Type v_Response;
+    var charstring v_Result := "";
+    
+    XCAP.send(p_Command);
+    XCAP.receive(v_ExpectedResponse) -> value v_Response;
+    
+    if (ischosen(v_Response.Error)) {
+      f_IMS_SetVerdictFailOrInconc(p_FileName, p_LineNo, v_Response.Error);
+    } else {
+      v_Result := v_Response.Result;
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      start transaction and wait until it is done: the UE shall exchange all necessary HTTP messages with the XCAP server
+   * @param     p_MaxDuration
+   * @param     p_InactivityDuration (default value: 20.0)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_HTTP_Transaction(float p_MaxDuration,
+                                  float p_InactivityDuration := 20.0) runs on IMS_XCAP_PTC
+  { /* @sic R5s130794 change 20: p_InactivityDuration increased to 20.0 sic@ */
+    var template (value) IMS_HTTP_Command_Type v_Command := {
+      TransactionStart := cs_HTTP_TransactionParams(p_MaxDuration, p_InactivityDuration)
+    };
+    f_IMS_HTTP_RunCommand(__FILE__, __LINE__, v_Command);
+  }
+
+  /*
+   * @desc      return HTTP_AuthenticationMethod_Type acc. to PICS setting and test requirement
+   * @param     p_AuthenticationRequirement
+   * @return    HTTP_AuthenticationMethod_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_HTTP_AuthenticationMethod(AuthenticationRequirement_Type p_AuthenticationRequirement) runs on IMS_PTC return HTTP_AuthenticationMethod_Type
+  { /* @sic R5-166278, R5-166279: p_AuthenticationRequirement sic@ */
+    var HTTP_AuthenticationMethod_Type v_AuthMethod;
+    
+    if (p_AuthenticationRequirement == gbaRequested) {
+      if (not pc_HttpGBAAuthentication) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE does not support GBA");
+      }
+      v_AuthMethod := httpDigestAndGbaAuthentication;
+    } else {
+      if (pc_HttpGBAAuthentication and pc_HttpDigestAuthentication) {
+        if (p_AuthenticationRequirement == gbaPreferred) {
+          v_AuthMethod := httpDigestAndGbaAuthentication;
+        } else {
+          v_AuthMethod := httpDigestAuthentication;
+        }
+      }
+      else if (pc_HttpGBAAuthentication) {
+        v_AuthMethod := httpDigestAndGbaAuthentication;
+      }
+      else if (pc_HttpDigestAuthentication) {   // @sic R5s160821 sic@
+        v_AuthMethod := httpDigestAuthentication;
+      }
+      else {    /* @sic R5-163070: noAuthentication is not allowed anymore sic@ */
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "At least one of GBA for XCAP authentication or HTTP Digest for XCAP authentication has to be supported");
+      }
+    }
+    return v_AuthMethod;
+  }
+
+  /*
+   * @desc      configure HTTP/XCAP PTC
+   * @param     p_AuthenticationMethod
+   * @param     p_XcapUserId
+   * @param     p_XcapUsername
+   * @param     p_XCAP_ServerAddrInfo
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_HTTP_Configure(HTTP_AuthenticationMethod_Type p_AuthenticationMethod,
+                                charstring p_XcapUserId,
+                                charstring p_XcapUsername,
+                                template (value) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo) runs on IMS_XCAP_PTC
+  {
+    var template (omit)  IPCAN_RAN_Type v_RanType := f_IMS_PTC_GetRanType();   /* @sic R5-163201: IPCAN_RAN_Type instead of charstring sic@ */
+    var template (value) IMS_HTTP_Command_Type v_Command;
+    var template (value) IP_AddrInfo_Type v_IP_AddressV4 := p_XCAP_ServerAddrInfo.IPv4;
+    var template (value) IP_AddrInfo_Type v_IP_AddressV6 := p_XCAP_ServerAddrInfo.IPv6;
+    var template (value) IP_SocketList_Type v_XcapServerAddrAndPort_List := {};
+    var template (value) IP_SocketList_Type v_BsfServerAddrAndPort_List := {};
+    var template (omit) IP_DrbInfo_Type v_DrbRoutingInfo;
+    var IP_DrbId_Type v_DrbId;
+    
+    if (not isvalue(v_RanType)) {
+      FatalError(__FILE__, __LINE__, "Unknown RAN type");
+    }
+
+    select (valueof(v_RanType)) {
+      case (EUTRA_FDD, EUTRA_TDD) {
+        v_DrbId := f_EUTRA_NB_EpsBearerAssociatedDRB(tsc_EpsDefaultBearerId2ndPDN);    /* DRB Id for 2nd PDN; @sic R5s141351 change 4 sic@ */
+        v_DrbRoutingInfo := cs_DrbInfo_EUTRA(eutra_Cell1, v_DrbId);
+      }
+      case (WLAN) { // @sic R5s230616 change 2.1 sic@
+        if (pc_WLAN_XCAP_without_PDN) {
+          v_DrbRoutingInfo := cs_DrbInfo_WLAN(wlan_Cell27);
+        } else {
+          v_DrbRoutingInfo := cs_DrbInfo_IPsecTunnel(ePDG_XCAP);
+        }
+      }
+      case (NR) {
+        v_DrbRoutingInfo := f_IMS_IPCAN_GetDrbInfo(IPCAN);                             /* @sic R5s220617 change 1.9 (replacing changes for R5-217449, R5s220380) sic@ */
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "RAN type not supported by current implementation");
+      }
+    }
+
+    v_XcapServerAddrAndPort_List[0] := cs_IP_Socket(v_IP_AddressV4, tsc_PortNumberHTTP);   /* @sic R5s150148 sic@ */
+    v_XcapServerAddrAndPort_List[1] := cs_IP_Socket(v_IP_AddressV6, tsc_PortNumberHTTP);   /* @sic R5s150148 sic@ */
+    
+    v_Command := {
+      Configure := cs_HTTP_ConfigurationParams(v_XcapServerAddrAndPort_List,
+                                               v_BsfServerAddrAndPort_List,
+                                               v_DrbRoutingInfo,
+                                               p_AuthenticationMethod,
+                                               f_IMS_PTC_Security_GetXRESLength(),         /* @sic R5s160710 sic@ */
+                                               p_XcapUsername,
+                                               p_XcapUserId)
+    };
+    
+    f_IMS_HTTP_RunCommand(__FILE__, __LINE__, v_Command);
+  }
+
+  /*
+   * @desc      preamble for XCAP test cases; returns XCAP user id (XUI)
+   * @param     p_AuthenticationRequirement
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function f_XCAP_Preamble(AuthenticationRequirement_Type p_AuthenticationRequirement,
+                           template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC return charstring
+  { /* @sic R5-166278, R5-166279: p_AuthenticationRequirement sic@ */
+    var HTTP_AuthenticationMethod_Type v_AuthenticationMethod;
+    var PDN_AddressInfo_Type v_PDN_AddressInfo;
+    var charstring v_XcapUserId;
+    var charstring v_XcapUsername;
+    var template (value) XCAP_ServerAddrInfo_Type v_XCAP_ServerAddrInfo;
+    var PDN_Index_Type v_PDN_Index;
+
+    /* NOTE: f_IMS_CC_StartSignalling triggers IPCAN to start the XCAP signalling but it does not wait for it
+     *       => we can start this in the preamble even though the UE will get triggered later on in the test body */
+    f_IMS_CC_StartSignalling(IPCAN_XCAP_Signalling);
+
+    if (pc_XCAP_XUIisDefaultPublicUserId) {                       /* @sic R5-144689, R5-144531 sic@ */
+      v_XcapUserId := f_IMS_PTC_ImsInfo_GetUriString(defaultId);
+    } else {
+      FatalError(__FILE__, __LINE__, "non-IR.92 configuration not supported yet: XUI has to be default public user id)");
+    }
+    if (pc_XCAP_UsernameIsConfiguredInUE) {                       /* @sic R5-144689, R5-144531 sic@ */
+      v_XcapUsername := px_XCAP_Username;
+    } else {
+      v_XcapUsername := v_XcapUserId;
+    }
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {  // @sic R5s220617 change 1.8 sic@
+      v_PDN_Index := PDN_3;
+    } else {
+      v_PDN_Index := PDN_2;
+    }
+
+    if (isvalue(p_XCAP_ServerAddrInfo)) {
+      v_XCAP_ServerAddrInfo := valueof(p_XCAP_ServerAddrInfo);
+    } else {
+      v_PDN_AddressInfo := f_PDN_AddressInfo_Get(v_PDN_Index); /* @sic R5s141051 change 8 sic@ */
+      v_XCAP_ServerAddrInfo := cs_XCAP_ServerAddrInfo(v_PDN_AddressInfo.XCAP_ServerAddressIPv4, v_PDN_AddressInfo.XCAP_ServerAddressIPv6)
+    }
+
+    v_AuthenticationMethod := fl_HTTP_AuthenticationMethod(p_AuthenticationRequirement);  /* @sic R5s160561 sic@ */
+    f_IMS_HTTP_Configure(v_AuthenticationMethod, v_XcapUserId, v_XcapUsername, v_XCAP_ServerAddrInfo);
+
+    return v_XcapUserId;
+  }
+
+}

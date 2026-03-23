@@ -1,0 +1,397 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-08-11 13:03:06 +0200 (Sun, 11 Aug 2024) $
+// $Rev: 39237 $
+/******************************************************************************/
+
+module MCX_IMS_Component {
+
+  import from CommonDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_Component all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_TcpHandlerMsgs all;
+  import from IP_PTC_UdpPacketHandlerMsgs all;
+  import from MCX_CommonDefs all;
+  import from MCX_CoordMsgs all;
+  import from MCX_Parameters all;
+  import from MCX_SecurityParameters all;
+  import from SRTP_ASP_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  type record MCX_Global_Type {                                                 /* @status    APPROVED (MCX) */
+    MCX_SecurityParameters_Type SecurityParameters optional,
+    MCX_GroupInfoList_Type      GroupInfoList,
+    charstring                  ClientId optional,
+    PortNumber_Type             MediaControlPortUE,
+    integer                     MediaControlSeqNums[5],                         /* size depends on the number of values of MCX_MediaControlMsgWithSeqNum_Type */
+    O4_Type                     RTCP_SSRC_UE optional,                          /* @sic R5-236323, R5-236320: handling of SSRC sic@
+                                                                                   SSRC to be used by the client in media control messages in case of multiplexing of media plane control channels;
+                                                                                   otherwise the RTCP_SSRC_UE is omit and the SSRC in the RTCP header of media control messages sent by the UE is not checked */
+    O4_Type                     RTCP_SSRC_SS                                    /* @sic R5-236323, R5-236320: handling of SSRC sic@
+                                                                                   SSRC to be used by the SS in media control messages:
+                                                                                   in case of multiplexing of media plane control channels the value is assigned by the client using the mc_floor_ssrc or mc_transmission_ssrc parameter of the SDP fmtp attribute;
+                                                                                   otherwise the value is arbitrarily selected by the SS */
+  };
+
+  type record MCX_GroupInfo_Type {                                              /* @status    APPROVED (MCX) */
+    charstring GroupId,
+    IMS_PTC_DialogIndex_Type DialogIndex_GROUPCONFIG,
+    IMS_PTC_DialogIndex_Type DialogIndex_GROUPKEY optional
+  };
+
+  type record of MCX_GroupInfo_Type MCX_GroupInfoList_Type;                     /* @status    APPROVED (MCX) */
+
+  type enumerated MCX_MediaControlMsgWithSeqNum_Type {                          /* @status    APPROVED (MCX) */
+    FloorIdle,                          // MCPTT
+    FloorTaken,                         // MCPTT
+    TransmissionIdle,                   // MCVIdeo
+    TransmissionArbitrationTaken,       // MCVIdeo
+    TransmissionArbitrationReleased     // MCVIdeo
+  };
+
+  type component MCX_IMS_PTC extends IMS_PTC {                                  /* @status    APPROVED (MCX) */
+
+    var MCX_Global_Type vc_MCX_Global;
+
+    port MCX_CO_ORD_PORT   HTTP;
+    port SRTP_PORT         SRTP;
+    port UDP_HANDLER_PORT  MEDIA_CTRL;
+    port TCP_HANDLER_PORT  MSRP;
+  };
+
+  template (value) MCX_Global_Type cs_MCX_IMS_PTC_Global_Init :=
+  { /* @status    APPROVED (MCX) */
+    SecurityParameters := omit,
+    GroupInfoList := {},
+    ClientId := omit,
+    MediaControlPortUE := 0,
+    MediaControlSeqNums := { 0, 0, 0, 0, 0 },
+    RTCP_SSRC_UE := omit,                                                       /* may be set to a value for multiplexing of media plane control channels; otherwise SSRC in the RTCP header of media control messages sent by the UE is not checked */
+    RTCP_SSRC_SS := tsc_MCX_RTCP_SSRC_SS                                        /* For multiplexing of media plane control channels the value shall be overwritten by the value provided by the client in the SDP message
+                                                                                   (mc_floor_ssrc or mc_transmission_ssrc parameter) */
+  };
+
+  /*
+   * @desc      Increment and return sequence number for the given media control message
+   * @param     p_FloorControlMsg
+   * @return    integer
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_MediaControl_IncrAndGetSeqNum(MCX_MediaControlMsgWithSeqNum_Type p_FloorControlMsg) runs on MCX_IMS_PTC return integer
+  {
+    var integer v_Index := enum2int(p_FloorControlMsg);
+    var integer v_SeqNum := vc_MCX_Global.MediaControlSeqNums[v_Index] + 1;
+    vc_MCX_Global.MediaControlSeqNums[v_Index] := v_SeqNum;
+    return v_SeqNum;
+  }
+
+  /*
+   * @desc      In case of multiplexing of media plane control channels (may be supported in Rel-18 and later),
+   *            the SS assigns the RTCP SSCR (SSRC in the RTCP header of media control messages) to the client
+   *            using the mc_floor_ssrc or mc_transmission_ssrc parameter of the SDP fmtp attribute
+   * @return    template (present) O4_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_RTCP_SSRC_UE_Get() runs on MCX_IMS_PTC return template (present) O4_Type
+  {
+    if (isvalue(vc_MCX_Global.RTCP_SSRC_UE)) {
+      return vc_MCX_Global.RTCP_SSRC_UE;
+    }
+    return ?;
+  }
+
+  /*
+   * @desc      In case of multiplexing of media plane control channels (may be supported in Rel-18 and later),
+   *            the client assigns the RTCP SSCR (SSRC in the RTCP header of media control messages) to the SS
+   *            using the mc_floor_ssrc or mc_transmission_ssrc parameter of the SDP fmtp attribute
+   *            NOTE 1: With the clarifications in C1-238269 and C1-238273 in case of multiplexing a media plane control channel is addressed by the RTCP SSRC
+   *            NOTE 2: floor/transmission messages are between client and controlling function but preestablished session control messages are between client and participating function
+   *                    => in general the participating function needs to map the RTCP SSRC of UL media control messages to ensure that the RTCP SSRC values are unique between
+   *                       the clinet and the participating function as well as between the participating and the controlling function (see e.g. C1-238283
+   * @return    O4_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_RTCP_SSRC_SS_Get() runs on MCX_IMS_PTC return O4_Type
+  {
+    return vc_MCX_Global.RTCP_SSRC_SS;
+  }
+
+  /*
+   * @desc      let the user do some check and assign PASS/FAIL depending on the result
+   *            if p_UserCheckReq=="", then the Check command is expected to be sent already (using f_UT_MCX_UserCheckCmd)
+   *            and only the cnf is retrieved and evaluated
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_UserCheckReq      (default value: "")
+   * @param     p_StepNumberOrReason
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_UserCheckPassFail(charstring p_FileName,
+                                   LineNo_Type p_LineNo,
+                                   charstring p_UserCheckReq := "",
+                                   charstring p_StepNumberOrReason) runs on IMS_PTC
+  {
+    var boolean v_Result;
+    
+    if (p_UserCheckReq != "") {
+      f_UT_MCX_UserCheckCmd(MMI, p_UserCheckReq);
+    }
+
+    v_Result := f_UT_MCX_UserCheckCnf(MMI);
+    if (v_Result) {
+      f_IMS_PreliminaryPass(p_FileName, p_LineNo, p_StepNumberOrReason);
+    } else {
+      f_IMS_SetVerdictFailOrInconc(p_FileName, p_LineNo, p_StepNumberOrReason);
+    }
+  }
+
+  /*
+   * @desc      let the user do some check and assign FAIL if the check is not successful
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_UserCheckReq
+   * @param     p_StepNumberOrReason
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_UserCheckFailOnly(charstring p_FileName,
+                                   LineNo_Type p_LineNo,
+                                   charstring p_UserCheckReq,
+                                   charstring p_StepNumberOrReason) runs on IMS_PTC
+  {
+    var boolean v_Result := f_UT_MCX_UserCheck(MMI, p_UserCheckReq);
+    if (not v_Result) {
+      f_IMS_SetVerdictFailOrInconc(p_FileName, p_LineNo, p_StepNumberOrReason);
+    }
+  }
+
+  /*
+   * @desc      let the user do some check and assign FAIL if the check is successful
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_UserCheckReq
+   * @param     p_StepNumberOrReason
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_UserCheckNegative(charstring p_FileName,
+                                   LineNo_Type p_LineNo,
+                                   charstring p_UserCheckReq,
+                                   charstring p_StepNumberOrReason) runs on IMS_PTC
+  {
+    var boolean v_Result := f_UT_MCX_UserCheck(MMI, p_UserCheckReq);
+    if (v_Result) {
+      f_IMS_SetVerdictFailOrInconc(p_FileName, p_LineNo, p_StepNumberOrReason);
+    }
+  }
+
+  /*
+   * @desc      set SecurityParameters
+   * @param     p_SecurityParameters
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_SecurityParameters_Set(MCX_SecurityParameters_Type p_SecurityParameters) runs on MCX_IMS_PTC
+  {
+    vc_MCX_Global.SecurityParameters := p_SecurityParameters;
+  }
+
+  /*
+   * @desc      get SecurityParameters
+   * @return    MCX_SecurityParameters_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_SecurityParameters_Get() runs on MCX_IMS_PTC return MCX_SecurityParameters_Type
+  {
+    return vc_MCX_Global.SecurityParameters;
+  }
+
+  /*
+   * @desc      get key with given index
+   * @param     p_KeyIndex
+   * @return    template (omit) MCX_SecurityKey_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_SecurityParameters_GetKey(MCX_KeyIndex_Type p_KeyIndex) runs on MCX_IMS_PTC return template (omit) MCX_SecurityKey_Type
+  {
+    var MCX_SecurityParameters_Type v_SecurityParameters;
+    var template (omit) MCX_SecurityKey_Type v_Key := omit;
+
+    v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    v_Key := f_MCX_SecurityParameters_GetOptionalKey(v_SecurityParameters, p_KeyIndex);   // @sic R5s240279: GetOptionalKey instead of GetKey sic@
+
+    return v_Key;
+  }
+
+  /*
+   * @desc      Store given Key
+   * @param     p_KeyIndex
+   * @param     p_Key
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_SecurityParameters_SetKey(MCX_KeyIndex_Type p_KeyIndex,
+                                                   MCX_SecurityKey_Type p_Key) runs on MCX_IMS_PTC
+  {
+    var MCX_SecurityParameters_Type v_SecurityParameters;
+    v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    v_SecurityParameters := f_MCX_SecurityParameters_SetKey(v_SecurityParameters, p_KeyIndex, p_Key);
+    f_MCX_IMS_PTC_SecurityParameters_Set(v_SecurityParameters);
+  }
+
+  /*
+   * @desc      get access token
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_SecurityParameters_GetAccessToken() runs on MCX_IMS_PTC return charstring
+  {
+    var MCX_SecurityParameters_Type v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    return v_SecurityParameters.Tokens.AccessToken;
+  }
+
+  /*
+   * @desc      Get the UE's Client Id
+   * @return    template (omit) charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_ClientId_Get() runs on MCX_IMS_PTC return template (omit) charstring
+  {
+    return vc_MCX_Global.ClientId;
+  }
+
+  /*
+   * @desc      Get the UE's Client Id
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_ClientId_GetValue() runs on MCX_IMS_PTC return charstring
+  {
+    if (not isvalue(vc_MCX_Global.ClientId)) {
+      FatalError(__FILE__, __LINE__, "Client has not provided an mcptt-client-id yet");
+    }
+    return vc_MCX_Global.ClientId;
+  }
+
+  /*
+   * @desc      set the UE's Client Id
+   * @param     p_ClientId
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_ClientId_Set(charstring p_ClientId) runs on MCX_IMS_PTC
+  {
+    vc_MCX_Global.ClientId := p_ClientId;
+  }
+
+  /*
+   * @desc      Get the UE's Media Control Port
+   * @return    PortNumber_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_UE_MediaControlPort_Get() runs on MCX_IMS_PTC return PortNumber_Type
+  {
+    return vc_MCX_Global.MediaControlPortUE;
+  }
+
+  /*
+   * @desc      Store the UE's Media Control Port
+   * @param     p_PortNumberUE
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_UE_MediaControlPort_Set(PortNumber_Type p_PortNumberUE) runs on MCX_IMS_PTC
+  {
+    vc_MCX_Global.MediaControlPortUE := p_PortNumberUE;
+  }
+
+  template (value) MCX_GroupInfo_Type cs_MCX_GroupInfo_Init(charstring p_GroupId,
+                                                            IMS_PTC_DialogIndex_Type p_DialogIndex_GROUPCONFIG,
+                                                            template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex_GROUPKEY) :=
+  { /* @status    APPROVED (MCX) */
+    GroupId := p_GroupId,
+    DialogIndex_GROUPCONFIG := p_DialogIndex_GROUPCONFIG,
+    DialogIndex_GROUPKEY := p_DialogIndex_GROUPKEY
+  };
+
+  /*
+   * @desc      Add group info to global list
+   * @param     p_GroupId
+   * @param     p_DialogIndex_GROUPCONFIG
+   * @param     p_DialogIndex_GROUPKEY
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_GroupInfo_Add(charstring p_GroupId,
+                                       IMS_PTC_DialogIndex_Type p_DialogIndex_GROUPCONFIG,
+                                       template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex_GROUPKEY) runs on MCX_IMS_PTC
+  {
+    var integer i := lengthof(vc_MCX_Global.GroupInfoList);
+    vc_MCX_Global.GroupInfoList[i] := valueof(cs_MCX_GroupInfo_Init(p_GroupId, p_DialogIndex_GROUPCONFIG, p_DialogIndex_GROUPKEY));
+  }
+
+  /*
+   * @desc      Get GroupInfo from global list stored at the MCX_IMS_PTC
+   * @param     p_GroupId
+   * @return    MCX_GroupInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_GroupInfo_Get(charstring p_GroupId) runs on MCX_IMS_PTC return MCX_GroupInfo_Type
+  {
+    var MCX_GroupInfo_Type v_GroupInfo;
+    var integer i;
+
+    for (i := 0; i < lengthof(vc_MCX_Global.GroupInfoList); i := i + 1) {
+      if (vc_MCX_Global.GroupInfoList[i].GroupId == p_GroupId) {
+        v_GroupInfo := vc_MCX_Global.GroupInfoList[i];
+      }
+    }
+    if (not isbound(v_GroupInfo)) {
+      FatalError(__FILE__, __LINE__, "Client is not subscribed for group " & p_GroupId);
+    }
+    return v_GroupInfo;
+  }
+
+  template (present) IP_PTC_UdpPacketHandler_RespOrInd_Type cr_UdpPacketHandler_Any := ?;       /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      Default handling for media control; activated on top of the regular IMS default handling
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_IMS_PTC_MediaControl_DefaultHandler() runs on MCX_IMS_PTC
+  {
+    [] MEDIA_CTRL.receive(cr_UdpPacketHandler_Any) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected or incorrect Media Plane Control message");
+    }
+  }
+
+  /*
+   * @desc      initialisiation of MCX IMS PTC
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_PTC_Init(PDN_Index_Type p_PdnIndex := PDN_1) runs on MCX_IMS_PTC
+  { /* NOTE: still runs on IMS_PTC as MCX_IMS_PTC extends ports only */
+    var NameValueList_Type v_ParameterList;
+    var charstring v_RegistrationWithTemporaryIdentities := "false";
+
+    if (px_MCX_SIP_RegistrationWithTemporaryIdentities) {
+      v_RegistrationWithTemporaryIdentities := "true";
+    }
+
+    v_ParameterList := {
+      { "MCX_SIP_PrivateUserId_A",    px_MCX_SIP_PrivateUserId_A },
+      { "MCX_SIP_HomeDomain_A",       px_MCX_SIP_HomeDomain_A },
+      { "MCX_SIP_PublicUserId_A_1",   px_MCX_SIP_PublicUserId_A_1 },
+      { "MCX_SIP_RegistrationWithTemporaryIdentities",   v_RegistrationWithTemporaryIdentities }
+    };
+
+    f_IMS_PTC_Init(p_PdnIndex, -, IMS_Security, -, TS_36579, v_ParameterList);
+    vc_MCX_Global := valueof(cs_MCX_IMS_PTC_Global_Init);
+    
+    vc_IMS_Global.Security.IntegrityAlgorithm := px_MCX_IPSecAlgorithm;         /* @sic R5s240511 change 2 sic@ */
+    vc_IMS_Global.Security.CipheringAlgorithm := px_MCX_CiphAlgo_Def;           /* @sic R5s240511 change 2 sic@ */
+    
+    activate(a_MCX_IMS_PTC_MediaControl_DefaultHandler());
+  }
+
+}

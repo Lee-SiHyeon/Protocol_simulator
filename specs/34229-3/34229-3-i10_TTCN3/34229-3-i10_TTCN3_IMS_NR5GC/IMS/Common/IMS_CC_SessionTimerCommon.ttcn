@@ -1,0 +1,414 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2022-08-29 19:10:49 +0200 (Mon, 29 Aug 2022) $
+// $Rev: 33846 $
+/******************************************************************************/
+
+module IMS_CC_SessionTimerCommon {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  template (value) Supported cs_Supported_timer := cs_Supported(tsc_OptionTagList_timer);    /* @status    APPROVED (IMS) */
+
+  template (present) Require cr_Require_timer := cr_Require(tsc_OptionTagList_timer);        /* @status    APPROVED (IMS) */
+
+  template (value) MinSE cs_MinSE(integer p_DeltaSec) :=
+  { /* @status    APPROVED (IMS) */
+    fieldName := MIN_SE_E,
+    deltaSec  := int2str(p_DeltaSec),
+    minSeParam  := omit
+  };
+
+  template (present) MinSE cr_MinSE(integer p_DeltaSec) :=
+  { /* @status    APPROVED (IMS) */
+    fieldName := MIN_SE_E,
+    deltaSec  := int2str(p_DeltaSec),
+    minSeParam  := *
+  };
+
+  /*
+   * @desc      Checks and raises verdict depending on error case for expiration of IMS Session
+   * @param     p_SessionExpires
+   * @param     p_DeltaSecValue
+   * @param     p_ExpectedRefresherValue (default value: *)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_CheckSessionExpires(SessionExpires p_SessionExpires,
+                                                          integer p_DeltaSecValue,
+                                                          template charstring p_ExpectedRefresherValue := *) runs on IMS_PTC
+  {
+    var template (omit) GenericParam v_RefresherParam;
+
+    if (not match(p_SessionExpires, cr_SessionExpires(p_DeltaSecValue))) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected 'delta-seconds' value");
+    }
+    else {
+      v_RefresherParam := f_SIP_SemicolonParamList_GetParam(p_SessionExpires.seParam, tsc_IMS_RefresherParameterId);
+      if (ispresent(v_RefresherParam)) {
+        if (not match(f_GenericParam_GetValue(v_RefresherParam), p_ExpectedRefresherValue)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected 'refresher' value");
+        }
+      } else if (ispresent(p_ExpectedRefresherValue)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'refresher' parameter is expected but not included in parameter list");
+      }
+    }
+  }
+
+  /*
+   * @desc      Check INVITE received after the UE has gotten 422 Session Interval Too Small
+   * @param     p_InviteRequestWithSdp
+   * @param     p_DeltaSec
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_CheckInviteAfter422(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                          integer p_DeltaSec) runs on IMS_PTC
+  { /* @sic R5-220211, R5-220231: checks for callId, fromField, toField, cSeq removed sic@ */
+    var MessageHeader v_MessageHeaderReceived := p_InviteRequestWithSdp.Invite.msgHeader;
+    var template (present) MessageHeader v_MessageHeaderExpected := cr_MessageHeader_Dummy;
+
+    v_MessageHeaderExpected.sessionExpires := cr_SessionExpires(p_DeltaSec);
+    v_MessageHeaderExpected.minSE          := cr_MinSE(p_DeltaSec);
+
+    if (not match(v_MessageHeaderReceived, v_MessageHeaderExpected)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "INVITE not as expected according to previous INVITE and/or delta-sec value");
+    }
+  }
+
+  /*
+   * @desc      Steps 4a0 - 4a2, 4a4 - 4a6 of 34.229-1 test 22.1 and steps 9a0 - 9a2, 9a4 - 9a6 of 34.229-1 test 22.1
+   * @param     p_InviteRequest
+   * @param     p_RoutingInfo_DL
+   * @param     p_DeltaSec
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_Send100Send422ReceiveACK(INVITE_Request p_InviteRequest,
+                                                               template (value) IMS_RoutingInfo_Type p_RoutingInfo_DL,
+                                                               integer p_DeltaSec) runs on IMS_PTC
+  {
+    var template (value) MessageHeader v_MessageHeader_422 := f_IMS_InviteResponse_4XX_MessageHeaderTX(p_InviteRequest.msgHeader);
+    var template (present) MessageHeader v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(p_InviteRequest, c_statusLine422);
+    var template (present) SipUrl v_ContactUrl := f_SIP_BuildSipUri_RX(f_SIP_SipUrl2Str(p_InviteRequest.requestLine.requestUri));
+    
+    v_MessageHeader_422.minSE := cs_MinSE(p_DeltaSec);
+
+    IMS_Server.send(cas_IMS_DATA_RSP(p_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(p_InviteRequest))));
+    IMS_Server.send(cas_IMS_DATA_RSP(p_RoutingInfo_DL, cs_Response(c_statusLine422, v_MessageHeader_422)));
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUrl, v_MessageHeader_Ack)));
+
+    f_IMS_PTC_ImsInfo_DialogRelease();
+  }
+
+  /*
+   * @desc      Sending message 200 OK for INVITE
+   * @param     p_MessageHeaderRequest
+   * @param     p_RoutingInfo_DL
+   * @param     p_Allow             (default value: omit)
+   * @param     p_Require           (default value: omit)
+   * @param     p_Supported         (default value: omit)
+   * @param     p_SessionExpires    (default value: omit)
+   * @param     p_MinSE             (default value: omit)
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_SDP_Message       (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_Send200OK(MessageHeader p_MessageHeaderRequest,
+                                                template (value) IMS_RoutingInfo_Type p_RoutingInfo_DL,
+                                                template (omit) Allow p_Allow := omit,
+                                                template (omit) Require p_Require := omit,
+                                                template (omit) Supported p_Supported := omit,
+                                                template (omit) SessionExpires p_SessionExpires := omit,
+                                                template (omit) MinSE p_MinSE := omit,
+                                                charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                template (omit) SDP_Message p_SDP_Message := omit) runs on IMS_PTC
+  { /* @sic R5s200334: p_ContactUri sic@ */
+    /* @sic R5-201447: p_Allow sic@ */
+    /* @sic R5-225427, R5-225258: p_SDP_Message sic@ */
+    var template (value) MessageHeader v_MessageHeader_200;
+    var template (omit) ContentType v_ContentType := omit;
+    var template (omit) MessageBody v_MessageBody := omit;
+
+    if (isvalue(p_SDP_Message)) {
+      v_ContentType := cs_ContentTypeSDP;
+      v_MessageBody := cs_MessageBody_SDP(valueof(p_SDP_Message));
+    }
+
+    // Send 200 OK
+    v_MessageHeader_200 := f_IMS_OtherResponse_200_MessageHeaderTX(p_MessageHeaderRequest, v_ContentType, -, p_ContactUri);
+    v_MessageHeader_200.allow := p_Allow;
+    v_MessageHeader_200.require := p_Require;
+    v_MessageHeader_200.supported := p_Supported;
+    v_MessageHeader_200.sessionExpires := p_SessionExpires;
+    v_MessageHeader_200.minSE := p_MinSE;
+
+
+    IMS_Server.send(cas_IMS_DATA_RSP(p_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_200, v_MessageBody)));
+  }
+
+  /*
+   * @desc      Handling of IMS call with ACK
+   * @param     p_InviteRequest
+   * @param     p_ContactUrl
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_ReceiveACK(INVITE_Request p_InviteRequest,
+                                                 SipUrl p_ContactUrl) runs on IMS_PTC
+  {
+    var template (present) MessageHeader v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(p_InviteRequest, c_statusLine200);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(p_ContactUrl, v_MessageHeader_Ack)));
+  }
+
+  /*
+   * @desc      Handling of IMS call with delay on rx request
+   * @param     p_DeltaSecValue
+   * @param     p_IMS_DATA_REQ
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_ReceiveRefreshRequest(integer p_DeltaSecValue,
+                                                            template (present) IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC return IMS_DATA_REQ
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var float v_TimerValueMid := int2float(p_DeltaSecValue / 2);
+    var float v_TimerValueMin := f_IMS_SetTimerToleranceMin(v_TimerValueMid);
+    var float v_TimerValueMax := f_IMS_SetTimerToleranceMax(v_TimerValueMid);
+
+    timer t_Timer;
+
+    t_Timer.start(v_TimerValueMax);
+    f_Delay(v_TimerValueMin);
+    alt {
+      [] a_IMS_ReceiveRequest(p_IMS_DATA_REQ, v_IMS_DATA_REQ_ByRef) {
+        t_Timer.stop;
+      }
+      [] t_Timer.timeout {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout");
+      }
+    }
+    return v_IMS_DATA_REQ_ByRef;
+  }
+
+  /*
+   * @desc      Handling of IMS call
+   * @param     p_ContactUrl
+   * @param     p_InviteRequest
+   * @param     p_DeltaSecValue
+   * @param     p_RefresherValue
+   * @param     p_CheckMinSE        (default value: false)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_CallWithSessionTimer_ReceiveUpdate(SipUrl p_ContactUrl,
+                                                     template (value) INVITE_Request p_InviteRequest,
+                                                     integer p_DeltaSecValue,
+                                                     charstring p_RefresherValue,
+                                                     boolean p_CheckMinSE := false) runs on IMS_PTC return IMS_DATA_REQ
+   { /* @sic R5s220951: return IMS_DATA_REQ instead of MessageHeader sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template MessageBody v_MessageBody := omit;
+    var template (present) MessageHeader v_MessageHeaderExpected;
+    var MessageHeader v_MessageHeaderReceived;
+
+    v_MessageHeaderExpected := f_IMS_UpdateRequest_MessageHeaderRX(p_InviteRequest);
+    v_MessageHeaderExpected.supported := cr_Supported(tsc_OptionTagList_timer);
+    v_MessageHeaderExpected.sessionExpires := cr_SessionExpires;
+    if (p_CheckMinSE) {
+      v_MessageHeaderExpected.minSE := cr_MinSE(p_DeltaSecValue);
+    }
+    v_MessageHeaderExpected.contentType := *;
+
+    v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveRefreshRequest(p_DeltaSecValue,
+                                                                       car_IMS_Update_Request(cr_UPDATE_Request(p_ContactUrl, v_MessageHeaderExpected, v_MessageBody)));
+    v_MessageHeaderReceived := v_IMS_DATA_REQ.Request.Update.msgHeader;
+    f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderReceived.sessionExpires, p_DeltaSecValue, p_RefresherValue);
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Handling of IMS call with update request
+   * @param     p_InviteRequest
+   * @param     p_RoutingInfo_DL
+   * @param     p_Contact           (default value: omit)
+   * @param     p_ContactUrlUE
+   * @param     p_DeltaSec
+   * @param     p_RefresherValue
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(INVITE_Request p_InviteRequest,
+                                                                   template (value) IMS_RoutingInfo_Type p_RoutingInfo_DL,
+                                                                   template (omit) Contact p_Contact := omit,
+                                                                   SipUrl p_ContactUrlUE,
+                                                                   integer p_DeltaSec,
+                                                                   charstring p_RefresherValue) runs on IMS_PTC return template (value) MessageHeader
+  { /* p_Contact needs to be provided only in case of MO Call; in case of MT call the whole Contact header is included in p_InviteRequest */
+    /* @sic R5s220760: p_Contact instead of p_ContactUrlSS sic@ */
+    var template (omit) MessageBody v_MessageBody := omit;
+    var template (value) MessageHeader v_MessageHeader_Update;
+
+    v_MessageHeader_Update := f_IMS_UpdateRequest_MessageHeaderTX(p_InviteRequest, NoPreconditionIndication, p_Contact);
+    v_MessageHeader_Update.supported := cs_Supported_timer;
+    v_MessageHeader_Update.sessionExpires := cs_SessionExpires(p_DeltaSec, p_RefresherValue);
+    v_MessageHeader_Update.contentType := omit;    // @sic R5-198895 sic@
+
+    f_Delay(int2float(p_DeltaSec / 2));
+
+    IMS_Client.send(cas_IMS_Update_Request(p_RoutingInfo_DL, cs_UPDATE_Request(p_ContactUrlUE, v_MessageHeader_Update, v_MessageBody)));
+    return v_MessageHeader_Update;
+  }
+
+  /*
+   * @desc      Handling of IMS call with Receive 200OK message
+   * @param     p_Protocol
+   * @param     p_MessageHeaderRequest
+   * @param     p_Require           (default value: *)
+   * @param     p_Supported         (default value: *)
+   * @param     p_DeltaSecValue
+   * @param     p_ExpectedRefresherValue
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_CallWithSessionTimer_Receive200OK(template (value) InternetProtocol_Type p_Protocol,
+                                                    template (value) MessageHeader p_MessageHeaderRequest,
+                                                    template Require p_Require := *,
+                                                    template Supported p_Supported := *,
+                                                    integer p_DeltaSecValue,
+                                                    charstring p_ExpectedRefresherValue) runs on IMS_PTC
+  {
+    var template (present) MessageHeader v_MessageHeader_200 := f_IMS_OtherResponse_200_MessageHeaderRX(p_MessageHeaderRequest);
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+
+    v_MessageHeader_200.require := p_Require;
+    v_MessageHeader_200.supported := p_Supported;
+    v_MessageHeader_200.sessionExpires := cr_SessionExpires;
+
+    v_IMS_DATA_RSP := f_IMS_ReceiveResponse(p_MessageHeaderRequest, p_Protocol, cr_Response(c_statusLine200, v_MessageHeader_200));
+    f_IMS_CallWithSessionTimer_CheckSessionExpires(v_IMS_DATA_RSP.Response.msgHeader.sessionExpires, p_DeltaSecValue, p_ExpectedRefresherValue);
+  }
+
+  /*
+   * @desc      UE sends 200 OK for INVITE first and then ACK
+   * @param     p_InviteRequestWithSdp
+   * @param     p_Require           (default value: *)
+   * @param     p_Supported         (default value: *)
+   * @param     p_DeltaSecValue
+   * @param     p_ExpectedRefresherValue
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                                  template Require p_Require := *,
+                                                                  template Supported p_Supported := *,
+                                                                  integer p_DeltaSecValue,
+                                                                  charstring p_ExpectedRefresherValue) runs on IMS_PTC
+  {
+    var IMS_ResponseWithSdp_Type v_IMS_ResponseWithSdp := f_IMS_MTCallSetup_Receive200OK_SendACK(p_InviteRequestWithSdp);
+    var MessageHeader v_MessageHeader_200 := v_IMS_ResponseWithSdp.Response.msgHeader;
+    var template (present) MessageHeader v_MessageHeaderExpected := cr_MessageHeader_Dummy;
+    
+    v_MessageHeaderExpected.require := p_Require;
+    v_MessageHeaderExpected.supported := p_Supported;
+    v_MessageHeaderExpected.sessionExpires := cr_SessionExpires;
+
+    if (not match(v_MessageHeader_200, v_MessageHeaderExpected)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "200 OK not as expected");
+    } else {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeader_200.sessionExpires, p_DeltaSecValue, p_ExpectedRefresherValue);
+    }
+  }
+
+  /*
+   * @desc      to receive INVITE at step 14 and 17 of test case 22.7 and at step 21 and 24 of NR5GC test case 7.33
+   * @param     p_ContactUrl
+   * @param     p_Require           (default value: omit)
+   * @param     p_Supported         (default value: omit)
+   * @param     p_DeltaSecValue
+   * @param     p_RefresherValue
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CallWithSessionTimer_MORefresh(SipUrl p_ContactUrl,
+                                                template (omit) Require p_Require := omit,
+                                                template (omit) Supported p_Supported := omit,
+                                                integer p_DeltaSecValue,
+                                                charstring p_RefresherValue) runs on IMS_PTC
+  { /* @sic R5-210124: 200 OK and ACK added to this function sic@ */
+    /* @sic R5s210678 change 2: p_Require, p_Supported sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) MessageHeader v_MessageHeaderExpected;
+    var INVITE_Request v_InviteRequest;
+    var template (omit) SDP_Message v_SDP_Message;
+    
+    v_MessageHeaderExpected := f_IMS_InviteRequest_MessageHeaderRX(p_ContactUrl, tsc_OptionTagList_Empty, A_2_1_A5);             // @sic R5-214531, R5-214553, R5-214450: tsc_OptionTagList_Empty sic@
+    v_MessageHeaderExpected.sessionExpires := cr_SessionExpires;
+    
+    // Receive INVITE
+    v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveRefreshRequest(p_DeltaSecValue, car_IMS_Invite_Request(cr_INVITE_Request(p_ContactUrl, v_MessageHeaderExpected, cr_MessageBody_SDP)));
+    v_RoutingInfo_DL := v_IMS_DATA_REQ.RoutingInfo;
+
+    f_IMS_A_2_1_Invite_CommonChecks(v_IMS_DATA_REQ, A_2_1_A5);
+    f_IMS_SIP_DecodeMatchAndCheckSDP(v_IMS_DATA_REQ.Request.Invite.messageBody.sdpMessageBody, cr_SDP_Message_Common, sameOriginAsPreviousSDP);
+
+    v_InviteRequest := v_IMS_DATA_REQ.Request.Invite;
+    f_IMS_CallWithSessionTimer_CheckSessionExpires(v_InviteRequest.msgHeader.sessionExpires, p_DeltaSecValue, p_RefresherValue);
+    
+    // Send 200 OK
+    v_SDP_Message := f_IMS_PTC_ImsInfo_DialogGetPrevSdpMessageTX();     // @sic R5-225427, R5-225258 sic@
+    f_IMS_CallWithSessionTimer_Send200OK(v_InviteRequest.msgHeader, v_RoutingInfo_DL, -, p_Require, p_Supported, cs_SessionExpires(p_DeltaSecValue, "uac"), -, f_SIP_SipUrl2Str(p_ContactUrl), v_SDP_Message);
+
+    // Receive ACK
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, p_ContactUrl);
+  }
+
+  /*
+   * @desc      Handling of IMS Call with MO Release
+   * @param     p_InviteRequest
+   * @param     p_ContactUrl
+   * @param     p_DeltaSec
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_CallWithSessionTimer_MOCallRelease(template (value) INVITE_Request p_InviteRequest,
+                                                     SipUrl p_ContactUrl,
+                                                     integer p_DeltaSec) runs on IMS_PTC
+  {
+    var template (present) MessageHeader v_MessageHeader_Bye := f_IMS_ByeRequest_MessageHeaderRX(p_InviteRequest);
+    var float v_TimerValueMid := int2float(p_DeltaSec);
+    var float v_TimerValueMin := f_IMS_SetTimerToleranceMin(v_TimerValueMid);
+    var float v_TimerValueMax := f_IMS_SetTimerToleranceMax(v_TimerValueMid);
+
+    timer t_Timer;
+
+    t_Timer.start(v_TimerValueMax);
+    f_Delay(v_TimerValueMin);
+
+    alt {
+      [] a_IMS_ReceiveByeSendOK(-, p_ContactUrl, v_MessageHeader_Bye) {
+        t_Timer.stop;
+      }
+      [] t_Timer.timeout {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout");
+      }
+    }
+  }
+
+}

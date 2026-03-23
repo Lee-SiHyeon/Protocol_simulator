@@ -1,0 +1,398 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-03-06 17:18:04 +0100 (Thu, 06 Mar 2025) $
+// $Rev: 40693 $
+/******************************************************************************/
+
+module IMS_Procedures_CallControl4G {
+
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      MT speech/video call setup according to 34.229-1 Annex C.11, C.26, steps 7 to 11: send UPDATE, receive 200 OK and optional 180 Ringing
+   * @param     p_InviteRequestWithSdp
+   * @param     p_SDP_MessageStep7
+   * @param     p_SDP_MessageStep8
+   * @param     p_WaitDuration_Ringing  (default value: 5.0)
+   * @return    template (omit) MessageHeader
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, NR5GC_IRAT)
+   */
+  function f_IMS_MTCallSetup_Common_Steps7_11(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                              template (value) SDP_Message p_SDP_MessageStep7,
+                                              template (present) SDP_Message p_SDP_MessageStep8,
+                                              float p_WaitDuration_Ringing := 5.0) runs on IMS_PTC return template (omit) MessageHeader
+  { /* @sic R5-140975: p_MessageBodyRinging removed as it is never used i.e. always omit sic@ */
+    /* @sic R5s140385 change 8: new parameter p_SrvccAlerting sic@ */
+    /* @sic R5-169122: v_ContentLengthRinging removed as contentLength is checked in a_IMS_ReceiveResponse sic@ */
+    /* @sic R5s170216: p_SrvccAlerting, check of srvcc-alerting tag removed for contact parameters of 180 Ringing (already part of f_IMS_InviteResponse_180_MessageHeaderRX) sic@ */
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var template (value) MessageHeader v_MessageHeader_Update;
+    var template (omit) MessageHeader v_MessageHeader_Ringing := omit;
+    var InternetProtocol_Type v_ProtocolForUpdate := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var SipUrl v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);       /* @sic R5s150908 change 4: dialog sic@ */
+    var boolean v_WaitingFor180 := true;
+    var boolean v_WaitingFor200 := true;
+
+    timer t_Timer := p_WaitDuration_Ringing;
+
+    // Step 7: Send UPDATE
+    v_MessageHeader_Update := f_IMS_UpdateRequest_MessageHeaderTX(p_InviteRequestWithSdp.Invite, PreconditionRequired);  /* @sic R5-160790, R5-162930: PreconditionRequired (Require header in C.11, C.26) sic@ */
+    IMS_Client.send(cas_IMS_Update_Request(cs_IMS_RoutingInfo(v_ProtocolForUpdate), cs_UPDATE_Request(v_ContactUrl, v_MessageHeader_Update, cs_MessageBody_SDP(p_SDP_MessageStep7))));
+    
+    t_Timer.start; // @sic R5-125772 sic@ Have introduced the timer to accommodate optional messages that may not arrive
+    while (v_WaitingFor180 or v_WaitingFor200) {
+      alt {
+        // Step 8. Receive 200 OK. The UE acknowledges the UPDATE with 200 OK and includes SDP answer to acknowledge its current precondition status.
+        [v_WaitingFor200] a_IMS_ReceiveResponse(v_MessageHeader_Update,
+                                                v_ProtocolForUpdate,
+                                                cr_Response(c_statusLine200,
+                                                            f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Update, cr_ContentTypeSDP), /* @sic R5s130685 change 4 sic@ @sic R5-160790, R5-162930, R5-162930 sic@ */
+                                                            cr_MessageBody_SDP),
+                                                v_IMS_DATA_RSP)                     /* @sic R5s140350: v_IMS_DATA_RSP is 'out' parameter sic@ */
+          {
+            // check at least one connections field sent
+            f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_IMS_DATA_RSP.Response.messageBody, p_SDP_MessageStep8);  // @sic R5w140112 sic@
+            v_WaitingFor200 := false;
+          }
+        [v_WaitingFor180] a_IMS_MTCallSetup_Receive180Ringing(p_InviteRequestWithSdp, -, v_IMS_DATA_RSP)
+         {
+            t_Timer.stop;
+            v_MessageHeader_Ringing := v_IMS_DATA_RSP.Response.msgHeader;
+            /* @sic R5s180202: check of RecordRoute and ContactAddr done in a_IMS_ReceiveResponse sic@ */
+            v_WaitingFor180 := false;
+          }
+        [] t_Timer.timeout
+          {
+            v_WaitingFor180 := false;
+          }
+      }
+    }
+    return v_MessageHeader_Ringing;
+  }
+
+  /*
+   * @desc      MT speech call setup according to 34.229-1 Annex C.11, steps 1 to 4.
+   *            return p_SessionProgress183 received in step 4
+   * @param     p_InviteRequestWithSdp
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, NR5GC_IRAT)
+   */
+  function f_IMS_MTCallSetup_AnnexC11_Steps1_4(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                               IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                               SDP_EVS_Configuration_MTCallSetup_Type p_EvsConfiguration := NO_EVS) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: p_InviteRequestWithSdp instead of p_InviteRequest sic@ */
+    /* @sic R5w140112: returns IMS_ResponseWithSdp_Type instead of IMS_Response_Type sic@ */
+    /* @sic R5-168057, R5-168142: p_AudioCodec := AMR_16000 sic@ */
+    /* @sic R5-243985: p_EvsConfiguration := NO_EVS sic@ */
+    var template (present) SDP_Message v_SDP_MessageStep4;
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var InternetProtocol_Type v_Protocol := p_InviteRequestWithSdp.RoutingInfo.Protocol;
+
+    // Step 1 - Send INVITE
+    IMS_Client.send(cas_IMS_Invite_Request(p_InviteRequestWithSdp.RoutingInfo, v_InviteRequest));
+    
+    // Step 2 - Void
+
+    // Step 3 .. 4
+    v_SDP_MessageStep4 := f_IMS_BuildSDP_InitialAnswerAudio_RX(p_AudioCodec, p_EvsConfiguration);
+    return f_IMS_MTCallSetup_Receive100Trying_Receive183SessionProgress(v_InviteRequest, v_SDP_MessageStep4, v_Protocol);
+  }
+
+  /*
+   * @desc      MT speech call setup according to 34.229-1 Annex C.11, steps 7..11
+   * @param     p_InviteRequestWithSdp
+   * @param     p_SessionProgress183
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @return    template (omit) MessageHeader
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, NR5GC_IRAT)
+   */
+  function f_IMS_MTCallSetup_AnnexC11_Steps7_11(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                IMS_ResponseWithSdp_Type p_SessionProgress183,
+                                                IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000) runs on IMS_PTC return template (omit) MessageHeader
+  { /* @sic R5w140112: p_InviteRequestWithSdp instead of p_InviteRequest sic@ */
+    /* @sic R5-153798: new parameter p_SessionProgress183, p_AudioCodec sic@ */
+    /* @sic R5-168057, R5-168142: p_AudioCodec := AMR_16000 sic@ */
+    var SDP_Message v_SDP_Message183 := p_SessionProgress183.SdpMessage;
+    var template (value)   SDP_Message v_Tx_SDP;
+    var template (present) SDP_Message v_Rx_SDP;
+
+    // Step 7 - 8. Send UPDATE, Receive 200 OK
+    v_Tx_SDP := f_IMS_BuildSDP_UpdatedOfferAudio_TX(v_SDP_Message183, p_AudioCodec);  /* @sic R5-153798 sic@*/
+    v_Rx_SDP := f_IMS_BuildSDP_FinalAnswerAudio_RX(p_AudioCodec); // @sic R5s120530 change 3.16 sic@  @sic R5-153798 sic@
+    return f_IMS_MTCallSetup_Common_Steps7_11(p_InviteRequestWithSdp, v_Tx_SDP, v_Rx_SDP);
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 C.44 - Step 2: Wrapper function for A.2.1 condition A4 (INVITE creating a dialog)
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_IMS_MOCallSetup_AnnexC21_Step2_A4(template SipUrl p_OtherCalleeUri := omit,
+                                               IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR,
+                                               SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: return type changed to IMS_InviteRequestWithSdp_Type to carry decoded SDP offer */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+    /* @sic R5-151968: p_IsC44 sic@ */
+    /* @sic R5-174483: p_AudioCodecList instead of p_AdditionalAudioCodecList sic@ */
+    /* @sic R5s180197: p_GeolocationInfoAvailable removed sic@ */
+    /* @sic R5-243984: p_EvsConfiguration := NO_EVS sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp := f_IMS_MOCallSetup_ReceiveINVITE_Common(p_OtherCalleeUri, -, p_AudioCodecList);
+
+    f_IMS_SDP_CheckMediaDescr_EVS_Configuration(v_InviteRequestWithSdp.SdpOffer.media_list[0], p_EvsConfiguration);  /* @sic R5-243984: Check EVS_A2 for test case 12.23a sic@ */
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 4: send 183 Session In Progress
+   *            return MessageHeader of the 183 response
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader_Response183
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @param     p_BandwidthAS       (default value: 37)
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_AnnexC21_Step4(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                            template (value) MessageHeader p_MessageHeader_Response183,
+                                            IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                            SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                            integer p_BandwidthAS := 37) runs on IMS_PTC
+  { /* @sic R5-142951: tsc_OptionTagList_precondition to be added to the Require header instead of the Supported header sic@ */
+    /* @sic R5-151968 new parameter: p_IsC44 sic@ */
+    /* @sic R5s150692 change 13: parameter p_CallType sic@ */
+    /* @sic R5-153950 parameter p_AudioCodec sic@ */
+    /* @sic R5s150841: p_IsC44 removed sic@ */
+    /* @sic R5-168031: p_AudioCodec := AMR_16000, p_BandwidthAS sic@ */
+    /* @sic R5-201447: p_MessageHeader_Response183 instead of p_ContactUri, p_AditionalContactParams, p_CallType sic@ */
+    /* @sic R5-243984: p_EvsConfiguration := NO_EVS sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var SDP_Message v_SDP_MessageInvite := p_InviteRequestWithSdp.SdpOffer;  /* @sic R5w140112 sic@ */
+    var template (value) SDP_Message v_SDP_MessageTx;
+
+    v_SDP_MessageTx := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_SDP_MessageInvite, -, p_AudioCodec, p_EvsConfiguration, p_BandwidthAS);  /* @sic R5-135020 sic@ */
+    // Step 4. Send 183 Session In Progress.
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine183, p_MessageHeader_Response183, cs_MessageBody_SDP(v_SDP_MessageTx))));
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 and C.44 - Step 3..4
+   *            return MessageHeader of the 183 response
+   * @param     p_InviteRequestWithSdp
+   * @param     p_ContactUri         (default value: px_IMS_CalleeContactUri)
+   * @param     p_AditionalContactParams (default value: omit)
+   * @param     p_CallType           (default value: NORMAL_CALL)
+   * @param     p_AudioCodec         (default value: AMR_16000)
+   * @param     p_EvsConfiguration   (default value: NO_EVS)
+   * @param     p_BandwidthAS        (default value: 37)
+   * @return    MessageHeader
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_IMS_MOCallSetup_AnnexC21_Step3_4(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                              charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                              template (omit) SemicolonParam_List p_AditionalContactParams := omit,
+                                              IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                              IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                              SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                              integer p_BandwidthAS := 37) runs on IMS_PTC return MessageHeader
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: p_InviteRequestWithSdp instead of p_RoutingInfo_DL, p_InviteRequest sic@ */
+    /* @sic R5s140359 - Additional Changes: split (f_IMS_MOCallSetup_Send100Trying, f_IMS_MOCallSetup_AnnexC21_Step4) sic@ */
+    /* @sic R5-151968: p_IsC44 sic@ */
+    /* @sic R5s150692 change 12: parameter p_CallType sic@ */
+    /* @sic R5s153535, R5-153950 parameter p_AudioCodec sic@ */
+    /* @sic R5s150841: p_IsC44 removed sic@ */
+    /* @sic R5-168031: p_AudioCodec := AMR_16000, p_BandwidthAS sic@ */
+    /* @sic R5-243984: p_EvsConfiguration := NO_EVS sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response183;
+    
+    // Step 3. SS sends a 100 Trying provisional response.
+    f_IMS_MOCallSetup_Send100Trying(p_InviteRequestWithSdp);
+    
+    // Step 4. Send 183 Session In Progress.
+    v_MessageHeader_Response183 := f_IMS_InviteResponse_183_MessageHeaderTX(p_InviteRequestWithSdp.Invite, p_ContactUri, p_AditionalContactParams, -, p_CallType); /* @sic R5-142951 sic@ @sic R5s150692 change 13 sic@
+                                                                                                                                                                      @sic R5-201447 sic@ */
+    f_IMS_MOCallSetup_AnnexC21_Step4(p_InviteRequestWithSdp, v_MessageHeader_Response183, p_AudioCodec, p_EvsConfiguration, p_BandwidthAS);  /* @sic R5s150692 change 12 sic@
+                                                                                                                                                @sic R5s153535, R5-153950, R5-168031 sic@
+                                                                                                                                                @sic R5-201447: v_MessageHeader_Response183 sic@ */
+    
+    return valueof(v_MessageHeader_Response183);
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 5..8
+   *            returns the "latest SDP offer" received from the UE
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader_Prev183Response
+   * @param     p_GeolocationInfoAvailable   (default value: false)
+   * @param     p_SDP_Message_Step5or7       (default value: omit)
+   * @param     p_PrevSDP_Message            (default value: omit)
+   * @param     p_CallType                   (default value: NORMAL_CALL)
+   * @param     p_ResourcesEstablished       (default value: false)
+   * @param     p_AudioCodec                 (default value: AMR_16000)
+   * @param     p_EvsConfiguration           (default value: NO_EVS)
+   * @param     p_PreconditionIndicationStep5and7     (default value: PreconditionRequired)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_AnnexC21C25_Steps5_8(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                  template (value) MessageHeader p_MessageHeader_Prev183Response,
+                                                  boolean p_GeolocationInfoAvailable := false,
+                                                  template SDP_Message p_SDP_Message_Step5or7 := omit,
+                                                  template (omit) SDP_Message p_PrevSDP_Message := omit,
+                                                  IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                  boolean p_ResourcesEstablished := false,
+                                                  IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                                  SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                                  IMS_PreconditionIndication_Type p_PreconditionIndicationStep5and7 := PreconditionRequired) runs on IMS_PTC return SDP_Message
+  { /* p_SDP_Message_Step5or7 .. used in case of video (C.25) */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: p_InviteRequest changed to p_InviteRequestWithSdp */
+    /* @sic R5s140686, R5-144755: parameter p_PrevSDP_Message sic@ */
+    /* @sic R5-151953 new parameter: p_ResourcesEstablished sic@ */
+    /* @sic R5-151968 new parameter: AudioCodec sic@ */
+    /* @sic R5s150692 change 16: parameter p_CallType sic@ */
+    /* @sic R5-160794 (17.1): p_PreconditionIndication sic@ */
+    /* @sic R5-162925, R5-162927, R5-162928, R5-162929: p_PreconditionIndicationStep5and7 := PreconditionRequired sic@ */
+    /* @sic R5-168031, R5-168032: p_AudioCodec := AMR_16000 sic@ */
+    /* @sic R5-243984: p_EvsConfiguration sic@ */
+    var SipUrl v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_MessageHeader_Prev183Response);    /* @sic R5s130333 change 8.2 - acc. to A.2.4, A.2.5 same as in previous response sic@ */
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var SDP_Message v_SDP_Message := p_InviteRequestWithSdp.SdpOffer;  /* @sic R5w140112 sic@ */
+    var template (present) SDP_Message v_SDP_Message_Step5or7;
+    var boolean v_MediaConfigured := false;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) MessageHeader v_MessageHeader_Prack;
+    var template (omit) MessageBody v_MessageBodyTx := omit;
+    var template (omit) ContentType v_ContentType := omit;
+    var PRACK_Request v_PrackRequest;
+    var SDP_Message v_SDP_LatestOffer;
+
+    if (isvalue(p_PrevSDP_Message)) {   /* e.g. in case of C.27 the INVITE's SDP message is not the latest SDP sent by the UE */
+      v_SDP_Message := valueof(p_PrevSDP_Message);
+    }
+
+    if (not ispresent(p_SDP_Message_Step5or7)) {
+      v_SDP_Message_Step5or7 := f_IMS_BuildSDP_UpdatedOfferAudio_RX(v_SDP_Message, p_ResourcesEstablished, p_AudioCodec, p_EvsConfiguration);  /* => use speech per default */
+    } else {
+      v_SDP_Message_Step5or7 := p_SDP_Message_Step5or7;         /* In case of video the SDP message needs to be handed over
+                                                                   NOTE: compiler warning cannot be avoided here */
+    }
+
+    // Step 5. Receive PRACK
+    v_MessageHeader_Prack := f_IMS_PrackRequest_MessageHeaderRX(v_InviteRequest, p_MessageHeader_Prev183Response, -, p_CallType);       /* @sic R5s221098: p_CallType sic@ */
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Prack_Request(cr_PRACK_Request(v_ContactUrl, v_MessageHeader_Prack, cr_MessageBody_SDP ifpresent)));
+    v_PrackRequest := v_IMS_DATA_REQ.Request.Prack;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+
+    // fl_IMS_Params_CheckSigComp(v_PrackRequest.msgHeader.route.routeBody[0].rrParam);     // acc. to 34.229-1 cl. 13.2.4 step 4 (PRACK) "comp=sigcomp" is optional for Via and Route
+    
+    if (ispresent(v_PrackRequest.messageBody)) {
+      f_IMS_MessageHeader_CheckPreconditionIndicationForOffer(v_PrackRequest.msgHeader, p_PreconditionIndicationStep5and7);   /* @sic R5-160794 sic@ */
+      v_SDP_LatestOffer := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_PrackRequest.messageBody, v_SDP_Message_Step5or7);  // @sic R5w140112 sic@
+      
+      // check session version increased @sic R5-150702: done in f_IMS_SIP_DecodeMatchAndCheckSDP sic@ */
+      
+      v_ContentType := cs_ContentTypeSDP;
+      v_MessageBodyTx := cs_MessageBody_SDP(f_IMS_BuildSDP_UpdatedAnswer_TX(v_SDP_LatestOffer));    /* @sic R5w140112 sic@ */
+      v_MediaConfigured := true;
+    }
+
+    // Step 6. Send 200 OK
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL,
+                                     cs_Response(c_statusLine200,
+                                                 f_IMS_OtherResponse_200_MessageHeaderTX(v_PrackRequest.msgHeader, v_ContentType, -, tsc_SDP_WithPreconditions, p_CallType),
+                                                 /* @sic R5s150237 change 2 sic@ @sic R5s150692 change 16 sic@ @sic R5-160794, R5-162925, R5-162927, R5-162928, R5-162929: PreconditionRequired sic@ */
+                                                 v_MessageBodyTx)));
+    
+    // Step 7 Optional. Receive Update, send 200 OK
+    // Note: UE will send Update if Media is not yet configured
+    if (not v_MediaConfigured) {
+      v_SDP_LatestOffer := f_IMS_MOCallSetup_ReceiveUpdateSend200OK(v_InviteRequest, f_SIP_SipUrl2Str(v_ContactUrl), v_SDP_Message_Step5or7, p_GeolocationInfoAvailable, p_CallType, p_PreconditionIndicationStep5and7);    /* @sic R5s201620 sic@ */
+    }
+    
+    return v_SDP_LatestOffer;
+  }
+
+  /*
+   * @desc      wrapper function: 34.229-1 Annex C.21 and C.44 - Step 5..8
+   *            returns the "latest SDP offer" received from the UE
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader_Prev183Response
+   * @param     p_GeolocationInfoAvailable   (default value: false)
+   * @param     p_PrevSDP_Message            (default value: omit)
+   * @param     p_CallType              (default value: NORMAL_CALL)
+   * @param     p_ResourcesEstablished       (default value: false)
+   * @param     p_AudioCodec                 (default value: AMR_16000)
+   * @param     p_EvsConfiguration           (default value: NO_EVS)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_AnnexC21_Steps5_8(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                               template (value) MessageHeader p_MessageHeader_Prev183Response,
+                                               boolean p_GeolocationInfoAvailable := false,
+                                               template (omit) SDP_Message p_PrevSDP_Message := omit,
+                                               IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                               boolean p_ResourcesEstablished := false,
+                                               IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                               SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS) runs on IMS_PTC return SDP_Message
+  { /* @sic R5-151953 new parameter: p_ResourcesEstablished sic@ */
+    /* @sic R5-151968: p_AudioCodec sic@ */
+    /* @sic R5s150692 change 15: parameter p_CallType  sic@ */
+    /* @sic R5-168031, R5-168032: p_AudioCodec := AMR_16000 sic@ */
+    /* @sic R5-243984: p_EvsConfiguration sic@ */
+    return f_IMS_MOCallSetup_AnnexC21C25_Steps5_8(p_InviteRequestWithSdp, p_MessageHeader_Prev183Response, p_GeolocationInfoAvailable, -, p_PrevSDP_Message, p_CallType, p_ResourcesEstablished, p_AudioCodec, p_EvsConfiguration); /* @sic R5s150692 change 15 sic@ */
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 9..11
+   * @param     p_InviteRequestWithSdp
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_CallType   (default value: NORMAL_CALL)
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_AnnexC21C25_Step9_11(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                  charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                  IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC
+  { // p_SrvccAlertingSupported  .. if voice call => condition A6 of A.2.6; needs to be set to false for non-voice calls
+    /* @sic R5s130333 change 9.2 - parameter p_ContactUri: acc. to see A.2.4 contact in request line of PRACK shall be the same in as in previous response (180 Ringing) sic@ */
+    /* @sic R5w140112: p_IMS_INVITE_REQ changed to p_InviteRequestWithSdp */
+    /* @sic R5s140370 change 6: new parameter p_SrvccAlertingSupported sic@ */
+    /* @sic R5s150692 change 10: parameter p_CallType  sic@ */
+    /* @sic R5-176209: p_SrvccAlertingSupported removed as not needed anymore sic@ */
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (value) MessageHeader v_MessageHeader_180Response := f_IMS_InviteResponse_180_MessageHeaderTX(v_InviteRequest, p_ContactUri, -, tsc_OptionTagList_100rel, p_CallType);  /* @sic R5s150667 change 2 sic@
+                                                                                                                                                                                            @sic R5s150692 change 3, 10 sic@ */
+    f_IMS_MOCallSetup_Send18X_Reliable(p_InviteRequestWithSdp, c_statusLine180, v_MessageHeader_180Response, -, p_CallType);   /* @sic R5s201620 sic@ @sic R5s221098: p_CallType sic@ */
+  }
+
+}

@@ -1,0 +1,184 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2023-05-04 17:38:01 +0200 (ju., 04 may. 2023) $
+// $Rev: 35902 $
+/******************************************************************************/
+module RRC_ANR_UTRAN {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EUTRA_CapabilityFunctions all;
+  import from Parameters all;
+  import from UTRAN_ANR_CommonFunctions all;
+  import from UTRAN_ANR_MDT_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_CommonProcedures all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RRC_SysInfo_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.7.1
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_8_7_1_UTRAN() runs on UTRAN_IRAT_PTC
+  {
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var EUTRA_MeasurementBandwidth v_EUTRA_MeasurementBandwidth := f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(f_ConvertDL_BandwidthPIXITToInteger());
+    
+    //Initialise all UTRAN cells according to 34.108
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5);
+    
+    //Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo (EUTRA);
+    
+    //Send the cell info to the EUTRA component
+    //f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5); @sic R5s150753 sic@
+    
+    //Set sysinfo in SIB19
+    if (v_EUTRASysInfo.Eutra[0].Arfcn < tsc_EUTRA_MaxEARFCN ) {  // EUTRA Band < 64  @sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def (3),  /*@sic R5s150753 sic@*/
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth,
+                                                                                                4)));
+    } else { // EUTRA Band > 64   @sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntryExtension(cs_Utra_PriorityInfoList_Def (3),  /*@sic R5s150753 sic@*/
+                                                                    omit,
+                                                                    {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(
+                                                                                        v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                        v_EUTRA_MeasurementBandwidth)}));
+    }
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    
+    //Bring UE to initial state
+    f_UTRAN_Preamble(utran_Cell5);
+    //Interactive or background / UL:64 DL: 64 kbps / PS RAB + UL:3.4 DL:3.4 kbps SRBs for DCCH
+    f_UTRAN_UE_64kPS_Rb_Est(utran_Cell5); //@sic R5-134682 sic@
+      
+    //This needs to be sent based on the release version it has TAU will be recieved
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_OctetData(valueof(f_UTRAN_MobileInfo_EUTRACapability_Get()))); // @sic R5s160394 sic@  /* @sic R5s150753 sic@*/
+       
+
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_8_7_1_Body (v_EUTRASysInfo);
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Inform EUTRA PTC that TC is over
+    f_IRAT_SendCoOrd (EUTRA, cms_IRAT_Trigger);
+    
+    //Release UTRAN Cells
+    f_UTRAN_Postamble(utran_Cell5, U2_CONNECTED);
+  }
+
+  /*
+   * @desc      test body of TC_8_7_1
+   * @param     p_EUTRASysInfo
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function fl_TC_8_7_1_Body(IRAT_CoOrd_SysInfo_Type p_EUTRASysInfo) runs on UTRAN_IRAT_PTC
+  {
+    var B32_Type v_P_tmsi := oct2bit(px_PTMSI_Def);
+    var B28_Type v_CellId;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var PLMN_Identity v_PLMN_Identity;
+    var boolean v_ExpectedMatchFound := false;
+    var template (present) LoggedCellInfo v_LoggedCellInfo;
+    var template (present) LoggedANRReportInfoList v_LoggedANRReportInfoList;
+    var B16_Type v_TrackingAreaCode;
+    var B28_Type v_EUTRA_Cell_Identity;
+    var EARFCN v_EARFCN;
+    var EUTRA_PhysicalCellIdentity v_EUTRA_PhysicalCellIdentity;
+    
+    v_CellId := f_UTRAN_GetCellIndentity(utran_Cell5);
+    v_SecurityInfo := f_UTRAN_Security_Get ();
+    v_PLMN_Identity := f_UTRAN_CellInfo_GetPLMNIdentity(utran_Cell5);
+    
+    //@siclog "Step 1" siclog@
+    // Configure UE to perform inter-RAT UTRAN ANR measurements.
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated, tsc_RB2, cs_LoggingMeasurementConfiguration_ANR(v_SecurityInfo.dl_IntegrityCheckInfo, tsc_RRC_TI, -, -, true_, -)));
+    //@siclog "Step 2" siclog@
+    //Procedure to release RRC Connection. UE moves to idle state
+    f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Dch);
+    
+    //@siclog "Step 3" siclog@
+    //The SS switches its downlink transmission power settings to column "T1" of table 8.7.1.3.2-1
+    f_UTRAN_SetCellPower (utran_Cell5, -70, -72);
+    //Synchronise with EUTRA PTC
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    // Wait for the trigger from EUTRA steps 4-5 to continue the test case
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    f_UTRAN_InterRAT_InitialiseAuthParams(); //@sic R5s170212 sic@
+    
+    //@siclog "Step 6" siclog@
+    //The SS switches its downlink transmission power settings to column "T2" of table 8.7.1.3.2-1
+    f_UTRAN_SetCellPower (utran_Cell5, -60, -62);
+    
+    //@siclog "Step 7" siclog@
+    //Generic test procedure in TS 36.508 Table 6.4.2.8 is performed on Cell 5.
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5, cell_Dch);
+    
+    //@siclog "Step 8" siclog@
+    //Waiting for 10 seconds to allow UE to activate ANR logging in IDLE mode state.
+    f_Delay(10.0);  //@sic R5-134682 sic@
+    
+    //@siclog "Step 9" siclog@
+    //Page UE to trigger RRC Connection establishment
+    f_UTRAN_Page (utran_Cell5, terminatingInteractiveCall, v_P_tmsi);
+    
+    //@siclog "Step 10-12" siclog@
+    //Complete RRC Connection setup and verify if IE "ANR Logging Results Available" is presentt
+    f_UTRAN_RRC_ConnEst(utran_Cell5, terminatingInteractiveCall, true);
+    
+    //@siclog "Steps 12A - 12C" siclog@
+    //The UE transmits SERVICE REQUEST message on cell 5, then security mode is activated
+    U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_ServiceRequest(?,?,?))); /* @sic R5-153731, R5s150962 sic@ */
+    f_UTRAN_RRC_Security(utran_Cell5, false,  ps_domain);   /* @sic R5-153731, R5s150962 sic@ */
+         
+      
+    //@siclog "Step 13-14" siclog@
+    //Send UE INFORMATION REQUEST message and receive UE INFORMATION RESPONSE message, check if IEs were set properly
+    v_PLMN_Identity :=f_UTRAN_Nas2Asn_PlmnId(p_EUTRASysInfo.Eutra[0].PLMN);
+    v_TrackingAreaCode := p_EUTRASysInfo.Eutra[0].TAC;
+    v_EUTRA_Cell_Identity := p_EUTRASysInfo.Eutra[0].CellId;
+    v_EARFCN := p_EUTRASysInfo.Eutra[0].Arfcn;
+    v_EUTRA_PhysicalCellIdentity := p_EUTRASysInfo.Eutra[0].HO.PhysCellId;
+    
+    v_LoggedCellInfo := cr_LoggedCellInfo_EUTRA(v_PLMN_Identity, v_TrackingAreaCode, v_EUTRA_Cell_Identity, v_EARFCN, v_EUTRA_PhysicalCellIdentity);
+    
+    v_CellId := f_UTRAN_GetCellIndentity(utran_Cell5);
+    v_PLMN_Identity := f_UTRAN_CellInfo_GetPLMNIdentity(utran_Cell5);
+    v_LoggedANRReportInfoList := cr_LoggedANRReportInfo_1Entry(v_PLMN_Identity, v_CellId, v_LoggedCellInfo);
+    v_ExpectedMatchFound := f_UTRAN_RetrieveANRMeasurements_InterRat(false, v_LoggedANRReportInfoList, 1);
+    
+    //Assign verdict accordingly
+    if (v_ExpectedMatchFound == true) {
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.7.1, Step 14");
+    }
+    else{
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__,"Test Case 8.7.1, Step 14");
+    }
+  }
+
+}

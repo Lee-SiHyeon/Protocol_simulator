@@ -1,0 +1,151 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2023-09-14 09:54:06 +0200 (Thu, 14 Sep 2023) $
+// $Rev: 37128 $
+/******************************************************************************/
+module EUTRA38_SecurityFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_NB_SecurityFunctions all;
+  import from EUTRA_NR_SecurityFunctions all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from NAS_AuthenticationCommon all;
+
+  type record EUTRA38_SecurityParamsExtd_Type {       /* @status    APPROVED (ENDC, NR5GC_IRAT) */
+    SK_Counter_Type                 SK_Counter,
+    B256_Type                       S_KGNB
+  };
+
+  template (value) EUTRA38_SecurityParamsExtd_Type cs_AuthParamsExtd_Init :=
+  { /* @desc      to Store all parameters related/used to Security */
+    /* @status    APPROVED (ENDC, NR5GC_IRAT) */
+    SK_Counter         := 0, // Initial value
+    S_KGNB             := tsc_AuthUndefinedB256
+  };
+
+  /*
+   * @desc      This is a copy of f_EUTRA_Authentication_InitAS, which allows for
+   *            user plane integrity (UPIP) to be configured when configuring NR PDCP on EUTRA
+   * @param     p_Auth_Params
+   * @param     p_UL_NAS_Count
+   * @param     p_IsSMC_Procedure   (default value: true)
+   * @param     p_TargetPhysicalCellIdentity (default value: omit)
+   * @param     p_EARFCN_DL         (default value: omit)
+   * @param     p_UserPlaneIntegrity (default value: false)
+   * @return    EUTRA_SecurityParams_Type
+   * @status    APPROVED (ENDC)
+   */
+  function f_EUTRA38_Authentication_InitAS(EUTRA_SecurityParams_Type p_Auth_Params,
+                                         O4_Type p_UL_NAS_Count,
+                                         boolean p_IsSMC_Procedure := true,                               // @sic R5s100178 sic@
+                                         template (omit) PhysCellId p_TargetPhysicalCellIdentity := omit, // @sic R5s100178 sic@
+                                         template (omit) ARFCN_ValueEUTRA_r9 p_EARFCN_DL := omit,             // @sic R5s100178 sic@
+                                         boolean p_UserPlaneIntegrity := false)
+    return EUTRA_SecurityParams_Type
+  { //@sic R5-165892 Band extension p_EARFCN_DL -> ARFCN_ValueEUTRA_r9 sic@
+    var EUTRA_SecurityParams_Type v_Auth_Params := p_Auth_Params;
+    // initialise to  received as parameter
+    v_Auth_Params.KENB := f_EUTRA_NB_Authentication_S11(v_Auth_Params.KDF, v_Auth_Params.KASME, p_UL_NAS_Count); // @sic R5s160711 sic@
+    // Derives KENB
+    v_Auth_Params.NH := f_EUTRA_NB_Authentication_S12(v_Auth_Params.KDF, v_Auth_Params.KASME, v_Auth_Params.KENB);                  // @sic R5s100496, R5s160711 sic@
+    //Derives NH corresponding to NCC =1;
+    if (p_IsSMC_Procedure == false) {   // @sic R5s100178 sic@
+      if (not (isvalue(p_TargetPhysicalCellIdentity) and isvalue(p_EARFCN_DL))) {
+        FatalError(__FILE__, __LINE__, "New key is to be used at RRC Connection Re-establishment or Reconfiguration but no Physical Cell ID and/or ARFCN value is provided");
+      }
+      else { // Refresh of KeNB; horizontal key derivation
+        v_Auth_Params.KENB := f_EUTRA_NB_Authentication_S13(v_Auth_Params.KDF,
+                                                            v_Auth_Params.KENB,
+                                                            v_Auth_Params.NH,
+                                                            valueof(p_TargetPhysicalCellIdentity),
+                                                            valueof(p_EARFCN_DL)); // @sic R5s160711 sic@
+      }
+    }
+    
+    //intraNB handover by RRC Connection Reconfiguration or RRC Connection Re-establishment
+    // Derives KENB
+    v_Auth_Params.NCC := 0;
+    // NCC is set to default/initial value of 0
+    v_Auth_Params.AS_Ciphering.KRRCenc := f_EUTRA_NB_Authentication_S15(tsc_RRC_Enc_Alg,
+                                                                        f_EUTRA_NB_ConvertCiphAlg2Bitstring(v_Auth_Params.AS_Ciphering.Algorithm),
+                                                                        v_Auth_Params.KENB,
+                                                                        v_Auth_Params.KDF);
+    // Derives KRRCenc key
+    v_Auth_Params.AS_Integrity.KRRCint := f_EUTRA_NB_Authentication_S15(tsc_RRC_Int_Alg,
+                                                                        f_EUTRA_NB_ConvertIntAlg2Bitstring(v_Auth_Params.AS_Integrity.Algorithm),
+                                                                        v_Auth_Params.KENB,
+                                                                        v_Auth_Params.KDF);
+    // Derives KRRCenc key
+    v_Auth_Params.AS_Ciphering.KUPenc := f_EUTRA_NB_Authentication_S15(tsc_UP_Enc_Alg,
+                                                                       f_EUTRA_NB_ConvertCiphAlg2Bitstring(v_Auth_Params.AS_Ciphering.Algorithm),
+                                                                       v_Auth_Params.KENB,
+                                                                       v_Auth_Params.KDF);
+    if (p_UserPlaneIntegrity) {
+      // Only used for NR PDCP on EUTRA side
+      v_Auth_Params.AS_Ciphering.KUPenc := f_EUTRA_NB_Authentication_S15(tsc_N_UP_Int_Alg,
+                                                                       f_EUTRA_NB_ConvertIntAlg2Bitstring(v_Auth_Params.AS_Integrity.Algorithm),
+                                                                       v_Auth_Params.KENB,
+                                                                       v_Auth_Params.KDF);
+    }
+    // Derives KRRCenc key;
+    // Ciphering algorithm for UP is same as RRC
+    return v_Auth_Params;
+  }
+
+  /*
+   * @desc      This is a copy of f_EUTRA_RRC_ActivateSecurity, which allows for
+   *            user plane integrity (UPIP) to be configured when configuring NR PDCP on EUTRA
+   * @param     p_CellId
+   * @param     p_SecurityParams
+   * @param     p_NasCountUL
+   * @param     p_DrbConfigList     (default value: cs_DrbConfigList_DRB1)
+   * @param     p_UserPlaneIntegrity (default value: false)
+   * @return    EUTRA_SecurityParams_Type
+   * @status    APPROVED (ENDC)
+   */
+  function f_EUTRA38_RRC_ActivateSecurity(EUTRA_CellId_Type p_CellId,
+                                        EUTRA_SecurityParams_Type p_SecurityParams,
+                                        NasCount_Type p_NasCountUL,
+                                        template (omit) RadioBearerList_Type p_DrbConfigList := cs_DrbConfigList_DRB1,
+                                        boolean p_UserPlaneIntegrity := false)  runs on EUTRA_PTC
+    return EUTRA_SecurityParams_Type
+  { /* @sic R5s150338: new parameter p_DrbList sic@ */
+    var EUTRA_SecurityParams_Type v_SecurityParams := f_EUTRA38_Authentication_InitAS(p_SecurityParams,
+                                                                                    p_NasCountUL,
+                                                                                    -,-, -,
+                                                                                    p_UserPlaneIntegrity); /* Calculate Kenb and KRRCenc, KRRCint, KUPenc, KUPint */
+    if (p_UserPlaneIntegrity) {
+      if (p_SecurityParams.AS_Integrity.Algorithm == eia0_v920) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Cannot have null algorithm");
+      }
+    }
+    if (ispresent(p_DrbConfigList)) {    /* @sic R5s150338 - dynamic DRB configuration sic@ */
+      f_EUTRA_SS_CommonRadioBearerConfig(p_CellId, valueof(p_DrbConfigList));
+    }
+
+    // Read PDCP SQN for SRB1 and calcuate Ciphering Activation times
+    v_SecurityParams.AS_Ciphering.ActTimeList := f_EUTRA_RRC_CipherActTime_GetInitial(p_CellId);         /* note: this works only when timing info is now */
+    // Note by default DRB is also pre-configured on SS side
+    
+    f_EUTRA_SS_RRC_EnableIntProt_CiphULandDL(p_CellId,
+                                             v_SecurityParams.AS_Integrity,
+                                             v_SecurityParams.AS_Ciphering); //@sic R5s110149 sic@
+    f_EUTRA_RRC_InitialSecurityActivation(p_CellId,
+                                          v_SecurityParams.AS_Integrity.Algorithm,
+                                          v_SecurityParams.AS_Ciphering.Algorithm);    /* SecurityModeComplete is not ciphered
+                                                                                          acc. to 36.331 cl. 5.3.4.3 and 5.3.1.1 */
+    return v_SecurityParams;
+  }
+
+}

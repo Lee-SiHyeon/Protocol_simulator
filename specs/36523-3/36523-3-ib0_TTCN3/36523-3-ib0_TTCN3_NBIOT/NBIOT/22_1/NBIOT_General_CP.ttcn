@@ -1,0 +1,868 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-07-17 13:13:58 +0200 (Thu, 17 Jul 2025) $
+// $Rev: 41555 $
+/******************************************************************************/
+
+module NBIOT_General_CP {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from CIoT_SMS_Templates all;
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_SMS_Templates all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_NB_Parameters all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_LoopBack all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Paging all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+  import from NBIOT_Timing all;
+  import from Parameters all;
+  import from SMS_Templates all;
+  import from SMS_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  template (value) EPS_NetworkFeatureSupport cs_EPS_NwkFtSupport_CP_LCS_XtdPCO := /* @status    APPROVED (NBIOT) */
+    cs_EPS_NwkFtSup_Common (-, -, '1'B, -, -, '02'O, '1'B, '1'B, tsc_Spare1, '0'B, '1'B, '1'B, '0'B, '0'B, '0'B, '0'B); // @sic R5s180427 sic@
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.1.1
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_1_1_NBIOT() runs on NBIOT_PTC
+  {
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1);
+
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell50, CONTROL_PLANE);
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell50, CONTROL_PLANE);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell50, CONTROL_PLANE, RRC_CONNECTED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    // Module 1 Mandatory
+    f_TC_22_1_1_Module1();
+    // Module 2
+    if (px_nonSMSTransport_CP_CIoT) {
+      f_TC_22_1_1_Module2();
+    }
+    // Module 3
+    if (pc_NB_S1_only and px_SMSTransport_CP_CIoT) {
+      f_TC_22_1_1_Module3();
+    }
+
+    f_NBIOT_TestBody_Set(false);
+    
+    f_NBIOT_Postamble (nbiot_Cell50, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.1.1 Module 1 (M1)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_1_1_Module1() runs on NBIOT_PTC
+  { // Attach for Control Plane CIoT EPS optimisation for EPS services with/without SMS-only
+    var template (present) B3_Type v_PDNType := (f_GetPdnType(), '101'B);
+    var template (present) NAS_UL_Message_Type v_AttachReq;
+    var template (present) NAS_UL_Message_Type v_ESMMessage;
+    var template (present) B2_Type v_PNB := '01'B;
+    var NAS_MSG_Indication_Type v_NasInd_Rxd;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var NAS_UL_Message_Type v_PDNConnectivityReq_Rxd;
+    var ExtdProtocolConfigOptions v_PcoToUE;
+    var AccessPointName v_APN := valueof(cs_AccessPointName(px_AccessPointName)); // @sic R5s180427 sic@
+    var EUTRA_ASN1_TrackingAreaCode_Type v_TAC := f_NBIOT_CellInfo_GetTAC(nbiot_Cell50);
+    var template (value) PDN_Address v_PDN_Address;
+    var integer v_SelectedPlmnIndex := f_NBIOT_CellInfo_GetSelectedPlmnIndex(nbiot_Cell50);
+    var template (omit) RRCConnSetupComplete_AttachWithoutPDN_Type v_AttachWithoutPDN := omit;
+    var template HeaderCompressConfig v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny ifpresent;
+    var NBIOT_SecurityParams_Type v_AuthParams;
+    var GutiParameters_Type v_GutiParams := f_NBIOT_CellInfo_GetGuti(nbiot_Cell50);
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId (v_GutiParams.PLMN_Identity);
+    var template (value) MobileIdentity v_Guti := f_GutiParameters2MobileIdentity(tsc_IEI_Guti, v_GutiParams);
+    var template (present) NAS_UL_Message_Type v_ESMMessage_BearerAccept;
+    
+    //@siclog "Step 1" siclog@
+    f_UT_SwitchOnUE(UT, false);
+    
+    //@siclog "Step 2" siclog@
+    f_NBIOT_RRC_ConnectionRequest_Def(nbiot_Cell50, mo_Signalling);
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step2");
+    
+    //@siclog "Step 3" siclog@
+    f_NBIOT_RRC_ConnectionSetup_Def();
+    
+    //@siclog "Step 4" siclog@
+    if (pc_HCCPCIoT and pc_IP_PDN){
+      v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny;
+    }
+    
+    if (px_DoAttachWithoutPDN) {
+      v_ESMMessage := cr_ESM_DUMMY_MESSAGE;
+      v_AttachWithoutPDN := true_;  // @sic R5s180287 sic@
+    } else {
+      v_ESMMessage := cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach,
+                                                       v_PDNType,
+                                                       -,
+                                                       v_HeaderCompressConfigRX);
+    }
+    if (pc_NB_User_Plane_CIoT_Optimisation) { // @sic R5-203070 sic@
+      v_PNB := ('01'B, '10'B);
+    }
+    v_AttachReq := cr_CIOT_ATTACH_REQUEST(cr_AdditionalUpdateType_CIOT);
+    v_AttachReq.aTTACH_REQUEST.addUpdateType := cr_AdditionalUpdateType_CIOT(v_PNB, f_ConvertBoolToBit (pc_NB_S1_only and px_SMSTransport_CP_CIoT)); // @sic R5s180294 sic@
+    
+    v_NasInd_Rxd := f_NBIOT_RRCConnectionSetupComplete_Def(nbiot_Cell50,
+                                                           cr_508_RRCConnectionSetupComplete_NB(tsc_RRC_TI_Def, v_SelectedPlmnIndex, -, -, -, v_AttachWithoutPDN),
+                                                           cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected,
+                                                                                             v_AttachReq,
+                                                                                             v_ESMMessage));
+    
+    if (not f_Check_UE_NetworkCap_CIOT (v_NasInd_Rxd.Pdu.Msg.aTTACH_REQUEST.ueNetworkCapability, CIOT_CP)) {
+      f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "UE Network Cap failed CIOT bit check");
+    }
+    if (ispresent(v_NasInd_Rxd.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap)) {// @sic R5-182074 sic@
+      v_AuthParams.NAS_SecurityCap5G := v_NasInd_Rxd.Pdu.Msg.aTTACH_REQUEST.ueAddSecurityCap;
+    }
+    
+    if (not px_DoAttachWithoutPDN) {
+      v_PDNConnectivityReq_Rxd := v_NasInd_Rxd.Pdu.PiggybackedPduList[0].Msg;
+      f_NBIOT_MobileInfo_SetAssignedPdnAndPTI (0, // This is registration, so this is the first PDN
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue,
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier);
+
+      if (ispresent(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName)) {
+        v_APN := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName;
+        v_APN.iei := omit;
+        f_NBIOT_MobileInfo_SetAPN (0, v_APN);
+      }
+      f_NBIOT_MobileInfo_SetExtPCO (0, v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions);
+    }
+    // If something wasn't correct in this message, it would have failed before now
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step4a1/4b1");
+    
+    //+   The SS Transmits an IDENTITY REQUEST message
+    //@siclog "Step 5" siclog@
+    SRB.send(cas_NB_SRB1bis_NasPdu_REQ(nbiot_Cell50,  // @sic R5s180287 sic@
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_IDENTITY_REQUEST(tsc_IdType_IMSI))));
+    
+    //+   Check: Does the UE transmit an IDENTIY RESPONSE message
+    //@siclog "Step 6" siclog@
+    SRB.receive(car_NB_SRB1bis_NasPdu_IND(nbiot_Cell50,  // @sic R5s180287 sic@
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cr_IDENTITY_RESPONSE(f_Imsi2MobileIdentity(px_IMSI_Def)))));
+    
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    
+    
+    // Set UE network capabilities as sent by the UE to be used later (see TS 24.301 clause 5.4.3.3)
+    v_AuthParams := f_NBIOT_Security_Get();
+    v_AuthParams.NAS_SecurityCap := f_EUTRA_NB_FillNAS_SecurityCapability(v_NasInd_Rxd.Pdu.Msg.aTTACH_REQUEST);
+    f_NBIOT_Security_Set(v_AuthParams);
+    
+    //@siclog "Step 7-8" siclog@
+    v_AuthParams := f_NBIOT_NAS_Authentication(nbiot_Cell50,
+                                               tsc_SRB1bis,
+                                               v_AuthParams,
+                                               tsc_SHT_IntegrityProtected_Ciphered,
+                                               tsc_SHT_IntegrityProtected_Ciphered,
+                                               v_PLMN);                        // AUTHENTICATION REQUEST & RESPONSE
+    f_NBIOT_Security_Set(v_AuthParams);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+    
+    //@siclog "Step 9-10" siclog@
+    f_NBIOT_NAS_ActivateSecurity(nbiot_Cell50, v_AuthParams, -, true); // @sic R5-182074 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+    
+    if (not px_DoAttachWithoutPDN) { // PDN Requested
+      if (f_CheckEsmInfoTransferFlag(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST)) {
+        //@siclog "Step 11a1" siclog@
+        SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                       tsc_SRB1bis,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_508_Esm_Information_Request(f_NBIOT_MobileInfo_GetPTI(0)))));
+        
+        //@siclog "Step 11a2" siclog@
+        SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                          tsc_SRB1bis,
+                                          cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                            cdr_CIOT_Esm_Information_Response(f_NBIOT_MobileInfo_GetPTI(0), cr_ExtdPCOAny))))
+          -> value v_ReceivedAsp;
+        if (ispresent(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.eSM_INFORMATION_RESPONSE.accessPointName)) {
+          v_APN := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.eSM_INFORMATION_RESPONSE.accessPointName;
+          v_APN.iei := omit;
+          f_NBIOT_MobileInfo_SetAPN (0, v_APN);
+        }
+        f_NBIOT_MobileInfo_SetExtPCO (0, v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.eSM_INFORMATION_RESPONSE.extdProtocolConfigurationOptions); // Table 22.1.1.3-31 specifies mandatory
+      }
+      v_PDN_Address := f_CIOT_GetPDNAddress(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue, f_CheckExtdPCOforIPallocationViaNas(f_NBIOT_MobileInfo_GetExtdPCO(0)));
+      v_PcoToUE := valueof(f_GetDefaultExtdProtocolConfigOptions(f_NBIOT_MobileInfo_GetExtdPCO(0)));
+      //@siclog "Step 12b1" siclog@
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                    cs_CIOT_ATTACH_ACCEPT(cs_TAIListNonConsecutive_lv(v_PLMN, {bit2oct(v_TAC)}),
+                                                                                          v_Guti,
+                                                                                          cs_EPS_NwkFtSupport_CP_LCS_XtdPCO,
+                                                                                          cs_AdditionalUpdateResult_CP_SMS,
+                                                                                          -,
+                                                                                          omit,
+                                                                                          omit,
+                                                                                          omit),
+                                                                    cs_CIOT_ActivateDefEpsBearerContextRequest(tsc_EpsDefaultBearerId,
+                                                                                                              f_NBIOT_MobileInfo_GetPTI(0),
+                                                                                                              v_APN,
+                                                                                                              v_PDN_Address,
+                                                                                                              cs_ExtdPCO (int2oct(oct2int(v_PcoToUE.iel), 2), v_PcoToUE.pco),
+                                                                                                              -,
+                                                                                                              -,
+                                                                                                              -,
+                                                                                                              -, // @sic R5-184093 sic@
+                                                                                                              cs_ControlPlaneInd,
+                                                                                                              cs_ServingPLMNRateControl(int2oct (10, 2))))));
+      
+      v_ESMMessage_BearerAccept := cdr_CIOT_ActivateDefEpsBearerContextAccept(tsc_EpsDefaultBearerId);
+    } else { // No PDN
+      //@siclog "Step 12a1" siclog@
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                    cs_CIOT_ATTACH_ACCEPT(cs_TAIListNonConsecutive_lv(v_PLMN, {bit2oct(v_TAC)}),
+                                                                                          v_Guti,
+                                                                                          cs_EPS_NwkFtSupport_CP_LCS_XtdPCO,
+                                                                                          cs_AdditionalUpdateResult_CP_SMS,
+                                                                                          -,
+                                                                                          omit,
+                                                                                          omit,
+                                                                                          omit),
+                                                                    cs_ESM_DUMMY_MESSAGE(v_NasInd_Rxd.Pdu.PiggybackedPduList[0].Msg.eSM_DUMMY_MESSAGE.procedureTransactionIdentifier))));
+      v_ESMMessage_BearerAccept := cr_ESM_DUMMY_MESSAGE;
+    }
+    
+    //@siclog "Step 13a1/13b1" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                        cr_508_ATTACH_COMPLETE,
+                                                                        v_ESMMessage_BearerAccept)));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+    
+    if (not px_DoAttachWithoutPDN) { // PDN Requested
+      if (not match (v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue, '101'B)) { // So IP PDN
+        f_NBIOT_DelayForUserPlaneSignalling_CP(nbiot_Cell50);
+      }
+    }
+    
+    //@siclog "Step 14" siclog@
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell50);
+  } // End of Module 1
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.1.1 Module 2 (M2)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_1_1_Module2() runs on NBIOT_PTC
+  { // UE and Network transmission of user data via the control plane (non-SMS service)
+    var template (present) B3_Type v_PDNType := (f_GetPdnType(), '101'B);
+    var template (present) NAS_MSG_Indication_Type v_NasInd_Expected;
+    var NAS_MSG_Indication_Type v_NasInd_Rxd;
+    var template (present) NAS_UL_Message_Type v_PDNConnectivityReq_Expected;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var NAS_UL_Message_Type v_PDNConnectivityReq_Rxd;
+    var ExtdProtocolConfigOptions v_PcoToUE;
+    var template (value) ExtdProtocolConfigOptions v_NewPco;
+    var template (value) ProtocolContainer v_ProtocolContainerAPN;
+    var AccessPointName v_APN;
+    var boolean v_ConfiguredPDN := false;
+    var integer v_PDNIndex := 0;
+    var template (value) PDN_Address v_PDN_Address;
+    var integer v_SelectedPlmnIndex := f_NBIOT_CellInfo_GetSelectedPlmnIndex(nbiot_Cell50);
+    var template (omit) RRCConnSetupComplete_AttachWithoutPDN_Type v_AttachWithoutPDN := omit;
+    var template HeaderCompressConfig v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny ifpresent;
+    var template ReleaseAssistanceInd v_ReleaseAssistanceInd := cr_ReleaseAssistanceInd ('00'B) ifpresent;
+    var template (value) APNRateControlParams v_APN_RateControl;
+    var O1_Type v_UserData := 'F0'O;
+    var integer v_Count := 0;
+    var integer v_LoopDelay := 60;
+    timer t_WaitForPDN := 2.0;
+    timer t_LoopDelay;
+    timer t_PLMNRateControl := 6.0;
+    timer t_APNRateControl := 1.0;
+    
+    //@siclog "Step 15a1" siclog@
+    f_NBIOT_UE_Page(nbiot_Cell50);
+    
+    if (pc_HCCPCIoT and pc_IP_PDN){
+      v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny;
+    }
+    v_PDNConnectivityReq_Expected := cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach,
+                                                                      v_PDNType,
+                                                                      -,
+                                                                      v_HeaderCompressConfigRX);
+    v_NasInd_Expected := (cr_NAS_IndicationWithPiggybacking (tsc_SHT_IntegrityProtected_PartiallyCiphered, cr_CONTROL_PLANE_SERVICE_REQUEST(?), v_PDNConnectivityReq_Expected), // with PDN Connectivity
+                          cr_NAS_Indication (tsc_SHT_IntegrityProtected, cr_CONTROL_PLANE_SERVICE_REQUEST(?)));                // or without PDN Connectivity
+    
+    // Step 2
+    f_NBIOT_RRC_ConnectionRequest_Def(nbiot_Cell50, mt_Access);
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "508Check CP ResponseToPagingForMTAccess Step2");
+    
+    // Step 3
+    f_NBIOT_RRC_ConnectionSetup_Def();
+    
+    // Step 4
+    if (px_DoAttachWithoutPDN) {
+      v_AttachWithoutPDN := true_;
+    }
+    v_NasInd_Rxd := f_NBIOT_RRCConnectionSetupComplete_Def(nbiot_Cell50,
+                                                           cr_508_RRCConnectionSetupComplete_NB(tsc_RRC_TI_Def, v_SelectedPlmnIndex, -, -, -, v_AttachWithoutPDN),
+                                                           v_NasInd_Expected);
+    
+    if (ispresent (v_NasInd_Rxd.Pdu.PiggybackedPduList)) { // Step 4a1a1
+      if (ischosen (v_NasInd_Rxd.Pdu.PiggybackedPduList[0].Msg.pDN_CONNECTIVITY_REQUEST)) {
+        v_PDNConnectivityReq_Rxd := v_NasInd_Rxd.Pdu.PiggybackedPduList[0].Msg;
+        v_ConfiguredPDN := true;
+        f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "508Check CP ResponseToPagingForMTAccess Step4a1a1");
+      } else {
+        f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "Unexpected Message at Step4a1a1");
+      }
+    } else { // Step 4a1b1
+      f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "508Check CP ResponseToPagingForMTAccess Step4a1b1");
+      // Step 4a1b2
+      t_WaitForPDN.start;
+      alt {
+        [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                             tsc_SRB1bis,
+                                             cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                               v_PDNConnectivityReq_Expected))) -> value v_ReceivedAsp
+          {  // Step 4a1b3a1
+            v_PDNConnectivityReq_Rxd := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg;
+            v_ConfiguredPDN := true;
+            // Step 4a1b3a2
+            t_WaitForPDN.stop;
+          }
+        // Step 4a1b3b1
+        [] t_WaitForPDN.timeout {}
+      }
+    }
+    
+    if (v_ConfiguredPDN) {
+      v_PDNIndex := f_NBIOT_MobileInfo_GetNoOfPDNsConfigured();
+      f_NBIOT_MobileInfo_SetAssignedPdnAndPTI (v_PDNIndex,
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue,
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier);
+
+      if (ispresent(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName)) {
+        v_APN := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName;
+        v_APN.iei := omit;
+      } else {
+        v_APN := valueof(cs_AccessPointName(px_AccessPointName));
+      }
+      f_NBIOT_MobileInfo_SetAPN(0, v_APN);
+      f_NBIOT_MobileInfo_SetExtPCO(0, v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions);
+
+      v_PcoToUE := valueof(f_GetDefaultExtdProtocolConfigOptions(f_NBIOT_MobileInfo_GetExtdPCO(v_PDNIndex)));
+      v_PDN_Address := f_CIOT_GetPDNAddress(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue, f_CheckExtdPCOforIPallocationViaNas(f_NBIOT_MobileInfo_GetExtdPCO(v_PDNIndex)));
+
+      // Step 4a1b3a3
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cs_CIOT_ActivateDefEpsBearerContextRequest(tsc_EpsDefaultBearerId,
+                                                                                              f_NBIOT_MobileInfo_GetPTI(v_PDNIndex),
+                                                                                              v_APN,
+                                                                                              v_PDN_Address,
+                                                                                              cs_ExtdPCO (int2oct(oct2int(v_PcoToUE.iel), 2), v_PcoToUE.pco),
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -, // @sic R5-184093 sic@
+                                                                                              cs_ControlPlaneInd,
+                                                                                              cs_ServingPLMNRateControl(int2oct (10, 2))))));
+      
+      // Step 4a1b3a4
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                        tsc_SRB1bis,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cdr_CIOT_ActivateDefEpsBearerContextAccept(tsc_EpsDefaultBearerId))));
+      
+      if (pc_IP_PDN) {
+        f_NBIOT_DelayForUserPlaneSignalling_CP(nbiot_Cell50);
+      }
+    }
+    
+    // Step 5
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_SERVICE_ACCEPT)));
+    
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step15a1");
+    
+    if (not v_ConfiguredPDN) {
+      //@siclog "Step 15a2a1" siclog@
+      f_UT_RequestAdditionalPDNConnectivity (UT, hex2int(tsc_EpsDefaultBearerId));
+      
+      //@siclog "Step 15a2a2" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                        tsc_SRB1bis,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach, v_PDNType))))-> value v_ReceivedAsp;
+      
+      v_PDNConnectivityReq_Rxd := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg;
+      v_PDNIndex := f_NBIOT_MobileInfo_GetNoOfPDNsConfigured();
+      f_NBIOT_MobileInfo_SetAssignedPdnAndPTI (v_PDNIndex,
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue,
+                                               v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier);
+
+      if (ispresent(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName)) {
+        v_APN := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.accessPointName;
+        v_APN.iei := omit;
+      } else {
+        v_APN := valueof(cs_AccessPointName(px_AccessPointName));
+      }
+      f_NBIOT_MobileInfo_SetAPN(0, v_APN);
+      f_NBIOT_MobileInfo_SetExtPCO(0, v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions);
+
+      v_PcoToUE := valueof(f_GetDefaultExtdProtocolConfigOptions(f_NBIOT_MobileInfo_GetExtdPCO(v_PDNIndex)));
+      v_PDN_Address := f_CIOT_GetPDNAddress(v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.pdnType.typeValue, f_CheckExtdPCOforIPallocationViaNas(f_NBIOT_MobileInfo_GetExtdPCO(v_PDNIndex)));
+
+      //@siclog "Step 15a2a3" siclog@
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cs_CIOT_ActivateDefEpsBearerContextRequest(tsc_EpsDefaultBearerId,
+                                                                                              f_NBIOT_MobileInfo_GetPTI(v_PDNIndex),
+                                                                                              v_APN,
+                                                                                              v_PDN_Address,
+                                                                                              cs_ExtdPCO (int2oct(oct2int(v_PcoToUE.iel), 2), v_PcoToUE.pco),
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -, // @sic R5-184093 sic@
+                                                                                              cs_ControlPlaneInd,
+                                                                                              cs_ServingPLMNRateControl(int2oct (10, 2))))));
+      
+      //@siclog "Step 15a2a4" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                        tsc_SRB1bis,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cdr_CIOT_ActivateDefEpsBearerContextAccept(tsc_EpsDefaultBearerId))));
+      
+      if (pc_IP_PDN) {
+        f_NBIOT_DelayForUserPlaneSignalling_CP(nbiot_Cell50);
+      }
+    }
+    //@siclog "Step 15a2A- 15a2B" siclog@
+    f_NBIOT_Activate_TestMode (nbiot_Cell50, tsc_UE_TestLoopMode_TypeG);
+    
+    //@siclog "Step 15a3 - 15a4" siclog@
+    f_NBIOT_CloseUE_TestLoopModeGH (nbiot_Cell50, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 12, v_LoopDelay);
+    t_LoopDelay.start(f_NBIOT_SetTimerToleranceMin(nasTimer, int2float(v_LoopDelay)));
+    
+    //@siclog "Step 15a5" siclog@
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT (tsc_EpsDefaultBearerId, f_NBIOT_MobileInfo_GetPTI(v_PDNIndex), cs_UserDataContainer(v_UserData&v_UserData&v_UserData)))));
+    
+    if (px_DoAttachWithoutPDN) {
+      //@siclog "Step 15a6a1" siclog@
+      f_NBIOT_508Check_ReleasePDN_RRCConnected (nbiot_Cell50);
+      f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step15a6a1");
+    }
+    //@siclog "Step 15a7" siclog@
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell50);
+    
+    //@siclog "Step 15a8" siclog@
+    t_LoopDelay.timeout;
+    
+    //@siclog "Step 15a9" siclog@
+    t_PLMNRateControl.start;
+    
+    //@siclog "Step 15a10" siclog@
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer (nbiot_Cell50, cr_UserDataContainer('0003'O, v_UserData&v_UserData&v_UserData));
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step15a10");
+    
+    //@siclog "Step 15a11 - 15a14" siclog@
+    for (v_Count := 0; v_Count< 9; v_Count := v_Count +1) {
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT (tsc_EpsDefaultBearerId, cr_UserDataContainer('0003'O, v_UserData&v_UserData&v_UserData), v_ReleaseAssistanceInd))));
+      f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step15a11 instance no." & int2str(v_Count + 1));
+    }
+
+    //@siclog "Step 15a12" siclog@
+    t_PLMNRateControl.timeout;
+    //@siclog "Step 15a13" siclog@
+    t_PLMNRateControl.start;
+
+    //@siclog "Step 15a14" siclog@
+    v_ReleaseAssistanceInd := cr_ReleaseAssistanceInd (('00'B, '01'B)) ifpresent;
+    for (v_Count := 0; v_Count< 2; v_Count := v_Count +1) {
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT (tsc_EpsDefaultBearerId, cr_UserDataContainer('0003'O, v_UserData&v_UserData&v_UserData), v_ReleaseAssistanceInd))));
+      f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step15a14 instance no." & int2str(v_Count + 1));
+    }
+
+    //@siclog "Step 15a15" siclog@
+    t_PLMNRateControl.stop;
+    
+    //@siclog "Step 15a16a1" siclog@
+    if (pc_APN_RateControl) {
+      v_APN_RateControl := cs_APNRateControlParams ('001'B, int2oct(1, 3));
+      v_ProtocolContainerAPN := cs_ProtocolContainer ('0016'O, bit2oct(encvalue(v_APN_RateControl)));
+      v_NewPco := f_NAS_ExtdProtocolConfigOptionsTX ({v_ProtocolContainerAPN});
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cs_ModifyEPSBearerCxtReq_AllParams(tsc_EpsDefaultBearerId,
+                                                                                       f_NBIOT_MobileInfo_GetPTI(v_PDNIndex),
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       f_Get_508_PFI(),
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       omit,
+                                                                                       v_NewPco,
+                                                                                       omit, // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+                                                                                       omit))));
+      
+      //@siclog "Step 15a16a2" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                        tsc_SRB1bis,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cr_508_ModifyEPSBearerCxtAccept(tsc_EpsDefaultBearerId))));
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 15a16a2");
+      
+      //@siclog "Step 15a16a3 - 15a16a4" siclog@
+      f_NBIOT_CloseUE_TestLoopModeGH (nbiot_Cell50, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 2, 0);
+      
+      v_UserData := f_GetN_OctetsFromPRBS(0, 10);
+      //@siclog "Step 15a16a5" siclog@
+      SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                     tsc_SRB1bis,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cs_ESM_DATA_TRANSPORT (tsc_EpsDefaultBearerId, f_NBIOT_MobileInfo_GetPTI(v_PDNIndex), cs_UserDataContainer(v_UserData)))));
+      
+      v_ReleaseAssistanceInd := cr_ReleaseAssistanceInd ('00'B) ifpresent;
+      for (v_Count :=0; v_Count <2; v_Count := v_Count+1 ) {
+        //@siclog "Step 15a16a6" siclog@
+        t_APNRateControl.start;
+        if (v_Count == 2) {
+          v_ReleaseAssistanceInd := cr_ReleaseAssistanceInd (('00'B, '01'B)) ifpresent;
+        }
+      
+        //@siclog "Step 15a16a7" siclog@
+        SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                                      tsc_SRB1bis,
+                                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                        cr_ESM_DATA_TRANSPORT (?, cr_UserDataContainer(?, v_UserData), v_ReleaseAssistanceInd)))) -> value v_ReceivedAsp;
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 15a16a7 "& int2str (v_Count+1)& "repetition");
+        
+        //@siclog "Step 15a16a8" siclog@
+        t_APNRateControl.timeout;
+      }
+    }
+    
+    // @sic R5-185019 sic@
+    
+    //@siclog "Step 15a19 - 15a20" siclog@
+    f_NBIOT_Deactivate_TestMode (nbiot_Cell50, tsc_SRB1bis);
+    
+    //@siclog "Step 15a21" siclog@
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell50);
+    
+  } // End of Module 2
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.1.1 Module 3 (M3)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_1_1_Module3() runs on NBIOT_PTC
+  { // UE and Network transmission of SMS via the control plane
+    var  octetstring v_SMS_Message;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var octetstring v_Rxd_SMS;
+    var NAS_MessageContainer v_NAS_RcvMsgContainer_SMS;
+    var template (value) NAS_MessageContainer v_NAS_TxMessageContainer_SMS;
+    var CP_PDU_Type v_RcvSMS_CP_PDU;
+    var template CP_PDU_Type v_ExpSMS_CP_PDU;
+    var bitstring v_NAS_RcvBitsMsgContainer_SMS;
+    var B3_Type v_TI_Value;
+    var TransactionIdentifier_Type v_MO_TI_FromSS;
+    var TransactionIdentifier_Type v_MO_TI_FromUE;
+    var O1_Type v_RpMsgRefRcvd;
+    var SMS_DELIVER_Type v_SMS_DELIVER_Sent;
+    var template CP_UserData_Type v_Exp_CP_UserData;
+    var octetstring v_SUBMIT_UserData;
+    var octetstring v_PRBS_SMS := f_GetN_OctetsFromPRBS (0, 140); // 140 fits with the requirement from 36.509 [160 7-bit characters] @sic R5-185125 sic@
+    var integer v_LoopDelay := 60;
+    timer t_LoopDelay;
+    
+    //@siclog "Step 16a1" siclog@
+    //IF pc_NB_S1_only AND px_SMSTransport_CP_CIoT THEN
+    // Check: Does the 'Test procedure to check UE response to Paging for Control Plane CIoT MT access' as described in TS 36.508 [18], clause 8.1.5A.2 take place?
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell50);
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step16a1");
+
+    //@siclog "Step 16a1A- 16a1B" siclog@
+    //The SS transmits an ACTIVATE TEST MODE message to activate test mode H (loopback the content of any downlink received SMS messages).
+    //The UE transmits an ACTIVATE TEST MODE COMPLETE message.
+    f_NBIOT_Activate_TestMode (nbiot_Cell50, tsc_UE_TestLoopMode_TypeH);
+    
+    //@siclog "Step 16a2 - 16a3" siclog@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the NB-IoT UE test loop mode for SMS transfer (2 transmissions; 60 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH (nbiot_Cell50, tsc_UE_TestLoopMode_TypeH, tsc_TestLoopModeGH_UplinkMode_NAS, 2, v_LoopDelay);
+    t_LoopDelay.start(f_NBIOT_SetTimerToleranceMin(nasTimer, int2float(v_LoopDelay)));
+    
+    //@siclog "Step 16a4" siclog@
+    //SS transmits a DOWNLINK NAS TRANSPORT message containing downlink user data (SMS).(Note 2)
+    v_SMS_DELIVER_Sent := valueof(cs_SMS_DELIVER_IoT (v_PRBS_SMS)); // data TPDU with random data
+    v_SMS_Message := f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (cs_MT_TI0_FromSS,
+                                                        cs_CP_UserData_DELIVER_IoT(v_SMS_DELIVER_Sent))); // data TPDU with random data
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                          cs_NAS_MsgContainer_SMS (v_SMS_Message)))));
+    
+    //@siclog "Step 16a4A" siclog@
+    //The UE transmits a CP-ACK encapsulated in an Uplink NAS transport message.
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                    tsc_SRB1bis,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_SMS_UL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                               cr_NAS_MsgContainer_SMS (?) )))) -> value v_ReceivedAsp;
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_NAS_TRANSPORT.nasMessage;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS.smsmessage);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (cr_MT_TI0_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test Case 22.1.1", "Step 16a4A");
+
+    //@siclog "Step 16a4B" siclog@
+    //The UE transmits a CP-DATA containing an RP-ACK RPDU encapsulated in an UPLINK NAS TRANSPORT message.
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_SMS_UL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                                 cr_NAS_MsgContainer_SMS (?))))) -> value v_ReceivedAsp;
+    // Store procedure transaction id to be used in SS responses.
+    // needs to be decoded with Decvalue !!
+    v_NAS_RcvMsgContainer_SMS := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_NAS_TRANSPORT.nasMessage;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS.smsmessage);
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MT_TI0_FromUE, cr_CP_UserData_RP_ACK_ul);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test Case 22.1.1", "Step 16a4B");
+
+    //@siclog "Step 16a4C" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS transport message to the UE.
+    v_NAS_TxMessageContainer_SMS := cs_NAS_MsgContainer_SMS (f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (cs_MT_TI0_FromSS)));
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request (tsc_SHT_IntegrityProtected_Ciphered,
+                                                   cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                            v_NAS_TxMessageContainer_SMS))));
+    //@siclog "Step 16a4D" siclog@
+    //For NTN access, SS waits for timer 2* TNTN,offset
+    f_Delay(2.0*f_NBIOT_NTN_Get_T_NTNoffset_InSeconds(nbiot_Cell50)); //for non-NTN access the delay will result in 0 /*@sic R5s250273 sic@ */
+    
+    //@siclog "Step 16a5" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message.
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell50);
+    
+    //@siclog "Step 16a6" siclog@
+    //Wait for the time set in the CLOSE UE TEST LOOP to expire.
+    t_LoopDelay.timeout;
+    
+    //@siclog "Step 16a7" siclog@
+    //Check: Does the 'Test procedure to check UE initiation of Control Plane CIoT MO user data transfer SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3A take place?
+    // 1st repetition
+    v_Rxd_SMS := f_NBIOT_508Check_CP_MOSMSDataTransfer (nbiot_Cell50); // any value, cannot specify the SMS in all details @sic R5-185125 sic@
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_Rxd_SMS); // the SMS contained in the NAS message container
+    v_Exp_CP_UserData := cr_CP_UserData_SUBMIT(cr_RP_DATA_ul_SUBMIT(cr_RP_UserData_SUBMIT(cr_SMS_SUBMIT_AnyVP))); // expected - any - CP User Data  @sic R5-185125 sic@
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, v_Exp_CP_UserData); // expected CP Data PDU, using - any - CP User Data
+    // Decode the received SMS and match against "any template"
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 22.1.1", "Step 16a7");
+    // extract received SMS user data
+    v_SUBMIT_UserData := v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_UserData.tP_PDU.SMS_SUBMIT.tP_UserData; // @sic R5-185125 sic@
+    // now compare the TPDU User Data sent and received
+    if (v_PRBS_SMS == v_SUBMIT_UserData) { // @sic R5-185125 sic@
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 16a7");
+    } else {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 16a7");
+    }
+
+    //@siclog "Step 16a7A" siclog@
+    //The SS transmits a CP-ACK encapsulated in a Downlink NAS Transport message.
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd :=  v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+    v_NAS_TxMessageContainer_SMS := cs_NAS_MsgContainer_SMS (f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS)));
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request (tsc_SHT_IntegrityProtected_Ciphered,
+                                                   cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                            v_NAS_TxMessageContainer_SMS))));
+    
+    //@siclog "Step 16a7B" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a DOWNLINK NAS TRANSPORT message.
+    v_NAS_TxMessageContainer_SMS := cs_NAS_MsgContainer_SMS (f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                                                                cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd))));
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request (tsc_SHT_IntegrityProtected_Ciphered,
+                                                   cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                            v_NAS_TxMessageContainer_SMS))));
+                                                                              
+    //@siclog "Step 16a7C" siclog@
+    //The UE transmits a CP-ACK encapsulated in an UPLINK NAS TRANSPORT message.
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_SMS_UL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                                 cr_NAS_MsgContainer_SMS (?))))) -> value v_ReceivedAsp;
+    v_NAS_RcvMsgContainer_SMS :=  v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_NAS_TRANSPORT.nasMessage;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS.smsmessage);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (v_MO_TI_FromUE);
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 22.1.1", "Step 16a7C");
+
+    //@siclog "Step 16a8" siclog@
+    //Check: Does the UE send an UPLINK NAS TRANSPORT message containing SMS, matching the TPDU sent in step 16a4?
+    // 2nd repetition
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_SMS_UL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                                      cr_NAS_MsgContainer_SMS (?))))) -> value v_ReceivedAsp;
+                                                                                          // extract SMS message container, decode SMS message, and extract TPDU User Data received and match against TPDU User Data sent
+    v_NAS_RcvMsgContainer_SMS :=  v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_NAS_TRANSPORT.nasMessage; // NAS message
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS.smsmessage); // SMS message contents, as bitstring
+    v_Exp_CP_UserData := cr_CP_UserData_SUBMIT(cr_RP_DATA_ul_SUBMIT(cr_RP_UserData_SUBMIT(cr_SMS_SUBMIT_AnyVP))); // expected - any - CP User Data  @sic R5-185125 sic@
+    v_ExpSMS_CP_PDU := cr_CP_DATA_PDU (cr_MO_AnyTI_FromUE, v_Exp_CP_UserData); // expected CP Data PDU, using - any - CP User Data
+    // Decode the received SMS and match against "any template"
+    v_RcvSMS_CP_PDU := f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 22.1.1", "Step 16a8");
+    // extract received SMS user data
+    v_SUBMIT_UserData := v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_UserData.tP_PDU.SMS_SUBMIT.tP_UserData; // @sic R5-185125 sic@
+    // now compare the TPDU User Data sent and received
+    if (v_PRBS_SMS == v_SUBMIT_UserData) { // @sic R5-185125 sic@
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 16a8");
+    } else {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 16a8");
+    }
+
+    // Note TI value used by the UE and set TI variables accordingly
+    v_TI_Value := v_RcvSMS_CP_PDU.CP_DATA.transactionIdentifier.tI_Value;
+    v_MO_TI_FromSS.tI_Flag := '1'B;
+    v_MO_TI_FromSS.tI_Value := v_TI_Value;
+    v_MO_TI_FromUE.tI_Flag := '0'B;
+    v_MO_TI_FromUE.tI_Value := v_TI_Value;
+    v_RpMsgRefRcvd :=  v_RcvSMS_CP_PDU.CP_DATA.cP_UserData.rP_PDU.RP_DATA_ul.rP_MessageReference;
+
+    //@siclog "Step 16a8A" siclog@
+    //The SS transmits a CP-ACK encapsulated in a DOWNLINK NAS TRANSPORT message.
+    v_NAS_TxMessageContainer_SMS := cs_NAS_MsgContainer_SMS (f_SMS_PDU_Encvalue(cs_CP_ACK_PDU (v_MO_TI_FromSS)));
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request (tsc_SHT_IntegrityProtected_Ciphered,
+                                                   cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                            v_NAS_TxMessageContainer_SMS))));
+    
+    //@siclog "Step 16a8B" siclog@
+    //The SS transmits a CP-DATA containing an RP-ACK RPDU encapsulated in a DOWNLINK NAS TRANSPORT message.
+    v_NAS_TxMessageContainer_SMS := cs_NAS_MsgContainer_SMS (f_SMS_PDU_Encvalue(cs_CP_DATA_PDU (v_MO_TI_FromSS,
+                                                                                                cs_CP_UserData_RP_ACK_dl(v_RpMsgRefRcvd))));
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request (tsc_SHT_IntegrityProtected_Ciphered,
+                                                 cs_SMS_DL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                          v_NAS_TxMessageContainer_SMS))));
+                                                                              
+    //@siclog "Step 16a8C" siclog@
+    //The UE transmits a CP-ACK encapsulated in an UPLINK NAS TRANSPORT message.
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                  cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cr_SMS_UL_NAS_Transport (tsc_SHT_NoSecurityProtection,
+                                                                             cr_NAS_MsgContainer_SMS (?))))) -> value v_ReceivedAsp;
+    v_NAS_RcvMsgContainer_SMS :=  v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_NAS_TRANSPORT.nasMessage;
+    v_NAS_RcvBitsMsgContainer_SMS := oct2bit(v_NAS_RcvMsgContainer_SMS.smsmessage);
+    v_ExpSMS_CP_PDU := cr_CP_ACK_PDU (v_MO_TI_FromUE);
+    f_SMS_CP_PDU_DecodeAndMatch(v_NAS_RcvBitsMsgContainer_SMS, v_ExpSMS_CP_PDU, "Test case 22.1.1", "Step 16a8C");
+    
+    //@siclog "Step 16a9" siclog@
+    //IF px_DoAttachWithoutPDN THEN The 'Test procedure to check release of PDN connectivity before leaving RRC-CONNECTED for attach without PDN' specified in TS 36.508 [18], clause 8.1.5A.4 takes place.
+    if (px_DoAttachWithoutPDN) {
+      f_NBIOT_508Check_ReleasePDN_RRCConnected (nbiot_Cell50);
+    }
+    
+    //@siclog "Step 16a10 - 16a11" siclog@
+    //The SS transmits DEACTIVATE TEST MODE message to deactivate the test mode H.
+    //The UE transmits an DEACTIVATE TEST MODE COMPLETE message.
+    f_NBIOT_Deactivate_TestMode (nbiot_Cell50, tsc_SRB1bis);
+    
+    //@siclog "Step 16a11" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message.
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell50);
+    
+  } // End of Module 3
+
+}

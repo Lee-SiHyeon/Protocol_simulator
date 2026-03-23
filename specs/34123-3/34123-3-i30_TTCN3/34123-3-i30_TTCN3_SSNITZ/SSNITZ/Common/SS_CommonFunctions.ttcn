@@ -1,0 +1,841 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module SS_CommonFunctions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from TCAP_Definitions language "ASN.1:2002" all with {encode "BER_EncRule"};
+  import from TCAP_Definitions_Para language "ASN.1:2002" all with {encode "DIRECT_EncRule"};
+  import from SS_Definitions_Arguments language "ASN.1:2002" all with {encode "BER_EncRule"};
+  import from Common_Definitions_Arguments language "ASN.1:2002" all with {encode "BER_EncRule"};
+  import from CommonDefs all;
+  import from ComponentsType all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from SS_CommonTemplates all;
+  import from SS_EncDecComponents all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_SS_CommonTemplates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  type record SS_ReceiveRegisterResult_Type {  /* @status    APPROVED (SSNITZ) */
+    Components components,
+    TI         ti
+  };
+
+  template (present) Invoke cr_InvokeBuildMPTY (template (present) InvokeIdType p_InvokeId := ?) :=
+  { /* @status    APPROVED (SSNITZ) */
+    invokeID := p_InvokeId,
+    linkedID := omit,
+    operationCode :=  {
+      local := tsc_OperationCode_BuildMPTY
+    },
+    parameter := {
+      buildMPTY := NULL
+    }
+  };
+
+  template (present) Invoke cr_InvokeHoldMPTY (template (present) InvokeIdType p_InvokeId := ?) :=
+  { /* @status    APPROVED (SSNITZ) */
+    invokeID := p_InvokeId,
+    linkedID := omit,
+    operationCode :=  {
+      local := tsc_OperationCode_HoldMPTY
+    },
+    parameter := {
+      holdMPTY := NULL
+    }
+  };
+
+  template (present) Invoke cr_InvokeRetrieveMPTY (template (present) InvokeIdType p_InvokeId := ?) :=
+  { /* @status    APPROVED (SSNITZ) */
+    invokeID := p_InvokeId,
+    linkedID := omit,
+    operationCode :=  {
+      local := tsc_OperationCode_RetrieveMPTY
+    },
+    parameter := {
+      retrieveMPTY := NULL
+    }
+  };
+
+  template (value) ReturnResult cs_ReturnResult_Empty_Result (InvokeIdType p_InvokeId) :=
+  { /* @status    APPROVED (SSNITZ) */
+    invokeID := p_InvokeId,
+    result := omit
+  };
+
+  template (present) BasicServiceCode cr_Teleservice_AllSpeech :=
+  { // TeleService AllSpeechTransmissionServices (TS10)
+    /* @status    APPROVED (SSNITZ) */
+    teleservice := tsc_AllSpeechTransmissionServices
+  };
+
+  template (present) BasicServiceCode cr_Teleservice_TS11 :=
+  { // TeleService Telephony (TS 11)
+    /* @status    APPROVED (SSNITZ) */
+    teleservice := tsc_TeleserviceSpeech
+  };
+
+  template (present) BasicServiceCode cr_BearerService_AllSynchronousServices :=
+  { // All Synchronous Services covers "allDataCDA-Services", "allAlternateSpeech-DataCDA", "allSpeechFollowedByDataCDA" and "allPadAccessCDA-Services"
+    /* @status    APPROVED (SSNITZ) */
+    bearerService := tsc_AllSynchronousServices
+  };
+
+  /* @desc      Step 1-16 of 34.108 cl. 7.2.3.2
+   * @param     p_CellId
+   * @param     p_DoAuth            (default value: true)
+   * @param     p_PS_RB_Already_Est (default value: false)
+   * @param     p_DoCS_Security (default value: true)
+   *            if p_DoAuth is true, p_DoCS_Security shall also be true
+   * @param     p_StopAtU4State (default value: false) to stop after Alerting message @sic R5-150590 sic@
+   * @return    TI
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_MO_SpeechCall(UTRAN_CellId_Type p_CellId,
+                                 boolean           p_DoAuth := true,
+                                 boolean           p_PS_RB_Already_Est := false,
+                                 boolean           p_DoCS_Security := true,
+                                 boolean           p_StopAtU4State := false) runs on UTRAN_PTC return TI
+  {
+    var template (present) EstablishmentCause v_EstCause := originatingConversationalCall;
+    var START_Value v_START_Value := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var TI v_TI_R;
+    
+    // Trigger UE to make an outgoing call
+    f_UT_RequestCSCall(UT);
+    
+    // Steps 2-4
+    f_UTRAN34_RRC_ConnEst(p_CellId, v_EstCause);
+    
+    // Step 5 Receive CM Service Request
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                        tsc_RB3,
+                                        cr_U_CMServReq_SS_MO(?)))-> value v_RRC_DataInd; // @sic R5s150213, R5-153983 sic@
+    
+    v_START_Value := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value);
+    v_TI_R := f_UTRAN34_MO_SpeechCall_Steps6_16 (p_CellId, p_DoAuth, p_PS_RB_Already_Est, p_DoCS_Security, p_StopAtU4State); // @sic  R5-150590 sic@
+    
+    return v_TI_R;
+  }
+
+  /* @desc      Call A-B in state U10 with auxiliary state Call Held 34.108 cl. 7.2.3.3.1.2
+   *            return TI of call A-B @sic R5-150740 sic@
+   * @param     p_CellId
+   * @return    TI
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_Held(UTRAN_CellId_Type  p_CellId) runs on UTRAN_PTC return TI
+  {
+    var TI v_TI_R;
+
+    // Step 1
+    v_TI_R := f_UTRAN34_MO_SpeechCall(p_CellId); // @sic R5-145740 sic@
+
+    v_TI_R := f_UTRAN_CallA_B_Held_Common (v_TI_R);
+    return v_TI_R;
+  }
+
+  /* @desc Call A-B in state U10 with auxiliary state Call Held  and Call A-C in U4 34.108 cl. 7.2.3.3.1.3  @sic R5-150740 sic@
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_Held_A_C_Delivered(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var TI v_TI_R;
+
+    v_TI_R := f_UTRAN34_MO_SpeechCall(p_CellId); // @sic R5-145740 sic@
+
+    return f_UTRAN_CallA_B_Held_A_C_Delivered_Common (v_TI_R); // @sic R6s160148 sic@
+
+  }
+
+  /* @desc Call A-B in state U10 with auxiliary state Call Held  and Call A-C in U10 34.108 cl. 7.2.3.3.1.4 @sic R5-150740 sic@
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_Held_A_C_Active(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var TI v_TI_R;
+    
+    v_TI_R := f_UTRAN34_MO_SpeechCall(p_CellId); // @sic R5-145740 sic@
+    return f_UTRAN_CallA_B_Held_A_C_Active_Common (v_TI_R); // @sic R6s160148 sic@
+  }
+
+  /* @desc      Call A-B and A-C in state U10 with auxiliary state Call in MPTY 34.108 cl. 7.2.3.3.1.5
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_Active_CallMPTY(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S;
+    var TI v_TI_R;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var octetstring v_FacilityReturn;
+    var Components v_FacilityInvoke;
+    
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_Held_A_C_Active(p_CellId);
+    
+    //Step 2 Join A-B and A-C
+    f_UT_CallMPTY(UT);
+    
+    //Step 3 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl((v_MultiTI_R.A_B, v_MultiTI_R.A_C), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // Now use the value received  @sic R5s140989 sic@
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeBuildMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    //Step 4 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    return v_MultiTI_R;
+  }
+
+  /*
+   * @desc      Call A-B and A-C in state U10 with auxiliary state Call in MPTY, Call Held 34.108 cl. 7.2.3.3.1.6
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_Active_CallMPTYHeld(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S;
+    var TI v_TI_R;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var octetstring v_FacilityReturn;
+    var Components v_FacilityInvoke;
+
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_A_C_Active_CallMPTY(p_CellId);
+
+    //Step 2 Put MPTY call on hold
+    f_UT_CallHold(UT);
+
+    //Step 3 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl(( v_MultiTI_R.A_B, v_MultiTI_R.A_C), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // Now use the value received
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeHoldMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    //Step 4 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    return v_MultiTI_R;
+  }
+
+  /*
+   * @desc      Call A-B, A-C in state U10 with auxiliary state Call in MPTY, Call Held and A-D in U10 34.108 cl. 7.2.3.3.1.7
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_Active_CallMPTYHeld_A_D_Active(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S_D;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var charstring v_NumberToDial := "4812162024"; // Make sure the number is different to previous numbers
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_A_C_Active_CallMPTYHeld(p_CellId);
+
+    // Step 2 Make the UE attempt a call to subscriber D
+    f_UT_RequestCSCall(UT, v_NumberToDial);
+    
+    // Step 3 Receive CM Service Request
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_CMServReq_SS_MO(v_SecurityInfo.authKeys.AuthCS.CKeySeq))) -> value v_RRC_DataInd; // @sic R5s150599 sic@
+    
+    // Steps 4 Send CM Service Accept
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CM_ServAcc));
+    
+    // Step 5 SET UP
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_SetupMOCall(cr_BcapSpeechMO)))
+      -> value v_RRC_DataInd;
+    v_MultiTI_R.A_D := v_RRC_DataInd.msg.setupul.ti;
+    v_TI_S_D := f_NAS_TI_InitAndSetFlag(v_MultiTI_R.A_D, '1'B);
+    
+    // Step 6 Transmit Call Proceeding message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CallProc(v_TI_S_D)));
+    
+    // Step 7  Transmit Alerting message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Alert(v_TI_S_D)));
+    
+    //Step 8 Transmit Connect message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Connect(v_TI_S_D)));
+    
+    //Step 9 Receive Connect Acknowledge message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ConnAck(v_MultiTI_R.A_D)));
+    return v_MultiTI_R;
+  }
+
+  /*
+   * @desc      Call A-B, A-C in state U10 with auxiliary state Call in MPTY, A-D Call Held 34.108 cl. 7.2.3.3.1.8
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_Active_CallMPTY_A_D_Held(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S_D;
+    var TI v_TI_R;
+    var TI v_TI_S;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var octetstring v_FacilityReturn;
+    var Components v_FacilityInvoke;
+    
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_A_C_Active_CallMPTYHeld_A_D_Active(p_CellId);
+    
+    // Step 2 Make the UE put call on hold
+    f_UT_CallHold(UT);
+    
+    // Step 3 Hold
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Hold(v_MultiTI_R.A_D))) -> value v_RRC_DataInd;
+    v_MultiTI_R.A_D := v_RRC_DataInd.msg.hold.ti;
+    v_TI_S_D := f_NAS_TI_InitAndSetFlag(v_MultiTI_R.A_D, '1'B);
+    
+    //Step 4 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl((v_MultiTI_R.A_B, v_MultiTI_R.A_C), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // Now use the value received
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeRetrieveMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    // Step 5 Hold Acknowledge
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_HoldAck(v_TI_S_D)));
+    
+    //Step 6 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    return v_MultiTI_R;
+  }
+
+  /*
+   * @desc      Call A-B, A-C, A-D in state U10 with auxiliary state Call in MPTY, A-E Call Held in U10 34.108 cl. 7.2.3.3.1.9
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_A_D_Active_CallMPTY_A_E_Held(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S_E;
+    var TI v_TI_R;
+    var TI v_TI_S;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var KeySeq v_KeySeq := '111'B; //cipher key sequence number IE: no key is available
+    var octetstring v_FacilityReturn;
+    var Components v_FacilityInvoke;
+    var charstring v_NumberToDial := "5101520253"; // Make sure the number is different to previous numbers
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_A_C_Active_CallMPTY_A_D_Held(p_CellId);
+    
+    //Step 2 Join all calls together
+    f_UT_CallMPTY(UT);
+    
+    //Step 3 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl((v_MultiTI_R.A_B, v_MultiTI_R.A_C, v_MultiTI_R.A_D), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // Now use the value received
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeBuildMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    //Step 4 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    
+    //Step 5 Put MPTY call on hold
+    f_UT_CallHold(UT);
+    
+    //Step 6 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl((v_MultiTI_R.A_B, v_MultiTI_R.A_C, v_MultiTI_R.A_D), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // Now use the value received
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeHoldMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    //Step 7 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    
+    // Step 8 Make the UE attempt a call to subscriber E
+    f_UT_RequestCSCall(UT, v_NumberToDial);
+    
+    v_SecurityInfo := f_UTRAN_Security_Get(); // @sic R5s150897 sic@
+    v_KeySeq := v_SecurityInfo.authKeys.AuthCS.CKeySeq;
+    
+    // Step 9 Receive CM Service Request
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_CMServReq_SS_MO(v_KeySeq)))-> value v_RRC_DataInd;
+    
+    // Steps 10 Send CM Service Accept
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CM_ServAcc));
+    
+    // Step 11 SET UP
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_SetupMOCall(cr_BcapSpeechMO)))
+      -> value v_RRC_DataInd;
+    v_MultiTI_R.A_E := v_RRC_DataInd.msg.setupul.ti;
+    v_TI_S_E := f_NAS_TI_InitAndSetFlag(v_MultiTI_R.A_E, '1'B);
+    
+    // Step 12 Transmit Call Proceeding message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CallProc(v_TI_S_E)));
+    
+    // Step 13  Transmit Alerting message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Alert(v_TI_S_E)));
+    
+    //Step 14 Transmit Connect message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Connect(v_TI_S_E)));
+    
+    //Step 15 Receive Connect Acknowledge message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ConnAck(v_MultiTI_R.A_E)));
+    
+    // Step 16 Make the UE put Call A-E on hold
+    f_UT_CallHold(UT);
+    
+    // Step 17 Hold
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Hold(v_MultiTI_R.A_E)))-> value v_RRC_DataInd;
+    
+    //Step 18 Receive Facility Invoke
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Facility_CallControl((v_MultiTI_R.A_B, v_MultiTI_R.A_C, v_MultiTI_R.A_D), cr_FacilityIE_lv))) -> value v_RRC_DataInd;
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.facilityul.facility_Str.components); // @sic R5s140989 sic@
+    v_TI_R := v_RRC_DataInd.msg.facilityul.ti; // now use the value received
+    v_TI_S := f_NAS_TI_InitAndSetFlag(v_TI_R, '1'B);
+    
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(cr_InvokeRetrieveMPTY)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Facility message does not match to template");
+    }
+    
+    // Step 19 Hold Acknowledge
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_HoldAck(v_TI_S_E)));
+    
+    //Step 20 Send Facility return result
+    v_FacilityReturn := f_SS_EncodeComponents(cs_Components(cs_ReturnResult(cs_ReturnResult_Empty_Result(v_FacilityInvoke[0].invoke.invokeID))));
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_Facility_CallControl(v_TI_S, cs_FacilityIE_lv(v_FacilityReturn))));
+    return v_MultiTI_R;
+  }
+
+  /*
+   * @desc      Call A-B, A-C in state U10 with auxiliary state Call in MPTY, A-D Call Received in U10 34.108 cl. 7.2.3.3.1.10
+   * @param     p_CellId
+   * @return    MultiTI_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CallA_B_A_C_Active_CallMPTY_A_D_Received(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return MultiTI_Type
+  {
+    var MultiTI_Type v_MultiTI_R;
+    var TI v_TI_S_D;
+    var integer i := 0;
+    
+    // Step 1
+    v_MultiTI_R := f_UTRAN34_CallA_B_A_C_Active_CallMPTY(p_CellId);
+    
+    while ((i == bit2int(v_MultiTI_R.A_B.tiVal)) or (i == bit2int(v_MultiTI_R.A_C.tiVal))) {
+      i := i + 1;
+    }
+    v_TI_S_D := f_NAS_TI_Init(cs_TI_MT(int2bit(i, 3)));
+    v_MultiTI_R.A_D := f_NAS_TI_InitAndSetFlag(v_TI_S_D, '1'B); // @sic R5s150574 sic@
+    
+    // Step 2 Send Setup
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_SetupMTCall_SS(cs_BcapSpeechMT,
+                                                 v_TI_S_D, // This value should be different to those already in use
+                                                 -,
+                                                 cs_Signal('00000111'B))));
+    // Step 3 Receive Call Confirmed
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_CallConfirmed(?)));
+    // Step 4 Receive Alerting
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Alerting(?)));
+    return v_MultiTI_R;
+  }
+
+  /* @desc Call A-B in state U10 34.108 cl. 7.2.3.1
+   * @param     p_CellId
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_GoToState6_9_MT(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC
+  {
+    // Step 2
+    f_UTRAN_PageCS(p_CellId, terminatingConversationalCall, oct2bit(px_TMSI_Def));
+    
+    // Step 3 - 5
+    f_UTRAN34_RRC_ConnEst(p_CellId, terminatingConversationalCall);
+    
+    // Step 6
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                        tsc_RB3,
+                                        cr_U_PagRsp(?, ?)));
+
+    f_UTRAN34_MT_SpeechCall_Steps7_17 (p_CellId);  // @sic R5-145740 sic@
+  }
+
+  /* @desc      Step 7-17 of 34.108 cl. 7.2.3.1
+   *            From TTCN2 test step ts_CC_EnterU10_MT_Def
+   * @param     p_CellId
+   * @param     p_DoAuth            (default value: true)
+      .. decides whether or not to do generate new keys
+   * @param     p_PS_RB_Already_Est (default value: false)
+      .. decides whether or not to configure or modify SS configuration.
+         p_PS_RB_Already_Est = TRUE is used in TC 13.1.4 where a PS RB has already been configured in SS and UE and then a CS Speech RB is set up/configured
+         p_PS_RB_Already_Est = FALSE is used in TC 13.1.3 where only a CS Speech RB is set up/configured
+   * @param     p_DoCS_Security     (default value: true)
+      .. if p_DoAuth is true, p_DoCS_Security shall also be true
+   * @param     p_StopAtU9State     (default value: false)
+      ..set to true if need U9, Alerting State, used for some rSRVCC tests
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_MT_SpeechCall_Steps7_17(UTRAN_CellId_Type p_CellId,
+                                             boolean           p_DoAuth := true,
+                                             boolean           p_PS_RB_Already_Est := false,
+                                             boolean           p_DoCS_Security := true,
+                                             boolean           p_StopAtU9State := false) runs on UTRAN_PTC
+  {
+    var template (value) Bcap v_Bcap := cs_BcapSpeechMT;
+    
+    f_CheckDTMFHandling (); // @sic R5s150330 sic@
+    
+    //Step 7 - 8
+    //MM Authentication
+    if (p_DoAuth) {
+      f_UTRAN_MM_Authentication();
+    }
+    
+    //Step 9 - 10
+    //Security Mode procedure
+    //@sic R5s120455 sic@
+    if (p_DoCS_Security) {
+      f_UTRAN34_RRC_Security(p_CellId, p_DoAuth, cs_domain);
+    }
+    
+    //Step 11
+    //Send Set Up
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_SetupMTCall(v_Bcap)));
+    //Step 12
+    //Receive Call Confirmed
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_CallConfirmed(?))); // @sic R5s120070 sic@
+    //Step 13 - 14
+    //Radio Bearer Establishment
+    f_UTRAN_Default_BlockDc(true);    /* @sic R5s120086 (R5s120107) sic@ */
+    if (p_PS_RB_Already_Est) {
+      f_UTRAN_Setup_RAB_PS_and_ConvSpeech(p_CellId);
+    }
+    else {
+      f_UTRAN_RB_SetUp_Speech(p_CellId);  /* @sic R5s120139 - Additional Changes sic@ */
+    }
+    f_UTRAN_Default_BlockDc(false);   /* @sic R5s120086 (R5s120107) sic@ */
+    
+    if (p_StopAtU9State) {  // @sic R5-145740 sic@
+      U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                            tsc_RB3,
+                                            cr_U_Alerting(?)));
+    } else {
+      alt {
+        //Step 15
+        [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                                 tsc_RB3,
+                                                 cr_U_Alerting(?)))
+          {
+            f_UT_AnswerCall(UT);
+            
+            //Step 16
+            U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                                  tsc_RB3,
+                                                  cr_U_Connect(?)));
+          }
+        //Step 16
+        [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                                 tsc_RB3,
+                                                 cr_U_Connect(?)))
+          {}
+      }
+      //Step 17
+      U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_ConnectAck(cs_TI_MT)));
+    }
+  }
+
+  /*
+   * @desc      MO Disconnect of an active CC call. To bring UE from UTRA CS call (U5) state to UTRA connected (U2) state.
+   * @param     p_TI_R
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN_CC_DisconnectMO(TI p_TI_R) runs on UTRAN_PTC
+  {
+    var TI v_TI_S := f_NAS_TI_InitAndSetFlag(p_TI_R, not4b (p_TI_R.tiFlag)); // @sic R5s141348 sic@
+    
+    // Step 1: Receive Disconnect message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_DisconnectUL(p_TI_R)));
+    
+    // Step 2: Send a Release message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_U_ReleaseDL(v_TI_S)));
+    
+    // Step 3: Receive a Release Complete message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3,  cr_U_ReleaseComplete_CallSS(p_TI_R))); // @sic R5s140884 sic@
+  }
+
+  /*
+   * @desc      Sends STATUS ENQUIRY and check the call state and auxiliary state in the returned STATUS message
+   * @param     p_TI_S
+   * @param     p_TI_R
+   * @param     p_LogMsg
+   * @param     p_Cau               (default value: cr_CauAny(omit))
+   * @param     p_CallState
+   * @param     p_AuxiliaryStates   (default value: omit)
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_UTRAN34_CheckStatus(template (value) TI p_TI_S,
+                                 template (present) TI p_TI_R,
+                                 charstring p_LogMsg,
+                                 template (present) Cau p_Cau := cr_CauAny(omit),  //@sic R5s140882 sic@
+                                 B6_Type p_CallState,
+                                 template (omit) AuxiliaryStates p_AuxiliaryStates := omit) runs on UTRAN_PTC
+  {
+    // STATUS ENQUIRY
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_StatusEnquiry(p_TI_S)));
+    // STATUS
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_Status(p_TI_R, p_Cau, cr_Call_State(p_CallState), p_AuxiliaryStates)));
+     
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg);
+  }
+
+  /*
+   * @desc      Function to do the REGISTER procedure:
+   *             - establish RRC signalling connection
+   *             - receive CM SERVICE REQUEST
+   *             - receive parameterised Invoke in a REGISTER
+   *             - return the component received in the REGISTER message
+   * @param     p_CellId
+   * @param     p_ReceivedInvoke
+   * @param     p_LogMsg1
+   * @param     p_LogMsg2
+   * @param     p_DoAuth            (default value: false)
+   * @return    SS_ReceiveRegisterResult_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_SS_ReceiveRegister(UTRAN_CellId_Type p_CellId,
+                                template (present) Invoke p_ReceivedInvoke,
+                                charstring p_LogMsg1,
+                                charstring p_LogMsg2,
+                                boolean p_DoAuth := false)
+    runs on UTRAN_PTC return SS_ReceiveRegisterResult_Type
+  {
+    var START_Value v_START_Value := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var Components v_FacilityInvoke;
+    var TI v_TI_R;
+    
+    // Establish the RRC Connection
+    f_UTRAN34_RRC_ConnEst(p_CellId, originatingHighPrioritySignalling);
+    
+    // Receive CM SERVICE REQUEST - CM service type = "Supplementary service activation"
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                        tsc_RB3,
+                                        cr_U_CMServReq_SSDef(?))) -> value v_RRC_DataInd;
+    v_START_Value := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg1);
+    
+    if (p_DoAuth){ //optional steps
+      f_UTRAN_MM_Authentication();
+    }
+    // Security  procedure - Authentication shall have been performed before
+    // We assume a real network will perform the security procedure and therefore the SERVICE ACCEPT is not needed.
+    f_UTRAN34_RRC_Security(p_CellId, p_DoAuth, cs_domain);
+    
+    // Receive REGISTER message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_RegisterMO(cr_FacilityIE_tlv,
+                                                          cr_SS_VersionIndAny)))-> value v_RRC_DataInd; //@sic R5s141079 sic@
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.register.facility_Str.components); // @sic R5s140989 R5s210141 sic@
+    
+    // Check the received Invoke component against the parameter
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(p_ReceivedInvoke)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, p_LogMsg2);
+    } else {
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg2);
+    }
+    
+    // Assigned Received TI (inout parameter)
+    v_TI_R := v_RRC_DataInd.msg.register.ti;
+    
+    return {v_FacilityInvoke, v_TI_R};
+  }
+
+  /*
+   * @desc      Function to do the REGISTER procedure:
+   *             - establish RRC signalling connection
+   *             - receive CM SERVICE REQUEST
+   *             - transmit CM Service Accept
+   *             - receive parameterised Invoke in a REGISTER
+   *             - return the component received in the REGISTER message
+   * @param     p_ReceivedInvoke
+   * @param     p_LogMsg1
+   * @param     p_LogMsg2
+   * @return    SS_ReceiveRegisterResult_Type
+   * @status    APPROVED (SSNITZ)
+   */
+  function f_SS_ReceiveRegister_UE_Active(template (present) Invoke p_ReceivedInvoke,
+                                          charstring p_LogMsg1,
+                                          charstring p_LogMsg2)
+    runs on UTRAN_PTC return SS_ReceiveRegisterResult_Type
+  {
+    var RRC_DATA_IND v_RRC_DataInd;
+    var Components v_FacilityInvoke;
+    var TI v_TI_R;
+    
+    // Receive CM SERVICE REQUEST - CM service type = "Supplementary service activation"
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,   //@sic R5s141081 sic@
+                                          tsc_RB3,
+                                          cr_U_CMServReq_SSDef(?))) -> value v_RRC_DataInd;
+ 
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg1);
+    
+    // Send CM SERVICE ACCEPT
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CM_ServAcc));
+    
+    // Receive REGISTER message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_RegisterMO(cr_FacilityIE_tlv,
+                                                          cr_SS_VersionIndAny))) -> value v_RRC_DataInd;  //@sic R5s141081 sic@
+    v_FacilityInvoke := f_SS_ComponentsDecode(v_RRC_DataInd.msg.register.facility_Str.components); // @sic R5s140989 R5s210141 sic@
+    
+    // Check the received Invoke component against the parameter
+    if (not match(v_FacilityInvoke, cr_Components(cr_InvokeComponent(p_ReceivedInvoke)))) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, p_LogMsg2);
+    } else {
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg2);
+    }
+    
+    // Assigned Received TI (inout parameter)
+    v_TI_R := v_RRC_DataInd.msg.register.ti;
+    
+    return {v_FacilityInvoke, v_TI_R};
+  }
+
+}

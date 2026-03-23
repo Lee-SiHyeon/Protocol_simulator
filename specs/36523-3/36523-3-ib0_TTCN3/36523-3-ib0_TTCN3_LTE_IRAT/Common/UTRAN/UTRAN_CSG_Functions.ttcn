@@ -1,0 +1,175 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2020-05-01 11:42:49 +0200 (Fri, 01 May 2020) $
+// $Rev: 27667 $
+/******************************************************************************/
+
+module UTRAN_CSG_Functions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  type record length(1..3) of CSG_Identity UTRAN_CSG_IdentityList_Type;   /* @sic R5-155978 R5s150982 sic@
+                                                                             @status    APPROVED (LTE_IRAT) */
+
+  const RejCau      tsc_NotAuthorizedCSG := '19'O; /* Reject cause: Not Authorized for this CSG
+                                                      @status    APPROVED (LTE_IRAT) */
+
+  /*
+   * @desc      To reject ATTACH request with a CSG not allowed cause
+   * @param     p_CSG_Cell
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_UTRAN_AttachRejectCSG(UTRAN_CellId_Type p_CSG_Cell) runs on UTRAN_PTC
+  {
+    var RRC_DATA_IND v_RRC_DataInd;
+    var START_Value v_START_Value_ps := '00000000000000000000'B;
+    var START_Value v_START_Value_cs := '00000000000000000000'B;
+    
+    alt{
+      //Receive Attach Request
+      [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AttachReq(cr_AttachType(?, (tsc_I_AttachTypeGPRSAtt, tsc_I_AttachTypeCombined))))) -> value v_RRC_DataInd  //@sic R5s140336 sic@
+        {
+          // Acc to 24.008 the reject message with the cause 'Not authorized for this CSG' shall be integrity protected.
+          // Perform authentication and integrity @sic R5s140366 sic@
+          v_START_Value_ps := v_RRC_DataInd.ttcn_start;
+          f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+          f_UTRAN_GMM_Authentication();
+          f_UTRAN_RRC_Security( p_CSG_Cell, true, ps_domain);
+          //Send Attach reject with cause value = 25 Not authorized for this CSG
+          U_Dc.send(cas_DataReq_PS(utran_CellDedicated,  //@sic R5s150982 sic@
+                                   tsc_RB3,
+                                   cs_U_AttachReject(tsc_NotAuthorizedCSG)));
+        }
+      //Receive any Location Update request
+      [] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,  //@sic R5s150982 sic@
+                                             tsc_RB3,
+                                             cr_U_LocationUpdatingRequest))-> value v_RRC_DataInd
+        {
+          // Acc to 24.008 the reject message with the cause 'Not authorized for this CSG' shall be integrity protected.
+          // Perform authentication and integrity @sic R5s140366 sic@
+          f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value_cs);
+          f_UTRAN_MM_Authentication();
+          f_UTRAN_RRC_Security(p_CSG_Cell, true, cs_domain);
+          //Send Reject with case Not Authorized CSG
+          U_Dc.send (cas_DataReq_CS(utran_CellDedicated,  //@sic R5s150982 sic@
+                                    tsc_RB3,
+                                    cs_U_LocationUpdatingRej(tsc_NotAuthorizedCSG)));
+        }
+    }
+  }
+
+    /*
+   * @desc      Function that sets the CSG identity in SIB3 contents
+   * @param     p_CellId
+   * @param     p_CSG_CellIdentity
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_UTRAN_SysInfo_SetSIB3_CSG_Identity(UTRAN_CellId_Type p_CellId,
+                                                CSG_Identity p_CSG_CellIdentity) runs on UTRAN_PTC
+  {
+    var UTRAN_CellInfo_Type v_CellInfo := f_UTRAN_CellInfo_Get(p_CellId);
+    v_CellInfo.sysInfo.SIB3.v4b0NonCriticalExtensions.v590NonCriticalExtension.v5c0NoncriticalExtension .v670NonCriticalExtension. v770NonCriticalExtension .v830NonCriticalExtension.v860NonCriticalExtension. sysInfoType3_v860ext.csgIdentity := p_CSG_CellIdentity;
+    f_UTRAN_CellInfo_Set(p_CellId, v_CellInfo);
+  }
+
+  /*
+   * @desc      Function that remove a list of CSG identities in the 'Allowed CSG list' in USIM
+   * @param     p_CSG_CellId        (default value: utran_Cell5)
+   * @param     p_CSG_ID_List
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_UTRAN_EmptyACSGL(UTRAN_CellId_Type p_CSG_CellId := utran_Cell5,
+                              UTRAN_CSG_IdentityList_Type p_CSG_ID_List)
+    runs on UTRAN_PTC
+  { //@sic R5-155978 R5s150982 sic@
+    var integer i;
+    
+    for (i:=0; i<lengthof(p_CSG_ID_List); i:=i+1){
+      f_UTRAN_Remove_CSG_From_ACSGL(p_CSG_CellId, p_CSG_ID_List[i]);
+    }
+  }
+
+  /*
+   * @desc      Function that remove a given CSG identity in the 'Allowed CSG list' in USIM
+   * @param     p_CSG_CellId
+   * @param     p_CSG_ID
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_UTRAN_Remove_CSG_From_ACSGL(UTRAN_CellId_Type p_CSG_CellId,
+                                         CSG_Identity p_CSG_ID)
+    runs on UTRAN_PTC
+  { //@sic R5-155978 R5s150982 sic@
+    
+    var  U_RLC_TM_IND v_RLC_TR_DATA_IND;
+    
+    timer t_GuardTimer := tsc_GuardTimePreamble_12min; // @sic R5s200494 sic@
+    timer t_ResponseTimer := 5.0;
+    
+    t_GuardTimer.start;
+    
+    // Set CSG cell to serving cell
+    f_UTRAN_SetCellPower(p_CSG_CellId, tsc_AttenuationServingCell);
+    
+    
+    // Broadcast CSG Identity in Sysinfo
+    f_UTRAN_SysInfo_SetSIB3_CSG_Identity (p_CSG_CellId, p_CSG_ID);
+    f_UTRAN_SysInfoModifySIB3 ( p_CSG_CellId, f_UTRAN_SysInfo_GetSIB3(p_CSG_CellId) );
+    
+    // Switch on UE
+    f_UT_SwitchOnUE (UT, false);
+    
+    // Wait 5s
+    t_ResponseTimer.start;
+    alt {
+      // UE intiates Attach if the CSG id is included in it's Allowed CSG list
+      [] U_TM.receive(car_RRC_ConnReq(p_CSG_CellId,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8((registration, terminatingConversationalCall)))) -> value v_RLC_TR_DATA_IND
+        {
+          t_ResponseTimer.stop;
+          f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq ( p_CSG_CellId, v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity );
+          f_UTRAN_AttachRejectCSG ( p_CSG_CellId );
+        }
+      [] t_ResponseTimer.timeout
+        {
+          // Manual select the CSG identity
+          f_UT_ManualPLMN_CSG ( UT, f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(p_CSG_CellId)), p_CSG_ID, "UTRAN" ); //@sic R5s150982 change 2.5 sic@
+          
+          // Attach is rejected with CSG not allowed cause
+          f_UTRAN_RRC_ConnEst(p_CSG_CellId);
+          f_UTRAN_AttachRejectCSG (p_CSG_CellId);
+        }
+    }
+    //Release RRC connection
+    f_UTRAN_RRC_ConnRel (p_CSG_CellId, cell_Fach_Dcch);
+    
+    // And then just need to switch UE off
+    f_UT_SwitchOffUE (UT, false, CNF_REQUIRED);
+    
+    // Power off CSG cell
+    f_UTRAN_SetCellPower ( p_CSG_CellId, tsc_AttenuationCellOFF );
+  }
+
+}

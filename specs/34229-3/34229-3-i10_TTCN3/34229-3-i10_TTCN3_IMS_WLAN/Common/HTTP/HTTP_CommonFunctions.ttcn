@@ -1,0 +1,139 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-09-09 13:13:26 +0200 (Mon, 09 Sep 2024) $
+// $Rev: 39600 $
+/******************************************************************************/
+
+module HTTP_CommonFunctions {
+
+  import from CommonDefs all;
+  import from HTTP_ASP_TypeDefs all;
+  import from HTTP_CommonTemplates all;
+  import from IP_ASP_TypeDefs all;
+
+  template (value) HttpServerInfo_Type cs_HttpServerInfo(template (value) IP_AddrInfo_Type p_ServerAddr,
+                                                         PortNumber_Type p_PortNumber,
+                                                         template (value) IP_DrbInfo_Type p_DrbInfo,
+                                                         template (omit) TLSConfig_Type p_TlsConfig := omit) :=
+  { /* @status    APPROVED (IMS, MCX) */
+    serverAddr := p_ServerAddr,
+    serverPort := p_PortNumber,
+    drbInfo := p_DrbInfo,
+    tlsConfig := p_TlsConfig
+  };
+
+  template (value) HTTP_CTRL_REQ cs_HttpCtlReq(template (value) HttpServerList_Type p_HttpServerList) :=
+  { /* @status    APPROVED (IMS, MCX) */
+    httpServerList := p_HttpServerList
+  };
+
+  template (present) HTTP_CTRL_CNF cr_HttpCtlCnf := { errorInfo := omit }; /* @status    APPROVED (IMS, MCX) */
+
+  /*
+   * @desc      Configure the http servers
+   * @param     p_HttpCtrlPort
+   * @param     p_HttpServerList
+   * @status    APPROVED (IMS, MCX)
+   */
+  function f_HTTP_Configure(HTTP_CTRL_PORT p_HttpCtrlPort,
+                            template (value) HttpServerList_Type p_HttpServerList)
+  {
+    p_HttpCtrlPort.send(cs_HttpCtlReq(p_HttpServerList));
+    p_HttpCtrlPort.receive(cr_HttpCtlCnf)
+  }
+
+  /*
+   * @desc      Configure the http server and bsf server for XCAP and ProSe
+   * @param     p_HttpCtrlPort
+   * @param     p_HttpServerAddrAndPort_List
+   * @param     p_BsfServerAddrAndPort_List
+   * @param     p_DrbRoutingInfo
+   * @param     p_TLSInfoForHttpServer (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_ConfigureHttpAndBsf(HTTP_CTRL_PORT p_HttpCtrlPort,
+                                      IP_SocketList_Type p_HttpServerAddrAndPort_List,
+                                      IP_SocketList_Type p_BsfServerAddrAndPort_List,
+                                      template (value) IP_DrbInfo_Type p_DrbRoutingInfo,
+                                      template (omit) TLSConfig_Type p_TLSInfoForHttpServer := omit)
+  { /* @sic R5-151795: sic@
+     * - HTTP implementation does not distinguish servers for XCAP or BSF but there can be one or more than one HTTP servers:
+     *   responses sent by the HTTP implementation are sent back using the same connection as the corresponding request */
+    /* @sic R5-160765: GBA for ProSE - p_TLSInfoForHttpServer sic@ */
+    var template (value) HttpServerList_Type v_HttpServerList;
+    var integer i;
+    var integer k := 0;
+
+    for (i := 0; i < lengthof(p_HttpServerAddrAndPort_List); i := i + 1) {   // @sic R5s150148 sic@
+      v_HttpServerList[k] := cs_HttpServerInfo(p_HttpServerAddrAndPort_List[i].IpAddr,
+                                               p_HttpServerAddrAndPort_List[i].Port,
+                                               p_DrbRoutingInfo,
+                                               p_TLSInfoForHttpServer);
+      k := k + 1;
+    }
+    for (i := 0; i < lengthof(p_BsfServerAddrAndPort_List); i := i + 1) {   // @sic R5s150148 sic@
+      v_HttpServerList[k] := cs_HttpServerInfo(p_BsfServerAddrAndPort_List[i].IpAddr,
+                                               p_BsfServerAddrAndPort_List[i].Port,
+                                               p_DrbRoutingInfo);
+      k := k + 1;
+    }
+    f_HTTP_Configure(p_HttpCtrlPort, v_HttpServerList);
+  }
+
+  /*
+   * @desc      Receive Http Request from UE
+   * @param     p_Port
+   * @param     p_HttpRequest
+   * @param     p_Watchdog
+   * @param     p_InactivityDuration (default value: 9999.0)
+   * @return    template (omit) HTTP_DATA_ASP
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_ReceiveRequest(HTTP_DATA_PORT p_Port,
+                                 template (present) HttpRequest_Type p_HttpRequest,
+                                 timer p_Watchdog,
+                                 float p_InactivityDuration := 9999.0) return template (omit) HTTP_DATA_ASP
+  {
+    var HTTP_DATA_ASP v_HTTP_REQUEST;
+    var template (omit) HTTP_DATA_ASP v_HTTP_DATA_ASP := omit;
+    var boolean v_TimerIsRunning := p_Watchdog.running;
+    timer t_InactivityTimer;
+
+    t_InactivityTimer.start(p_InactivityDuration);
+      
+    alt {
+      [] p_Port.receive(cr_HTTP_REQUEST(?, p_HttpRequest)) -> value v_HTTP_REQUEST
+        {
+          v_HTTP_DATA_ASP := v_HTTP_REQUEST;
+        }
+      [] p_Port.receive(cr_HTTP_REQUEST(?, ?))
+        {
+          f_SetVerdictInconc(__FILE__, __LINE__, "unexpected HTTP request"); /* @sic R5s150945 change 10 sic@ */
+        }
+      [] t_InactivityTimer.timeout {}
+      [v_TimerIsRunning] p_Watchdog.timeout {}
+    }
+    t_InactivityTimer.stop;
+    return v_HTTP_DATA_ASP;
+  }
+
+  /*
+   * @desc      Send Http Response to UE
+   * @param     p_Port
+   * @param     p_HttpRoutingInfo
+   * @param     p_HttpResponse
+   * @status    APPROVED (IMS, MCX)
+   */
+  function f_HTTP_SendResponse(HTTP_DATA_PORT p_Port,
+                               template (value) IP_Connection_Type p_HttpRoutingInfo,
+                               template (value) HttpResponse_Type p_HttpResponse)
+  {
+    p_Port.send(cs_HTTP_RESPONSE(p_HttpRoutingInfo, p_HttpResponse));
+  }
+
+}

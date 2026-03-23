@@ -1,0 +1,323 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2022-06-15 13:04:40 +0200 (Wed, 15 Jun 2022) $
+// $Rev: 33645 $
+/******************************************************************************/
+
+module DNS_Functions {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from DNS_TypeDefs all;
+
+  type record DNS_AddressResolution_Type {  /* entries of internal table for address resolution: <matching pattern for domain name><IPv4Address><IPv6Address>
+                                               @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    charstring DomainNamePattern,
+    charstring IPv4Address,
+    charstring IPv6Address
+  };
+
+  type record of DNS_AddressResolution_Type DNS_AddressResolutionTable_Type;  /* table for address resolution
+                                                                                 @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  template (value) DNS_AddressResolution_Type cs_DNS_AddressResolution(charstring p_DomainNamePattern,
+                                                                       charstring p_IPv4Address,
+                                                                       charstring p_IPv6Address) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    DomainNamePattern := p_DomainNamePattern,
+    IPv4Address := p_IPv4Address,
+    IPv6Address := p_IPv6Address
+  };
+
+  /*
+   * @desc      add entry to DNS address resolution table
+   * @param     p_DNS_AddressResolutionTable
+   * @param     p_DNS_AddressResolutionTableEntry
+   * @return    template (value) DNS_AddressResolutionTable_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_DNS_AddressResolutionTable_Add(template (value) DNS_AddressResolutionTable_Type p_DNS_AddressResolutionTable,
+                                            template (value) DNS_AddressResolution_Type p_DNS_AddressResolutionTableEntry)
+    return template (value) DNS_AddressResolutionTable_Type
+  {
+    var template (value) DNS_AddressResolutionTable_Type v_DNS_AddressResolutionTable := p_DNS_AddressResolutionTable;
+    var integer i := lengthof(v_DNS_AddressResolutionTable);
+    v_DNS_AddressResolutionTable[i] := p_DNS_AddressResolutionTableEntry;
+    return v_DNS_AddressResolutionTable;
+  }
+
+  /*
+   * @desc      get entry from the address resolution table matching the given domain name;
+   *            return either IPv4 or IPv6 address depending on the qtype if entry is found or "" else
+   * @param     p_AddressResolutionTable
+   * @param     p_DomainName
+   * @param     p_QType
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_DNS_ServerGetIpAddress(DNS_AddressResolutionTable_Type p_AddressResolutionTable,
+                                     charstring p_DomainName,
+                                     O2_Type p_QType) return charstring
+  {
+    var integer i;
+    var charstring v_Pattern;
+    var charstring v_MatchingDomainName;
+    var charstring v_IPAddr := "";
+
+    for (i := 0; i < lengthof(p_AddressResolutionTable); i := i + 1) {
+      v_Pattern := "(" & p_AddressResolutionTable[i].DomainNamePattern & ")";
+      v_MatchingDomainName := regexp(p_DomainName, v_Pattern, 0);
+      if (lengthof(v_MatchingDomainName) >  0) {
+        select (p_QType) {
+          case (tsc_DNSTYPE_A)    { v_IPAddr := p_AddressResolutionTable[i].IPv4Address; }
+          case (tsc_DNSTYPE_AAAA) { v_IPAddr := p_AddressResolutionTable[i].IPv6Address; }   /* @sic R5s150085 change 1: IPv6 address rather than IPv4 sic@ */
+        }
+        break;
+      }
+    }
+    return v_IPAddr;
+  }
+
+  /*
+   * @desc      decode domain name being encoded acc. RFC 1035 cl. 4.1.2:
+   *            "a domain name represented as a sequence of labels, where each label consists of a length octet followed by that number of octets.
+   *            The domain name terminates with the zero length octet for the null label of the root..."
+   * @param     p_OctetString
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_DomainName_Decode(octetstring p_OctetString) return charstring
+  {
+    var CharStringList_Type v_LableList := {}
+    var integer i := 0;
+    var integer k := 0;
+    var integer v_StringLength := lengthof(p_OctetString);
+    var integer v_LableLength;
+    var octetstring v_EncodedLable;
+
+    while (true) {
+      v_LableLength := oct2int(p_OctetString[i]);
+      i := i + 1;
+      if ((v_LableLength > 0) and (i + v_LableLength < v_StringLength)) {
+        v_EncodedLable := substr(p_OctetString, i, v_LableLength);
+        i := i + v_LableLength;
+        v_LableList[k] := oct2char(v_EncodedLable);
+        k := k + 1;
+      } else {
+        break;
+      }
+    }
+    return f_StringJoin(v_LableList, ".");
+  }
+
+  template (present) DNS_Header cr_DNS_Query_Header :=
+  { /* RFC 1035 clause 4.1.1 */
+    /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    id := ?,
+    qr := '0'B,
+    opcode := tsc_DNSOPCODE_QUERY,
+    aa := ?,
+    tc := '0'B,
+    rd := ?,
+    ra := ?,
+    z := '000'B,
+    rcode := ?,
+    qdcount := 1,
+    ancount := 0,
+    nscount := 0,
+    arcount := 0
+  };
+
+  template (present) DNS_Question cr_DNS_Question(template (present) O2_Type p_QType := ?) :=
+  { /* RFC 1035 clause 4.1.2 */
+    /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    qname := ?,
+    qtype := p_QType,
+    qclass := tsc_DNSCLASS_IN
+  };
+
+  template (present) DNSMessage cr_DNS_Query :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    dnsHeader := cr_DNS_Query_Header,
+    questions :=  ?,
+    answer := omit,
+    authority := omit,
+    additional := omit
+  };
+
+  template (value) DNS_Header cs_DNS_Response_Header(DNS_Header p_DNS_Query_Header,
+                                                     integer p_Ancount) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    id := p_DNS_Query_Header.id,
+    qr := '1'B,
+    opcode := p_DNS_Query_Header.opcode, // RFC 1035 / 4.1.1
+    aa := '1'B,
+    tc := '0'B,
+    rd := '0'B,
+    ra := '0'B,
+    z := '000'B,
+    rcode := tsc_DNSRCODE_NoError,
+    qdcount := p_DNS_Query_Header.qdcount,
+    ancount := p_Ancount,
+    nscount := 0,
+    arcount := 0
+  };
+
+  template (value) DNS_RDATAu cs_DNS_RDATAu_A(O4_Type p_IPv4Addr) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    a := {
+      ipv4addr := p_IPv4Addr
+    }
+  };
+
+  template (value) DNS_RDATAu cs_DNS_RDATAu_AAAA(O16_Type p_IPv6Addr) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    aaaa := {
+      ipv6addr := p_IPv6Addr
+    }
+  };
+
+  template (value) DNS_RR cs_DNS_RR(octetstring p_Name,
+                                    O2_Type p_RRType,
+                                    UInt16_Type p_DataLength,
+                                    template (value) DNS_RDATAu p_RData) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    name := p_Name,
+    rrtype := p_RRType,
+    class := tsc_DNSCLASS_IN,
+    ttl := 86400,      // one day
+    rdlength := p_DataLength,
+    rdata := p_RData
+  };
+
+  template (value) DNSMessage cs_DNS_Reponse(DNSMessage p_DNS_Query,
+                                             template (omit) DNS_RRs p_DNS_RRs) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    dnsHeader  := cs_DNS_Response_Header(p_DNS_Query.dnsHeader, lengthof(p_DNS_RRs)),
+    questions  := p_DNS_Query.questions,
+    answer     := p_DNS_RRs,
+    authority  := omit,
+    additional := omit
+  };
+
+  /*
+   * @desc      decode function for DNS query:
+   *            only one question per query is supported
+   *            returns valid DNS_Question when the query can be decoded and has one question only which matches the given template;
+   *            returns omit otherwise
+   * @param     p_Request
+   * @param     p_ExpectedQuestion  (default value: cr_DNS_Question)
+   * @return    template (omit) DNSMessage
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_DNS_Query_DecodeAndMatch(octetstring p_Request,
+                                      template (present) DNS_Question p_ExpectedQuestion := cr_DNS_Question) return template (omit) DNSMessage
+  {
+    var bitstring v_Bitstring := oct2bit(p_Request);
+    var DNSMessage v_DNSQuery;
+    var DNS_Question v_DNS_Question;
+
+    if (decvalue(v_Bitstring, v_DNSQuery) != 0) {
+      f_ErrorLog(__FILE__, __LINE__, "Cannot decode DNS query (skipped)");
+      return omit;
+    }
+    if (not match(v_DNSQuery, cr_DNS_Query)) {
+      f_ErrorLog(__FILE__, __LINE__, "Invalid/unexpected DNS query");
+      return omit;
+    }
+    if (v_DNSQuery.dnsHeader.qdcount > 1) {
+      f_ErrorLog(__FILE__, __LINE__, "multiple DNS questions not supported yet in the same query");
+      return omit;
+    }
+    v_DNS_Question := v_DNSQuery.questions[0];
+    if (not match(v_DNS_Question, p_ExpectedQuestion)) {
+      f_ErrorLog(__FILE__, __LINE__, "Invalid/unexpected DNS question");
+      return omit;
+    }
+    return v_DNSQuery;
+  }
+
+  /*
+   * @desc      generate answer(s) to a single question; returns encoded octetstring or ''O when there is no answer
+   * @param     p_DNSQuery
+   * @param     p_IpAddress
+   * @param     p_QType
+   * @param     p_QName
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_DNS_Answer_Encode(DNSMessage p_DNSQuery,
+                               charstring p_IpAddress,
+                               O2_Type p_QType,
+                               octetstring p_QName) return octetstring
+  {
+    var octetstring v_Response := ''O;
+    var UInt16_Type v_DataLength := 0;
+    var template (value) DNS_RDATAu v_RData;
+    var template (value) DNS_RRs v_DNS_RRs;
+    var template (value) DNSMessage v_DNS_Response;
+
+    select (p_QType) {
+      case (tsc_DNSTYPE_A) {
+        v_DataLength := 4;
+        v_RData := cs_DNS_RDATAu_A(f_Convert_IPv4Addr2OctString(p_IpAddress));
+      }
+      case (tsc_DNSTYPE_AAAA) {
+        v_DataLength := 16;
+        v_RData := cs_DNS_RDATAu_AAAA(f_Convert_IPv6Addr2OctString(p_IpAddress));
+      }
+    }
+    if (v_DataLength > 0) {
+      v_DNS_RRs := { cs_DNS_RR(p_QName, p_QType, v_DataLength, v_RData) };
+      v_DNS_Response := cs_DNS_Reponse(p_DNSQuery, v_DNS_RRs);
+      v_Response := bit2oct(encvalue(v_DNS_Response));
+    }
+    return v_Response;
+  }
+
+  /*
+   * @desc      function representing the DNS server:
+   *            returns encoded DNS response if the given query is supported or ''O else
+   * @param     p_Request
+   * @param     p_DNS_AddressResolutionTable
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_DNS_GetEncodedResponse(octetstring p_Request,
+                                    DNS_AddressResolutionTable_Type p_DNS_AddressResolutionTable) return octetstring
+  {
+    var octetstring v_Response := ''O;
+    var template (omit) DNSMessage v_DNSQueryOrOmit;
+    var DNSMessage v_DNSQuery;
+    var DNS_Question v_DNS_Question;
+    var O2_Type v_QType;
+    var octetstring v_QName;
+    var charstring v_DomainName;
+    var charstring v_IpAddress;
+
+    v_DNSQueryOrOmit := f_DNS_Query_DecodeAndMatch(p_Request);                                      /* @sic R5-169075 (test case 20.1): introduction of f_DNS_Query_DecodeAndMatch sic@ */
+    if (isvalue(v_DNSQueryOrOmit)) {
+      v_DNSQuery := valueof(v_DNSQueryOrOmit);
+      v_DNS_Question := v_DNSQuery.questions[0];
+      v_QType := v_DNS_Question.qtype;
+      select (v_QType) {
+        case (tsc_DNSTYPE_A, tsc_DNSTYPE_AAAA) {
+          v_QName := v_DNS_Question.qname;
+          v_DomainName := f_DomainName_Decode(v_DNS_Question.qname);
+          v_IpAddress := fl_DNS_ServerGetIpAddress(p_DNS_AddressResolutionTable, v_DomainName, v_QType);
+          v_Response := f_DNS_Answer_Encode(v_DNSQuery, v_IpAddress, v_QType, v_QName);             /* @sic R5-169075 (test case 20.1): introduction of f_DNS_Answer_Encode sic@ */
+        }
+        case else {
+          f_ErrorLog(__FILE__, __LINE__, "unsupported DNS question (skipped)");
+        }
+      }
+    }
+    return v_Response;
+  }
+
+}

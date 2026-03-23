@@ -1,0 +1,1072 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-06-11 12:21:05 +0200 (mi., 11 jun. 2025) $
+// $Rev: 41440 $
+/******************************************************************************/
+
+module SOR_CMCI_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_CommonParameters all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_5GC_Parameters all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_SecurityFunctions all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Encode Criterion Value when it contains a DNN
+   *            as per 24.501 cl. 9.11.3.51-3: The DNN length-value pair field
+   *            shall be encoded as a sequence of one octet DNN value length field and a DNN value field.
+   * @param     p_DNN
+   * @return    octetstring
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_EncodeCriterionValue_DNN(charstring p_DNN) return octetstring
+  {
+    var octetstring v_EncodedDNN := f_DomainName_Encode(p_DNN);
+    var integer v_Length;
+    
+    v_Length := lengthof(v_EncodedDNN);
+    return  int2oct(v_Length, 1) & v_EncodedDNN;
+  }
+
+  /*
+   * @desc      Common check function for SOR CMCI tests 6.3.2.1/3/4
+   * @param     p_NR_CellId
+   * @param     p_NR_TargetCellId
+   * @param     p_PduToSend
+   * @param     p_PayloadContainerType (default value: cr_PayloadContainerType(tsc_PayloadContainerSORMsg))
+   * @param     p_VerdictMsg        (default value: "Step 26 PASS")
+   * @param     p_SecondVerdictMsg  (default value: "Step 28 PASS")
+   * @param     p_TmaxValue         (default value: 660.0)
+   * @param     p_SorcmValue        (default value: 60.0)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_TransportSorCmCheckfunction(NR_CellId_Type p_NR_CellId,
+                                      NR_CellId_Type p_NR_TargetCellId,
+                                      template (value) NG_NAS_DL_Pdu_Type p_PduToSend,
+                                      template (present) PayloadContainerType p_PayloadContainerType:=cr_PayloadContainerType(tsc_PayloadContainerSORMsg),//LYLY
+                                      template (omit) charstring p_VerdictMsg := "Step 26 PASS",
+                                      template (omit) charstring p_SecondVerdictMsg := "Step 28 PASS",
+                                      float p_TmaxValue:=660.0,
+                                      float p_SorcmValue:=60.0) runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    timer t_Tmax;
+    timer t_Sorcm;
+    //@siclog "Step n+1" siclog@
+    //The SS transmits an DLInformationTransfer message containing steering of roaming information
+    SRB.send(cas_NR_SRB_NasPdu_REQ(p_NR_CellId,
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,p_PduToSend.Msg)));
+    //@siclog "Step n+2" siclog@
+    //The SS starts timer of Tsor-cm timer.
+    t_Sorcm.start(p_SorcmValue);
+    //@siclog "Step n+3" siclog@
+    //The SS starts timer of tmax =(6 minutes + cell selection time)
+    //@siclog "Step n+4" siclog@
+    //The UE transmits an ULInformationTransfer message
+    //@siclog "Step n+5" siclog@
+    //Check: Does the UE transmit a DEREGISTRATION REQUEST after Tsor-cm timer expires?
+    t_Tmax.start(f_NR_SetTimerToleranceMax(p_NR_CellId, nonProtocolTimer, p_TmaxValue));
+    alt{
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp // @sic R5s201387 Baseline Moving sic@  @sic R5s210026 sic@
+      {
+       if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, p_PayloadContainerType, omit)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+        }
+        // MSSI should be 1 @sic R5s240531 sic@
+        f_NG_DecodeAndMatchSORTransportContainer (v_ReceivedAsp, cr_NG_SOR_Header (?, ?, '1'B, ?));
+        repeat;
+      }
+      [] t_Sorcm.timeout {
+        SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+        v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+        if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B))) {  // Jun24 @sic R5s240531 Baseline Moving sic@
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+        }
+        else {
+          f_NR_PreliminaryPass (__FILE__, __LINE__, valueof(p_VerdictMsg));
+        }
+      }
+    }
+    //@siclog "Step n+6" siclog@
+    //The SS transmits a DEREGISTRATION ACCEPT message.
+    SRB.send(cas_NR_SRB_NasPdu_REQ(p_NR_CellId,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+    //@siclog "Step n+6A" siclog@
+    //The SS releases the RRC Connection on NR Cell 12.
+    f_NR_RRCRelease(p_NR_CellId);//@sic R5-233456 R5-233458 R5-233459 R5-233460 sic@
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[f_PDN_PdnIndex2Integer(PDN_1)], cms_IPCAN_IMS_Reset);
+    //@siclog "Step n+7" siclog@
+    //Check: Does the UE transmits an RRCSetupRequest on NR Cell 11 before tmax expires?
+    alt {
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(p_NR_TargetCellId, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+        {
+          t_Tmax.stop;
+          f_NR_PreliminaryPass (__FILE__, __LINE__, valueof(p_SecondVerdictMsg));
+        }
+      [] t_Tmax.timeout
+        {
+          f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, "RRCSetupRequest failed");
+        }
+    }
+    
+    //@siclog "Step n+8" siclog@
+    //Steps 3 to 20a1 of the registration procedure described in TS 38.508-1 subclause 4.5.2.2-2 are performed on NR Cell 11.
+    f_NR5GC_RRC_IdleState1N_Def(p_NR_TargetCellId);//@sic R5-233456 R5-233458 R5-233459 R5-233460 R5s230590 sic@
+    //@siclog "Step n+9" siclog@
+    //Void//@sic R5-233456 R5-233458 R5-233459 R5-233460 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_1_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / DNN of the PDU session / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    // Set Sys info and cell info for cell 11& 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // USIM configuration as defined in Table 6.4.1-21 of TS 38.508-1 [4] will be used.
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    f_NR5GC_Preamble (nr_Cell12, STATE_CONNECTED_3A);//@sic R5-233456 sic@
+
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-234801 sic@
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-234801 sic@
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_3_2_1_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_1_TestBody() runs on NR5GC_PTC
+  {
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+//    var O1_Type v_SORInfo :='01'O;//SI/SSCMI/SSSI//@sic R5-233456 sic@
+    var octetstring  v_NAS_TxMsgContainer_SOR_CMCI;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_CriterionType:= '01'O;
+    var octetstring v_CriterionValue:= fl_EncodeCriterionValue_DNN(pc_APN_ID_Internet); // @sic R5s250062 sic@
+    var octetstring v_TsorcmTimer:= '21'O;
+    var O2_Type v_CounterSOR :='0001'O;
+    var octetstring v_Length;//@sic R5s240594 sic@
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B,'1'B);//@sic R5-233456, R5s240531 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1);//@sic R5s230554 sic@
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+
+    //@siclog "Step 1" siclog@
+    //Void//@sic R5-233456 sic@
+    //@siclog "Steps 2-21a1" siclog@
+    //Void//@sic R5-233456 sic@
+    //@siclog "Step 22-34b3a1" siclog@//@sic R5s230554 sic@
+    v_Length:=int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)+lengthof(v_CriterionValue)),2);//@sic R5s240594 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, v_CriterionValue,v_Length);//@sic R5s240594 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,  // octet O = '01'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule},int2oct((oct2int(v_Length)+2),2)));//@sic R5s240594 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+//    v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_SORInfo & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType & v_CriterionValue;
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));//@sic R5s230749 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    f_NR5GC_TransportSorCmCheckfunction(nr_Cell12,nr_Cell11,v_PduToSend,-,"Step 26 PASS","Step 28 PASS");
+  }//End of fl_TC_6_3_2_1_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_2_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / MMTEL voice call / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    // Set Sys info and cell info for cell 11 and 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13 //@sic R5s240259 sic@ //@sic R5s240520 sic@
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12); //@sic R5s240259 sic@
+
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    // Equip UE with the USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    
+    f_NR5GC_Preamble (nr_Cell12, STATE_IDLE_1A); //Prose CR needed //@sic R5s240259 sic@ //@sic R5-242145 sic@
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2); //@sic R5s240259 sic@
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_3_2_2_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_2_TestBody() runs on NR5GC_PTC
+  {
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var boolean v_ULNASTransportReceived := false;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NG_NAS_MSG_Indication_Type  v_DetachReq;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var octetstring  v_NAS_TxMsgContainer_SOR;
+    var TypeOfRegistration_Type v_TypeOfRegistration;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+    var O2_Type v_Counter :='0001'O;
+    //var O1_Type v_Octet_O :='03'O; // 24.501 Table 9.11.3.51.2A Octet O (Bits  8-4 are spare, SSSI = '0'B, SSCMI = '1'B, SI = '1'B)
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B,'1'B); //@sic R5s240259, R5s240531 sic@
+
+    var octetstring v_CriterionType:= '05'O; //@sic R5s240259 sic@
+    var octetstring v_Length; //@sic R5s240580 sic@
+    var octetstring v_TsorcmTimer:= '21'O; //@sic R5s240259 sic@
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1); //@sic R5s240259 sic@
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+    timer t_Tmax;
+    timer t_Tsor_cm := 60.0;
+    timer t_T1 := 10.0; //@sic R5-242145 sic@
+    
+    //@siclog "Step 22 -34" siclog@
+    //FFS : Prose CR needed
+    //  Steps 1 to step 13 from test procedure for IMS MO speech call establishment as described in TS 38.508-1 [4] Table 4.9.15.2.2-1 take place.
+    f_UT_RequestIMSCall(UT);
+
+    f_NR_RRC_SetupRequest_Def(nr_Cell12, mo_VoiceCall); //@sic R5s240259 sic@
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell12, //@sic R5s240259 sic@
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                          tsc_SHT_IntegrityProtected
+                                          );
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu, cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), tsc_NasKsi_NativeSecurityContext), f_NG_S_TMSI2MobileIdentity(omit, f_NR5GC_CellInfo_GetGutiParameters (nr_Cell13)), '0001'B)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+    }
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(nr_Cell12, v_ReceivedMsg); //@sic R5s240259 sic@
+    
+    v_GSM_MobilityInfo:= f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+    
+    
+    //Now wait for trigger from IMS PTC to add voice
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1], "Add Voice Bearer");
+    // Now Modify the PDU Session to add voice QoS
+    f_NR5GC_ModifyPDUSession_AddVoice(nr_Cell12, valueof(v_GSM_MobilityInfo)); //@sic R5s240259 sic@
+    if (not pc_Preconditions) {
+      f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IMS_IPCAN_Trigger("Voice Bearer Added"));
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Voice Call Established");
+
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1], "Voice Call Established");
+    
+    //@siclog "Step 35" siclog@
+    /*The SS transmits an DLInformationTransfer message containing steering of roaming information indicating list of preferred PLMN/access technology combination provided with acknowledgment requested from the UE for successful reception*/
+    v_Length := int2oct((lengthof(v_CriterionType) + lengthof(v_TsorcmTimer)),2); // @sic R5s240580 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, omit, v_Length); // @sic R5s240580 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,
+                                         '1'B,  // octet O = '03'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule},
+                                         int2oct( (lengthof(v_CriterionType) + lengthof(v_TsorcmTimer) + 2),2))); // @sic R5s240580 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+    //v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_Octet_O & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType; //@sic R5s240259 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_Counter,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_Counter, v_Data, omit, omit)));
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12, //@sic R5s240259 sic@
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,v_PduToSend.Msg)));
+    //@siclog "Step 36 - 37" siclog@
+    //SS starts timer of tmax =(6 minutes + cell selection time) (Note 1, 2 and 3) and Tsor-cm
+    t_Tmax.start(f_NR_SetTimerToleranceMax(nr_Cell12, nonProtocolTimer, 660.0)); //@sic R5s240259 sic@
+    t_Tsor_cm.start;
+
+    alt{
+    //@siclog "Step 38" siclog@
+    //The UE transmits an ULInformationTransfer message carrying acknowledgement of successful reception of the steering of roaming information
+        [] SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp //@sic R5s240259 sic@
+        {
+            if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSORMsg), omit)) {
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+            }else{
+                // MSSI should be 1 @sic R5s240531 sic@
+                f_NG_DecodeAndMatchSORTransportContainer (v_ReceivedAsp, cr_NG_SOR_Header (?, ?, '1'B, ?));
+                if(not v_ULNASTransportReceived) {
+                    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 38");
+                    v_ULNASTransportReceived := true;
+                }
+            }
+            repeat;
+        }
+        //@siclog "Step 38A" siclog@
+        //Tsor-cm timer expires
+        [] t_Tsor_cm.timeout {
+            //@siclog "Step 38B" siclog@
+            t_T1.start; //@sic R5s242145 sic@
+            alt { //@sic R5-251356 sic@
+                [] SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered)))) -> value v_ReceivedAsp //@sic R5s240259 sic@
+                {
+                    //@siclog "Step 38Da1" siclog@
+                    //@siclog "Step 38Db3" siclog@
+                    //Check: Does the UE transmit a DEREGISTRATION REQUEST after Tsor-cm timer expires?
+                    if (ischosen(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.deregistration_RequestMO)) {
+                        v_DetachReq := v_ReceivedAsp.Signalling.Nas[0];
+                        if (not f_Check_NG_DeregistrationReqMOMsg (v_DetachReq.Pdu, crs_DeregisterType('0'B, '0'B, '01'B))) {
+                            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Deregistration Request Message Failed");
+                        }else {
+                            f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 38Cb1");
+                        }
+                        //@siclog "Step 38Da2" siclog@
+                        //@siclog "Step 38Db4" siclog@
+                        t_T1.stop;
+                        //Received Deregistration , tell IMS to stop waiting for 200OK
+                        f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IMS_IPCAN_Trigger("Received Deregistration"));
+                    }
+                }
+                []IMS[tsc_Index_IMS1].receive(cmr_IMS_IPCAN_Trigger ("200OK sent"))
+                {
+                    //Received 200OK first, now wait for De-registration
+                    repeat;
+                }
+                //@siclog "Step 38Dc1" siclog@
+                [] t_T1.timeout
+                {
+                  f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 38Cc1 : De-registration REQ not received at Step 38Ca5 or 38Cb1");
+                }
+            }
+            //@siclog "Step 39" siclog@
+            //Void
+
+            //@siclog "Step 40" siclog@
+            //The SS transmits a DEREGISTRATION ACCEPT message.
+            SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT))); //@sic R5s240259 sic@
+            //@siclog "Step XX" siclog@
+            //Prose CR needed
+            f_NR_RRCRelease(nr_Cell12); //@sic R5s240259 sic@
+            //Check: Does the UE transmit an RRCSetupRequest on NR Cell 11 before tmax expires? (Note 1, 2 and 3)
+            //@siclog "Step 41" siclog@
+            alt {
+              [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell11, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+                {
+                  t_Tmax.stop;
+                  f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 41");
+                }
+              [] t_Tmax.timeout
+                {
+                  f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 41");
+                }
+            }
+        }
+    }
+    f_NR5GC_MobileInfo_Init();  //Reset everything and get ready for next Registration cycle
+    v_TypeOfRegistration := f_NR5GC_InitialOrMobilityRegistrationRequest (v_GMM_MobilityInfo, v_ReceivedMsg, nr_Cell11);
+    //@siclog "44a1-44a16a1" siclog@
+    //Void // @sic R5-233457 sic@
+    //@siclog "44b1-44b3a1" siclog@
+    //Void // @sic R5-233457 sic@
+    //@siclog "45 - 60a1" siclog@
+    //Steps 5 to 20a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 11.
+    f_NR5GC_RRC_Idle_Steps5_20(v_GMM_MobilityInfo, nr_Cell11, v_ReceivedMsg, TESTMode_OFF,-, v_TypeOfRegistration); // @sic R5-233457 sic@
+    }//End of fl_TC_6_3_2_2_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_3_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / match all / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    // Set Sys info and cell info for cell 11& 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // USIM configuration as defined in Table 6.4.1-21 of TS 38.508-1 [4] will be used.
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    f_NR5GC_Preamble (nr_Cell12, STATE_CONNECTED_3A);//@sic R5-233458 sic@
+
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_3_2_3_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_3_TestBody() runs on NR5GC_PTC
+  {
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+ //   var O1_Type v_SORInfo :='01'O;//SI/SSCMI/SSSI//@sic R5-233458 sic@
+    var octetstring  v_NAS_TxMsgContainer_SOR_CMCI;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_CriterionType:= 'FF'O;//@sic R5-233458 sic@
+//    var O2_Type v_Length_SOR_CMCI_rule_contents := '0002'O;//@sic R5s230590 R5s230770 sic@
+//    var O2_Type v_Length_SOR_CMCI_contents := '0004'O;//@sic R5s230590 R5s230770 sic@
+    var octetstring v_TsorcmTimer:= '21'O;
+    var O2_Type v_CounterSOR :='0001'O;
+    var octetstring v_Length;//@sic R5s240591 sic@
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B,'1'B);//@sic R5-233458, R5s240531 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1);//@sic R5s230590 sic@
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+
+    //@siclog "Step 1" siclog@
+    //Void//@sic R5-233458 sic@
+    //@siclog "Steps 2-21a1" siclog@
+    //Void//@sic R5-233458 sic@
+    //@siclog "Step 22-34b3a1" siclog@
+    v_Length:=int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)),2);//@sic R5s240594 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, omit,v_Length);//@sic R5s240591 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,  // octet O = '01'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule},int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)+2),2)));//@sic R5s240591 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+  //  v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_SORInfo & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType;//@sic R5s230590 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));//@sic R5s240027 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    f_NR5GC_TransportSorCmCheckfunction(nr_Cell12,nr_Cell11,v_PduToSend,-,"Step 26 PASS","Step 28 PASS");
+
+  }//End of fl_TC_6_3_2_3_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_4_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / DNN of the PDU session / update Tsor-cm Timer / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    // Set Sys info and cell info for cell 11& 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // USIM configuration as defined in Table 6.4.1-21 of TS 38.508-1 [4] will be used.
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    f_NR5GC_Preamble (nr_Cell12, STATE_CONNECTED_3A);//@sic R5-233459 sic@
+
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_3_2_4_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_4
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_4_TestBody() runs on NR5GC_PTC
+  {
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+//    var O1_Type v_SORInfo :='01'O;//SI/SSCMI/SSSI//@sic R5-233459 sic@
+    var octetstring  v_NAS_TxMsgContainer_SOR_CMCI;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_CriterionType:= '01'O;
+    var octetstring v_CriterionValue:= fl_EncodeCriterionValue_DNN(pc_APN_ID_Internet); // @sic R5s250062 sic@
+    var octetstring v_TsorcmTimer:= '21'O;
+    var O2_Type v_CounterSOR :='0001'O;
+    var octetstring v_Length;//@sic R5s240595 sic@
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B,'1'B);//@sic R5-233459, R5s240531 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1);//@sic R5s230605 sic@
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+    timer t_Sorcm:=60.0;
+    timer t_Wait:=49.0;
+    //@siclog "Step 1-21a1" siclog@
+    //Void //@sic R5-242146 sic@
+    //@siclog "Steps 22" siclog@
+    //The SS transmits an DLInformationTransfer message containing steering of roaming information indicating list of preferred PLMN/access technology combination provided with acknowledgment requested from the UE for successful reception.
+    v_Length:=int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)+lengthof(v_CriterionValue)),2);//@sic R5s240595 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, v_CriterionValue,v_Length);//@sic R5s240595 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,  // octet O = '01'
+                                          cs_SOR_CMCI({v_SOR_CMCIRule},int2oct((oct2int(v_Length)+2),2)));//@sic R5s240595 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+//    v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_SORInfo & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType & v_CriterionValue;//@sic R5s230605 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));//@sic R5s240027 R5s240306 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,v_PduToSend.Msg)));
+    //@siclog "Step 23" siclog@
+    //The SS starts timer of Tsor-cm timer.
+    t_Wait.start;
+    t_Sorcm.start;
+    //@siclog "Step 24" siclog@
+    //The UE transmits an ULInformationTransfer message carrying acknowledgement of successful reception of the steering of roaming information
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s201387 Baseline Moving sic@  @sic R5s210026 sic@
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSORMsg), omit)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    // MSSI should be 1 @sic R5s240531 sic@
+    f_NG_DecodeAndMatchSORTransportContainer (v_ReceivedAsp, cr_NG_SOR_Header (?, ?, '1'B, ?));
+    t_Wait.timeout;
+    //@siclog "Step 25-34b3a1" siclog@
+    //@siclog "Step 34" siclog@
+    //Void//@sic R5-242146 sic@
+    //@siclog "Step 35-50a1" siclog@
+    v_CounterSOR :='0002'O;//@sic R5s230605 sic@
+    v_TsorcmTimer:='05'O;//@sic R5-242146 R5s240316 sic@
+    v_Length:=int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)+lengthof(v_CriterionValue)),2);//@sic R5s240595 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, v_CriterionValue,v_Length);//@sic R5s240595 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,  // octet O = '01'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule},int2oct((oct2int(v_Length)+2),2)));//@sic R5s240595 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+//    v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_SORInfo & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType & v_CriterionValue;//@sic R5s230605 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));//@sic R5s240027 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    t_Sorcm.stop;
+    f_NR5GC_TransportSorCmCheckfunction(nr_Cell12,nr_Cell11,v_PduToSend,-,"Step 29 PASS","Step 31 PASS",-,10.0);
+  }//End of fl_TC_6_3_2_4_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_5_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / DNN of the PDU session / store SOR-CMCI in ME / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    // Set Sys info and cell info for cell 11& 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // USIM configuration as defined in Table 6.4.1-21 of TS 38.508-1 [4] will be used.
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    //The UE is in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    f_NR5GC_Preamble (nr_Cell12, STATE_CONNECTED_3A);//@sic R5-233460 sic@
+
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_NR_TestBody_Set(true);
+    //@sic R5-235284 sic@
+    //@sic R5-246396 sic@
+    fl_TC_6_3_2_5_TestBody();
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_5
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_5_TestBody() runs on NR5GC_PTC
+  {
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+//    var O1_Type v_SORInfo :='03'O;//SSCMI
+    var octetstring  v_NAS_TxMsgContainer_SOR_CMCI;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_CriterionType:= '01'O;
+    var octetstring v_CriterionValue; // @sic R5s250113 sic@
+    var octetstring v_TsorcmTimer:= '21'O;
+    var O2_Type v_CounterSOR :='0001'O;
+    var octetstring v_Length;//@sic R5s240598 sic@
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B,'1'B);//@sic R5-233460, R5s240531 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1);//@sic R5s240309 sic@
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+    var PDU_PDN_DNN_Type v_PDUType; //@sic R5-246396 sic@
+    timer t_Sorcm:=60.0;
+    timer t_Tmax:=f_NR_SetTimerToleranceMax(nr_Cell12, nonProtocolTimer, 660.0);
+    //@siclog "Step 1-2-21a1" siclog@
+    //Void //@sic R5-233460 sic@
+    //@siclog "Step 22" siclog@//@sic R5s240309 sic@
+    //The SS transmits an DLInformationTransfer message containing steering of roaming information indicating list of preferred PLMN/access technology combination provided with acknowledgment requested from the UE for successful reception
+    v_PDUType := f_GetDefaultAPN_DNNType_FromPICS();//@sic R5-246396 sic@
+    v_CriterionValue:= fl_EncodeCriterionValue_DNN(f_GetDNNStringFromPICS(v_PDUType)); //@sic R5-246396, R5s250062, R5s250113 sic@
+    v_Length:=int2oct((lengthof(v_CriterionType)+lengthof(v_TsorcmTimer)+lengthof(v_CriterionValue)),2);//@sic R5s240598 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_TsorcmTimer, v_CriterionType, v_CriterionValue,v_Length);//@sic R5s240594 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,
+                                         '1'B,  // octet O = '03'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule},int2oct((oct2int(v_Length)+2),2)));//@sic R5s240598 sic@
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+//    v_Data := v_Length_PlmnID_AccessTechId & v_PlmnID & v_AccessTechId & v_SORInfo & v_Length_SOR_CMCI_contents & v_Length_SOR_CMCI_rule_contents & v_TsorcmTimer & v_CriterionType & v_CriterionValue;
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));//@sic R5s240309 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,v_PduToSend.Msg)));
+    //@siclog "Step 23" siclog@
+    //The SS starts timer of Tsor-cm timer.
+    t_Sorcm.start;
+    //@siclog "Step 24" siclog@
+    //The UE transmits an ULInformationTransfer message carrying acknowledgement of successful reception of the steering of roaming information.
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s201387 Baseline Moving sic@  @sic R5s210026 sic@
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSORMsg), omit)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    // MSSI should be 1 @sic R5s240531 sic@
+    f_NG_DecodeAndMatchSORTransportContainer (v_ReceivedAsp, cr_NG_SOR_Header (?, ?, '1'B, ?));
+    //@siclog "Step 25a1-25b1" siclog@
+    //Steps 5a1 to 5b1 of Switch off procedure described in TS 38.508-1 [4] Table 4.9.6.3-1 are performed on NR Cell 12 before Tsor-cm timer expires.
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell12, STATE_CONNECTED_3A);
+    t_Sorcm.stop;
+    //@siclog "Step 26" siclog@
+    //Power on the UE or intert USIM (Note 1)
+     f_UT_SwitchOnUE(UT);//@sic R5s240309 sic@
+    //@siclog "Step 27-39" siclog@
+    //Steps 1 to 13 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2-2 are performed on NR Cell 12.
+     //@siclog "Step 40" siclog@
+     //The SS transmits an DLInformationTransfer message and an REGISTRATION ACCEPT message//@sic R5-237423 sic@
+    //@siclog "Step 41-42" siclog@
+    //Void  //@sic R5-235284 sic@
+    //@siclog "Step 43" siclog@//@sic R5-237423 sic@
+    //The UE transmits an ULInformationTransfer message and REGISTRATION COMPLETE message.
+    f_NR5GC_Registration(nr_Cell12);
+    //@siclog "Step 44a1" siclog@
+    //Void  //@sic R5-235284 sic@
+    //@siclog "Step 44A" siclog@
+    //Steps 19a1 to 19Ba2 of the registration procedure described in TS 38.508-1 [4] subclause 4.5.2.2-2 are performed on NR Cell 12.//@sic R5-242147 sic@
+    if (pc_noOf_PDUsSameConnection > 0 ){//@sic R5-235284 sic@
+      f_NR5GC_PDUSessionEstablishment (nr_Cell12,-,tsc_NR_RbId_SRB1);//@sic R5s210576 sic@
+    }
+    else if (pc_noOf_PDUsNewConnection >0 or pc_noOf_PDUsSameConnection == 0){ //@sic R5s250050 sic@
+      f_NR_RRCRelease(nr_Cell12);
+      f_NR5GC_RRC_Idle_Extension(nr_Cell12); // @sic R5-236305 sic@
+    }
+    //@siclog "Step 44AA" siclog@// @sic R5-242147 R5s240309 sic@
+    //The SS transmits an DLInformationTransfer message containing steering of roaming information indicating list of preferred PLMN/access technology combination provided with acknowledgment requested from the UE for successful reception, but no SOR-CMCI field included.
+    v_Data := v_PlmnID & v_AccessTechId ;
+    v_Header:= cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B); // @sic R5s240531 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_CounterSOR,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR_CMCI := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_CounterSOR, v_Data, omit, omit)));
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR_CMCI));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,v_PduToSend.Msg)));
+
+    //@siclog "Step 44B" siclog@
+    //The SS starts timer of Tsor-cm timer.
+    t_Sorcm.start;
+    //@siclog "Step 44C" siclog@
+    t_Tmax.start(f_NR_SetTimerToleranceMax(nr_Cell12, nonProtocolTimer, 660.0));
+    //@siclog "Step 44D" siclog@// @sic R5-242147 R5s240309 sic@
+    //The UE transmits an ULInformationTransfer message carrying acknowledgement of successful reception of the steering of roaming information.
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s201387 Baseline Moving sic@  @sic R5s210026 sic@
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSORMsg), omit)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+   }
+
+    //@siclog "Step 45" siclog@
+    //Check: Does the UE transmit a DEREGISTRATION REQUEST after Tsor-cm timer expires?
+    t_Sorcm.timeout;
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B))) {  // Jun24 @sic R5s240531 Baseline Moving sic@
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+      }
+      else {
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 45 pass");
+      }
+    //@siclog "Step 46" siclog@
+    //The SS transmits a DEREGISTRATION ACCEPT message.
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[f_PDN_PdnIndex2Integer(PDN_1)], cms_IPCAN_IMS_Reset);
+    //@siclog "Step 47" siclog@
+    //Check: Does the UE transmits an RRCSetupRequest on NR Cell 11 before tmax expires?
+    alt {
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell11, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+        {
+          t_Tmax.stop;
+          f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 47 pass");
+        }
+      [] t_Tmax.timeout
+        {
+          f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 47 Fail");
+        }
+    }
+    //@siclog "Step 48-49" siclog@
+    //Steps 3 to 4 of the registration procedure described in TS 38.508-1 subclause 4.5.2.2-2 are performed on NR Cell 11.
+    //@siclog "Steps 51-66a1" siclog@
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell11, TESTMode_OFF);
+    // @siclog "Steps 50" siclog@// @sic R5-242147 sic@
+    //Void
+  }//End of fl_TC_6_3_2_5_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.3.2.6
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_3_2_6_NR5GC() runs on NR5GC_PTC
+  { //Steering of UE in roaming after registration / SOR-CMCI rule / match all / Emergency call / DL NAS transport
+  
+    f_NR5GC_Init(NR_4);
+
+    //Set Sys info and cell info for cell 11& 12 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_002_11);//PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_81);//PLMN13
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+
+    // Equip UE with the USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1
+    f_UT_USIM_Insert(UT, "USIM configuration 21 specified in table 6.4.1-21 TS 38.508-1");
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    f_UT_AutomaticPLMN_Select (UT);
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+    
+    f_NR5GC_Preamble (nr_Cell12, STATE_CONNECTED_3A); //@sic R5-233461 sic@
+    
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2); // @sic R5s230768 sic@
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2); // @sic R5s230768 sic@
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_6_3_2_6_TestBody();
+    
+    f_NR_TestBody_Set(false);
+   
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_6_3_2_6
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_6_3_2_6_TestBody() runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var octetstring  v_NAS_TxMsgContainer_SOR;
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var O16_Type v_Mac;
+    var B128_Type v_Mac_A17;
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams;
+    var octetstring v_Data;
+    var NAS_PlmnId v_PlmnID := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var O2_Type v_AccessTechId :='0800'O;
+    var O2_Type v_Counter :='0001'O;
+    var template (value) SOR_Header v_Header := cs_NG_SOR_HeaderType0('1'B,'1'B,'1'B,'0'B, '1'B); //@sic R5-233461 R5s230768, R5s240531 sic@
+    var octetstring v_Criterion_type:= 'FF'O;
+    var octetstring v_Tsor_cm_timer:= '21'O;
+    var octetstring v_Length;
+    // @sic R5s230768 sic@
+    var O1_Type v_Length_PlmnID_AccessTechId := int2oct(lengthof(v_PlmnID & v_AccessTechId),1);
+    var template (value) SOR_DataType0WithAddInfo v_SOR_Data;
+    var template (value) SOR_CMCIRule v_SOR_CMCIRule;
+    timer t_Tsor:= 60.0;
+    timer t_Tmax;
+    
+    //@siclog "Steps 1-21a1" siclog@
+    //Void @sic R5-233461 R5-244240 sic@
+  
+    //@siclog "Step 22" siclog@
+    //The SS transmits an DLInformationTransfer message containing steering of roaming information indicating list of preferred PLMN/access technology combination provided with acknowledgment requested from the UE for successful reception.
+    v_Length := int2oct((lengthof(v_Criterion_type) + lengthof(v_Tsor_cm_timer)),2); // @sic R5s240592 sic@
+    v_SOR_CMCIRule := cs_SOR_CMCIRule (v_Tsor_cm_timer, v_Criterion_type, omit, v_Length); // @sic R5s240592 sic@
+    v_SOR_Data := cs_SOR_DataWithAddInfo(v_Length_PlmnID_AccessTechId,
+                                         {cs_SOR_PLMN_AccessTech(v_PlmnID, v_AccessTechId)},
+                                         '0'B,
+                                         '0'B,
+                                         '1'B,
+                                         '1'B,  // octet O = '03'
+                                         cs_SOR_CMCI({v_SOR_CMCIRule}, int2oct( (lengthof(v_Criterion_type) + lengthof(v_Tsor_cm_timer) + 2),2)));// @sic R5s240592 sic@
+
+    v_Data := bit2oct(encvalue(v_SOR_Data));  // @sic R5s240531 sic@
+    v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    v_Mac_A17 :=f_NG_Authentication_A17(bit2oct(encvalue(v_Header)),
+                                  v_NAS_SecurityParams.KAUSF,
+                                  v_Counter,
+                                  v_Data,
+                                  v_NAS_SecurityParams.KDF);
+    v_Mac := bit2oct(v_Mac_A17);
+    v_NAS_TxMsgContainer_SOR := bit2oct(encvalue(cs_NG_SORTransparentContainer(v_Header, v_Mac, v_Counter, v_Data, omit, omit))); // @sic R5s200639 sic@
+    v_PduToSend := f_Get_NG_DLNASTransport (cs_PayloadContainerType(tsc_PayloadContainerSORMsg),
+                                            omit,
+                                            cs_PayloadContainer(omit, v_NAS_TxMsgContainer_SOR));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,
+                                   tsc_NR_RbId_SRB2,
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,v_PduToSend.Msg)));
+    //@siclog "Step 23" siclog@
+    //The SS starts timer of Tsor-cm timer value
+    t_Tsor.start;
+    
+    //@siclog "Step 24" siclog@
+    //The SS starts timer of tmax =(6 minutes + cell selection time) (Note 1, 2 and 3)
+    t_Tmax.start(f_NR_SetTimerToleranceMax(nr_Cell12, nonProtocolTimer, 480.0)); //@sic R5-233461 sic@
+    
+    //@siclog "Step 25" siclog@
+    //The UE transmits an ULInformationTransfer message carrying acknowledgement of successful reception of the steering of roaming information
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_ULNASTransport(v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_PayloadContainerType(tsc_PayloadContainerSORMsg), omit)) {
+     f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "UL NAS Transport Message Failed");
+    }
+    //@siclog "Step 26" siclog@
+    //Make the UE attempt an IMS emergency call dialling an emergency number e.g. 112 or 911. (Note 4)
+    f_UT_RequestIMSEmergencyCall (UT, "112");
+    //@siclog "Step 27" siclog@
+    //Generic procedure fo IMS Emergency call establishment in 5GC with IMS emergency registration as described in TS 38.508-1 [4] Table 4.9.11.2.2-1 is performed
+    f_NR5GC_EmergencyCallPDUSession(nr_Cell12); //@sic R5-233461 sic@
+    
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Emergency Call Established"); // @sic R5s230768 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "step 27 IMS eCall Established");
+
+    //@siclog "Step 28" siclog@
+    //The SS waits for timer of Tsor-cm timer expiry.
+    t_Tsor.timeout;
+    //@siclog "Step 29" siclog@
+    //Make the UE release the emergency call.
+    //@siclog "Step 30" siclog@
+    //The Generic test procedure for IMS MO Emergency call release as specified in TS 38.508-1 [4], subclause 4.9.12A takes place.
+    f_NR5GC_EmergencyCallRelease(nr_Cell12);
+    
+    //@siclog "Step 30A" siclog@
+    //The SS releases the RRC connection on NR cell 12.
+    f_NR_RRCRelease(nr_Cell12); //@sic R5-233461 sic@
+  
+    //@siclog "Step 31" siclog@
+    //Check: Does the UE transmit an RRCSetupRequest on NR Cell 11 before tmax expires?(Note 1, 2 and 3)
+
+    alt { //@sic R5s201466 sic@
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell11, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+        {
+          t_Tmax.stop;
+          f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 31 PASS");
+        }
+      [] t_Tmax.timeout
+        {
+          f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 31 Failed");
+        }
+    }
+    //@siclog "Steps 32 - 37a1" siclog@
+    //Steps 2-3 of Table 4.9.5.2.2-1of the generic procedure in TS 38.508-1 [4] are performed
+    //Steps 4 to 6a1 of Table 4.9.5.2.2-15.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 11.
+    f_NR5GC_MobilityRegistration(nr_Cell11); // @sic R5s230768 R5-236181 sic@
+  
+ 
+ }//End of fl_TC_6_2_3_6_TestBody
+
+}

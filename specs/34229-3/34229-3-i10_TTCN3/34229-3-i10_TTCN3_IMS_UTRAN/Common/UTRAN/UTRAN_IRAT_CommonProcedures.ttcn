@@ -1,0 +1,194 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module UTRAN_IRAT_CommonProcedures {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      additional default behaviour to receive Service Request
+   * @param     p_CellId
+   * @param     p_UsedStoredNsapi   (default value: false)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_RxdServiceReq(UTRAN_CellId_Type p_CellId,
+                                boolean p_UsedStoredNsapi := false) runs on UTRAN_PTC
+  { // @sic R5-173011 sic@
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var RRC_DATA_IND v_RRC_DataInd;
+    var U_RLC_AM_IND v_U_RLC_AM_IND;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    
+    [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                              tsc_RB3,
+                                              cr_U_ServiceRequest(cr_ServiceType('001'B),//Service type 'data'
+                                                                  cr_MobileIdAny,
+                                                                  ?))) -> value v_RRC_DataInd
+      {  // @sic R5-142919, R5s140710 sic@
+        f_UTRAN_RRC_Security(p_CellId, false, ps_domain);
+        v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);  // @sic R5s150057 sic@
+        select (v_CellConfig){
+          case (cell_FACH) {
+            f_UTRAN_RB_SetUp_PS_RAB(p_CellId, cell_FACH_PS, false, -, p_UsedStoredNsapi); // @sic R5s150057, R5s150919 sic@
+          }
+          case else {
+            f_UTRAN_RB_SetUp_PS_RAB(p_CellId, cell_DCH_64kPS_RAB_SRB, false, -, p_UsedStoredNsapi); // @sic R5s140710 R5s141127 R5s150919 sic@
+          }
+        }
+        U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated, //@sic R5s110210 sic@
+                                      tsc_RB2,
+                                      cr_108_RB_SetUpCmpl (tsc_RRC_TI))) -> value v_U_RLC_AM_IND;
+        v_SecurityInfo := f_UTRAN_Security_Get();
+        v_SecurityInfo.start_PS := v_U_RLC_AM_IND.data.aM_message.uL_DCCH_Message.message_.radioBearerSetupComplete.start_Value;
+        f_UTRAN_Security_Set(v_SecurityInfo);
+      }
+  }
+
+  /*
+   * @desc      Optional IMS registration or deregistration is performed.
+   *            This procedure is according to 36.523-3 table 10.1.2.1-2
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_UsedStoredNsapi
+   * @param     p_EstCause          (default value: complement (detach))
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_Optional_IMS_Reg(UTRAN_CellId_Type p_CellId,
+                                     timer p_Timer,
+                                     boolean p_UsedStoredNsapi,
+                                     template (present) EstablishmentCause p_EstCause := complement (detach))
+    runs on UTRAN_PTC
+  { // @sic R5-173011, R5-174656, R5-182560  sic@
+    
+    [] U_TM.check(receive(car_RRC_ConnReq(p_CellId,
+                                          tsc_RB0,
+                                          cr_108_RRC_ConnReq_r8(p_EstCause)))) { // @sic R5s170747, R5-182560 sic@
+      p_Timer.stop; // @sic R5-174656 sic@
+      f_UTRAN_RRC_ConnEst(p_CellId);
+      a_UTRAN_RxdServiceReq(p_CellId, p_UsedStoredNsapi);
+    }
+  }
+
+  /*
+   * @desc      Brings UE from UTRA idle (U1) state or UTRA connected (U2) state to UTRA State Off
+   *            This procedure is according to 36.523-3 cl. 10.1.2 (Switch/Power off procedure)
+   * @param     p_CellId
+   * @param     p_Utra_Postamble_State
+   * @param     p_AttachType
+   * @param     p_USIM_Rmvd         (default value: false)
+   * @param     p_UsedStoredNsapi   (default value: false)
+   * @param     p_RB_Id             (default value: tsc_RB20)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_SwitchPower_Off(UTRAN_CellId_Type         p_CellId,
+                                   UTRA_POSTAMBLE_STATE_Type p_Utra_Postamble_State, // @sic R5s150895 sic@
+                                   UTRAN_GERAN_ATTACH_Type p_AttachType,
+                                   boolean p_USIM_Rmvd := false,
+                                   boolean p_UsedStoredNsapi := false,
+                                   integer p_RB_Id := tsc_RB20) //@sic R5s141127 sic@
+    runs on UTRAN_IP_PTC
+  {
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var RRC_Rel_Status v_RRC_Rel_Status := cell_Dch;
+    var UTRA_POSTAMBLE_CONDITIONS v_Utra_Postamble_Condition := f_UTRA_SetPostambleCondition(p_AttachType); // @sic R5s110176 sic@
+    var boolean v_DeregisteredEarly := false;
+    timer t_WaitForOptional_IMS_Dereg := 2.0;
+    timer t_Dummy;
+        
+    if (v_CellConfig == cell_FACH or v_CellConfig == cell_FACH_NoConn or v_CellConfig == cell_FACH_PS) { //@sic R5s150302 sic@
+      v_RRC_Rel_Status := cell_Fach_Dcch;
+    }
+    if (f_UTRAN_Global_IP_NoOfPDPContexts_Get() != 0) { // @sic R5s180056, R5s180247 sic@
+      f_IP_ChangeDrbMappingUTRAN(IP, utran_CellDedicated, p_RB_Id); // @sic R5s160394 sic@
+    }
+    
+    // Step 0A
+    t_WaitForOptional_IMS_Dereg.start; // @sic R5-174656 sic@
+    // Step 0Ba1 - 10
+    alt { // @sic R5-174656 sic@
+      [] a_UTRAN_Optional_IMS_Reg (p_CellId, t_WaitForOptional_IMS_Dereg, p_UsedStoredNsapi)
+        {
+          v_DeregisteredEarly := true;
+        }
+      [] t_WaitForOptional_IMS_Dereg.timeout {}
+    }
+    
+    //Step 1: The UE can be switched off or USIM removed
+    if (pc_SwitchOnOff or p_USIM_Rmvd and pc_USIM_Removal) { // @sic R5s120597r1 sic@
+      //Step 1: The UE is switched off
+      f_UT_SwitchOffUE(UT, p_USIM_Rmvd);
+        
+      alt {
+        // Step 1A
+        [not v_DeregisteredEarly]  a_UTRAN_Optional_IMS_Reg (p_CellId, t_Dummy, p_UsedStoredNsapi) {  // @sic R5-174656 sic@
+          v_DeregisteredEarly := true;
+          repeat;
+        }
+        //Step 2-4: RRC Connection establishment when UE is in UTRA idle end state
+        [p_Utra_Postamble_State == U1_IDLE and not v_DeregisteredEarly] U_TM.check(receive(car_RRC_ConnReq(p_CellId,
+                                                                                                           tsc_RB0,
+                                                                                                           cr_108_RRC_ConnReq_r8(?)))) {
+          f_UTRAN_RRC_ConnEst(p_CellId); // @sic R5s140572, R5s150899 sic@
+          repeat;
+        } // @sic R5s150895 sic@
+        [] a_UTRAN_DeactivatePDPContext_MO () { // @sic R5-168426 sic@
+          repeat;
+        }
+        [] a_UTRAN_UE_DetachAfterSwitchOff_Common (p_CellId, v_Utra_Postamble_Condition); // @sic R5s150895 sic@
+      } // End of alt
+      //Step 6-7: Release RRC connection when the UE has been switched off
+      f_UTRAN_RRC_ConnRel_AfterSwitchOff(p_CellId, v_RRC_Rel_Status);
+    }
+    //Step 1: The power must be removed from the UE
+    else {
+      f_UT_PowerOffUE (UT);
+    }
+  } // f_UTRAN_SwitchPower_Off
+
+  /*
+   * @desc      To handle UE initiated Deactivate PDP Context procedure
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  altstep a_UTRAN_DeactivatePDPContext_MO() runs on UTRAN_PTC
+  {
+    var RRC_DATA_IND v_RRCDataInd;
+    var TI v_TI;
+    
+    [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_DeactPdpContextReq(cr_Deact_PDP_ContextReq_MO))) -> value v_RRCDataInd
+      {
+        v_TI := v_RRCDataInd.msg.deactivatePDPContextRequest.ti;
+        v_TI.tiFlag := not4b v_TI.tiFlag; // @sic R5s170094 sic@
+        U_Dc.send (cas_DataReq_PS(utran_CellDedicated, tsc_RB3, cs_U_DeactPdpContextAcp(cs_DeactPdpContextAcp(v_TI)))); // @sic R5s170028 sic@
+      }
+  }
+
+}

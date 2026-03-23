@@ -1,0 +1,321 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2021-08-02 15:09:24 +0200 (Mon, 02 Aug 2021) $
+// $Rev: 31116 $
+/******************************************************************************/
+
+module RRC_Paging_eDRX {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_AspCommon_Templates all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from EUTRA_Paging all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_Timing all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.1.1.2a
+   * @status    APPROVED (LTE_A_PRO)
+   */
+  function f_TC_8_1_1_2a_EUTRA ( ) runs on EUTRA_PTC
+  { /* Test case 8.1.1.2a RRC / Paging for notification of BCCH modification in idle mode / eDRX cycle longer than the modification period
+                                                                                          / eDRX cycle with eDRX Allowed/Not Allowed */
+    var NAS_MSG_Indication_Type v_NasInd;
+    var ProcedureTransactionIdentifier v_EPS_TI  := '01'O;
+    var APNandPCOs_Type v_APNandPCOs;
+    var template (omit) ProtocolConfigOptions v_Pco := omit;
+    var NAS_AttDetValue_Type v_AttachType := f_GetEAttachType(NORMAL);
+    var template (omit) LocAreaId v_LAI; /* @sic R5s170923 ch.1 sic@ */
+    var template (omit) MobileIdentity v_MSId;
+    var EPS_BearerIdentity v_EPS_Bearer_Id;
+    var DRB_Identity v_DRB_Id;
+    var GutiParameters_Type v_GutiParams;
+    var NAS_PlmnId v_PLMN;
+    var TrackingAreaCode v_TAC;
+    var EUTRA_FDD_TDD_Mode_Type v_EUTRA_FDD_TDD_Mode;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    // FDD subframe numbers associated with PRACH Config Index 9 according to TS 36.211 table 5.7.1-2
+    var template (present) integer v_SubFrameNum_FDD_1 := 1; /* @sic R5s170923 ch.6 sic@ */
+    var template (present) integer v_SubFrameNum_FDD_2 := 4; /* @sic R5s170923 ch.6 sic@ */
+    var template (present) integer v_SubFrameNum_FDD_3 := 7; /* @sic R5s170923 ch.6 sic@ */
+    // TDD subframe number associated with PRACH Config Index 52
+    var template (present) integer v_SubFrameNum_TDD := 6;
+    var template (omit) SRB_COMMON_IND v_SrbIndByRef := omit;    // not used (needed when other information of the RRC message needs to be access)
+    var template (omit) SYSTEM_IND v_SysIndByRef := omit;        // to store SYSTEM_IND if it takes over the RRC message
+    var float v_WaitForNext_eDRX_Acquisition;
+    var SubFrameTiming_Type v_CurrentTime;
+    var integer v_HSFN_Gap;
+
+    f_EUTRA_Init ( c1 );
+    
+    // initialization of variables which require previous initialization of EUTRA
+    v_LAI := f_EUTRA_GetCellLAI (eutra_Cell1, NORMAL); /* @sic R5s170923 ch.1 sic@ */
+    v_MSId := f_GetMSId (NORMAL);
+    v_EPS_Bearer_Id := f_EUTRA_InitialRegistrationEpsBearerId(firstPDN);
+    v_DRB_Id := f_EUTRA_NB_EpsBearerAssociatedDRB(v_EPS_Bearer_Id);
+    v_GutiParams := f_EUTRA_CellInfo_GetGuti(eutra_Cell1);
+    v_PLMN := f_Asn2Nas_PlmnId (v_GutiParams.PLMN_Identity);
+    v_TAC := f_EUTRA_CellInfo_GetTAC(eutra_Cell1);
+    v_EUTRA_FDD_TDD_Mode := f_EUTRA_CellInfo_GetFDD_TDD(eutra_Cell1);
+
+    
+    //Tables 8.1.1.2a.3.3-1 and 8.1.1.2a.3.3-1A: SystemInformationBlockType1 and SystemInformationBlockType1-BR-r13 eventually for Cell 1
+    f_Set_SIB1_eDRXAllowed(eutra_Cell1);  // @sic R5-174489 sic@
+    f_EUTRA_Set_SIB1_HyperSFN(eutra_Cell1);
+    
+    //Create and configure all cell 1
+    f_EUTRA_CellConfig_Def (eutra_Cell1);
+    
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED);
+    f_UT_ConfigureEDRX(UT, true, -, CNF_REQUIRED); // @sic R5s180261 sic@
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED);
+
+    //Cell 1 is powered
+    f_EUTRA_SetCellPower(eutra_Cell1, tsc_ServingCellRS_EPRE);
+    // The UE is switched on.
+    f_EUTRA_SwitchOnUEandStartIP(eutra_Cell1);
+    // Steps 1 to 13 of the generic test procedure for UE registration (TS 36.508 4.5.2.3-1).
+    // Now continue with the procedure
+    v_NasInd := f_EUTRA_InitialRegistration_Step1_4 (eutra_Cell1, PREAMBLE, NORMAL);
+    v_EPS_TI := v_NasInd.Pdu.PiggybackedPduList[0].Msg.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+    v_APNandPCOs := f_EUTRA_InitialRegistration_Step5_13 (eutra_Cell1, STATE2_IDLEUPDATE, v_NasInd);
+    // it is be ensured that eDRX information in ATTACH REQUEST is provided by the UE (and thus expected by the TTCN),
+    // and that ATTACH ACCEPT is sent with eDRX parameters: PTW = 1 and eDRX value = 4
+    v_Pco := v_NasInd.Pdu.PiggybackedPduList[0].Msg.pDN_CONNECTIVITY_REQUEST.protocolConfigurationOptions;
+    if (isvalue(v_APNandPCOs.protocolConfigurationOptions)) {
+      v_Pco := v_APNandPCOs.protocolConfigurationOptions;
+    }
+    // Steps 14 to 15 of the generic test procedure for UE registration (TS 36.508 4.5.2.3-1).
+    // The SS transmits an ATTACH ACCEPT message with GUTI-1 and with the ACTIVATE DEFAULT EPS BEARER CONTEXT REQUEST message.
+    f_IP_ChangeEutraCell(IP, eutra_Cell1);
+    f_EUTRA_RRCConnectionReconfiguration_SRB2_1AM_DRB_Est(eutra_Cell1,
+                                                          tsc_RRC_TI_Def,
+                                                          cs_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                                         cs_508_ATTACH_ACCEPT(v_AttachType,
+                                                                                                              cs_TAIListNonConsecutive_lv(v_PLMN, {bit2oct(v_TAC)}),
+                                                                                                              f_GutiParameters2MobileIdentity(tsc_IEI_Guti, v_GutiParams),
+                                                                                                              v_LAI,
+                                                                                                              v_MSId,
+                                                                                                              omit,
+                                                                                                              f_GetAdditionalUpdateResult(v_NasInd.Pdu.Msg.aTTACH_REQUEST.addUpdateType),
+                                                                                                              -,
+                                                                                                              -,
+                                                                                                              -,
+                                                                                                              -,
+                                                                                                              cs_EDRXParams ('0001'B, '0101'B)), // PTW = 1, eDRX value = 5
+                                                                                         cs_508_ActivateDefEpsBearerContextRequest(v_EPS_Bearer_Id,
+                                                                                                                                   v_EPS_TI,
+                                                                                                                                   v_APNandPCOs.accessPointName,
+                                                                                                                                   f_EUTRA_GetPDNAddress (f_CheckPCOforIPallocationViaNas (omit), f_EUTRA_InitialRegistrationPdnIndex(firstPDN)),
+                                                                                                                                   -,
+                                                                                                                                   f_GetDefaultProtocolConfigOptions (v_Pco))),
+                                                          v_DRB_Id);
+    
+    // Steps 16-18b1 of the generic procedure for UE registration specified in TS 36.508 subclause 4.5.2.3 are performed.
+    f_EUTRA_InitialRegistration_Step16_18b1(eutra_Cell1);
+
+    f_EUTRA_TestBody_Set (true);
+
+    //@siclog "Step 1" siclog@
+    //The SS changes prach-ConfigIndex in SystemInformationBlockType2 and  does not include eDRX-Allowed-r13 IE in the SystemInformationBlockType1
+    //Configure SS to enable report of PRACH preamble reception
+    f_EUTRA_SS_ConfigRachPreambleIndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Enable);
+    //Change the prach config index in system information.
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      f_EUTRA_CellInfo_SetPRACH_ConfigurationIndex (eutra_Cell1, 9, true); /* @sic R5s170923 ch.6 sic@ */
+    }
+    else if (v_EUTRA_FDD_TDD_Mode == TDD) {
+      f_EUTRA_CellInfo_SetPRACH_ConfigurationIndex (eutra_Cell1, 52, true); /* @sic R5s170923 ch.6 sic@ */
+     }
+    f_Set_SIB1_eDRXAllowed(eutra_Cell1, false);//SIB1 set to NOT include eDRX-Allowed-r13 IE
+    //Configure PRACH at SS
+    f_EUTRA_SS_CommonCellConfig (eutra_Cell1,  /* @sic R5s170923 ch.5 sic@ */
+                                 cas_CellConfig_UpdatePRACH_Info_REQ(eutra_Cell1,
+                                                                     cs_TimingInfo_Now,
+                                                                     f_EUTRA_CellInfo_GetPrach_Config(eutra_Cell1),
+                                                                     f_EUTRA_SS_InitialisePRACH_Config_v1310(eutra_Cell1)));
+    //@siclog "Step 2" siclog@
+    //The SS transmits a Paging message including IE systemInfoModification-eDRX-r13 in a valid PO within the PTW of the next upcoming UEs PH as per Idle eDRX
+    f_EUTRA_ModifySysinfo_eDRX (eutra_Cell1,
+                                1,  // PTW index value (2.56 sec)
+                                5,  // eDRX index value (81.96 sec)
+                                cs_Paging_eDRX_r13);
+
+    //@siclog "Step 3" siclog@
+    //Wait till the beginning of next eDRX acquisition time (next H-SFN for which H-SFN mod 256 =0).
+    v_CurrentTime := f_EUTRA_GetCurrentTiming(eutra_Cell1);
+    v_HSFN_Gap := 256 - (v_CurrentTime.HSFN.Number mod 256); // calculate HSFNs left to reach HSFN mod 256
+    v_WaitForNext_eDRX_Acquisition := (int2float(v_HSFN_Gap) * 10.24) - (int2float(v_CurrentTime.SFN.Number + 1) * 0.01); // reduce by SFNs already elapsed + 1 @sic R5s170923 ch.4 sic@
+    f_Delay(v_WaitForNext_eDRX_Acquisition);
+    
+    //@siclog "Step 4" siclog@
+    //After Step 3, wait for 10s for the UE to acquire the new system information.
+    f_Delay(10.0);
+
+    //@siclog "Step 5" siclog@
+    //The SS transmits a Paging message to the UE in  a valid PO as per normal DRX
+    f_EUTRA_UE_Page_Def (eutra_Cell1);
+
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit a random access using prach-ConfigIndex given in step 1?
+    //Receive Receive dedicated preamble
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      f_EUTRA_RacingCond_AwaitSysIndBeforeSrbMsg (car_PRACH_Preamble_IND_Any ( eutra_Cell1, cr_TimingInfo ( ?, (v_SubFrameNum_FDD_1,v_SubFrameNum_FDD_2,v_SubFrameNum_FDD_3) )),
+                                                  v_SrbIndByRef,
+                                                  v_SysIndByRef);
+    }
+    else {
+      f_EUTRA_RacingCond_AwaitSysIndBeforeSrbMsg (car_PRACH_Preamble_IND_Any ( eutra_Cell1, cr_TimingInfo ( ?, v_SubFrameNum_TDD )),
+                                                  v_SrbIndByRef,
+                                                  v_SysIndByRef);
+    }
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, "Test Case 8.1.1.2a Step 6");
+    
+    //@siclog "Step 7" siclog@
+    //The UE transmits an RRCConnectionRequest message.
+    f_EUTRA_RacingCond_MatchRrcMsg (v_SrbIndByRef,
+                                    car_SRB0_RrcPdu_IND (eutra_Cell1,
+                                                         cr_RRCConnectionRequest (cr_EstablishmentCause_mt_Access)));
+    
+    //Configure SS to disable report of PRACH preamble reception
+    f_EUTRA_SS_ConfigRachPreambleIndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Disable);
+    
+    //@siclog "Step 8" siclog@
+    //The SS transmits an RRCConnectionSetup message
+    f_EUTRA_RRC_ConnectionSetup_Def (eutra_Cell1, -, v_RRC_TI);
+
+    //@siclog "Step 9" siclog@
+    //Check: Does the UE transmit an RRCConnectionSetupComplete message including a SERVICE REQUEST message?
+    v_NasInd := f_EUTRA_RRCConnectionSetupComplete_Def(eutra_Cell1,
+                                                       cr_508_RRCConnectionSetupComplete(v_RRC_TI, ?),
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                         cr_508_SERVICE_REQUEST(f_EUTRA_SecurityKSIasme_Get())));
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, "Test Case 8.1.1.2a Step 9");
+    
+    //@siclog "Steps 10-13" siclog@
+    //Steps 6 to 9 of the generic radio bearer establishment procedure in TS 36.508 subclause 4.5.3.3 are executed to successfully complete the service request procedure.
+    f_EUTRA_ServiceReqPostamble_508Steps6_9(eutra_Cell1, v_NasInd);
+    
+    //@siclog "Step 14" siclog@
+    //The SS releases the RRC Connection.
+    f_EUTRA_RRC_ConnectionRelease (eutra_Cell1);
+    
+    //@siclog "Step 15" siclog@
+    //The SS sets eDRX-Allowed-r13 IE to true in SystemInformationBlockType1 and changes changes prach-ConfigIndex in SystemInformationBlockType2
+    //Configure SS to enable report of PRACH preamble reception
+    f_EUTRA_SS_ConfigRachPreambleIndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Enable);
+    //Change the prach config index in system information.
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      f_EUTRA_CellInfo_SetPRACH_ConfigurationIndex (eutra_Cell1, 3, true); /* @sic R5s170923 ch.6 sic@ */
+      v_SubFrameNum_FDD_1 := 1; // FDD subframe number associated with PRACH Config Index 3 according to TS 36.211 table 5.7.1-2
+    }
+    else if (v_EUTRA_FDD_TDD_Mode == TDD) {
+      f_EUTRA_CellInfo_SetPRACH_ConfigurationIndex (eutra_Cell1, 51, true); /* @sic R5s170923 ch.6 sic@ */
+      v_SubFrameNum_TDD := 1; // in @sic R5s110197 sic@ indicated as associated with default PRACH Config Index 51 @sic R5s210795 sic@
+    }
+    f_Set_SIB1_eDRXAllowed(eutra_Cell1); //SIB1 set to include eDRX-Allowed-r13 IE
+    //Configure PRACH at SS
+    f_EUTRA_SS_CommonCellConfig (eutra_Cell1,  /* @sic R5s170923 ch.5 sic@ */
+                                 cas_CellConfig_UpdatePRACH_Info_REQ(eutra_Cell1,
+                                                                     cs_TimingInfo_Now,
+                                                                     f_EUTRA_CellInfo_GetPrach_Config(eutra_Cell1),
+                                                                     f_EUTRA_SS_InitialisePRACH_Config_v1310(eutra_Cell1)));
+    //@siclog "Step 16" siclog@
+    //The SS transmits a Paging message including a systemInfoModification as per normal DRX
+    f_EUTRA_ModifySysinfo (eutra_Cell1);
+
+    //@siclog "Step 17" siclog@
+    //Wait for 15 secs for the UE to acquire the new system information
+    f_Delay(15.0);
+
+    //@siclog "Step 18" siclog@
+    //SS sends a Paging message to the UE in a valid PO within the PTW of the next upcoming UEs PH as per Idle eDRX.
+    f_EUTRA_UE_Page_eDRX (eutra_Cell1,
+                          cs_NasPaging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_GutiParams.MME_Code, v_GutiParams.M_TMSI)),
+                          1,  // PTW index value (2.56 sec)
+                          5); // eDRX index value (81.96 sec)
+
+    //@siclog "Step 19" siclog@
+    //Check: Does the UE transmit a random access using prach-ConfigIndex given in step 15?
+    //Receive Receive dedicated preamble
+    // subframe numbers have been adjusted above
+    if (v_EUTRA_FDD_TDD_Mode == FDD) {
+      f_EUTRA_RacingCond_AwaitSysIndBeforeSrbMsg (car_PRACH_Preamble_IND_Any (eutra_Cell1, cr_TimingInfo (?, v_SubFrameNum_FDD_1)),
+                                                  v_SrbIndByRef,
+                                                  v_SysIndByRef);
+    }
+    else {
+      f_EUTRA_RacingCond_AwaitSysIndBeforeSrbMsg (car_PRACH_Preamble_IND_Any (eutra_Cell1, cr_TimingInfo (?, v_SubFrameNum_TDD)),
+                                                  v_SrbIndByRef,
+                                                  v_SysIndByRef);
+    }
+
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, "Test Case 8.1.1.2a Step 19");
+
+    //@siclog "Step 20" siclog@
+    //The UE transmits an RRCConnectionRequest message.
+    f_EUTRA_RacingCond_MatchRrcMsg (v_SrbIndByRef,
+                                    car_SRB0_RrcPdu_IND (eutra_Cell1,
+                                                         cr_RRCConnectionRequest (cr_EstablishmentCause_mt_Access)));
+    
+    //Configure SS to disable report of PRACH preamble reception
+    f_EUTRA_SS_ConfigRachPreambleIndMode (eutra_Cell1, tsc_L1Mac_IndicationMode_Disable);
+
+    //@siclog "Step 21" siclog@
+    //The SS transmits an RRCConnectionSetup message.
+    f_EUTRA_RRC_ConnectionSetup_Def (eutra_Cell1, -, v_RRC_TI);
+
+    //@siclog "Step 22" siclog@
+    //Check: Does the UE transmit an RRCConnectionSetupComplete message including a SERVICE REQUEST message?
+    v_NasInd := f_EUTRA_RRCConnectionSetupComplete_Def(eutra_Cell1,
+                                                       cr_508_RRCConnectionSetupComplete(v_RRC_TI, ?),
+                                                       cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                         cr_508_SERVICE_REQUEST(f_EUTRA_SecurityKSIasme_Get())));
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, "Test Case 8.1.1.2a Step 22");
+    
+    //@siclog "Steps 23-26" siclog@
+    //Steps 6 to 9 of the generic radio bearer establishment procedure in TS 36.508 subclause 4.5.3.3 are executed to successfully complete the service request procedure.
+    f_EUTRA_ServiceReqPostamble_508Steps6_9 (eutra_Cell1, v_NasInd);
+    
+    //@siclog "Step 27" siclog@
+    //The SS releases the RRC Connection.
+    f_EUTRA_RRC_ConnectionRelease (eutra_Cell1);
+
+    f_EUTRA_TestBody_Set (false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble (eutra_Cell1, E1_IDLE);
+  } // f_TC_8_1_1_2a_EUTRA
+
+}

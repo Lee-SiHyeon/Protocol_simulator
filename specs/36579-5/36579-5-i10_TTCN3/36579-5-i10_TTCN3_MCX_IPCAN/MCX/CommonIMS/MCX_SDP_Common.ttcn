@@ -1,0 +1,246 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-06-09 17:47:05 +0200 (Fri, 09 Jun 2023) $
+// $Rev: 36190 $
+/******************************************************************************/
+
+module MCX_SDP_Common {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_Component all;
+  import from IMS_SDP_Templates all;
+  import from LibSip_SDPTypes all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_SRTP_Configuration all;
+  import from MIKEY_TypeDefs all;
+
+  template (present) SDP_attribute cr_SDP_Attribute_Mikey :=
+  { /* @status    APPROVED (MCX) */
+    keymgmt := {
+      prtcl_id := "mikey",
+      data:= ?
+    }
+  };
+
+  template (value) SDP_attribute cs_SDP_Attribute_Mikey(bitstring p_EncodedMikeyMessage) :=
+  { /* @status    APPROVED (MCX) */
+    keymgmt := {
+      prtcl_id := "mikey",
+      data:= f_Base64Encode(p_EncodedMikeyMessage)
+    }
+  };
+
+  template (present) SDP_attribute cr_SDP_Attribute_candidate_host(integer p_ComponentId,
+                                                                   integer p_Port,
+                                                                   charstring p_Transport := "UDP") :=
+  { /* @status    APPROVED (MCX) */
+    candidate := {
+      foundation := ?,
+      component_id := int2str(p_ComponentId),
+      transport := p_Transport,
+      priority := ?,
+      connection_address := ?,      // needs to be checked explicitly as IPv6 address may use different notations
+      port_number := p_Port,
+      cand_type := "host",
+      rel_addr := omit,
+      rel_port := omit,
+      extensions := {}
+    }
+  };
+
+  template (present) SDP_attribute cr_SDP_Attribute_candidate_any :=
+  { /* @status    APPROVED (MCX) */
+    candidate := ?
+  };
+
+  template (value) SDP_attribute cs_SDP_Attribute_candidate_host(charstring p_Foundation,
+                                                                 integer p_ComponentId,
+                                                                 template (value) SDP_connection p_Connection,
+                                                                 integer p_Port,
+                                                                 charstring p_Transport := "UDP") :=
+  { /* @status    APPROVED (MCX) */
+    candidate := {
+      foundation := p_Foundation,
+      component_id := int2str(p_ComponentId),
+      transport := p_Transport,
+      priority := int2str((f_Power(2, 24) * 126) + (f_Power(2, 8) * 65535) + (256 - p_ComponentId)),    // according to Table 5.5.3.1.2-1
+      connection_address := p_Connection.conn_addr.addr,
+      port_number := p_Port,
+      cand_type := "host",
+      rel_addr := omit,
+      rel_port := omit,
+      extensions := {}
+    }
+  };
+
+  template (value) SDP_attribute crs_SDP_Attribute_ice_lite :=
+  { /* @status    APPROVED (MCX) */
+    ice_lite := {}
+  };
+
+  /*
+   * @desc      o= line for DL
+   * @return    template (value) SDP_Origin
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_Origin_TX() runs on IMS_PTC return template (value) SDP_Origin
+  {
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var charstring v_IPAddr := f_IMS_PTC_RemoteAddress_GetAddrStr();            // IP address of the remote UE
+    var charstring v_SessionId := f_IMS_PTC_ImsInfo_DialogGetSessIdTX();
+    var charstring v_SessionVersion;
+    
+    v_SessionVersion := f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX();
+    
+    return cs_SDP_Origin(-, v_SessionId, v_SessionVersion, v_AddrType, v_IPAddr);
+  }
+
+  /*
+   * @desc      Check that given media description does not contain attributed which shall not be contained
+   * @param     p_MediaDescription
+   * @param     p_AllowedMediaAttributes
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_MediaDescription_CheckAllowedAttributes(SDP_media_desc p_MediaDescription,
+                                                             template (present) SDP_attribute_list p_AllowedMediaAttributes) runs on IMS_PTC
+  {
+    var integer i;
+    var integer k;
+    var boolean v_Match;
+
+    for (i := 0; i < lengthof(p_MediaDescription.attributes); i := i + 1) {
+      // NOTE: f_SDP_AttributeList_CheckAttribute cannot be used as p_AllowedMediaAttributes is template (present)
+      v_Match := false;
+      for (k := 0; k < lengthof(p_AllowedMediaAttributes); k := k + 1) {
+        if (match(p_MediaDescription.attributes[i], p_AllowedMediaAttributes[k])) {
+          v_Match := true;
+          break;
+        }
+      }
+      if (not v_Match) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unknown or unexpected audio media attribute");
+      }
+    }
+  }
+
+  /*
+   * @desc      Check ICE candidates for the given media description: at least the ICE default candidate shall be there
+   * @param     p_MediaDescription
+   * @param     p_ComponentId
+   * @param     p_Address
+   * @param     p_Port
+   * @param     p_Transport         (default value: "UDP")
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_CheckIceCandidate(SDP_media_desc p_MediaDescription,
+                                       integer p_ComponentId,
+                                       charstring p_Address,
+                                       integer p_Port,
+                                       charstring p_Transport := "UDP") runs on IMS_PTC
+  {
+    var integer i;
+
+    for (i := 0; i < lengthof(p_MediaDescription.attributes); i := i + 1) {
+      if (match(p_MediaDescription.attributes[i], cr_SDP_Attribute_candidate_host(p_ComponentId, p_Port, p_Transport)) and
+          f_IPAddresses_Compare(p_MediaDescription.attributes[i].candidate.connection_address, p_Address)) {
+        return;
+      }
+    }
+    f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "No default ICE candidate found");
+  }
+
+  /*
+   * @desc      check that the IP addresses used in origin and c= lines at session and media level are the UE's IP address;
+   *            NOTE: For IPv6 there may be different notation for one and the same address => it cannot (easily) be checked in templates
+   * @param     p_SDP_Message
+   * @param     p_IpAddr
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_CheckIpAddresses(SDP_Message p_SDP_Message,
+                                      charstring p_IpAddr) runs on IMS_PTC
+  {
+    var integer i;
+
+    // c= line at session level
+    if (isvalue(p_SDP_Message.connection) and not f_IPAddresses_Compare(p_SDP_Message.connection.conn_addr.addr, p_IpAddr)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected IP address in c= line of the session description");
+    }
+    // o= line
+    if (not f_IPAddresses_Compare(p_SDP_Message.origin.addr, p_IpAddr)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected IP address in origin");
+    }
+    // c= line(s) at media level
+    for (i := 0; i < lengthof(p_SDP_Message.media_list); i := i + 1) {
+      if (isvalue(p_SDP_Message.media_list[i].connections[0]) and not f_IPAddresses_Compare(p_SDP_Message.media_list[i].connections[0].conn_addr.addr, p_IpAddr)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected IP address in in c= line of the media description");
+      }
+    }
+  }
+
+  /*
+   * @desc      Get PCK from SDP message
+   * @param     p_ServiceType
+   * @param     p_SessionAttributes
+   * @param     p_MediaAttributes1
+   * @param     p_MediaAttributes2  (default value: omit)
+   * @return    MCX_SecurityKey_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_GetPCK(MCX_ServiceType_Type p_ServiceType,
+                            template (omit) SDP_attribute_list p_SessionAttributes,
+                            template (omit) SDP_attribute_list p_MediaAttributes1,
+                            template (omit) SDP_attribute_list p_MediaAttributes2 := omit) runs on MCX_IMS_PTC return MCX_SecurityKey_Type
+  {
+    var template (omit) SDP_attribute v_KeyMgmtAttrSession := f_SDP_AttributeList_GetAttribute(p_SessionAttributes, cr_SDP_Attribute_Mikey);   // @sic R5w210212: key-mgmt maybe at session or at media level sic@
+    var template (omit) SDP_attribute v_KeyMgmtAttrMedia1 := f_SDP_AttributeList_GetAttribute(p_MediaAttributes1, cr_SDP_Attribute_Mikey);
+    var template (omit) SDP_attribute v_KeyMgmtAttrMedia2 := f_SDP_AttributeList_GetAttribute(p_MediaAttributes2, cr_SDP_Attribute_Mikey);
+    var template (present) MIKEY_Message v_MikeyMsgTemplate;
+    var SDP_attribute v_KeyMgmtAttr;
+    var MIKEY_Message v_MIKEY_Message;
+    var MCX_SecurityKey_Type v_Key;
+    var charstring v_EncodedMikeyMsg := "";
+    var MCX_CS_ID_Type v_CS_Id_RTP;
+    var template (present) O1_Type v_CsId := ?;
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_CS_Id_RTP := PCK_MCPTT_Receiver; }
+      case (MCVideo) { v_CS_Id_RTP := PCK_MCVideo_Receiver; }
+    }
+    if (isbound(v_CS_Id_RTP)) { v_CsId := int2oct(enum2int(v_CS_Id_RTP), 1); }
+
+    if (isvalue(v_KeyMgmtAttrSession)) {
+      v_KeyMgmtAttr := valueof(v_KeyMgmtAttrSession);
+      if (isvalue(v_KeyMgmtAttrMedia1) or isvalue(v_KeyMgmtAttrMedia2)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "key-mgmt attribute shall be either at session level or at media level");
+      }
+    } else {
+      if (not isvalue(v_KeyMgmtAttrMedia1)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing key-mgmt attribute at media level");
+      } else {
+        v_KeyMgmtAttr := valueof(v_KeyMgmtAttrMedia1);
+        if (isvalue(p_MediaAttributes2)) {           // MCVideo
+          if (not match(v_KeyMgmtAttr, v_KeyMgmtAttrMedia2)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "key-mgmt attribute shall be the same for audio and video");
+          }
+        }
+      }
+    }
+
+    v_EncodedMikeyMsg := v_KeyMgmtAttr.keymgmt.data;
+    v_MikeyMsgTemplate := f_MIKEY_SAKKE_MessageRX_PrivateCall(p_ServiceType, v_CsId);
+    v_MIKEY_Message := f_MCX_MIKEY_DecodeMatchAndCheckMikeyMessage(v_EncodedMikeyMsg, v_MikeyMsgTemplate);
+    v_Key := f_MCX_MIKEY_Message_ExtractKey(v_MIKEY_Message);
+
+    return v_Key;
+  }
+
+}

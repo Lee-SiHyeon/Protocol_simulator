@@ -1,0 +1,171 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module MCX_JSON_Objects {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from JSON all;
+  import from MCX_CommonDefs all;
+  import from MCX_SecurityFunctions all;
+  import from MCX_SecurityParameters all;
+
+  template (value) JSON.ObjectMember cs_JSON_ObjectMember_String(charstring p_Name,
+                                                                 charstring p_Value) :=
+  { /* @status    APPROVED (MCX) */
+    name := p_Name,
+    value_ := {
+      str := p_Value
+    }
+  };
+
+  template (value) JSON.ObjectMember cs_JSON_ObjectMember_Integer(charstring p_Name,
+                                                                  integer p_Value) :=
+  { /* @status    APPROVED (MCX) */
+    name := p_Name,
+    value_ := {
+      int := p_Value
+    }
+  };
+
+  template (value) JSON.ObjectMember cs_JSON_ObjectMember_StrArray(charstring p_Name,
+                                                                   JSON.StrArray p_Value) :=
+  { /* @status    APPROVED (MCX) */
+    name := p_Name,
+    value_ := {
+      strArray := p_Value
+    }
+  };
+
+  template (value) JSON.Object cs_JSON_Object(template (value) JSON.Object.memberList p_NameValueList) :=
+  { /* @status    APPROVED (MCX) */
+    memberList := p_NameValueList
+  };
+
+  /*
+   * @desc      Encode JSON object
+   * @param     p_NameValueList
+   * @return    bitstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_JSON_EncodeObjectToBitstring(template (value) JSON.Object.memberList p_NameValueList) return bitstring
+  {
+    var template (value) JSON.Object v_Object := cs_JSON_Object(p_NameValueList);
+    var bitstring v_EncodedObject := encvalue(v_Object);
+    
+    return v_EncodedObject;
+  }
+
+  /*
+   * @desc      Encode JSON object
+   * @param     p_NameValueList
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_JSON_EncodeObject(template (value) JSON.Object.memberList p_NameValueList) return charstring
+  {
+    var bitstring v_EncodedObject := fl_JSON_EncodeObjectToBitstring(p_NameValueList);
+    
+    return f_Bit2Char(v_EncodedObject);
+  }
+
+  /*
+   * @desc      Encode JWS Token
+   * @param     p_HeaderList
+   * @param     p_PayloadList
+   * @param     p_Algorithm
+   * @param     p_Key
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_JWS_EncodeToken(template (value) JSON.Object.memberList p_HeaderList,
+                             template (value) JSON.Object.memberList p_PayloadList,
+                             JWK_HashAlgorithm_Type p_Algorithm,
+                             octetstring p_Key) return charstring
+  {
+    var bitstring v_EncodedHeader := fl_JSON_EncodeObjectToBitstring(p_HeaderList);
+    var bitstring v_EncodedPayload := fl_JSON_EncodeObjectToBitstring(p_PayloadList);
+    var charstring v_Base64urlHeader := f_Base64urlEncode(v_EncodedHeader);
+    var charstring v_Base64urlPayload := f_Base64urlEncode(v_EncodedPayload);
+    var charstring v_String := v_Base64urlHeader & "." & v_Base64urlPayload;
+    var charstring v_Signature := fx_JWK_Signature(v_String, p_Algorithm, p_Key);
+
+    v_String := v_String & "." & v_Signature;
+
+    return v_String;
+  }
+
+  /*
+   * @desc      Create Access token MCX claim for service id (33.180 Table B.2.2.3-1)
+   * @param     p_ServiceType
+   * @return    template (value) JSON.ObjectMember
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_JSON_MCService(MCX_ServiceType_Type p_ServiceType) return template (value) JSON.ObjectMember
+  {
+    var charstring v_MCServiceID := f_MCX_MCService_ID_User_A(p_ServiceType);
+    var charstring v_ServiceName;
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_ServiceName := "mcptt_id"; }
+      case (MCVideo) { v_ServiceName := "mcvideo_id"; }
+      case (MCData)  { v_ServiceName := "mcdata_id"; }
+      case else      { FatalError(__FILE__, __LINE__, "Invalid service type"); }
+    }
+    
+    return cs_JSON_ObjectMember_String(v_ServiceName, v_MCServiceID);
+  }
+
+  /*
+   * @desc      Create Id, Access and Refresh Tokens
+   * @param     p_ServiceType
+   * @param     p_Client_Id
+   * @param     p_Issuer_Id
+   * @param     p_ScopeList
+   * @param     p_RsaPrivateKey
+   * @return    MCX_Tokens_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_JSON_CreateTokens(MCX_ServiceType_Type p_ServiceType,
+                                   charstring p_Client_Id,
+                                   charstring p_Issuer_Id,
+                                   CharStringList_Type p_ScopeList,
+                                   octetstring p_RsaPrivateKey) return MCX_Tokens_Type
+  { // @sic R5s240640: p_ServiceType instead of p_MCPTT_Id sic@
+    var integer v_SystemTime := f_UnixEpoch_TimestampSeconds();
+    var integer v_ExpirationTime := v_SystemTime + 7199;
+    var template (value) JSON.ObjectMember v_MCService := fl_MCX_JSON_MCService(p_ServiceType); // @sic R5s240640: no hard-coded "mcptt_id" anymore sic@
+    var template (value) JSON.Object.memberList v_TokenHeader := {
+      cs_JSON_ObjectMember_String("kid", "jws-rsa"),
+      cs_JSON_ObjectMember_String("alg", "RS256")
+    };
+    var template (value) JSON.Object.memberList v_IdTokenPayload := {
+      v_MCService,
+      cs_JSON_ObjectMember_String("sub",       "1234567890"),               // arbitrarily selected string
+      cs_JSON_ObjectMember_String("aud",       p_Client_Id),
+      cs_JSON_ObjectMember_String("iss",       p_Issuer_Id),
+      cs_JSON_ObjectMember_Integer("exp",      v_ExpirationTime),
+      cs_JSON_ObjectMember_Integer("iat",      v_SystemTime)
+    };
+    var template (value) JSON.Object.memberList v_AccessTokenPayload := {
+      v_MCService,
+      cs_JSON_ObjectMember_StrArray("scope",   p_ScopeList),
+      cs_JSON_ObjectMember_Integer("exp",      v_ExpirationTime),
+      cs_JSON_ObjectMember_String("client_id", p_Client_Id)
+    };
+    var charstring v_IdToken := f_JWS_EncodeToken(v_TokenHeader, v_IdTokenPayload, RS256, p_RsaPrivateKey);
+    var charstring v_AccessToken := f_JWS_EncodeToken(v_TokenHeader, v_AccessTokenPayload, RS256, p_RsaPrivateKey);
+    var charstring v_RefreshToken := "Y7NSzUJuS0Jp7G4SKpBKSOJVHIZxFbxqsqCIZhOEk9";
+
+    return {v_IdToken, v_AccessToken, v_RefreshToken};
+  }
+
+}

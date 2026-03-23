@@ -1,0 +1,404 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2025-12-01 14:39:10 +0100 (Mon, 01 Dec 2025) $
+// $Rev: 42297 $
+/******************************************************************************/
+
+module EUTRA_CapabilityFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_AuxiliaryCapCheckFunctions all;
+  import from EUTRA_Parameters all;
+  import from Parameters all;
+
+  template (present) PDCP_Parameters cr_PDCP_Parameters :=
+  { /* @status    APPROVED (LTE, UTRAN) */
+    supportedROHC_Profiles := ?,
+    maxNumberROHC_ContextSessions := *
+  };
+
+  template (present) UE_EUTRA_Capability.interRAT_Parameters cr_UE_EUTRA_Capability_InterRAT_Parameters :=
+  { /* @status    APPROVED (LTE, LTE_A_R10_R11, UTRAN) */
+    utraFDD := *,  // @sic R5s140135 sic@
+    utraTDD128 := *,
+    utraTDD384 := *,
+    utraTDD768 := *,
+    geran := *,
+    cdma2000_HRPD := *,
+    cdma2000_1xRTT := *
+  };
+
+  template (present) UE_EUTRA_Capability cr_UE_EUTRA_Capability(template (present) PDCP_Parameters p_PDCP_Parameters := cr_PDCP_Parameters,
+                                                                template (present) B32_Type p_FeatureGroupIndicators := f_DeriveFeatrGrpCapFromPics(),
+                                                                template UE_EUTRA_Capability_v920_IEs p_UE_EUTRA_Capability_v920_IEs := *) :=
+  { /* @status    APPROVED (LTE, UTRAN) */
+    /* @sic R5s160320 - Additional Changes by MCC160: parameters p_PDCP_Parameters, p_FeatureGroupIndicators, p_UE_EUTRA_Capability_v920_IEs sic@ */
+    
+    accessStratumRelease := ?,  //@sic R5s140912 sic@
+    ue_Category := ?,
+    pdcp_Parameters := p_PDCP_Parameters,
+    phyLayerParameters := {
+      ue_TxAntennaSelectionSupported := ?,
+      ue_SpecificRefSigsSupported := ?
+    },
+    rf_Parameters := {
+      supportedBandListEUTRA := ?
+    },
+    measParameters := {
+      bandListEUTRA := ?
+    },
+    featureGroupIndicators := p_FeatureGroupIndicators,
+    interRAT_Parameters := cr_UE_EUTRA_Capability_InterRAT_Parameters,
+    nonCriticalExtension := p_UE_EUTRA_Capability_v920_IEs
+  };
+
+  /*
+   * @desc      To decode the EUTRA UE-CapabilityRAT-Container
+   * @param     p_Octetstring
+   * @return    UE_EUTRA_Capability
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_EUTRA_DecodeEutraCapMsg(octetstring p_Octetstring) return UE_EUTRA_Capability
+  {
+    var UE_EUTRA_Capability v_Ue_Eutra_Capability;
+    var bitstring v_Bitstring := oct2bit(p_Octetstring);
+    var integer v_Result := decvalue(v_Bitstring, v_Ue_Eutra_Capability);
+    if (v_Result != 0) {
+      FatalError(__FILE__, __LINE__, "UE EUTRA Capability cannot be decoded");
+    }
+    return v_Ue_Eutra_Capability;
+  }
+
+  /*
+   * @desc      Function to check if a band is a TN band (i.e. not an NTN band)
+   * @param     p_BandEUTRA
+   * @return    boolean
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function fl_EUTRA_Band_IsTN(integer p_BandEUTRA) return boolean
+  { // @sic R5-255055, R5s250332 sic@
+    if ((p_BandEUTRA == 252) or (p_BandEUTRA == 253) or (p_BandEUTRA == 254) or (p_BandEUTRA == 255) or (p_BandEUTRA == 256)) {return false}
+    else {return true};
+  }
+
+  /*
+   * @desc      Function to check the setting of halfduplex capability of the supported EUTRA bands
+   *            relates PICS settings to reported bands
+   *            NTN bands not checked !
+   *            Reference 36.523-1 Table 8.5.4.1.3.3-2
+   * @param     p_ReceivedCapabilityMsg
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_CheckUE_HDX_SupportedEUTRA_Bands(UE_EUTRA_Capability p_ReceivedCapabilityMsg)
+  { //@sic R5-193997 sic@
+    var integer i;
+    var integer v_BandEUTRA;
+    var boolean v_HalfDuplex; // @sic R5-166324 sic@
+    var SupportedBandListEUTRA v_SupportedBandListEUTRA := p_ReceivedCapabilityMsg.rf_Parameters.supportedBandListEUTRA;
+    var integer v_MaxBandsReported := lengthof(v_SupportedBandListEUTRA);
+
+    for (i := 0; i < v_MaxBandsReported; i := i + 1) { // check against all reported bands
+      v_BandEUTRA := v_SupportedBandListEUTRA[i].bandEUTRA;
+      v_HalfDuplex := v_SupportedBandListEUTRA[i].halfDuplex; // @sic R5-166324 sic@
+      // if the band is an extended band it is represented by maxFBI. All extended bands are FDD bands!
+      if (f_EUTRA_FrequencyBandIsFDD(v_BandEUTRA)) {  // @sic R5s160823 sic@
+        if (fl_EUTRA_Band_IsTN (v_BandEUTRA)) { // @sic R5-255055, R5s250332 sic@
+          if ((pc_FDD_TypeB_HalfDuplex and (not v_HalfDuplex)) or ((not pc_FDD_TypeB_HalfDuplex) and v_HalfDuplex)) {  // @sic R5-166324 sic@
+            f_SetVerdict(fail, __FILE__, __LINE__, "half duplex mode of EUTRA band No. " & int2str(v_BandEUTRA) &  " inconsistent with pc_FDD_TypeB_HalfDuplex"); // half duplex mode inconsistent @sic R5s240460 add. change sic@
+          };
+        };
+      };
+      // TDD bands are not checked !
+    };
+  }
+
+  /*
+   * @desc      Function to check the supported EUTRA bands
+   *            relates PICS settings to reported bands
+   *            Reference 36.523-1 Table 8.5.4.1.3.3-2
+   * @param     p_ReceivedCapabilityMsg
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_CheckUE_SupportedEUTRA_Bands(UE_EUTRA_Capability p_ReceivedCapabilityMsg)
+  {
+    //@sic R5s140566 sic@
+    var UE_EUTRA_Capability v_ReceivedCapabilityMsg := p_ReceivedCapabilityMsg;
+    var integer i;
+    var bitstring v_SuppEutraBandsAccToPICS := f_DeriveSuppEutraBandsFromPics();
+    var bitstring v_SuppEutraBandsAccToPICS_Chunk;
+    var SupportedBandListEUTRA v_SupportedBandListEUTRA := p_ReceivedCapabilityMsg.rf_Parameters.supportedBandListEUTRA;
+    var integer v_NumEutraBandsReported := lengthof(v_SupportedBandListEUTRA);
+
+    // Check that FDD bands (incl. extended bands) are reported in accordance with the PICS item for half-duplex.
+    f_CheckUE_HDX_SupportedEUTRA_Bands (p_ReceivedCapabilityMsg); //@sic R5-193997 sic@
+    
+    // It is no longer checked that number of supported EUTRA bands match the set PICS parameters (pc_eBanda_Supp)
+    // There may be more bands reported than there are PICS defined for bands
+    
+    // Check that any value B such that pc_eBandB_Supp is TRUE and different from all eutra-Band[k] where k = 1 to a - 1
+    // Go through the received supportedBandListEUTRA and match against the supported bands according to the PICS
+    // Check only the bands for which there are PICS; do not check other bands which may or may not be reported.
+    // Done for all sets of continuous PICS.
+
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 0, 14); // bands 1 - 14
+    f_CheckUE_SupportedEUTRA_Bands_Chunk(v_SupportedBandListEUTRA, v_SuppEutraBandsAccToPICS_Chunk, 0, 14); // @sic R5s150278 change 2 sic@
+    
+    // after appearance of band 32 the previous gap disappears
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 16, 30); // bands 17 - 46
+    f_CheckUE_SupportedEUTRA_Bands_Chunk(v_SupportedBandListEUTRA, v_SuppEutraBandsAccToPICS_Chunk, 16, 30); // @sic R5-130710, R5-151966, R5-165506, R5-171990 sic@
+    
+    // after appearance of band 48 a new gap is to be handled
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 47, 1); // band 48
+    f_CheckUE_SupportedEUTRA_Bands_Chunk(v_SupportedBandListEUTRA, v_SuppEutraBandsAccToPICS_Chunk, 47, 1); // @sic R5-172672 sic@
+
+    // after appearance of band 53 a new gap is to be handled
+    // band 54 to be accounted for
+    v_SuppEutraBandsAccToPICS_Chunk := substr(v_SuppEutraBandsAccToPICS, 52, 2); // band 53 - 54
+    f_CheckUE_SupportedEUTRA_Bands_Chunk(v_SupportedBandListEUTRA, v_SuppEutraBandsAccToPICS_Chunk, 52, 2); // @sic R5-192337, R5-232325 sic@
+
+    // interFreqEUTRA-BandList SEQUENCE (SIZE (1..maxBands)) OF SEQUENCE {
+    //* same number of entries like in supportedEUTRA-BandList
+    //* Match number of entries in interFreqEUTRA-BandList with number of entries in supportedEUTRA-BandList
+    for (i := 0; i < lengthof(v_ReceivedCapabilityMsg.measParameters.bandListEUTRA); i := i + 1) {
+      if  ((v_NumEutraBandsReported) != lengthof(v_ReceivedCapabilityMsg.measParameters.bandListEUTRA[i].interFreqBandList)) {
+        f_SetVerdict(fail, __FILE__, __LINE__, "Number of interFreqEUTRA-BandList does not match nr. of supportedEUTRA-BandList");  // @sic R5-133612 sic@
+      }
+    }
+    
+    //@sic R5s100302 Change 6 : Correction of check of supported interRat bands sic@
+    // Check that number of bands in interRAT-Parameters matches number of entries in interRAT-BandList
+    // According to 36.331:
+    // interRAT-BandList - One entry corresponding to each supported band of another RAT
+    //                     listed in the same order as in the interRAT-Parameters.
+    for (i := 0; i < lengthof(v_ReceivedCapabilityMsg.measParameters.bandListEUTRA); i := i + 1) {
+      if (ispresent(v_ReceivedCapabilityMsg.measParameters.bandListEUTRA[i].interRAT_BandList)) {
+        if (lengthof(v_ReceivedCapabilityMsg.measParameters.bandListEUTRA[i].interRAT_BandList) != f_Count_Supported_interRAT_Bands(v_ReceivedCapabilityMsg)) {
+          f_SetVerdict(fail, __FILE__, __LINE__, "Number of listed bands in interRAT-Parameters does not match number of entries in interRAT-BandList");  // @sic R5-133612 sic@
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      check the reported UE Category vs. UE Category PICS items.
+   *            Inconsistency leads to verdict INCONCLUSIVE
+   * @param     p_ReceivedCapabilityMsg
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_CheckUE_Category(UE_EUTRA_Capability p_ReceivedCapabilityMsg)
+  { // @sic R5-123325 sic@
+    var UE_EUTRA_Capability v_ReceivedCapabilityMsg;
+    
+    v_ReceivedCapabilityMsg := p_ReceivedCapabilityMsg;
+    
+    select (v_ReceivedCapabilityMsg.ue_Category) {
+      case (1) {if (not pc_ue_Category_1) {f_SetVerdict(inconc, __FILE__, __LINE__, "UE_Category reported inconsistent with PICS");}}
+      case (2) {if (not pc_ue_Category_2) {f_SetVerdict(inconc, __FILE__, __LINE__, "UE_Category reported inconsistent with PICS");}}
+      case (3) {if (not pc_ue_Category_3) {f_SetVerdict(inconc, __FILE__, __LINE__, "UE_Category reported inconsistent with PICS");}}
+      case (4) {if (not pc_ue_Category_4) {f_SetVerdict(inconc, __FILE__, __LINE__, "UE_Category reported inconsistent with PICS");}}
+      case (5) {if (not pc_ue_Category_5) {f_SetVerdict(inconc, __FILE__, __LINE__, "UE_Category reported inconsistent with PICS");}}
+      case else  {
+        f_SetVerdict(fail, __FILE__, __LINE__, "Invalid UE Category received from the UE");  // @sic R5-133612 sic@
+      }
+    }
+  }
+
+  /*
+   * @desc      To check the EUTRA Radio Access Capability IE in the RRC Connection Setup Complete
+   * @param     p_EUTRA_RadioAccessCapability
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN_CheckEUTRA_IRAT(octetstring p_EUTRA_RadioAccessCapability)
+  { //@sic R5s140566 sic@
+    //@sic R5s170441: deleted p_Release sic@
+    var UE_EUTRA_Capability  v_UE_EUTRA_Capability := f_EUTRA_DecodeEutraCapMsg(p_EUTRA_RadioAccessCapability);
+    
+    // In the match: Check the following fields
+    // accessStratumRelease: only the presence of the release is checked
+    // pdcp-Parameters:
+    // supportedROHC-Profiles: Checked it is present
+    // maxNumberROHC-ContextSessions:Checked it is present
+    // phyLayerParameters:
+    // ul-AntennaSelectionSupported Checked it is present
+    // ue-SpecificRefSigsSupported  Checked it is present
+    // featureGroupIndicators   To be checked against ICS statements pcFeatGrp_1 to pcFeatGrp_27, other bits shall be set to 0.
+    if (not(match(v_UE_EUTRA_Capability, cr_UE_EUTRA_Capability(-, f_DeriveFeatrGrpCapFromPics_r9_FDD())))) {  //@sic R5s140912, R5s190591 sic@
+      f_SetVerdict(fail, __FILE__, __LINE__, "featureGroupIndicators not matching the received statement. ");
+    }
+    
+    // ue-Category: To be checked against ICS statements in 36.523-2 pc_ue_Category_X
+    f_CheckUE_Category(v_UE_EUTRA_Capability);
+    
+    // eutra-Band   To be checked against ICS statements in 36.523-2 pc_eBandXX_Supp (indicating the coded supporting bands)
+    // halfDuplex being mandatory, it is implicitely checked
+    f_CheckUE_SupportedEUTRA_Bands(v_UE_EUTRA_Capability);
+  }
+
+  /*
+   * @desc      convert the PICS parameters pc_FeatrGrp_X from single booleans to a bitstring of size 32.
+   *            Size 32 is chosen because the signaled element featureGroupIndicators in UE-EUTRA-Capability is of size 32.
+   * @return    B32_Type
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_DeriveFeatrGrpCapFromPics() return B32_Type
+  { // @sic R5s150398 sic@
+    var B32_Type v_FeatureGroupIndicators := '00000000000000000000000000000000'B; //@sic R5s170880 add. comments sic@
+    var B32_Type v_FeatureGroupIndicators_FDD;
+    var B32_Type v_FeatureGroupIndicators_TDD;
+    
+    if (pc_eFDD and pc_eTDD) {
+      v_FeatureGroupIndicators_FDD := f_DeriveFeatrGrpCapFromPics_r9_FDD();
+      v_FeatureGroupIndicators_TDD := f_DeriveFeatrGrpCapFromPics_r9_TDD();
+      v_FeatureGroupIndicators:= v_FeatureGroupIndicators_FDD and4b v_FeatureGroupIndicators_TDD;
+    }
+    else{
+      if (pc_eFDD) { // FDD only
+        v_FeatureGroupIndicators := f_DeriveFeatrGrpCapFromPics_r9_FDD();
+      }
+      else
+      if (pc_eTDD) { // TDD only
+        v_FeatureGroupIndicators := f_DeriveFeatrGrpCapFromPics_r9_TDD();
+      }
+      else { // incorrect RAT settings: FDD and TDD set to FALSE
+        f_SetVerdict(fail, __FILE__, __LINE__, "both eFDD and eTDD are set to FALSE"); //@sic R5s170880 add. comments sic@
+      }
+    }
+    return v_FeatureGroupIndicators;
+  }
+
+  /*
+   * @desc      Function returns the number of supported interRat bands listed in all IEs in interRAT_Parameters.
+   *            @sic R5s100302 Change 7 : Creation of new function for counting the number of supported interRat bands sic@
+   * @param     p_UECaps
+   * @return    integer
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_Count_Supported_interRAT_Bands(UE_EUTRA_Capability p_UECaps) return integer
+  {
+    var integer v_NrOfSuppIratBands := 0;
+    
+    if (ispresent(p_UECaps.interRAT_Parameters.utraFDD)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.utraFDD.supportedBandListUTRA_FDD);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.utraTDD128)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.utraTDD128.supportedBandListUTRA_TDD128);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.utraTDD384)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.utraTDD384.supportedBandListUTRA_TDD384);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.utraTDD768)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.utraTDD768.supportedBandListUTRA_TDD768);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.geran)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.geran.supportedBandListGERAN);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.cdma2000_HRPD)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.cdma2000_HRPD.supportedBandListHRPD);
+    }
+    if (ispresent(p_UECaps.interRAT_Parameters.cdma2000_1xRTT)){
+      v_NrOfSuppIratBands := v_NrOfSuppIratBands + lengthof(p_UECaps.interRAT_Parameters.cdma2000_1xRTT.supportedBandList1XRTT);
+    }
+    
+    return v_NrOfSuppIratBands;
+  }
+
+  /*
+   * @desc      Check that any value B such that pc_eBandB_Supp is TRUE and different from all eutra-Band[k] where k = 1 to a - 1
+   *            Go through the received supportedBandListEUTRA and match against the supported bands according to the PICS
+   *            Check only the bands for which there are PICS; do not check other bands which may or may not be reported
+   *            Done for one set of continuous PICS, specified by offset and length.
+   * @param     p_SupportedBandListEUTRA
+   * @param     p_DerivedChunk
+   * @param     p_OffsetPICS
+   * @param     p_LengthPICS
+   * @status    APPROVED (LTE, UTRAN)
+   */
+  function f_CheckUE_SupportedEUTRA_Bands_Chunk(SupportedBandListEUTRA p_SupportedBandListEUTRA,
+                                                bitstring p_DerivedChunk,
+                                                integer p_OffsetPICS,
+                                                integer p_LengthPICS) // @sic R5s150278 change 3 sic@
+  {
+    var SupportedBandListEUTRA v_SupportedBandListEUTRA := p_SupportedBandListEUTRA;
+    var bitstring v_DerivedChunk := p_DerivedChunk;
+    var integer v_OffsetPICS := p_OffsetPICS;
+    var integer v_LengthPICS := p_LengthPICS;
+    var integer i;
+    var integer j;
+    var integer v_BandEUTRA;
+    var integer v_BitStringIndex;
+    var bitstring v_SuppEutraBandsReported := int2bit(0, 63); // 1... maxbands
+    var integer v_MaxBandsReported := lengthof(v_SupportedBandListEUTRA);
+    
+    // It is no longer checked that number of supported EUTRA bands match the set PICS parameters (pc_eBanda_Supp)
+    // There may be more bands reported than there are PICS defined for bands
+    
+    // Check that any value B such that pc_eBandB_Supp is TRUE and different from all eutra-Band[k] where k = 1 to a - 1
+    // Go through the received supportedBandListEUTRA and match against the supported bands according to the PICS
+    for (i := 0; i < v_LengthPICS; i := i + 1) {
+      //It is assumed that UE reports the bands in any order => compare against the complete list
+      if (v_DerivedChunk [i] == '1'B) { // PICS for band i in chunk + 1 is set; i is different from maxFBI !!
+        for (j := 0; j < v_MaxBandsReported; j := j + 1) { // check against all reported bands
+          v_BandEUTRA := v_SupportedBandListEUTRA[j].bandEUTRA; // may be maxFBI @sic R5-193997 sic@
+          v_BitStringIndex := v_BandEUTRA - 1;
+          if ((i + v_OffsetPICS) == v_BitStringIndex) { // will never be == if band equals maxFBI
+            if (v_SuppEutraBandsReported[v_BitStringIndex] == '1'B) {
+              f_SetVerdict (fail, __FILE__, __LINE__, "support of EUTRA band No. " & int2str(v_BandEUTRA) &  " is reported more than once"); //@sic R5s240460 sic@
+            } else {
+              v_SuppEutraBandsReported[v_BitStringIndex] := '1'B;
+            };
+          }
+          else {// do nothing, check next reported band
+          }
+        } // end for ...
+        if (v_SuppEutraBandsReported[i + v_OffsetPICS] != '1'B) { // PICS set,  but expected band was not in the list
+          f_SetVerdict(fail, __FILE__, __LINE__, "expected (per PICS) EUTRA band No. " & int2str(i + v_OffsetPICS + 1) &  " is not reported"); // error: PICS set, but expected band not reported @sic R5s240460 sic@
+        }
+      }
+      else { // PICS is not set => non support
+        for (j := 0; j < v_MaxBandsReported; j := j + 1) { // check against all reported bands
+          v_BandEUTRA := v_SupportedBandListEUTRA[j].bandEUTRA;
+          v_BitStringIndex := v_BandEUTRA - 1;
+          if ((i + v_OffsetPICS) == v_BitStringIndex) { // will never be == if band equals maxFBI
+            f_SetVerdict(fail, __FILE__, __LINE__, "PICS does not match reported capability for EUTRA band No. " & int2str(v_BandEUTRA)); // PICS mismatch @sic R5s240460 sic@
+          }
+          else { // do nothing, check next reported band
+          }
+        }
+      }
+      // NOTE:  number of bands reported by the UE and number of bands acc. to PICS setting may not be equal. None of the bands is reported twice by the UE.
+    } // end for ...
+  }
+
+  /*
+   * @desc      Check that a given E-UTRA Band is supported by UE - Check done against the PICS
+   *            Note: if a band is reported by the UE but there is no PICS defined yet the UE will be failed
+   * @param     p_Band
+   * @return    boolean
+   * @status    APPROVED (UTRAN)
+   */
+  function f_EUTRA_CheckSupportedEUTRA_Band(integer p_Band) return boolean
+  {
+    var bitstring v_EutraBandIsSuportedPerPICS  := f_DeriveSuppEutraBandsFromPics();
+    var boolean v_EutraBandIsSuported := true;
+    var bitstring v_EutraBandIsSuportedPerPICS_v9e0 := f_DeriveSuppEutraBandsFromPics_v9e0(); //@sic R5s170475 sic@
+    
+    //Check the band support against the PICS
+    if (lengthof(v_EutraBandIsSuportedPerPICS) >= p_Band) {
+      if (v_EutraBandIsSuportedPerPICS[p_Band-1]=='0'B) {
+        v_EutraBandIsSuported := false; // Early UE may support bands 15 or 16, but we find 0
+      }
+    } else if (lengthof(v_EutraBandIsSuportedPerPICS_v9e0) >= (p_Band-64)){  //@sic R5s170475 sic@
+        if(v_EutraBandIsSuportedPerPICS_v9e0[p_Band-65]=='0'B) {
+          v_EutraBandIsSuported := false;
+        }
+    } //@sic R5s170598 sic@
+    return v_EutraBandIsSuported;
+  }
+
+}

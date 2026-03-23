@@ -1,0 +1,1124 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-09-26 10:48:35 +0200 (Fri, 26 Sep 2025) $
+// $Rev: 42082 $
+/******************************************************************************/
+
+module EUTRA_RRCSteps {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_AuxiliaryFunctions all;
+  import from EUTRA_CapabilityFunctions all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_ASP_TypeDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from EUTRA_Parameters all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from EUTRA_Timing all;
+  import from Parameters all;
+  import from TestcaseProperties all;
+
+  type record DRB_IdentityList_AllAndAMonly_Type {    /* @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT) */
+    DRB_IdentityList_Type All,
+    DRB_IdentityList_Type AMonly
+  };
+
+  const integer tsc_EUTRA_BL_CE_DelayAfterRRCConnectionRelease := 1250;              /* 1250 ms; 36.523-3 cl 7.18A @sic R5-173005 sic@
+                                                                                        @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS) */
+
+  /*
+   * @desc      local function to get list of all DRBs and list of AM DRBs
+   * @param     p_DrbConfigList
+   * @return    DRB_IdentityList_AllAndAMonly_Type
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_DRB_IdentityList(template (value) RadioBearerList_Type p_DrbConfigList) return DRB_IdentityList_AllAndAMonly_Type
+  {
+    var DRB_IdentityList_AllAndAMonly_Type v_DRB_IdentityList;
+    var DRB_Identity v_DRB_Identity;
+    var integer k;
+    var integer i := 0;
+
+    v_DRB_IdentityList.All := {};       // @sic R5s120207 sic@
+    v_DRB_IdentityList.AMonly := {};    // @sic R5s120207 sic@
+
+    for (k:=0; k < lengthof(p_DrbConfigList); k:= k+1) {
+      if (ischosen (p_DrbConfigList[k].Id.Drb)){ //@sic R5s200317 change 2.8 sic@
+        v_DRB_Identity := valueof(p_DrbConfigList[k].Id.Drb);
+        v_DRB_IdentityList.All[k] := v_DRB_Identity;
+        if (ischosen(p_DrbConfigList[k].Config.AddOrReconfigure.Rlc.Rb.AM)) {
+            v_DRB_IdentityList.AMonly[i] := v_DRB_Identity;
+            i := i+1;
+        }
+      }
+    }
+    return v_DRB_IdentityList;
+  }
+
+  /*
+   * @desc      Reset SRB[0..2] and active DRBs
+   * @param     p_CellId
+   * @param     p_DrbConfigList                (default value: omit)
+   * @param     p_DelayBeforeResetInMilliSec   (default value: 0)
+   * @param     p_StopULGrant        (default value: false)
+   * @param     p_CnfFlag            (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_SS_SRBs_DRBs_Reset(EUTRA_CellId_Type  p_CellId,
+                                      template (omit) RadioBearerList_Type p_DrbConfigList := omit,
+                                      integer p_DelayBeforeResetInMilliSec := 0,
+                                      boolean p_StopULGrant := false,
+                                      template (omit) boolean p_CnfFlag := omit) runs on EUTRA_PTC
+  { /* Note: this function shall use timing info "Now" only otherwise between release and config there have to be at least 5ms */
+    /* @sic R5s100803: new parameter for the delay sic@ */
+    /* @sic R5s150922 - Additional changes: p_CnfFlag sic@ */
+
+    var DRB_IdentityList_Type v_DrbIdList := f_EUTRA_SS_ActiveDRBs(p_CellId);   // @sic R5s150402 sic@
+
+    if (p_DelayBeforeResetInMilliSec > 0) {
+      f_Delay (int2float(p_DelayBeforeResetInMilliSec) / 1000.0);
+    }
+    if (p_StopULGrant) {
+      f_EUTRA_StopULGrantTransmission(p_CellId, cs_TimingInfo_Now);
+    }
+    f_EUTRA_SS_SRBs_DRBs_Release(p_CellId, -, v_DrbIdList, p_CnfFlag);    // @sic R5s150402 sic@
+    f_EUTRA_SS_SRBs_DRBs_Config(p_CellId, -, p_DrbConfigList, p_CnfFlag); // @sic R5s150402 sic@
+  }
+
+  /*
+   * @desc      common function to await RRC Connection Request sent by the UE;
+   *            when a running timer is handed over, this is used as watchdog.
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionRequest_Common(EUTRA_CellId_Type p_CellId,
+                                                timer p_Timer,
+                                                template (present) EstablishmentCause p_EstablishmentCause := cr_EstablishmentCause_Any,
+                                                template InitialUE_Identity p_InitialUE_Identity := ?) runs on EUTRA_PTC return boolean
+  { /* common procedure to receive the initial RRC connection request for an expected RRC connection establishment procedure;
+       when RRC connection setup is not explicitly sent from TTCN but is preconfigured at the SS to be sent together with the contention resolution,
+       the default UL grant configuration is configured at the SS */
+    var template (omit) UplinkTimeAlignment_Synch_Type v_PUCCH_Synch;
+    var template (value) DciUlInfo_Type v_ULDCIInfo;
+    var template (value) UL_GrantConfig_Type v_UL_GrantConfig;
+    var boolean v_TimerIsRunning := p_Timer.running;
+    
+    if (not f_EUTRA_EarlyContentionResolution()) { //@sic R5-190788 DlCcchMsgInSeparateMacPdu renamed to EarlyContentionResolution sic@
+      /* do UL grant configuration: */
+      v_PUCCH_Synch := cs_UplinkTimeAlignment_Synch_None;   /* @sic R5s120121 sic@
+                                                               No automatic UL time alignment: if the SS would send MAC PDU with TA while the waits for contention resolution the will consider contention resolutions as being fail
+                                                               => in case of automatic Msg4 (RRCConnectionSetup) handling UL time alignment shall be started not before RRCConnectionSetupComplete has been received */
+      v_ULDCIInfo := f_EUTRA_DciUlInfo_Get(p_CellId);
+      v_UL_GrantConfig := f_EUTRA_UL_GrantConfig_Get(); // @sic R5s170564, R5s170597 sic@
+      f_EUTRA_ULGrantConfiguration_Common(p_CellId, cs_TimingInfo_Now, v_ULDCIInfo, v_PUCCH_Synch, v_UL_GrantConfig, tsc_NoCnfReq);  /* @sic R5s140676 Change 2: v_ULDCIInfo sic@ @sic R5s170564 sic@ */
+    }
+    /* else: UL grant configuration is done just before sending of RRCConnectionSetup @sic R5s170597 - Cleanup of UL grant Configuration: no UL configuration for DlCcchMsgInSeparateMacPdu in this function sic@ */
+
+    alt {
+      [] SRB.receive(car_SRB0_RrcPdu_IND(p_CellId, cr_RRCConnectionRequest(p_EstablishmentCause, p_InitialUE_Identity)))
+        {
+          p_Timer.stop;       /* NOTE: acc. to ES 201 873-1 cl. 23.3 the timer can be stopped even if it has not been started before */
+          return true;
+        }
+      [v_TimerIsRunning] p_Timer.timeout
+        {
+        }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      await RRC Connection Request sent by the UE; staight foreward case without watchdog timer
+   * @param     p_CellId
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionRequest_Def(EUTRA_CellId_Type p_CellId,
+                                             template (present) EstablishmentCause p_EstablishmentCause := cr_EstablishmentCause_Any,
+                                             template InitialUE_Identity p_InitialUE_Identity := ?) runs on EUTRA_PTC
+  {
+    timer t_Dummy; // timer which is not started
+    f_EUTRA_RRC_ConnectionRequest_Common(p_CellId, t_Dummy, p_EstablishmentCause, p_InitialUE_Identity);
+  }
+
+  /*
+   * @desc      send RRC connection setup
+   * @param     p_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionSetup_Def(EUTRA_CellId_Type p_CellId,
+                                           template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                           RRC_TransactionIdentifier p_RRC_TI := tsc_RRC_TI_Def) runs on EUTRA_PTC
+  {
+    if (f_EUTRA_EarlyContentionResolution()) {    /* @sic R5-120721 change 3 sic@ */
+      //@sic R5-190788 DlCcchMsgInSeparateMacPdu renamed to EarlyContentionResolution sic@
+      // switch on UL grant assignments
+      f_EUTRA_StartDefULGrantTransmission(p_CellId);
+      
+      SRB.send(cas_SRB0_RrcPdu_REQ(p_CellId,
+                                   p_TimingInfo,
+                                   f_EUTRA_508_RRCConnectionSetup(p_CellId, p_RRC_TI)));  /* @sic R5-120721 change 3 sic@ */
+    }
+  }
+
+  /*
+   * @desc      receive RRCConnectionSetupComplete
+   * @param     p_CellId
+   * @param     p_ExpectedRRCConnectionSetupComplete
+   * @param     p_ExpectedNasIndication
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRCConnectionSetupComplete_Def(EUTRA_CellId_Type p_CellId,
+                                                  template (present) UL_DCCH_Message p_ExpectedRRCConnectionSetupComplete,
+                                                  template (present) NAS_MSG_Indication_Type p_ExpectedNasIndication)
+    runs on EUTRA_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var SRB_COMMON_IND v_ReceivedAsp;
+    
+    SRB.receive(car_SRB1_RrcNasPdu_IND(p_CellId, p_ExpectedRRCConnectionSetupComplete, p_ExpectedNasIndication)) -> value v_ReceivedAsp;
+    v_NAS_Ind := v_ReceivedAsp.Signalling.Nas[0];
+    
+    if (not f_EUTRA_EarlyContentionResolution()) {    /* @sic R5s120121 sic@
+                                                         UL time alignment needs to be started here as contention resolution now has been done */
+                                                      // @sic R5-190788 DlCcchMsgInSeparateMacPdu renamed to EarlyContentionResolution sic@
+      f_EUTRA_SS_CommonCellConfig(p_CellId, cas_PUCCH_Synch_Config_REQ(p_CellId, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_Auto_Def)); // start automatic TA
+    }
+    
+    return v_NAS_Ind;
+  }
+
+  /*
+   * @desc      send RRC connection reconfiguration
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_NAS_MSG_Request   (default value: omit)
+   * @param     p_DRB_Id            (default value: tsc_DRB1)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRCConnectionReconfiguration_SRB2_1AM_DRB_Send(EUTRA_CellId_Type p_CellId,
+                                                                  RRC_TransactionIdentifier p_RRC_TI := tsc_RRC_TI_Def,
+                                                                  template (omit) NAS_MSG_Request_Type p_NAS_MSG_Request := omit,
+                                                                  DRB_Identity p_DRB_Id := tsc_DRB1)
+    runs on EUTRA_PTC
+  { /* @sic R5-144797: parameter p_DRB_Id sic@  */
+    var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_CellInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_CellId);
+    var template (value) PhysicalConfigDedicated_AntennaInfo_Type v_AntennaInfo := f_EUTRA_CellInfo_GetAntennaInfoDedicated (p_CellId);
+    var template (omit)  NAS_MSG_RequestList_Type v_NasMsgList := omit;
+    
+    if (isvalue(p_NAS_MSG_Request)) {
+      v_NasMsgList := {p_NAS_MSG_Request};
+    }
+    
+    SRB.send(cas_SRB1_RrcNasPduList_REQ(p_CellId,
+                                        cs_TimingInfo_Now,
+                                        cs_RRCConnectionReconfiguration_SRB2_1AM_DRB_Est(p_RRC_TI,
+                                                                                         v_EUTRA_FDD_TDD_CellInfo.cqi_ReportConfig,
+                                                                                         v_EUTRA_FDD_TDD_CellInfo.soundingRS_UL_Config,
+                                                                                         v_AntennaInfo,
+                                                                                         p_DRB_Id),
+                                        v_NasMsgList));
+  }
+
+  /*
+   * @desc      send RRC connection reconfiguration and receive RRC connection reconfiguration complete
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_NAS_MSG_Request   (default value: omit)
+   * @param     p_DRB_Id            (default value: tsc_DRB1)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRCConnectionReconfiguration_SRB2_1AM_DRB_Est(EUTRA_CellId_Type p_CellId,
+                                                                 RRC_TransactionIdentifier p_RRC_TI := tsc_RRC_TI_Def,
+                                                                 template (omit) NAS_MSG_Request_Type p_NAS_MSG_Request := omit,
+                                                                 DRB_Identity p_DRB_Id := tsc_DRB1)
+    runs on EUTRA_PTC
+  { /* @sic R5s120092 Additional Changes sic@ */
+    /* @sic R5s130201 Additional Changes sic@ */
+    /* @sic R5-144797: parameter p_DRB_Id sic@ */
+
+    f_EUTRA_RRCConnectionReconfiguration_SRB2_1AM_DRB_Send(p_CellId, p_RRC_TI, p_NAS_MSG_Request, p_DRB_Id);
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_RRCConnectionReconfigurationComplete(p_RRC_TI)));
+  }
+
+  /*
+   * @desc      configuration of ConfigRachProcedure in case of HO
+   * @param     p_TargetCellId
+   * @param     p_TimingInfo
+   * @param     p_C_RNTI
+   * @param     p_CnfFlag           (default value: omit)
+   * @param     p_UplinkGrantCE_Mode_ReducedGrant (default value: false)
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_SS_ConfigRachProcedure_HO(EUTRA_CellId_Type p_TargetCellId,
+                                             template (value) TimingInfo_Type p_TimingInfo,
+                                             C_RNTI p_C_RNTI,
+                                             template (omit) boolean p_CnfFlag := omit,
+                                             boolean                 p_UplinkGrantCE_Mode_ReducedGrant := false) runs on EUTRA_PTC
+  { /* @sic R5-106063: grants acc. to 36.523-3 cl. 7.16.3 sic@ */
+    /* @sic R5s110019/R5s110030/R5s110634 additional changes: parameter to request/suppress CNF sic@ */
+    /* @sic R5s120709 additional change: new template cs_RachProcedureConfig_CRNTI_HO  sic@ */
+    //@sic R5s170974 sic@
+    var template (omit) UplinkGrantCE_Mode_Type   v_UplinkGrantCE_Mode := f_EUTRA_SS_InitialiseUplinkGranteCE(p_TargetCellId, p_UplinkGrantCE_Mode_ReducedGrant); // @sic R5s180249 sic@
+    var template (value) RachProcedureConfig_Type v_RachProcedureConfig := f_EUTRA_GetRachProcedure_HO(p_TargetCellId, v_UplinkGrantCE_Mode);       //@sic R5-213516 sic@
+
+    f_EUTRA_SS_ConfigRachProcedure(p_TargetCellId,
+                                   p_C_RNTI,
+                                   v_RachProcedureConfig,
+                                   p_TimingInfo,
+                                   p_CnfFlag);
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE IntraCell handover.
+   *            The function implements step 1..5 of 36.523-3 cl. 7.16.2
+   * @param     p_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_DrbConfigList     (default value: cs_DrbConfigList_DRB1)
+   * @param     p_C_RNTI            (default value: tsc_C_RNTI_Def2)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_Dsr_TransMax      (default value: n4)
+   * @param     p_SecurityActTimeList (default value: omit)
+   * @param     p_UplinkGrantCE_Mode_ReducedGrant (default value: false)
+   * @param     p_RRCConnectionReconfiguration_v890_IEs (default value: omit)
+   * @param     p_SrbDrbList        (default value: omit)
+   * @param     p_Drb_ToReleaseList (default value: omit)
+   * @param     p_DRB_ToAddModList  (default value: omit)
+   * @param     p_RadioResourceConfigDedicated (default value: omit)
+   * @status    APPROVED (ENDC, LTE)
+   */
+  function f_EUTRA_508RRC_IntraLTE_HO_IntraCell_Step1_5(EUTRA_CellId_Type                     p_CellId,
+                                                        template (value) TimingInfo_Type      p_TimingInfo    := cs_TimingInfo_Now,
+                                                        template (value) RadioBearerList_Type p_DrbConfigList := cs_DrbConfigList_DRB1,
+                                                        C_RNTI                                p_C_RNTI        := tsc_C_RNTI_Def2,
+                                                        template (omit)  MeasConfig           p_MeasConfig    := omit,
+                                                        Dsr_TransMax_Type                     p_Dsr_TransMax := n4,
+                                                        template (omit) SecurityActTimeList_Type p_SecurityActTimeList := omit,
+                                                        boolean                               p_UplinkGrantCE_Mode_ReducedGrant := false,
+                                                        template (omit) RRCConnectionReconfiguration_v890_IEs p_RRCConnectionReconfiguration_v890_IEs := omit,
+                                                        template (omit) RadioBearerList_Type p_SrbDrbList := omit,
+                                                        template (omit) DRB_ToReleaseList p_Drb_ToReleaseList:= omit,
+                                                        template (omit) DRB_ToAddModList  p_DRB_ToAddModList := omit,
+                                                        template (omit) RadioResourceConfigDedicated p_RadioResourceConfigDedicated := omit
+                                                        )  runs on EUTRA_PTC // @sic R5s180249, R5s190055, R5-192717 sic@
+  { /* @sic R5s110019/R5s110030: suppress CNFs in f_EUTRA_SS_SRBs_DRBs_Release, f_EUTRA_SS_ConfigRachProcedure_HO, f_EUTRA_SS_SRBs_DRBs_Config sic@ */
+    /* @sic R5-112122: UL_DL_Earfcn is omit in case of intra-cell HO sic@ */
+    /* @sic R5s190476 change 4.2: added p_SrbDrbList sic@ */
+    /* @sic R5s190554 change 4.5: added p_NR_PDCP_HO sic@ */
+    /* @sic R5s200317 : added p_RadioResourceConfigDedicated sic@ */
+    /* @sic R5s200570: replaced p_AddRelDrb8 with p_Drb_ToReleaseList and p_DRB_ToAddModList, R5-202627: removed p_NR_PDCP_HO sic@ */
+    var DRB_IdentityList_AllAndAMonly_Type v_DRB_IdentityList;
+    var SubFrameTiming_Type v_Timing;
+    var EUTRA_SecurityParams_Type v_Auth_Params := f_EUTRA_Security_Get();
+    var NextHopChainingCount v_NextHopChainingCount := 0; //According to 36.508 cl. 4.6.1 RRCConnectionReestablishment
+    var template (omit) CarrierFreqEUTRA_v9e0 v_CarrierFreqEutra_v9e0 := omit;    // no change of frequency in case of intra-cell HO @sic R5-171150 sic@
+    var template (value) MobilityControlInfo v_MobilityControlInfo := f_Generate_cs_MobilityControlInfo_HO_CRNTI(p_CellId, p_C_RNTI, v_CarrierFreqEutra_v9e0);  //@sic R5-202627 sic@
+    var template (value) RadioResourceConfigDedicated v_RadioResourceConfigDedicated; // @sic R5s190918 sic@
+    var boolean v_MeasGapConfigIsPresent := isvalue(p_MeasConfig) and ispresent(p_MeasConfig.measGapConfig);
+    
+    if (isvalue(p_RadioResourceConfigDedicated)) { //@sic R5s200317 sic@
+      v_RadioResourceConfigDedicated := valueof(p_RadioResourceConfigDedicated);
+    } else {
+      v_RadioResourceConfigDedicated := f_Generate_cs_508_RadioResourceConfigDedicated_HO (p_CellId, p_Dsr_TransMax, -, p_Drb_ToReleaseList, p_DRB_ToAddModList);
+    }
+    // Build DRB identity list from inputed radiobearer config list
+    v_DRB_IdentityList := f_EUTRA_DRB_IdentityList(p_DrbConfigList);
+    
+    /* for intra cell HO the HO procedure and the SS configuration must be executed with timing info.
+     * This is to make sure SS reconfiguration is done properly and in time before UE access the new cell.
+     * @sic R5s100178 sic@ */
+    if (f_TimingInfo_IsNow(p_TimingInfo)) {
+      v_Timing := f_EUTRA_GetNextSendOccasion(p_CellId, tsc_EUTRA_DelayBeforeIntraCellHO); // @sic R5-106675 sic@
+    }
+    else {
+      v_Timing := valueof(p_TimingInfo.SubFrame);
+    }
+    
+    // Step 1: Transmit RRCConnectionReconfiguration/HO command to UE
+    f_EUTRA_RRC_ConnReconfigHO_Common(p_CellId,
+                                      p_MeasConfig,
+                                      v_MobilityControlInfo,
+                                      v_RadioResourceConfigDedicated,
+                                      cs_508SecurityConfigHO_IntraLTE,
+                                      cs_TimingInfo_EUTRA_NB (v_Timing),
+                                      p_RRCConnectionReconfiguration_v890_IEs); // @sic R5s190055, R5-192717 sic@
+    
+    /* Note: current implementation releases SRBs and reconfigures C-RNTI 5ms after sending the RRCConnectionReconfiguration
+       => RLC ACK is not taken into consideration */
+    
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing, 5, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));   // add 5ms
+    
+    // Step 2: Release SRBs and DRBs
+    f_EUTRA_SS_SRBs_DRBs_Release(p_CellId,
+                                 cs_TimingInfo_EUTRA_NB(v_Timing),
+                                 v_DRB_IdentityList.All);  /* @sic R5s110634: Additional MCC160 Changes sic@ */
+    
+    // Step 3: Configure C-RNTI based contention resolution in target cell 1 and assign new C-RNTI to the cell
+    f_EUTRA_SS_ConfigRachProcedure_HO(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), p_C_RNTI, -, p_UplinkGrantCE_Mode_ReducedGrant); // @sic R5s180249 sic@
+    
+    // Save new C-RNTI in cell configuration for target cell (which is also source cell)
+    f_EUTRA_CellInfo_SetC_RNTI(p_CellId, p_C_RNTI);
+
+    // Step 3a: Release MeasGapConfig configuration
+    
+    if (v_MeasGapConfigIsPresent) {                                                                         // @sic R5-121779 sic@
+      f_EUTRA_SS_MeasGapCtrlConfig(p_CellId, cs_MeasGapCtrl_Config(valueof(p_MeasConfig.measGapConfig)));   // valueof to avoid compiler warnings: ok as p_MeasConfig.measGapConfig is checked to be present
+    } else {
+      f_EUTRA_SS_MeasGapCtrlConfig(p_CellId, cs_MeasGapCtrl_None);                                          // @sic R5s110039 Additional Changes sic@
+    }
+    
+    // Step 4: Setup SRBs and DRBs again
+    v_Timing := f_EUTRA_TimingInfoAdd(v_Timing, 5, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));   // add 5ms
+    f_EUTRA_SS_SRBs_DRBs_Config(p_CellId,
+                                cs_TimingInfo_EUTRA_NB(v_Timing),
+                                p_DrbConfigList,
+                                -,
+                                p_SrbDrbList);   /* @sic R5s110634: Additional MCC160 Changes sic@ */
+    
+    // Step 5: Reestablish security, disable TA transmission
+    v_Auth_Params := f_EUTRA_SS_AS_ActivateSecurity_HO_Common(p_CellId,
+                                                              v_Auth_Params,
+                                                              v_NextHopChainingCount,
+                                                              cs_TimingInfo_EUTRA_NB(v_Timing),
+                                                              v_DRB_IdentityList.AMonly,
+                                                              p_SecurityActTimeList);
+    
+    f_EUTRA_Security_Set(v_Auth_Params);
+    // disable TA transmission @sic R5-113734 Change 11 sic@
+    f_EUTRA_SS_CommonCellConfig(p_CellId,
+                                cas_PUCCH_Synch_Config_REQ(p_CellId,
+                                                           cs_TimingInfo_EUTRA_NB(v_Timing),
+                                                           cs_UplinkTimeAlignment_Synch_None));   /* @sic R5s110634: Additional MCC160 Changes sic@ */
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE IntraCell handover.
+   *            The function implements step 6..7 of 36.523-3 cl. 7.16.2
+   * @param     p_CellId
+   * @status    APPROVED (ENDC, LTE)
+   */
+  function f_EUTRA_508RRC_IntraLTE_HO_IntraCell_Step6_7(EUTRA_CellId_Type p_CellId)  runs on EUTRA_PTC
+  {
+    // Step 6:
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_RRCConnectionReconfigurationComplete(tsc_RRC_TI_Def)));       // @sic R5s100430  Change 2 sic@
+    
+    // Step 7: configure RACH procedure back to default    @sic R5s100520 change 11 sic@
+    f_EUTRA_SS_ConfigRachProcedure_Def(p_CellId);     /* @sic acc. to R5s100029 change 3 sic@ */
+    
+    // enable TA transmissions @sic R5-113734 Change 11 sic@
+    f_EUTRA_SS_CommonCellConfig(p_CellId, cas_PUCCH_Synch_Config_REQ(p_CellId, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_Auto_Def));
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE IntraCell handover.
+   *            The function implements 36.523-3 cl. 7.16.2
+   * @param     p_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_DrbConfigList     (default value: cs_DrbConfigList_DRB1)
+   * @param     p_C_RNTI            (default value: tsc_C_RNTI_Def2)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_Dsr_TransMax      (default value: n4)
+   * @param     p_RRCConnectionReconfiguration_v890_IEs (default value: omit)
+   * @param     p_SrbDrbList        (default value: omit)
+   * @param     p_NR_PDCP_HO        (default value: false)
+   * @param     p_Drb_ToReleaseList (default value: omit)
+   * @param     p_DRB_ToAddModList  (default value: omit)
+   * @param     p_RadioResourceConfigDedicated (default value: omit)
+   * @status    APPROVED (ENDC, LTE)
+   */
+  function f_EUTRA_508RRC_IntraLTE_HO_IntraCell(EUTRA_CellId_Type                     p_CellId,
+                                                template (value) TimingInfo_Type      p_TimingInfo    := cs_TimingInfo_Now,
+                                                template (value) RadioBearerList_Type p_DrbConfigList := cs_DrbConfigList_DRB1,
+                                                C_RNTI                                p_C_RNTI        := tsc_C_RNTI_Def2,
+                                                template (omit)  MeasConfig           p_MeasConfig    := omit,
+                                                Dsr_TransMax_Type                     p_Dsr_TransMax  := n4,
+                                                template (omit) RRCConnectionReconfiguration_v890_IEs p_RRCConnectionReconfiguration_v890_IEs := omit,
+                                                template (omit) RadioBearerList_Type p_SrbDrbList := omit,
+                                                boolean p_NR_PDCP_HO := false,
+                                                template (omit)  DRB_ToReleaseList p_Drb_ToReleaseList:= omit,
+                                                template (omit) DRB_ToAddModList  p_DRB_ToAddModList := omit,
+                                                template (omit) RadioResourceConfigDedicated p_RadioResourceConfigDedicated := omit // @sic R5-202627 sic@
+                                                )  runs on EUTRA_PTC // @sic R5s190055, R5-192717 sic@
+  { /* @sic R5s100491: enhancement to support MeasConfig sic@ */
+    /* @sic R5s100524: common change of HO functions sic@ */
+    /* @sic R5s100473: additional parameter p_Dsr_TransMax sic@ */
+    /* @sic R5s110019/R5s110030: additional parameter p_SecurityActTimeList, split into step 1-5 and step 6-7  sic@ */
+    /* @sic R5-120721 change 7: restore PDCP Count for AM DRBs after the HO; parameter p_SecurityActTimeList removed; SecurityActTimeList determined in this function sic@ */
+    /* @sic R5s190476 change 4.2: added p_SrbDrbList sic@ */
+    /* @sic R5s190554 change 4.5: added p_NR_PDCP_HO sic@ */
+    /* @sic R5s200570: replaced p_AddRelDrb8 with p_Drb_ToReleaseList and p_DRB_ToAddModList sic@ */
+    var PdcpCountInfoList_Type v_PdcpCountInfoListAll;
+    var PdcpCountInfoList_Type v_PdcpCountInfoListAmOnly;
+    var DRB_IdentityList_AllAndAMonly_Type v_DRB_IdentityList;
+    var template (value) SecurityActTimeList_Type v_SecurityActTimeList;
+
+    /* step 0: get PDCP Count for AM DRBs  @sic R5-120721 change 7 sic@ */
+    v_DRB_IdentityList := f_EUTRA_DRB_IdentityList(p_DrbConfigList);
+    v_PdcpCountInfoListAll := f_EUTRA_SS_PdcpCount_GetAll(p_CellId);
+    v_PdcpCountInfoListAmOnly := f_EUTRA_SS_PdcpCount_GetAmDrbs(p_CellId, v_DRB_IdentityList.AMonly, v_PdcpCountInfoListAll);
+    v_SecurityActTimeList := f_EUTRA_RRC_CipherActTime_GetForHO(p_CellId, v_DRB_IdentityList.AMonly, v_PdcpCountInfoListAll);
+
+    f_EUTRA_508RRC_IntraLTE_HO_IntraCell_Step1_5(p_CellId,
+                                                 p_TimingInfo,
+                                                 p_DrbConfigList,
+                                                 p_C_RNTI,
+                                                 p_MeasConfig,
+                                                 p_Dsr_TransMax,
+                                                 v_SecurityActTimeList,
+                                                 -,
+                                                 p_RRCConnectionReconfiguration_v890_IEs,
+                                                 p_SrbDrbList,
+                                                 p_Drb_ToReleaseList,
+                                                 p_DRB_ToAddModList,
+                                                 p_RadioResourceConfigDedicated);  // @sic R5s190918, R5-202627 sic@
+    f_EUTRA_508RRC_IntraLTE_HO_IntraCell_Step6_7(p_CellId);
+
+    /* step 8: restore PDCP Count for AM DRBs  @sic R5-120721 change 7 R5s190554 change 4.6 sic@ */
+    if (not p_NR_PDCP_HO) {
+        f_EUTRA_SS_PdcpCount_Set(p_CellId, v_PdcpCountInfoListAmOnly);
+    }
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover.
+   *            The function implements step 13-14 of 36.523-3 cl. 7.16.1
+   * @param     p_SourceCellId
+   * @status    APPROVED (ENDC, LTE, LTE_A_PRO, LTE_A_R10_R11)
+   */
+  function f_EUTRA_508RRC_IntraLTE_HO_InterCell_Common_Steps13_14(EUTRA_CellId_Type  p_SourceCellId)
+    runs on EUTRA_PTC
+  { // @sic R5s151040 sic@
+    var boolean v_CnfFlag := tsc_NoCnfReq;  /* @sic R5s150922 - Additional changes: v_CnfFlag instead of v_CnfFlag sic@ */
+    
+    // Step 13: Re-establish SRBs and release DRB(s) in source cell
+    f_EUTRA_SS_SRBs_DRBs_Reset(p_SourceCellId, -, -, -, v_CnfFlag); // @sic R5s100801 R5s150338: no reconfiguration of DRBs; R5s150922 - Additional changes: f_EUTRA_SS_SRBs_DRBs_Reset sic@
+    
+    // Step 14: Release DRX and MeasGap configuration
+    f_EUTRA_SS_DrxCtrlConfig(p_SourceCellId, cs_DrxCtrl_None, -, v_CnfFlag);  // @sic R5s100801 sic@
+    f_EUTRA_SS_MeasGapCtrlConfig(p_SourceCellId, cs_MeasGapCtrl_None, -, v_CnfFlag);  // @sic R5s110743 sic@
+  }
+
+  /*
+   * @desc      Generates the default RadioresourceConfigDedicated template (according to 36.508) and returns the template
+   * @param     p_TargetCellId
+   * @param     p_Dsr_TransMax      (default value: n4)
+   * @param     p_Rel10             (default value: false)
+   * @param     p_Drb_ToReleaseList (default value: omit)
+   * @param     p_DRB_ToAddModList  (default value: omit)
+   * @param     p_EPDCCH_Config_r11 (default value: omit)
+   * @return    template (value) RadioResourceConfigDedicated
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_Generate_cs_508_RadioResourceConfigDedicated_HO(EUTRA_CellId_Type p_TargetCellId,
+                                                             Dsr_TransMax_Type p_Dsr_TransMax := n4,
+                                                             boolean p_Rel10 := false,
+                                                             template (omit) DRB_ToReleaseList p_Drb_ToReleaseList:= omit,
+                                                             template (omit) DRB_ToAddModList  p_DRB_ToAddModList := omit,
+                                                             template (omit) EPDCCH_Config_r11 p_EPDCCH_Config_r11 := omit ) runs on EUTRA_PTC return template (value) RadioResourceConfigDedicated
+  { /* @sic R5s100473 additional parameter p_Dsr_TransMax sic@ */
+    /* @sic R5s150650 additional parameter p_Rel10 sic@ */
+    /* @sic R5s200570: replaced p_AddRelDrb8 with p_Drb_ToReleaseList and p_DRB_ToAddModList sic@ */
+    /* @sic R5s200698, R5-203061: additional parameter p_EPDCCH_Config_r11 sic@ */
+    var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_CellInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_TargetCellId);
+    var SR_PUCCH_ResourceIndex_Type v_Sr_PUCCH_ResourceIndex := f_EUTRA_CellInfo_GetSR_PUCCH_ResourceIndex (p_TargetCellId);
+    var SR_ConfigIndex_Type v_SR_ConfigIndex := f_EUTRA_CellInfo_GetSR_ConfigIndex (p_TargetCellId);
+    var template (value) PhysicalConfigDedicated_AntennaInfo_Type v_AntennaInfo := f_EUTRA_CellInfo_GetAntennaInfoDedicated (p_TargetCellId);
+    var template (omit) CQI_ReportConfig v_CQI_ReportConfig := omit;
+    var template (omit) CQI_ReportConfig_r10 v_CQI_ReportConfig_r10 := omit;
+    var template (value) PhysicalConfigDedicated v_PhysicalConfigDedicated;
+    var template (value) SchedulingRequestConfig  v_SchedulingRequestConfig;
+    var template (omit) CE_Mode_r13_Type  v_CE_Mode_r13 := f_EUTRA_GetCE_Mode(p_TargetCellId); //@sic R5s170918 sic@
+        
+    //@sic R5s150650 sic@
+    if (p_Rel10) {
+      v_CQI_ReportConfig_r10 := cs_CQI_ReportConfig_r10_DEFAULT;
+    }
+    else {
+      v_CQI_ReportConfig := cs_508_CQI_ReportConfig_Default(v_EUTRA_FDD_TDD_CellInfo.cqi_ReportConfig);
+    }
+
+    v_SchedulingRequestConfig := cs_508_SchedulingRequest_Config_Default(v_Sr_PUCCH_ResourceIndex, v_SR_ConfigIndex, p_Dsr_TransMax);
+    v_PhysicalConfigDedicated := cds_PhysicalConfigDedicated_Common(-,
+                                                                    v_EUTRA_FDD_TDD_CellInfo.pucch_Config,
+                                                                    -,
+                                                                    -,
+                                                                    v_CQI_ReportConfig,
+                                                                    v_EUTRA_FDD_TDD_CellInfo.soundingRS_UL_Config,
+                                                                    v_AntennaInfo,
+                                                                    v_SchedulingRequestConfig,
+                                                                    v_CQI_ReportConfig_r10,
+                                                                    -,
+                                                                    v_CE_Mode_r13,
+                                                                    -,
+                                                                    p_EPDCCH_Config_r11); //@sic R5s170918, R5-203061 sic@
+
+    return cds_RadioResourceConfigDedicated_MacPhy(-, -, v_PhysicalConfigDedicated, -, p_DRB_ToAddModList, p_Drb_ToReleaseList);
+  }
+
+  /*
+   * @desc      Generates a MobilityControlInfo template based on the input parameters
+   *            If parameters are not input, default values (according to 36.508) will be used.
+   * @param     p_TargetCellId
+   * @param     p_CarrierFreqEutra_v9e0 (default value: omit)
+   * @param     p_RadioResourceConfigCommon (default value: omit)
+   * @param     p_EUTRA_CarrierBandwidth (default value: omit)
+   * @param     p_AdditionalSpectrumEmission (default value: omit)
+   * @param     p_T304              (default value: ms1000)
+   * @param     p_C_RNTI            (default value: tsc_C_RNTI_Def2)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_PucchConfigCommon_Needed (default value: false)
+   * @return    template (value) MobilityControlInfo
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_Generate_cs_MobilityControlInfo_HO(EUTRA_CellId_Type                          p_TargetCellId,
+                                                template (omit) CarrierFreqEUTRA_v9e0      p_CarrierFreqEutra_v9e0 := omit,
+                                                template (omit) RadioResourceConfigCommon  p_RadioResourceConfigCommon := omit,
+                                                template (omit) CarrierBandwidthEUTRA      p_EUTRA_CarrierBandwidth := omit,
+                                                template (omit) integer                    p_AdditionalSpectrumEmission := omit,
+                                                MobilityControlInfo.t304                   p_T304 := ms1000,
+                                                C_RNTI                                     p_C_RNTI := tsc_C_RNTI_Def2,
+                                                template (omit) RACH_ConfigDedicated       p_RACH_ConfigDedicated := omit,
+                                                boolean p_PucchConfigCommon_Needed := false)
+    runs on EUTRA_PTC return template (value) MobilityControlInfo
+  { /* @sic R5s120209 change 3: parameter p_PucchConfigCommon_Needed sic@ */
+    // @sic R5-171150 CarrierFreqEUTRA -> CarrierFreqEUTRA_v9e0 sic@
+    var template (omit) AntennaInfoCommon v_AntennaInfoCommon := f_EUTRA_CellInfo_GetAntennaInfoCommon (p_TargetCellId);
+    var EUTRA_CellSysInfo_Type v_EUTRA_CellSysInfo := f_EUTRA_CellInfo_GetSYSINFO(p_TargetCellId);
+    var RadioResourceConfigCommonSIB v_RadioResourceConfigCommonSIB := v_EUTRA_CellSysInfo.BCCH_Info.SIs[0].message_.c1.systemInformation.criticalExtensions.systemInformation_r8.sib_TypeAndInfo[0].sib2.radioResourceConfigCommon;
+    var PhysCellId v_PhysicalCellIdentity := f_EUTRA_CellInfo_GetPhyCellId(p_TargetCellId);
+    var template (value) RadioResourceConfigCommon v_RadioResourceConfigCommon;
+    var template (omit) TDD_Config v_Tdd_Configuration := v_EUTRA_CellSysInfo.BCCH_Info.SIB1.message_.c1.systemInformationBlockType1.tdd_Config;
+    var template (omit) PUCCH_ConfigCommon v_PUCCH_ConfigCommon := omit;
+    var template (omit) PRACH_Config_v1310 v_PRACH_Config_v1310 := omit; //@sic R5s170918 sic@
+    var template (omit) FreqHoppingParameters_r13 v_FreqHoppingParameters_r13 := omit; //@sic R5s170918, R5-177062 sic@
+    var template (omit) PDSCH_ConfigCommon_v1310 v_PDSCH_ConfigCommon_v1310 := omit; //@sic R5s170918 sic@
+    var template (omit) PUCCH_ConfigCommon_v1310 v_PUCCH_ConfigCommon_v1310 := omit; //@sic R5s170918 sic@
+    var template (omit) PUSCH_ConfigCommon_v1310 v_PUSCH_ConfigCommon_v1310 := omit; //@sic R5s170918 sic@
+    var template (omit) HighSpeedConfig_r14      v_HighSpeedConfig_r14      := omit; //@sic R5-176985 sic@
+    var template (omit) PRACH_Config_v1430       v_PRACH_Config_v1430       := omit;  //@sic R5-176985 sic@
+    
+    if (p_PucchConfigCommon_Needed) {
+      v_PUCCH_ConfigCommon := v_RadioResourceConfigCommonSIB.pucch_ConfigCommon;    /* @sic R5s120209 change 3 sic@ */
+    }
+
+    if (isvalue(p_RadioResourceConfigCommon)) {
+      //If non default RadioResourceConfigCommon has been specified, use those values
+      v_RadioResourceConfigCommon := valueof(p_RadioResourceConfigCommon);
+    }
+    else { //@sic R5s200364 sic@
+      v_PRACH_Config_v1310 := f_EUTRA_CellInfo_GetPRACH_Config_v1310(p_TargetCellId);
+      v_FreqHoppingParameters_r13 := f_EUTRA_CellInfo_GetFreqHoppingParameters_r13 (p_TargetCellId);
+      v_PDSCH_ConfigCommon_v1310 := f_EUTRA_CellInfo_GetPDSCH_ConfigCommon_v1310(p_TargetCellId);
+      v_PUCCH_ConfigCommon_v1310 := f_EUTRA_CellInfo_GetPUCCH_ConfigCommon_v1310(p_TargetCellId);
+      v_PUSCH_ConfigCommon_v1310 := f_EUTRA_CellInfo_GetPUSCH_ConfigCommon_v1310(p_TargetCellId);
+      v_HighSpeedConfig_r14      := f_EUTRA_CellInfo_GetHighSpeedConfig_r14(p_TargetCellId);
+      v_PRACH_Config_v1430       := f_EUTRA_CellInfo_GetPRACH_Config_v1430(p_TargetCellId);
+      //If no RadioResourceConfigCommon-template has been passed in to function generate default one
+      v_RadioResourceConfigCommon := cs_RadioResourceConfigCommon_Def(v_RadioResourceConfigCommonSIB.rach_ConfigCommon,
+                                                                      cs_PRACH_Config_Def(v_RadioResourceConfigCommonSIB.prach_Config),
+                                                                      v_RadioResourceConfigCommonSIB.pusch_ConfigCommon,
+                                                                      v_RadioResourceConfigCommonSIB.soundingRS_UL_ConfigCommon,
+                                                                      v_Tdd_Configuration,
+                                                                      v_AntennaInfoCommon,
+                                                                      v_PUCCH_ConfigCommon,
+                                                                      v_PRACH_Config_v1310,
+                                                                      v_FreqHoppingParameters_r13,
+                                                                      v_PDSCH_ConfigCommon_v1310,
+                                                                      v_PUCCH_ConfigCommon_v1310,
+                                                                      v_PUSCH_ConfigCommon_v1310,
+                                                                      v_HighSpeedConfig_r14,
+                                                                      v_PRACH_Config_v1430);
+                                                                      
+      if (f_GetTestcaseAttrib_CA_Configured(testcasename())) { // @sic R5-132002 sic@
+        if (pc_DualRM_Coding) {
+          // Dual Reed-Muller coding
+          v_RadioResourceConfigCommon.uplinkPowerControlCommon_v1020 := cs_UplinkPowerControlUL_CA(deltaF4);
+        } else {
+          // Reed-Muller coding
+          v_RadioResourceConfigCommon.uplinkPowerControlCommon_v1020 := cs_UplinkPowerControlUL_CA(deltaF0);
+        }
+      }
+    }
+    
+    return cs_MobilityControlInfo(v_PhysicalCellIdentity,
+                                  f_Return_CarrierFreqEUTRA(p_CarrierFreqEutra_v9e0, f_EUTRA_CellInfo_GetUL_CarrierNotDefaultTxRx(p_TargetCellId)), //@sic R5-171150 R5-217954/7955 sic@
+                                  p_EUTRA_CarrierBandwidth,
+                                  p_AdditionalSpectrumEmission,
+                                  p_T304,
+                                  p_C_RNTI,
+                                  v_RadioResourceConfigCommon,
+                                  p_RACH_ConfigDedicated,
+                                  f_Return_CarrierFreqEUTRA_v9e0(p_CarrierFreqEutra_v9e0));  //@sic R5-171150 sic@
+  }
+
+  /*
+   * @desc      Wrapper function to generate a MobilityControlInfo template with a specific C-RNTI.
+   * @param     p_TargetCellId
+   * @param     p_C_RNTI
+   * @param     p_CarrierFreqEutra  (default value: omit)
+   * @param     p_CarrierBandwidthEUTRA (default value: omit)
+   * @param     p_PucchConfigCommon_Needed (default value: false)
+   * @return    template (value) MobilityControlInfo
+   * @status    APPROVED (ENDC, LTE)
+   */
+  function f_Generate_cs_MobilityControlInfo_HO_CRNTI(EUTRA_CellId_Type p_TargetCellId,
+                                                      C_RNTI      p_C_RNTI,
+                                                      template (omit) CarrierFreqEUTRA_v9e0     p_CarrierFreqEutra := omit,
+                                                      template (omit) CarrierBandwidthEUTRA p_CarrierBandwidthEUTRA := omit,
+                                                      boolean p_PucchConfigCommon_Needed := false)
+    runs on EUTRA_PTC return template (value) MobilityControlInfo
+  { /* @sic R5s120209 change 3: parameter p_PucchConfigCommon_Needed sic@ */
+    // @sic R5-171150 CarrierFreqEUTRA -> CarrierFreqEUTRA_v9e0 sic@
+    return f_Generate_cs_MobilityControlInfo_HO(p_TargetCellId, p_CarrierFreqEutra, -, p_CarrierBandwidthEUTRA, -, -, p_C_RNTI, -, p_PucchConfigCommon_Needed);
+  }
+
+  /*
+   * @desc      Generic function for IntraLTE HO
+   * @param     p_SourceCellId
+   * @param     p_MeasurementConfiguration
+   * @param     p_MobilityControlInfo
+   * @param     p_RadioResourceConfigDedicated
+   * @param     p_SecurityConfigHO
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RRCConnectionReconfiguration_v890_IEs (default value: omit)
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_RRC_ConnReconfigHO_Common(EUTRA_CellId_Type                            p_SourceCellId,
+                                             template (omit) MeasConfig                   p_MeasurementConfiguration,
+                                             template (omit) MobilityControlInfo          p_MobilityControlInfo,
+                                             template (omit) RadioResourceConfigDedicated p_RadioResourceConfigDedicated,
+                                             template (omit) SecurityConfigHO             p_SecurityConfigHO,
+                                             template (value) TimingInfo_Type             p_TimingInfo := cs_TimingInfo_Now, //@sic R5s141319 sic@
+                                             template (omit) RRCConnectionReconfiguration_v890_IEs p_RRCConnectionReconfiguration_v890_IEs := omit)  runs on EUTRA_PTC
+  {
+    SRB.send(cas_SRB1_RrcPdu_REQ(p_SourceCellId,
+                                 p_TimingInfo,
+                                 cs_RRCConnectionReconfiguration_Common(tsc_RRC_TI_Def,
+                                                                        p_MeasurementConfiguration,
+                                                                        p_MobilityControlInfo,
+                                                                        p_RadioResourceConfigDedicated,
+                                                                        p_SecurityConfigHO,//@sic R5s141319 sic@
+                                                                        p_RRCConnectionReconfiguration_v890_IEs)));
+  }
+
+  /*
+   * @desc      Common function to send RRCConnectionReconfiguration which contains MeasConfig and to receive RRCConnectionReconfiguration
+   *            The function takes care of whether measurement gaps need to be configured at the SS or not
+   * @param     p_CellId
+   * @param     p_RRCConnectionReconfiguration
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_RRCConnectionReconfiguration_MeasConfig(EUTRA_CellId_Type p_CellId,
+                                                           template (value) DL_DCCH_Message p_RRCConnectionReconfiguration) runs on EUTRA_PTC
+  { /* NOTE: this function shall be applied for all cases when measConfig is contained in the RRCConnectionReconfiguration
+     *       i.e. even when the MeasConfig  does not contain any measGapConfig (for the time being) the function shall be used to be future proven */
+    var RRC_TransactionIdentifier v_RRC_TI := valueof(p_RRCConnectionReconfiguration.message_.c1.rrcConnectionReconfiguration.rrc_TransactionIdentifier);
+    var template (value) MeasGapCtrl_Type v_MeasGapCtrl;
+    var template (value) MeasGapConfig v_MeasGapConfig;
+    var SubFrameTiming_Type v_Timing;
+    var Dl_Bandwidth_Type v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId);   //@sic R5-253974 sic@
+    
+    if (ispresent(p_RRCConnectionReconfiguration.message_.c1.rrcConnectionReconfiguration.criticalExtensions.c1.rrcConnectionReconfiguration_r8.measConfig.measGapConfig)) {
+      
+      v_MeasGapConfig := valueof(p_RRCConnectionReconfiguration.message_.c1.rrcConnectionReconfiguration.criticalExtensions.c1.rrcConnectionReconfiguration_r8.measConfig.measGapConfig); // valueof ok due to previous check with ispresent
+      
+      if (ischosen(v_MeasGapConfig.setup)) {
+        v_MeasGapCtrl := cs_MeasGapCtrl_Config(v_MeasGapConfig);
+      } else {
+        v_MeasGapCtrl := cs_MeasGapCtrl_None;
+      }
+      
+      v_Timing := f_EUTRA_GetNextSendOccasion(p_CellId);
+      SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), p_RRCConnectionReconfiguration));
+      
+      v_Timing := f_EUTRA_TimingInfoAdd(v_Timing, 5, v_DL_Bandwidth);   // add 5ms
+      f_EUTRA_SS_MeasGapCtrlConfig(p_CellId, v_MeasGapCtrl, cs_TimingInfo_EUTRA_NB(v_Timing));
+    }
+    else {
+      SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId, cs_TimingInfo_Now, p_RRCConnectionReconfiguration));
+    }
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_RRCConnectionReconfigurationComplete(v_RRC_TI)));
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.523-3 clauses 7.18 and 7.18a
+   * @param     p_CellId
+   * @param     p_TimingAtT
+   * @param     p_DefaultDRB_Only   (default value: false)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionRelease_Local(EUTRA_CellId_Type p_CellId,
+                                               SubFrameTiming_Type p_TimingAtT,
+                                               boolean p_DefaultDRB_Only := false
+                                               ) runs on EUTRA_PTC
+  { /* NOTE: the function schedules all steps to release and reconfigure the SRBs and (default) DRB
+     *       => this will in fact happen in the future */
+    /* @sic R5-110803 change 13 sic@ */
+    /* @sic R5s110634 MCC160 implementation of change 1.1: new parameter p_DrbConfigList sic@ */
+    /* @sic R5s110743: release MeasGapConfig sic@ */
+    /* @sic R5s150338: p_DrbConfigList removed sic@ */
+    /* @sic R5s200821: added p_DefaultDRB_Only sic@ */
+    var SubFrameTiming_Type v_Timing := p_TimingAtT;
+    var DRB_IdentityList_Type v_DrbIdList;
+    var SysinfoType_Type v_SysinfoType := f_EUTRA_CellInfo_GetSysinfoType(p_CellId); //@sic R5-173005 sic@
+
+    if (p_DefaultDRB_Only == false) {v_DrbIdList := f_EUTRA_SS_ActiveDRBs(p_CellId)} else {v_DrbIdList := tsc_DrbList_Def}; //@sic R5s200821 sic@
+
+    if (v_SysinfoType==sysinfoOnly) { //acc. to 36.523-3 clauses 7.18
+        /* Step 1 at T: disable the UL grant
+        *               => it is not possible for the UE to send any ACK for the RRC Connecion Release)
+        *               => UE has to wait until 60ms timer has timed out (-> 36.331 cl. 5.3.8.3) */
+        f_EUTRA_StopULGrantTransmission(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing));
+    
+        /* Step 2 at T+5ms: release security */
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 5, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_RRC_ReleaseSecurity(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing));
+    
+        /* Step 3 at T+10ms: release DRX */
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 10, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_DrxCtrlConfig(p_CellId, cs_DrxCtrl_None, cs_TimingInfo_EUTRA_NB(v_Timing));
+    
+        /* Step 3A at T+15ms: release MeasGapConfig */
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 15, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_MeasGapCtrlConfig(p_CellId, cs_MeasGapCtrl_None, cs_TimingInfo_EUTRA_NB(v_Timing));
+    
+        /* Step 4 (obsolete) */
+    
+        /* Step 5 at T+55ms: Release SRBs and DRBs */
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 55, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_SRBs_DRBs_Release(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), v_DrbIdList);
+    
+        /* Step 6 at T+60ms: Configure SRBs and DRBs */
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 60, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_SRBs_DRBs_Config(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), omit);   /* @sic R5s150338: no DRBs to be re-configured sic@ */
+    
+    } else { // BL/CE UE  acc. to 36.523-3 clauses 7.18a - sysinfoAndBR - @sic R5-173005 sic@
+        // 1.   At T:   Send RRCConnectionRelease
+        // 2.   At T + 5ms: Release security.
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 5, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_RRC_ReleaseSecurity(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing));
+        
+        // 3.   At T + 10ms:    Release DRX configuration at the SS.
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 10, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_DrxCtrlConfig(p_CellId, cs_DrxCtrl_None, cs_TimingInfo_EUTRA_NB(v_Timing));
+        
+        // 3A   At T + 15ms:    Release measurement gap configuration at the SS.
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 15, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_MeasGapCtrlConfig(p_CellId, cs_MeasGapCtrl_None, cs_TimingInfo_EUTRA_NB(v_Timing));
+        
+        // 4.   At T + 200ms:   stop UL grants (NOTE 1).
+        // The delay of 200ms added for release of UL grant is to allow UE to send an UL RLC Ack for RRCConnectionRelease.
+        // It is selected to be small enough so as to not impact successive cell selection and long enough that both CE mode A and B type UE's can be catered
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 200, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_StopULGrantTransmission(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing));
+        
+        // 5.   At T + 205ms:       Release SRBs and DRBs.
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 205, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_SRBs_DRBs_Release(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), v_DrbIdList);
+        
+        // 6.   At T + 210ms:   (Re-) configure SRBs.
+        v_Timing := f_EUTRA_TimingInfoAdd(p_TimingAtT, 210, f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId));
+        f_EUTRA_SS_SRBs_DRBs_Config(p_CellId, cs_TimingInfo_EUTRA_NB(v_Timing), omit);
+    }
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.331 cl. 5.3.8; 36.523-3 cl. 7.4.2
+   * @param     p_CellId
+   * @param     p_RRCConnectionRelease
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionRelease_Common(EUTRA_CellId_Type p_CellId,
+                                                template (value) DL_DCCH_Message p_RRCConnectionRelease,
+                                                template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on EUTRA_PTC
+  { /* @sic R5-110803 change 13 sic@ */
+    /* @sic R5s110634 MCC160 implementation of change 1.1: new parameter p_DrbConfigList sic@ */
+    /* @sic R5-123740 change 2: additional delay of 640ms at the end of the generic RRC Connection Release procedure (result of AP#55.04, replacing R5-1421779 change 14) sic@ */
+    /* @sic R5s150338: p_DrbConfigList removed sic@ */
+    var SubFrameTiming_Type v_TimingAtT;   // time T: sending of RRCConnectionRelease acc. to 36.523-3 clause 7.18
+    var SubFrameTiming_Type v_TimingNow;
+    var integer v_MilliSecondsDelay := tsc_EUTRA_DelayBeforeIntraCellHO;
+    var integer v_Duration;
+    var SysinfoType_Type v_SysinfoType := f_EUTRA_CellInfo_GetSysinfoType(p_CellId); //@sic R5-173005 sic@
+
+    timer t_Timer;
+    
+    if (f_TimingInfo_IsNow(p_TimingInfo)) {
+      v_TimingAtT := f_EUTRA_GetNextSendOccasion(p_CellId, v_MilliSecondsDelay);
+      v_Duration := v_MilliSecondsDelay;
+    }
+    else {
+      // dedicated timing info is given
+      v_TimingAtT := valueof(p_TimingInfo.SubFrame);
+      v_TimingNow := f_EUTRA_GetCurrentTiming(p_CellId);
+      v_Duration := f_SubFrameTiming_Duration(v_TimingNow, v_TimingAtT);
+    }
+    if (v_SysinfoType==sysinfoOnly) { //Acc to 36.508 cl 7.18
+      v_Duration := v_Duration + tsc_EUTRA_DelayAfterRRCConnectionRelease;   // @sic R5s120683 sic@
+    } else { // BL/CE UE acc to 36.523-3 cl 7.18A step 7 @sic R5-173005 sic@
+      // 7.   Delay of 1880ms(1040 +840)
+      // 1880 ms is 1.25s - 210ms => As the delay is from T, the delay is set to 1250 ms
+      v_Duration := v_Duration + tsc_EUTRA_BL_CE_DelayAfterRRCConnectionRelease;
+    }
+    t_Timer.start (int2float(v_Duration) / 1000.0);
+    
+    SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId,
+                                 cs_TimingInfo_EUTRA_NB(v_TimingAtT),
+                                 p_RRCConnectionRelease));
+    
+    f_EUTRA_RRC_ConnectionRelease_Local(p_CellId, v_TimingAtT);
+    
+    alt {
+      [] t_Timer.timeout {}
+      [] SRB.check(receive(car_SRB0_RrcPdu_IND(?, cr_RRCConnectionRequest(cr_EstablishmentCause_Any)))) {
+        // there is an RRCConnectionRequest sent by the UE which can be received by TTCN-3 in a sub-sequent function
+        t_Timer.stop;
+      }
+    }
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.331 cl. 5.3.8
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_ReleaseCause      (default value: other)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_RRC_ConnectionRelease(EUTRA_CellId_Type p_CellId,
+                                         RRC_TransactionIdentifier p_RRC_TI := tsc_RRC_TI_Def,
+                                         ReleaseCause p_ReleaseCause := other,
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on EUTRA_PTC
+  { /* @sic R5-110803 change 13 sic@ */
+    /* @sic R5s110634 MCC160 implementation of change 1.1: new parameter p_DrbConfigList sic@ */
+    /* @sic R5s150338: p_DrbConfigList removed sic@ */
+    var template (omit) RRCConnectionRelease_v890_IEs  v_RRCConnectionRelease_v890 := omit;
+    var ResumeIdentity_r13 v_ResumeId;
+    var ReleaseCause v_ReleaseCause := p_ReleaseCause; // @sic R5-173839 sic@
+    
+    if (f_GetTestcaseAttrib_CIOT_UP(testcasename())) { // @sic R5-173839 sic@
+      v_ReleaseCause := rrc_Suspend_v1320;
+      v_ResumeId := tsc_CIOT_ResumeIdentity_Def;
+      v_RRCConnectionRelease_v890 := cs_RRCConnectionRelease_v890_IEs(-, cs_RRCConnectionRelease_ResumeId_r13(v_ResumeId));
+    }
+    f_EUTRA_RRC_ConnectionRelease_Common(p_CellId, cs_RRCConnectionRelease(p_RRC_TI, v_ReleaseCause, -, -, v_RRCConnectionRelease_v890), p_TimingInfo);
+  }
+
+  /*
+   * @desc      To check the EUTRA release reported by UE against the tc release
+   * @param     p_ReleaseIndicator_UE
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRAN_CheckReleaseIndicator(AccessStratumRelease p_ReleaseIndicator_UE)
+  { // @sic R5-123750 sic@
+    var integer v_PrimaryFrequencyBand;   // @sic R5s160134 sic@
+    var integer v_SecondaryFrequencyBand; // @sic R5s160134 sic@
+    var integer v_RelMin;
+    var integer v_Rel;
+    var template (omit) integer v_UE_Release := f_ConvertAccessStratumReleaseToInteger(p_ReleaseIndicator_UE);    /* @sic R5s170597 BASELINE MOVING 2017: use of integer sic@ */
+    
+    if (isvalue(v_UE_Release)) {
+      v_Rel := valueof(v_UE_Release);
+      
+      select (f_GetTestcaseAttrib_Eutra_Release (testcasename())) {
+        case ("") { // rel8
+          v_RelMin := 8;
+        }
+        case ("rel_9") { // >= rel9
+          v_RelMin := 9;
+        }
+        case ("rel_10") { // >= rel10
+          v_RelMin := 10;
+        }
+        case ("rel_11") { // >= rel11
+          v_RelMin := 11;
+        }
+        case ("rel_12") { // >= rel12   @sic R5-142980: added rel-12 tc sic@
+          v_RelMin := 12;
+        }
+        case ("rel_13") { // >= rel13  @sic R5s160975 sic@
+          v_RelMin := 13;
+        }
+        case ("rel_14") { // >= rel14
+          v_RelMin := 14;
+        }
+        case ("rel_15") { // >= rel15    /* @sic R5s180271 BASELINE MOVING 2018 Phase 1 sic@ */
+          v_RelMin := 15;
+        }
+        case ("rel_16") { // >= rel16    /* @sic R5s201386 BASELINE MOVING 2020 sic@ */
+          v_RelMin := 16;
+        }
+        case ("rel_17") { // >= rel17    /* @sic R5s221178 BASELINE MOVING 2022 rel-17 sic@ */
+          v_RelMin := 17;
+        }
+        case ("rel_18") { // >= rel18    /* @sic R5s240444 BASELINE MOVING 2024 rel-18 sic@ */
+          v_RelMin := 18;
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "");
+        }
+      }
+      if (v_Rel < v_RelMin) {
+        f_SetVerdictInconc (__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+      }
+      
+      //@sic R5s160134 additional change sic@
+      // CA test cases executed with FDD/TDD band combinations shall be run with UE of Rel-12 or above - See TS 36.307 cl 3A.2
+      if (f_GetTestcaseAttrib_CA_Configured(testcasename())) {
+        v_PrimaryFrequencyBand := f_EUTRA_GetCA_PrimaryBand (px_EUTRA_CA_BandCombination);
+        v_SecondaryFrequencyBand := f_EUTRA_GetCA_SecondaryBand (px_EUTRA_CA_BandCombination);
+        
+        if ((f_EUTRA_FrequencyBandIsFDD(v_PrimaryFrequencyBand) != f_EUTRA_FrequencyBandIsFDD(v_SecondaryFrequencyBand)) and (v_Rel < 12)) { //@sic R5s160303 sic@
+          f_SetVerdictInconc (__FILE__, __LINE__, "Wrong Access Stratum release indicator for an FDD/TDD CA band combination");
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      Send UECapabilityEnquiry message and receives UECapabilityInformation message.
+   *            The received UE Capabilities are decoded and stored in the structure for the Mobile Info.
+   * @param     p_CellId
+   * @param     p_RRC_TI
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_Capability(EUTRA_CellId_Type p_CellId,
+                              RRC_TransactionIdentifier p_RRC_TI) runs on EUTRA_PTC
+  {
+    var SRB_COMMON_IND v_ReceivedAspForUeCapabilityInfo;
+    var UE_EUTRA_Capability v_EutraCapability;
+    
+    SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId, cs_TimingInfo_Now, cs_508_UeCapabilityEnquiry(p_RRC_TI)));
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_UeCapabilityInformation_Any(p_RRC_TI)))
+      -> value v_ReceivedAspForUeCapabilityInfo;
+    
+    // Decode and store the ueCapabilitiesRAT-Container
+    v_EutraCapability := f_EUTRA_DecodeEutraCapMsg(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[0].ueCapabilityRAT_Container);
+    f_EUTRA_MobileInfo_SetUECapability (v_EutraCapability);
+
+    // Check the UE release
+    // @sic R5-123750 sic@
+    f_EUTRAN_CheckReleaseIndicator (v_EutraCapability.accessStratumRelease);
+    
+    select (v_EutraCapability.accessStratumRelease) { // @sic R5-121847 sic@ @sic R5-123750 sic@
+      case (rel8) {
+        if (f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 30)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 31 not set to 0");
+        }
+        if (f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 31)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 32 not set to 0");
+        }
+      }
+      case (rel9) { // @sic R5-123750 sic@
+        /* @sic R5s120653 sic@
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 4)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 5 not set to 1");
+        }
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 5)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 6 not set to 1");
+        }
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 15)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 16 not set to 1");
+        }
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 16)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 17 not set to 1");
+        }
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 17)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 18 not set to 1");
+        }
+        if (not f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 19)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 20 not set to 1");
+        }
+        if (f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 30)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 31 not set to 0");
+        }
+        if (f_Bitstring_BitIsSet(v_EutraCapability.featureGroupIndicators, 31)) {
+          f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "FGI bit 32 not set to 0");
+        }
+        */
+      }
+      case (rel10) { // @sic R5s130064 sic@
+      }
+      case (rel11) { // @sic R5s130195 sic@
+      }
+      case (rel12) {
+      }
+      case (rel13) { // @sic R5s160975 sic@
+      }
+      case (rel14) { // @sic R5s170597 BASELINE MOVING 2017 sic@
+      }
+      case (rel15) {   /* @sic R5s180271 BASELINE MOVING 2018 Phase 1 sic@ */
+      }
+      case (rel16) {   /* @sic R5s201386 BASELINE MOVING 2020 sic@ */
+      }
+      case (rel17) {   /* @sic R5s221178 BASELINE MOVING 2022 sic@ */
+      }
+      case (rel18) {   /* @sic R5s240444 BASELINE MOVING 2024 rel-18 sic@ */
+      }
+      case else{
+        FatalError (__FILE__, __LINE__, "accessStratumRelease not yet considered");
+      }
+    }
+  }
+
+  /*
+   * @desc      Get RACH procedure configuration for HO
+   * @param     p_CellId
+   * @param     p_UplinkGrantCE_Mode_Type
+   * @return    template (value) RachProcedureConfig_Type
+   * @status    APPROVED (ENDC, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT)
+   */
+   function f_EUTRA_GetRachProcedure_HO( EUTRA_CellId_Type p_CellId,
+                                        template (omit) UplinkGrantCE_Mode_Type p_UplinkGrantCE_Mode_Type
+                                       ) runs on EUTRA_PTC return template (value) RachProcedureConfig_Type
+  { /* @sic R5-106063: grants acc. to 36.523-3 cl. 7.16.3 and 38.523-3 cl 7.2.5.2 for ENDC test cases sic@ */
+    /* @sic R5s110019/R5s110030/R5s110634 additional changes: parameter to request/suppress CNF sic@ */
+    /* @sic R5s120709 additional change: new template cs_RachProcedureConfig_CRNTI_HO  sic@ */
+    // @sic R5s170974 sic@
+    // @sic R5-213516 sic@
+    var template (value) RachProcedureConfig_Type v_RachProcedureConfig := cs_RachProcedureConfig_CRNTI_HO(f_EUTRA_CellInfo_GetRAR_TA(p_CellId),
+                                                                                                           f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId),  //@sic R5s170974 sic@
+                                                                                                           p_UplinkGrantCE_Mode_Type,
+                                                                                                           f_EUTRA_FirstRB_UL(p_CellId));
+    if (f_GetTestcaseAttrib_ENDC(testcasename())) {
+        //ENDC assign Initial grant: 208 bits acc to 38.523-3 clause 7.2.5.2
+        v_RachProcedureConfig := cs_RachProcedureConfig_CRNTI_HO_ENDC(f_EUTRA_CellInfo_GetRAR_TA(p_CellId),
+                                                                      f_EUTRA_CellInfo_GetDL_ChBandwidth(p_CellId),
+                                                                      p_UplinkGrantCE_Mode_Type,
+                                                                      f_EUTRA_FirstRB_UL(p_CellId));
+    }
+    return v_RachProcedureConfig;
+  }
+
+}

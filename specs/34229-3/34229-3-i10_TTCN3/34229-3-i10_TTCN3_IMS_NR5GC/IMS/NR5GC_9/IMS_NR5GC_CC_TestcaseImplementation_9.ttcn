@@ -1,0 +1,489 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2022-06-27 21:22:37 +0200 (Mon, 27 Jun 2022) $
+// $Rev: 33681 $
+/******************************************************************************/
+module IMS_NR5GC_CC_TestcaseImplementation_9 {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CommonFunctions all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_5G all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SIP_Templates all;
+  import from IMS_SMS_Messages all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_SIPTypesAndValues all;
+  import from SMS_Templates all;
+  import from SMS_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Common Test body of test case 9.1
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileOriginatingSMS() runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    f_IMS_CC_StartSignalling(IPCAN_MO_IMS_Signalling);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    // UE is made to attempt a Mobile Originating SMS over IMS
+    f_UT_IMS_TriggerSMS(MMI);
+    
+    // @siclog "Step 2" siclog@
+    // Check: Does UE send a SIP MESSAGE request including a vnd.3gpp.sms payload that contains a short message?
+    v_IMS_DATA_REQ := f_IMS_NR5GC_MO_SMS_Step1(); // A.7.3 cond. A5 <=> UE uses NR access
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends a SIP MESSAGE");
+    
+    // @siclog "Step 3-9" siclog@
+    f_IMS_NR5GC_MO_SMS_Step2to8 (v_IMS_DATA_REQ);
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Step 1 of MO SMS reception of concatenated SMS
+   * @param     p_SMS_RP_DATA_ul_SUBMIT_IMS
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MO_SMS_ConcSMS(template (present) RP_DATA_ul_Type p_SMS_RP_DATA_ul_SUBMIT_IMS) runs on IMS_PTC return IMS_DATA_REQ
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var MessageHeader v_MessageHeader;
+    var MESSAGE_Request v_MESSAGE_RequestRX;
+    var octetstring v_EncodedSMS;
+    var template (present) SipUrl v_SipUrl_PsiSmsc := ?; /* @sic R5s140304, R5-142157 sic@
+                                                            @sic R5-152094: Request URI not to be checked sic@ */
+    var SipUrl v_RequestURI_MO;
+
+    // Step 1. UE sends a short message
+    // @siclog "Step 1" siclog@
+    // Contents in 34.229-1 Annex A.7.3
+    v_IMS_DATA_REQ := f_IMS_MessageRequest_Receive(v_SipUrl_PsiSmsc, f_IMS_MessageRequest_MessageHeaderRX_MO_SMS(v_SipUrl_PsiSmsc));           /* @sic R5s130370 change 4 sic@ */
+    v_MESSAGE_RequestRX := v_IMS_DATA_REQ.Request.Message;
+    v_MessageHeader := v_MESSAGE_RequestRX.msgHeader;
+    v_RequestURI_MO := v_MESSAGE_RequestRX.requestLine.requestUri;
+
+    if (not f_SIP_SipUrl_Compare(v_RequestURI_MO, f_Addr_Union_GetSipUrl(v_MessageHeader.toField.addressField))) {  /* @sic R5-152094: Request URI and To URI shall be the same sic@ */
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "addr-spec of To header shall be the same as Request URI")
+    }
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    f_SMS_PDU_DecodeAndMatchRPDATA(v_EncodedSMS, p_SMS_RP_DATA_ul_SUBMIT_IMS);
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Steps 2-4 of MO SMS reception of concatenated SMS
+   * @param     p_IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MO_SMS_Step2to4(IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC
+  {
+    var MESSAGE_Request v_MESSAGE_RequestRX := p_IMS_DATA_REQ.Request.Message;
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var MessageHeader v_MessageHeader := v_MESSAGE_RequestRX.msgHeader;
+    var RP_DATA_ul_Type v_MoSMS;
+    var template (value) RP_ACK_Type v_RPAck_TX;
+    var octetstring v_EncodedSMS;
+    var SipUrl v_ContactUrl;
+    var InternetProtocol_Type v_Protocol;
+    var bitstring v_Bitstring;
+    var integer v_CSeqValue := tsc_MESSAGE_CSeqValue;
+    var SipUrl v_RequestURI_MO := v_MESSAGE_RequestRX.requestLine.requestUri;
+    var CallidString v_PrevCallId := v_MessageHeader.callId.callid;
+    var CharStringList_Type v_PrevCallIdList := {};
+
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+    
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    v_Bitstring := oct2bit(v_EncodedSMS);
+    if (decvalue(v_Bitstring, v_MoSMS) != 0) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "cannot decode v_MoSMS");
+    }
+
+    // @siclog "Step 2 resp 3" siclog@
+    // SS responds with 202 Accepted.
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(p_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine202, f_IMS_Accepted_202_MessageHeaderTX(v_MessageHeader))));
+    
+    // @siclog "Step 3 resp 4" siclog@
+    // SS sends a SIP MESSAGE request including a vnd.3gpp.sms payload that contains the short message submission report indicating a positive acknowledgement of the first segment of the concatenated SMS sent by the UE at Step 2.
+    v_RPAck_TX := cs_RP_ACK_SUBMIT_REPORT(v_MoSMS.rP_MessageReference);
+    v_EncodedSMS := f_SMS_PDU_EncodeRPACK(v_RPAck_TX);
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();             // @sic R5s130514 change 2 sic@
+    v_MessageHeader_MessageMT := f_IMS_MessageRequest_MessageHeaderTX_SubmissionReport(v_Protocol, v_RequestURI_MO, v_PrevCallId, v_CSeqValue);   /* @sic R5s130235 change 4a  R5-131269 sic@ */
+    IMS_Client.send(cas_IMS_Message_Request(cs_IMS_RoutingInfo(v_Protocol), cs_MESSAGE_Request(v_ContactUrl, v_MessageHeader_MessageMT, cs_MessageBody_SMS(v_EncodedSMS))));
+    v_PrevCallId := valueof(v_MessageHeader_MessageMT.callId.callid);
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+    
+    // @siclog "Step 4 resp 5" siclog@
+    // Check: Does the UE respond with 200 OK?
+    f_IMS_ReceiveResponse(v_MessageHeader_MessageMT, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_MessageMT)));  /* @sic R5s140350 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends 200 OK");
+  }
+
+  /*
+   * @desc      Steps 1 - 4 of an MO SMS reception for concatenated SMS for IMS TC 9.3
+   * @param     p_SMS_RP_DATA_ul_SUBMIT_IMS
+   * @param     p_MsgRef
+   * @param     p_SN_SMS
+   * @return    O1_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileOriginating_ConcSMS(template (present) RP_DATA_ul_Type p_SMS_RP_DATA_ul_SUBMIT_IMS,
+                                           template (present) O1_Type p_MsgRef,
+                                           O1_Type p_SN_SMS) runs on IMS_PTC return O1_Type
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var MESSAGE_Request v_MESSAGE_RequestRX;
+    var octetstring v_EncodedSMS;
+    var O1_Type v_MsgRef;
+    var RP_DATA_ul_Type v_RP_DATA_ul;
+    var RP_UserData v_RP_UserData_SUBMIT;
+    var octetstring v_EncodedUDH;
+    var TP_UserDataHeader_Type v_MoUDH;
+
+    // @siclog "Step 1 resp 2" siclog@
+    // Step 1, 5, 9 UE sends a short message segment
+    // Check: Does the UE send a SIP MESSAGE request including a vnd.3gpp.sms payload that contains the first/second/third segment of the concatenated SMS?
+    v_IMS_DATA_REQ := f_IMS_NR5GC_MO_SMS_ConcSMS(p_SMS_RP_DATA_ul_SUBMIT_IMS); // 1st, 2nd, 3rd SMS segment passed
+    v_MESSAGE_RequestRX := v_IMS_DATA_REQ.Request.Message;
+
+    // Decode and check received SMS message
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    v_RP_DATA_ul := f_SMS_PDU_DecodeAndMatchRPDATA(v_EncodedSMS, p_SMS_RP_DATA_ul_SUBMIT_IMS);
+    v_RP_UserData_SUBMIT := v_RP_DATA_ul.rP_UserData;
+
+    // Decode and check received User Data Header, note first MsgRef used by UE
+    v_EncodedUDH := v_RP_UserData_SUBMIT.tP_PDU.SMS_SUBMIT.tP_UserData;
+    v_MoUDH := f_TP_UserDataWithHeader_DecodeAndMatch (v_EncodedUDH, cr_TP_UserDataHeader_ConcSMS(p_MsgRef, p_SN_SMS, f_CharPacking_IA5toGsm7Bit(tsc_FoxShort, SMS_Packing, 1))); // @sic R5s201446, R5s210441 sic@
+    v_MsgRef := v_MoUDH.tP_UDH_IE_Record[0].tP_UDH.tP_UDH_ConcSMS.tP_UserDataHeaderMsgRef; // Msg Reference chosen by the UE for the Concatenated messsage
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends SIP Message containing a short message");
+
+    // Step 2-4, 6-8, 10-12 of 9.3 resp 3-5, 7-9, 11-13 of 18.2a
+    f_IMS_NR5GC_MO_SMS_Step2to4 (v_IMS_DATA_REQ);
+
+    return v_MsgRef;
+  }
+
+  /*
+   * @desc      Common Test body of test case 9.3
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileOriginatingConcatenatedSMS() runs on IMS_PTC
+  {
+    var O1_Type v_MsgRef; // take value chosen by the UE
+    var integer v_SN_Num := 1; // initially (first segment) 1
+    var template RP_DATA_ul_Type v_SMS_RP_DATA_ul_SUBMIT_IMS;
+
+    // configure the SMS environment using the necessary AT commands
+    f_IMS_SMS_AT_Config();
+
+    f_IMS_CC_StartSignalling(IPCAN_MO_IMS_Signalling);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    // UE is made to send a Concatenated SMS over IP (The length of SMS text is determined so that the amount of segments of the concatenated SMS is three).
+    // trigger one overlong SMS of 3 segments of 134 octets / 153 7bit characters each
+    f_IMS_SMS_AT_Trigger_MO_SMS (113, 415, tsc_FoxShort & tsc_FoxShort & tsc_FoxShort);
+    
+    // @siclog "Steps 1-4 resp 2-5" siclog@
+    v_SMS_RP_DATA_ul_SUBMIT_IMS := cr_SMS_RP_DATA_ul_SUBMIT_IMS; // any Message Reference
+    v_MsgRef := f_IMS_NR5GC_MobileOriginating_ConcSMS (v_SMS_RP_DATA_ul_SUBMIT_IMS, ?, int2oct(1,1)); // 1st SMS segment, Msg Reference noted
+
+    // @siclog "Steps 5-8 resp 6-9" siclog@
+    v_SN_Num := v_SN_Num + 1;
+    v_SMS_RP_DATA_ul_SUBMIT_IMS := cr_SMS_RP_DATA_ul_SUBMIT_IMS;
+    f_IMS_NR5GC_MobileOriginating_ConcSMS (v_SMS_RP_DATA_ul_SUBMIT_IMS, v_MsgRef, int2oct(2,1)); // 2nd SMS segment
+
+    // @siclog "Steps 9-12 resp 10-13" siclog@
+    v_SN_Num := v_SN_Num + 1;
+    v_SMS_RP_DATA_ul_SUBMIT_IMS := cr_SMS_RP_DATA_ul_SUBMIT_IMS;
+    f_IMS_NR5GC_MobileOriginating_ConcSMS (v_SMS_RP_DATA_ul_SUBMIT_IMS, v_MsgRef, int2oct(3,1)); // 3rd SMS segment
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Common Test body of test case 9.5
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileOriginatingSMS_RPError() runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    f_IMS_CC_StartSignalling(IPCAN_MO_IMS_Signalling);
+        
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1" siclog@
+    // UE is made to attempt a Mobile Originating SMS over IMS
+    f_UT_IMS_TriggerSMS(MMI);
+
+    // @siclog "Step 1 resp 2" siclog@
+    // Check: Does UE send a SIP MESSAGE request including a vnd.3gpp.sms payload that contains a short message?
+    v_IMS_DATA_REQ := f_IMS_NR5GC_MO_SMS_Step1();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends SIP Message containing a short message");
+    
+    // @siclog "Step 2-4 resp 3-5" siclog@
+    f_IMS_NR5GC_MO_SMS_Step2to4_NOOO (v_IMS_DATA_REQ);
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Common Test body of test case 9.2
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileTerminatingSMS() runs on IMS_PTC
+  {
+
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var MESSAGE_Request v_MESSAGE_RequestRX;
+    var SipUrl v_ContactUrl;
+    var octetstring v_EncodedSMS;
+    var template (value) RP_DATA_dl_Type v_SMSdl;
+    var InternetProtocol_Type v_Protocol;
+    var SipUrl v_PAssertedIDUrl;
+    var CallidString v_PrevCallId;
+    var CharStringList_Type v_PrevCallIdList := {};
+    
+    f_IMS_CC_StartSignalling(IPCAN_MT_IMS_Signalling);
+
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+
+    f_IMS_TestBody_Set(true);
+    
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+
+    // @siclog "Step 1" siclog@
+    // The SS sends a Short Message.
+    v_SMSdl := cs_RP_DATA_dl_DELIVER('7788996655'O);
+    v_EncodedSMS := f_SMS_PDU_EncodeRPDATA(v_SMSdl);
+    v_MessageHeader_MessageMT := f_IMS_MessageRequest_MessageHeaderTX_MT_SMS(v_Protocol);
+    IMS_Client.send(cas_IMS_Message_Request(cs_IMS_RoutingInfo(v_Protocol), cs_MESSAGE_Request(v_ContactUrl, v_MessageHeader_MessageMT, cs_MessageBody_SMS(v_EncodedSMS))));
+    v_PrevCallId := valueof(v_MessageHeader_MessageMT.callId.callid);                                          // @sic R5-133705 sic@
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE send a 200 OK response?
+    f_IMS_ReceiveResponse(v_MessageHeader_MessageMT, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_MessageMT)));  /* @sic R5s140350 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends 200 OK");
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the UE respond with a delivery report?
+    v_PAssertedIDUrl := f_Addr_Union_GetSipUrl(v_MessageHeader_MessageMT.pAssertedID.pAssertedIDValueList[0]); // @sic R5-130572 R5s130183 sic@
+
+    v_IMS_DATA_REQ := f_IMS_MessageRequest_Receive(v_PAssertedIDUrl,
+                                                   f_IMS_MessageRequest_MessageHeaderRX_DeliveryReport(v_PAssertedIDUrl, v_PrevCallId),
+                                                   v_PrevCallIdList); // @sic R5s130370 change 1 sic@
+    v_MESSAGE_RequestRX := v_IMS_DATA_REQ.Request.Message;
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    f_SMS_PDU_DecodeAndMatchRPACK(v_EncodedSMS, cr_RP_ACK_DELIVER_REPORT); // @sic R5-130572, R5-205345 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends SIP message containing a Delivery Report");
+    
+    // @siclog "Step 4" siclog@
+    // The SS sends a 202 ACCEPTED response.
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine202, f_IMS_Accepted_202_MessageHeaderTX(v_MESSAGE_RequestRX.msgHeader))));
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Step 1 of MT SMS transmission
+   * @param     p_SMSdl
+   * @return    template MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MT_SMS_Step1(template (value) RP_DATA_dl_Type p_SMSdl) runs on IMS_PTC return template MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var SipUrl v_ContactUrl;
+    var octetstring v_EncodedSMS;
+    var template (value) RP_DATA_dl_Type v_SMSdl;
+    var InternetProtocol_Type v_Protocol;
+    
+    v_SMSdl := p_SMSdl;
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+
+    // @siclog "Step 1" siclog@
+    // Step 1. The SS sends a Short Message.
+    // Build MT SMS
+    // SS sends a first/second/third segment of a concatenated SMS in the message-body of SIP_MESSAGE.
+    v_EncodedSMS := f_SMS_PDU_EncodeRPDATA(v_SMSdl);
+    v_MessageHeader_MessageMT := f_IMS_MessageRequest_MessageHeaderTX_MT_SMS(v_Protocol);
+    IMS_Client.send(cas_IMS_Message_Request(cs_IMS_RoutingInfo(v_Protocol), cs_MESSAGE_Request(v_ContactUrl, v_MessageHeader_MessageMT, cs_MessageBody_SMS(v_EncodedSMS))));
+
+    return v_MessageHeader_MessageMT;
+
+  }
+
+  /*
+   * @desc      Steps 2 - 4 of MT SMS transmission
+   * @param     p_MessageHeader_MessageMT
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MT_SMS_Step2to4(template (value) MessageHeader p_MessageHeader_MessageMT) runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var MESSAGE_Request v_MESSAGE_RequestRX;
+    var octetstring v_EncodedSMS;
+    var InternetProtocol_Type v_Protocol;
+    var SipUrl v_PAssertedIDUrl;
+    var CallidString v_PrevCallId;
+    var CharStringList_Type v_PrevCallIdList := {};
+    
+    v_MessageHeader_MessageMT := p_MessageHeader_MessageMT;
+    v_PrevCallId := valueof(v_MessageHeader_MessageMT.callId.callid);
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+
+    // @siclog "Step 2" siclog@
+    // Check: Does UE respond with a 200 OK?
+    f_IMS_ReceiveResponse(v_MessageHeader_MessageMT, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_MessageMT)));  /* @sic R5s140350 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends 200 OK");
+
+    // @siclog "Step 3" siclog@
+    // Check: when the payload is extracted, does the UE respond with a delivery report included in the message-body of MESSAGE?
+    v_PAssertedIDUrl := f_Addr_Union_GetSipUrl(v_MessageHeader_MessageMT.pAssertedID.pAssertedIDValueList[0]); // @sic R5-130572 R5s130183 sic@
+
+    v_IMS_DATA_REQ := f_IMS_MessageRequest_Receive(v_PAssertedIDUrl,
+                                                   f_IMS_MessageRequest_MessageHeaderRX_DeliveryReport(v_PAssertedIDUrl, v_PrevCallId),
+                                                   v_PrevCallIdList); // @sic R5s130370 change 1 sic@
+    v_MESSAGE_RequestRX := v_IMS_DATA_REQ.Request.Message;
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    f_SMS_PDU_DecodeAndMatchRPACK(v_EncodedSMS, cr_RP_ACK_DELIVER_REPORT); // @sic R5-130572, R5-205345 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends SIP message containing a Delivery Report");
+    
+    // @siclog "Step 4" siclog@
+    // SS responds with a 202 ACCEPTED.
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine202, f_IMS_Accepted_202_MessageHeaderTX(v_MESSAGE_RequestRX.msgHeader))));
+
+  }
+
+  /*
+   * @desc      Steps 1 - 4 of an MT SMS transmission for concatenated SMS for IMS TC 9.4
+   * @param     p_MsgRef
+   * @param     p_SN_SMS
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileTerminating_ConcSMS(O1_Type p_MsgRef,
+                                                 O1_Type p_SN_SMS) runs on IMS_PTC
+  {
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var template (value) RP_DATA_dl_Type v_SMSdl;
+    
+    v_SMSdl := cs_RP_DATA_dl_DELIVER_ConcSMS('7788996655'O, p_MsgRef, p_SN_SMS); // can remain as is !!
+    // Step 1, 5, 9 of 9.4
+    // SS sends a first/second/third segment of a concatenated SMS in the message-body of SIP_MESSAGE.
+    v_MessageHeader_MessageMT := f_IMS_NR5GC_MT_SMS_Step1 (v_SMSdl);
+
+    // Step 2-4, 6-8, 10-12 of 9.4
+    f_IMS_NR5GC_MT_SMS_Step2to4 (v_MessageHeader_MessageMT);
+
+  }
+
+  /*
+   * @desc      Common Test body of IMS test case 9.4
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MobileTerminatingConcatenatedSMS() runs on IMS_PTC
+  {
+    var O1_Type v_MsgRef := 'FF'O; // any value
+    var integer v_SN_Num := 1; // initially (first segment) 1
+    
+    // configure the SMS environment using the necessary AT commands
+    f_IMS_SMS_AT_Config();
+
+    f_IMS_CC_StartSignalling(IPCAN_MT_IMS_Signalling);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Steps 1-4" siclog@
+    f_IMS_NR5GC_MobileTerminating_ConcSMS(v_MsgRef, int2oct(v_SN_Num,1));// 1st SMS segment
+
+    // @siclog "Steps 5-8" siclog@
+    v_SN_Num := v_SN_Num + 1;
+    f_IMS_NR5GC_MobileTerminating_ConcSMS(v_MsgRef, int2oct(v_SN_Num,1));// 2nd SMS segment
+
+    // @siclog "Steps 9-12" siclog@
+    v_SN_Num := v_SN_Num + 1;
+    f_IMS_NR5GC_MobileTerminating_ConcSMS(v_MsgRef, int2oct(v_SN_Num,1));// 3rd SMS segment
+
+    f_IMS_TestBody_Set(false);
+    
+  }
+
+  /*
+   * @desc      To continue expected sequence of 34.229-1 cl. 18.1b resp. 34.229-5 9.5 after initial MESSAGE request
+   * @param     p_IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NR5GC_MO_SMS_Step2to4_NOOO(IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC
+  {
+    var MESSAGE_Request v_MESSAGE_RequestRX := p_IMS_DATA_REQ.Request.Message;
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var MessageHeader v_MessageHeader := v_MESSAGE_RequestRX.msgHeader;
+    var RP_DATA_ul_Type v_MoSMS;
+    var template (value) RP_ERROR_Type v_RP_ERROR_TX;
+    var template (value) RP_Cause v_RP_Cause;
+    var octetstring v_EncodedSMS;
+    var SipUrl v_ContactUrl;
+    var InternetProtocol_Type v_Protocol;
+    var bitstring v_Bitstring;
+    var integer v_CSeqValue := tsc_MESSAGE_CSeqValue;
+    var SipUrl v_RequestURI_MO := v_MESSAGE_RequestRX.requestLine.requestUri;
+    var CallidString v_PrevCallId := v_MessageHeader.callId.callid;
+    var CharStringList_Type v_PrevCallIdList := {};
+
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+    
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    
+    v_EncodedSMS := v_MESSAGE_RequestRX.messageBody.smsMessage;
+    v_Bitstring := oct2bit(v_EncodedSMS);
+    if (decvalue(v_Bitstring, v_MoSMS) != 0) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "cannot decode v_MoSMS");
+    }
+
+    // @siclog "Step 2 resp 3" siclog@
+    // SS responds with 202 Accepted.
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(p_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine202, f_IMS_Accepted_202_MessageHeaderTX(v_MessageHeader))));
+    
+    // @siclog "Step 3 resp 4" siclog@
+    // SS sends a SIP MESSAGE request including a vnd.3gpp.sms payload and RP-ERROR message.
+    v_RP_Cause := cs_RP_Cause (tsc_RP_ERROR_Cause_NtwOOO); // network out of order
+    v_RP_ERROR_TX := cs_RP_ERROR(v_MoSMS.rP_MessageReference, v_RP_Cause);
+    v_EncodedSMS := f_SMS_PDU_EncodeRP_ERROR(v_RP_ERROR_TX);
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    v_MessageHeader_MessageMT := f_IMS_MessageRequest_MessageHeaderTX_SubmissionReport(v_Protocol, v_RequestURI_MO, v_PrevCallId, v_CSeqValue);
+    IMS_Client.send(cas_IMS_Message_Request(cs_IMS_RoutingInfo(v_Protocol), cs_MESSAGE_Request(v_ContactUrl, v_MessageHeader_MessageMT, cs_MessageBody_SMS(v_EncodedSMS))));
+    v_PrevCallId := valueof(v_MessageHeader_MessageMT.callId.callid);
+    v_PrevCallIdList := f_CharStringList_Add(v_PrevCallIdList, v_PrevCallId);
+    
+    // @siclog "Step 4 resp 5" siclog@
+    // Check: Does the UE respond with 200 OK?
+    f_IMS_ReceiveResponse(v_MessageHeader_MessageMT, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_MessageMT)));
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "UE sends 200 OK");
+  }
+
+}

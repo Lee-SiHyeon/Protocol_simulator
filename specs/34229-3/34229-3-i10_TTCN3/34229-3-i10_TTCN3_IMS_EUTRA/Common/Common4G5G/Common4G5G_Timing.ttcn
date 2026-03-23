@@ -1,0 +1,252 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+module Common4G5G_Timing {
+
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+
+  /*
+   * @desc      calculate difference between p_T1 and p_T2 (in milliseconds)
+   * @param     p_T1
+   * @param     p_T2
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SubFrameTiming_Duration(SubFrameTiming_Type p_T1,
+                                     SubFrameTiming_Type p_T2) return integer
+  {
+    var integer v_MillisecondsT1;
+    var integer v_MillisecondsT2;
+    var integer v_SubframeNumberT1 := 0;
+    var integer v_SubframeNumberT2 := 0;
+    var integer v_MaxValue := 10240 * 1024;   // SFN is 0..1023 in steps of 10ms; @sic R5s170235 change 1: HSFN sic@
+    var integer v_Duration;
+
+    if (ischosen(p_T1.Subframe.Number) and
+        ischosen(p_T2.Subframe.Number)) {
+      v_SubframeNumberT1 := p_T1.Subframe.Number;
+      v_SubframeNumberT2 := p_T2.Subframe.Number;
+    }
+    v_MillisecondsT1 := (p_T1.HSFN.Number * 10240) + (p_T1.SFN.Number * 10) + v_SubframeNumberT1; // @sic R5s170235 change 1: HSFN sic@
+    v_MillisecondsT2 := (p_T2.HSFN.Number * 10240) + (p_T2.SFN.Number * 10) + v_SubframeNumberT2; // @sic R5s170235 change 1, R5s170451: HSFN sic@
+
+    v_Duration := (v_MaxValue + v_MillisecondsT2 - v_MillisecondsT1) mod v_MaxValue;  // calculation considers wrap-around
+
+    return v_Duration;
+  }
+
+  /*
+   * @desc      To calculate the timestamp which is p_MilliSeconds after the given timestamp
+   *            If this function is used to calculate timestamps for DL scheduling of data or
+   *            UL grants the subframe number incoming must be a valid one for the intended purpose.
+   * @param     p_TimingInfo
+   * @param     p_MilliSeconds
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SubFrameTiming_AddMilliSeconds(SubFrameTiming_Type p_TimingInfo,
+                                            UInt_Type p_MilliSeconds) return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_TimingInfo;
+    var UInt_Type v_Subframes;
+
+    if (not (ischosen(p_TimingInfo.Subframe.Number) and ischosen(p_TimingInfo.SFN.Number) and ischosen(p_TimingInfo.HSFN.Number))) {
+      FatalError(__FILE__, __LINE__, "Invalid SubFrameTiming");
+    }
+    v_Subframes := p_TimingInfo.Subframe.Number + p_MilliSeconds;
+    v_TimingInfo.Subframe.Number := v_Subframes mod 10;
+    v_TimingInfo.SFN.Number := (p_TimingInfo.SFN.Number + (v_Subframes / 10)) mod 1024;
+    v_TimingInfo.HSFN.Number := (p_TimingInfo.HSFN.Number + ((p_TimingInfo.SFN.Number + (v_Subframes / 10)) / 1024)) mod 1024; // @sic R5w160204r1 sic@
+    v_TimingInfo.Slot := p_TimingInfo.Slot;   /* @sic R5s180411 sic@ */
+    v_TimingInfo.Symbol := p_TimingInfo.Symbol;   /* @sic R5w220211 sic@ */
+    
+    return v_TimingInfo;
+  }
+
+  /*
+   * @desc      calculates next start of a cycle with (10 * SFN + subframe number) mod CycleLength = CycleOffset
+   * @param     p_SubFrameTiming
+   * @param     p_CycleLength
+   * @param     p_CycleOffset
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_SubFrameTiming_CalculateCycleStartTime(SubFrameTiming_Type p_SubFrameTiming,
+                                                    UInt_Type p_CycleLength,
+                                                    UInt_Type p_CycleOffset) return SubFrameTiming_Type
+  { /* @sic R5s170484 Change 3: if 10240 is not multiple of the p_CycleLength we need to explicitly handle a wrap-around (needed e.g. for DRX cycle of 4096 as for NBIOT) sic@ */
+       
+    var SubFrameTiming_Type v_SubFrameTiming := p_SubFrameTiming;
+    var UInt_Type v_Subframes;
+
+    v_Subframes := (p_SubFrameTiming.SFN.Number * 10) + p_SubFrameTiming.Subframe.Number;
+    v_Subframes := ((v_Subframes - p_CycleOffset + p_CycleLength - 1) / p_CycleLength) * p_CycleLength + p_CycleOffset; // @sic R5s110219 change 4 sic@
+
+    if (v_Subframes < 10240) { /* @sic R5s170484 Change 3: no wrap-around; no change of HSFN.Number  sic@
+                                  NOTE: for 10240 being multiple of the p_CycleLength calculation as below would result in the same even in case of wrap around */
+      v_SubFrameTiming.SFN.Number := (v_Subframes / 10) mod 1024;
+      v_SubFrameTiming.Subframe.Number := v_Subframes mod 10;
+    }
+    else {                     /* @sic R5s170484 Change 3: wrap-around: use first cycle of next hyper frame sic@ */
+      v_SubFrameTiming.HSFN.Number := (v_SubFrameTiming.HSFN.Number + 1) mod 1024;
+      v_SubFrameTiming.SFN.Number := p_CycleOffset / 10;
+      v_SubFrameTiming.Subframe.Number := p_CycleOffset mod 10;
+    }
+    return v_SubFrameTiming;
+  }
+
+  const integer tsc_TimeUnitsPerFrame_Ts := 307200;                         /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_TimeUnitsPerFrame_Tc := tsc_TimeUnitsPerFrame_Ts * 64;  /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_TimeUnitsPerSubframe_Tc := tsc_TimeUnitsPerFrame_Tc / 10; /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_SymbolPerSlot := 14;    /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+                                               Normal cyclic prefix*/
+
+  /*
+   * @desc      Calculate number of system time units for given cell timing information based on the granularity of NR (being the smallest granularity, i.e. it can be used for NR and LTE)
+   * @param     p_CellTimingInfo
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SystemTimeUnits_ConvertFromCellTimingInfo(CellTimingInfo_Type p_CellTimingInfo) return integer
+  {
+    var integer v_SystemTimeUnits;
+    
+    v_SystemTimeUnits := (p_CellTimingInfo.SfnOffset + (1024 * p_CellTimingInfo.HsfnOffset)) * tsc_TimeUnitsPerFrame_Tc;
+    v_SystemTimeUnits := v_SystemTimeUnits + (p_CellTimingInfo.Tcell * 64);
+    if (ispresent(p_CellTimingInfo.TcOffset)) {    // NR only
+      v_SystemTimeUnits := v_SystemTimeUnits + p_CellTimingInfo.TcOffset;
+    }
+    return v_SystemTimeUnits;
+  }
+
+  /*
+   * @desc      Calculate number of system time units for given timing information based on the granularity of NR (being the smallest granularity, i.e. it can be used for NR and LTE)
+   * @param     p_SubFrameTiming
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SystemTimeUnits_ConvertFromSubFrameTiming(SubFrameTiming_Type p_SubFrameTiming) return integer
+  { //@sic R5w220211 sic@
+    var integer v_SystemTimeUnits;
+    var SlotOffset_Type v_SlotOffset;
+    var SymbolNumber_Type v_SymbolOffset := 0;  //@sic R5w220211 sic@
+
+    if (ischosen(p_SubFrameTiming.HSFN.Any) or ischosen(p_SubFrameTiming.SFN.Any) or ischosen(p_SubFrameTiming.Subframe.Any)) {  /* @sic R5s190424: p_SubFrameTiming.Slot.Any and p_SubFrameTiming.Symbol.Any is allowed for EUTRA/NBIOT sic@ */
+      FatalError(__FILE__, __LINE__, "cannot convert SubFrameTiming into SystemTimeUnits");
+    }
+    v_SystemTimeUnits := (p_SubFrameTiming.Subframe.Number + (10 * (p_SubFrameTiming.SFN.Number + (1024 * p_SubFrameTiming.HSFN.Number)))) * tsc_TimeUnitsPerSubframe_Tc;
+
+    if (ischosen(p_SubFrameTiming.Symbol.SymbolOffset)){   //@sic R5w220211 sic@
+        v_SymbolOffset :=  p_SubFrameTiming.Symbol.SymbolOffset;
+    }
+    if (ischosen(p_SubFrameTiming.Slot.SlotOffset)) {
+      // NOTE: if p_SubFrameTiming.Slot.FirstSlot or p_SubFrameTiming.Slot.SlotOffset.Numerology0 then no slot needs to be counted
+      v_SlotOffset := p_SubFrameTiming.Slot.SlotOffset;
+      select union (v_SlotOffset) {
+        case (Numerology1) { v_SystemTimeUnits := v_SystemTimeUnits + (v_SlotOffset.Numerology1 * (tsc_TimeUnitsPerSubframe_Tc / 2)) + ((v_SymbolOffset*(tsc_TimeUnitsPerSubframe_Tc / 2))/tsc_SymbolPerSlot); }
+        case (Numerology2) { v_SystemTimeUnits := v_SystemTimeUnits + (v_SlotOffset.Numerology2 * (tsc_TimeUnitsPerSubframe_Tc / 4)) + ((v_SymbolOffset*(tsc_TimeUnitsPerSubframe_Tc / 4))/tsc_SymbolPerSlot); }
+        case (Numerology3) { v_SystemTimeUnits := v_SystemTimeUnits + (v_SlotOffset.Numerology3 * (tsc_TimeUnitsPerSubframe_Tc / 8)) + ((v_SymbolOffset*(tsc_TimeUnitsPerSubframe_Tc / 8))/tsc_SymbolPerSlot); }
+        case (Numerology4) { v_SystemTimeUnits := v_SystemTimeUnits + (v_SlotOffset.Numerology4 * (tsc_TimeUnitsPerSubframe_Tc / 16)) + ((v_SymbolOffset*(tsc_TimeUnitsPerSubframe_Tc / 16))/tsc_SymbolPerSlot); }
+      }
+    }
+    return v_SystemTimeUnits;
+  }
+
+  /*
+   * @desc      Calculate timing info from given system time units (system time units Tc as defined for NR);
+   *            NOTE: the granularity of LTE (given by Ts) is just a subset of the granularity of NR => by doing the calculations based on Tc LTE and NR can be covered
+   * @param     p_SystemTimeUnits
+   * @param     p_SlotNumerology      ...  provides the numerology to be applied for NR
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SystemTimeUnits_ConvertToSubFrameTiming(integer p_SystemTimeUnits,
+                                                     SlotTimingInfo_Type p_SlotNumerology) return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_SubFrameTiming;
+    var integer v_SystemTimeUnits := p_SystemTimeUnits;
+    var integer v_HyperSFNs;
+    var integer v_SFNs;
+    var integer v_Subframes;
+    var integer v_Remainder;
+    
+    if (v_SystemTimeUnits < 0) {
+      v_SystemTimeUnits := v_SystemTimeUnits + (1024 * 1024 * tsc_TimeUnitsPerFrame_Tc);
+    }
+    v_Remainder := v_SystemTimeUnits mod tsc_TimeUnitsPerSubframe_Tc;
+    v_Subframes := v_SystemTimeUnits / tsc_TimeUnitsPerSubframe_Tc;
+
+    if (not ischosen(p_SlotNumerology.SlotOffset)) {
+      v_SubFrameTiming.Slot.FirstSlot := true;
+      v_Subframes := v_Subframes + ((v_Remainder + (tsc_TimeUnitsPerSubframe_Tc / 2)) / tsc_TimeUnitsPerSubframe_Tc);     /* v_Subframes rounded up or down; may not be needed but kept for backward compatibility */
+    } else {
+      select union (p_SlotNumerology.SlotOffset) {
+        case (Numerology0) { v_SubFrameTiming.Slot.SlotOffset.Numerology0 := true; }
+        case (Numerology1) { v_SubFrameTiming.Slot.SlotOffset.Numerology1 := v_Remainder mod (tsc_TimeUnitsPerSubframe_Tc / 2); }
+        case (Numerology2) { v_SubFrameTiming.Slot.SlotOffset.Numerology2 := v_Remainder mod (tsc_TimeUnitsPerSubframe_Tc / 4); }
+        case (Numerology3) { v_SubFrameTiming.Slot.SlotOffset.Numerology3 := v_Remainder mod (tsc_TimeUnitsPerSubframe_Tc / 8); }
+        case (Numerology4) { v_SubFrameTiming.Slot.SlotOffset.Numerology4 := v_Remainder mod (tsc_TimeUnitsPerSubframe_Tc / 16); }
+      }
+    }
+    v_SFNs := v_Subframes / 10;
+    v_HyperSFNs := v_SFNs / 1024;
+    v_SubFrameTiming.Subframe.Number := v_Subframes mod 10;
+    v_SubFrameTiming.SFN.Number := v_SFNs mod 1024;
+    v_SubFrameTiming.HSFN.Number := v_HyperSFNs mod 1024;
+    v_SubFrameTiming.Symbol := valueof(cs_SymbolTimingInfo_FirstSlot);   //@sic R5w220211 sic@
+    return v_SubFrameTiming;
+  }
+
+  /*
+   * @desc      Calculate timing info based on timing info of the given cell and the SFN offset and Tcell of the given cells
+   * @param     p_CellTimingInfo1
+   * @param     p_TimingInfo1
+   * @param     p_CellTimingInfo2
+   * @param     p_TargetSlotTimingInfo (default value: omit)
+   * @return    template
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_CellTimingInfo_TimingOtherCell(CellTimingInfo_Type p_CellTimingInfo1,
+                                            template (value) TimingInfo_Type p_TimingInfo1,
+                                            CellTimingInfo_Type p_CellTimingInfo2,
+                                            template (omit) SlotTimingInfo_Type p_TargetSlotTimingInfo := omit
+                                            ) return template (value) TimingInfo_Type
+  { /* NOTE: As illustrated in 36.523-3 figure 7.4.3.1-3 the timing offset between a cell is a delay compared to a reference cell0 with no timing offset
+       => to calculate the 'normalised' time of cell0 the timing offset of a cell needs to be added to the timing retrieved for this cell
+       @sic R5s180533: generic implementation using f_SystemTimeUnits_ConvertFromSubFrameTiming, f_SystemTimeUnits_ConvertFromCellTimingInfo and f_SystemTimeUnits_ConvertToSubFrameTiming sic@ */
+       //@sic R5s210079: added p_TargetSlotTimingInfo sic@ - to be used when the target cell has a different SCS than the source cell
+    var integer v_SystemTimeUnits;
+    var SubFrameTiming_Type v_SubFrameTiming;
+    var SlotTimingInfo_Type v_SlotTimingInfo;
+
+    if (f_TimingInfo_IsNow(p_TimingInfo1)) { //@sic R5s180633 sic@
+      return cs_TimingInfo_Now;
+    }
+
+    v_SubFrameTiming := valueof(p_TimingInfo1.SubFrame);
+    v_SystemTimeUnits := f_SystemTimeUnits_ConvertFromSubFrameTiming(v_SubFrameTiming)     // SystemTimeUnits for cell 1
+      + f_SystemTimeUnits_ConvertFromCellTimingInfo(p_CellTimingInfo1)                     // add SFN offset and TCell of cell 1 (=> normalised time) @sic R5s120289: offset needs to be added but not substracted sic@
+      - f_SystemTimeUnits_ConvertFromCellTimingInfo(p_CellTimingInfo2);                    // subtract SFN offset and TCell of cell 2                 @sic R5s120289: offset needs to be substracted but not added sic@
+    
+    if (isvalue(p_TargetSlotTimingInfo)) {
+        v_SlotTimingInfo := valueof(p_TargetSlotTimingInfo);
+    } else {
+        v_SlotTimingInfo := v_SubFrameTiming.Slot
+    }
+    v_SubFrameTiming := f_SystemTimeUnits_ConvertToSubFrameTiming(v_SystemTimeUnits, v_SlotTimingInfo);
+    return cs_TimingInfo_NR(v_SubFrameTiming);
+  }
+
+}

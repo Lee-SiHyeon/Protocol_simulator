@@ -1,0 +1,1082 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-07 18:09:08 +0200 (Sat, 07 Jun 2025) $
+// $Rev: 41335 $
+/******************************************************************************/
+
+module IP_PTC_Main {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from DHCPv4_Common all;
+  import from DNS_Functions all;
+  import from ICMPv6_Functions all;
+  import from IP_ASP_Common all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_CtrlMsgs all;
+  import from IP_PTC_HTTP_Handler all;
+  import from IP_PTC_IMS_Handler all;
+  import from IP_PTC_Routing all;
+  import from IP_PTC_TcpHandlerMsgs all;
+  import from IP_PTC_Templates all;
+  import from IP_PTC_UdpPacketHandlerMsgs all;
+  import from TCP_Functions all;
+  import from UDP_Functions all;
+
+  type enumerated IP_AddrServers_Start_Type { dnsServerOnly, allServers };      /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const PortNumber_Type  tsc_PortNumber_DNS_Server := 53;          /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const PortNumber_Type  tsc_PortNumber_DHCP_Server := 67;         /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const PortNumber_Type  tsc_PortNumber_ISAKMP := 500;             /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const PortNumber_Type  tsc_PortNumber_IPsecNAT_T := 4500;        /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const charstring tsc_INADDR_BROADCAST := "255.255.255.255";      /* broadcast address; used e.g. for DHCP
+                                                                      @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  const charstring tsc_INADDR_ANY := "0.0.0.0";                    /* used e.g. for DHCP
+                                                                      @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  type record IP_PTC_UdpHandlerInfo_Type { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    IP_Socket_Type         LocalSocket                             /* IP address and UDP port at the SS side: if LocalSocket.IpAddr and LocalSocket.Port are present,
+                                                                      then the IP_PTC shall receive UDP packets with the destination port and destination IP address matching LocalSocket */
+  };
+
+  template (value) IP_PTC_UdpHandlerInfo_Type cs_IP_PTC_UdpHandlerInfo_Init := { LocalSocket := cs_IP_Socket(omit, omit) }; /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  type record IP_PTC_TcpHandlerInfo_Type { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    IP_Socket_Type TcpServer optional,
+    IP_Connection_Type TcpConnection  optional
+  };
+
+  template (value) IP_PTC_TcpHandlerInfo_Type cs_IP_PTC_TcpHandlerInfo_Init := { omit, omit };  /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+
+  /*
+   * @desc      get AddrServerInfo for given IP address
+   *            NOTE: IP addresses for Address Servers of different PDNs (or WLAN) shall be different (see 36.523-3 cl. 4.2.4.6)
+   * @param     p_AddrServerArray
+   * @param     p_ServerAddrInfo
+   * @return    template (omit) AddrServerInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_AddrServerArray_GetAddrServer(IP_AddrServerArray_Type p_AddrServerArray,
+                                            IP_AddrInfo_Type p_ServerAddrInfo) return template (omit) AddrServerInfo_Type
+  { /* @sic R5-145754: new generic function sic@ */
+    var integer i;
+
+    for (i:=0; i < lengthof(p_AddrServerArray); i := i + 1) {
+      if (isvalue(p_AddrServerArray[i].ServerAddr)) {  // @sic R5s220841 change 4 sic@
+        if (f_IMS_IpAddrMatch(p_ServerAddrInfo, p_AddrServerArray[i].ServerAddr)) {
+          return p_AddrServerArray[i];
+        }
+      }
+    }
+    FatalError(__FILE__, __LINE__, "No address server found matching given server address");
+    return omit;
+  }
+
+  /*
+   * @desc      get AddrServerInfo for DNS server; in contrast to DHCP or ICMPv6 there might be a DNS server for WLAN too
+   * @param     p_ServerAddrInfo
+   * @return    template (omit) AddrServerInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_DNS_Server_Get(IP_AddrInfo_Type p_ServerAddrInfo) runs on IP_PTC return template (omit) AddrServerInfo_Type
+  {
+    var IP_AddrServerArray_Type v_WLAN_DNS_AddrServerArray := {};
+    var IP_AddrServerArray_Type v_PDN_DNS_AddrServerArray;
+    var IP_AddrServerArray_Type v_DNS_AddrServerArray;
+    var boolean v_IsIPv6 := ischosen(p_ServerAddrInfo.V6);
+
+    if (fl_WLAN_IsStarted()) {
+      if (v_IsIPv6) { v_WLAN_DNS_AddrServerArray := { vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv6 }; }
+      else          { v_WLAN_DNS_AddrServerArray := { vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv4 }; }
+    }
+    if (v_IsIPv6) { v_PDN_DNS_AddrServerArray := vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv6; }
+    else          { v_PDN_DNS_AddrServerArray := vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv4; }
+
+    v_DNS_AddrServerArray := v_WLAN_DNS_AddrServerArray & v_PDN_DNS_AddrServerArray;
+
+    return fl_AddrServerArray_GetAddrServer(v_DNS_AddrServerArray, p_ServerAddrInfo);
+  }
+
+  /*
+   * @desc      get DrbInfo for given IP address
+   * @param     p_AddrServerArray
+   * @param     p_ServerAddrInfo
+   * @return    template (omit) IP_DrbInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServer_GetDrbInfo(IP_AddrServerArray_Type p_AddrServerArray,
+                                       IP_AddrInfo_Type p_ServerAddrInfo) runs on IP_PTC return template (omit) IP_DrbInfo_Type
+  {
+    var template (omit) AddrServerInfo_Type v_AddrServerInfo := fl_AddrServerArray_GetAddrServer(p_AddrServerArray, p_ServerAddrInfo);
+    var template (omit) IP_DrbInfo_Type v_IP_DrbInfo := omit;
+
+    if (isvalue(v_AddrServerInfo.PdnIndex)) {
+      v_IP_DrbInfo := f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(valueof(v_AddrServerInfo.PdnIndex));  /* @sic R5s150648 Change 4 sic@ */
+    }
+    return v_IP_DrbInfo;
+  }
+
+  /*
+   * @desc      send trigger to GERAN PTC to control sending of DL data
+   * @param     p_DrbInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServer_SendTriggerToGeran(template (omit) IP_DrbInfo_Type p_DrbInfo) runs on IP_PTC
+  {
+    if (ischosen(p_DrbInfo.Geran)) {
+      GERAN_CTRL.send(cs_IP_GeranTrigger(valueof(p_DrbInfo)));
+      GERAN_CTRL.receive(cr_IP_CtrlAnyReq);   // block until getting confirmation
+    }
+  }
+
+  /*
+   * @desc      Check whether an address is a IPv4 broadcast address
+   * @param     p_IPv4Addr
+   * @return    boolean     ..  true if the address is a broadcast address
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IPv4AddrIsBroadcast(charstring p_IPv4Addr) return boolean
+  {
+    return (p_IPv4Addr == tsc_INADDR_BROADCAST);
+  }
+
+  /*
+   * @desc      Check whether an address is a IPv4 any address
+   * @param     p_IPv4Addr
+   * @return    boolean     ..  true if the address is a any address
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IPv4AddrIsAny(charstring p_IPv4Addr) return boolean
+  {
+    return (p_IPv4Addr == tsc_INADDR_ANY);
+  }
+
+  template (value) AddrServerInfo_Type cs_IP_AddrServer_Init(template (omit) charstring p_ServerAddr := omit,
+                                                             template (omit) charstring p_ClientAddr := omit,
+                                                             template (omit) PDN_Index_Type p_PdnIndex := omit) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    ServerAddr := p_ServerAddr,
+    ClientAddr := p_ClientAddr,
+    PdnIndex :=  p_PdnIndex              /* @sic R5-145754  sic@ */
+  };
+
+  template (value) IP_PTC_WLAN_Info_Type cs_IP_PTC_WLAN_Info_Init :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    DNS_UdpServerIPv4 := cs_IP_AddrServer_Init,
+    DNS_UdpServerIPv6 := cs_IP_AddrServer_Init,
+    AddressInfo := omit,
+    DrbInfo := omit,
+    ExplicitDnsHandling := false      /* @sic R5-169075 (test case 20.1) sic@ */
+  };
+
+  /*
+   * @desc      initialisation of the IP PTC and all servers
+   * @param     p_MUSIM
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_PTC_Init(boolean p_MUSIM) runs on IP_PTC
+  {
+    var integer i;
+
+    vc_IP_PTC_MuSimConfiguration := p_MUSIM;
+
+    vc_IP_PTC_DRB_RoutingInfo := {
+      Table := {},
+      RawMode := false
+    };
+    vc_IP_PTC_WLAN_Info := valueof(cs_IP_PTC_WLAN_Info_Init);   /* @sic R5w160107 slide 7 sic@ */
+
+    for (i:=0; i < tsc_NoOfPDNs; i:=i+1) {                      /* initialise address servers and default DRBs */
+      vc_IP_PTC_PDN_AddrServer.DHCP[i]        := valueof(cs_IP_AddrServer_Init);
+      vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv4[i] := valueof(cs_IP_AddrServer_Init);
+      vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv6[i] := valueof(cs_IP_AddrServer_Init);
+      vc_IP_PTC_PDN_AddrServer.ICMPv6[i]      := valueof(cs_IP_AddrServer_Init);
+      vc_IP_PTC_PDN_MappingTable[i].DefaultDrb := omit;         /* @sic R5s150648 Change 2.1 sic@ */
+    }
+    for (i:=0; i < tsc_NoOfIMSPDNs; i:=i+1) {                   /* initialise IMS servers @sic R5s201177: tsc_NoOfIMSPDNs sic@ */
+      vc_IP_PTC_IMS_Info.Server[i]            := valueof(cs_IMS_Server_Init);
+    }
+  }
+
+  /*
+   * @desc      check whether server is running
+   * @param     p_ServerInfo
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServer_IsRunning(AddrServerInfo_Type p_ServerInfo) return boolean
+  {
+    return isvalue(p_ServerInfo.PdnIndex);  /* @sic R5s150648 Change 4 sic@ */
+  }
+
+  /*
+   * @desc      search in given array for server with DrbInfo matching to the given DrbInfo
+   * @param     p_ServerArray
+   * @param     p_DrbInfo
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServer_Find(IP_AddrServerArray_Type p_ServerArray,
+                                 template (omit) IP_DrbInfo_Type p_DrbInfo) runs on IP_PTC return integer
+  {
+    var IP_DrbInfo_Type v_DrbInfoPdn;
+    var IP_DrbInfo_Type v_DrbInfo;
+    var integer i;
+
+    if (isvalue(p_DrbInfo)) {
+      v_DrbInfo := valueof(p_DrbInfo);
+
+      for (i:=0; i < lengthof(p_ServerArray); i:=i+1) {
+        if (fl_IP_AddrServer_IsRunning(p_ServerArray[i])) {
+          v_DrbInfoPdn := valueof(f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(p_ServerArray[i].PdnIndex)); /* @sic R5s211657 - Additional change: valueof (the PDN can be considered as started when the Address server is runnning  sic@ */
+          if (f_IP_DrbInfo_DrbIdMatch(v_DrbInfoPdn, v_DrbInfo)) {    /* @sic R5s150648 Change 4 sic@ */
+            return i;
+          }
+        }
+      }
+    }
+    FatalError(__FILE__, __LINE__, "No Server found for given DRB");
+    return -1;
+  }
+
+  /*
+   * @desc      stop UDP server for DHCP or DNS
+   * @param     p_UdpServer
+   * @param     p_ServerPort
+   * @return    AddrServerInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_UdpServer_Stop(AddrServerInfo_Type p_UdpServer,
+                                integer p_ServerPort) runs on IP_PTC return AddrServerInfo_Type
+  {
+    var charstring v_ServerAddr;
+    var template (value) IP_AddrInfo_Type v_IP_AddrInfo;
+
+    if (fl_IP_AddrServer_IsRunning(p_UdpServer)) {      /* @sic R5s160948: initialisation of v_ServerAddr and v_IP_AddrInfo moved into if statement block sic@ */
+      v_ServerAddr := p_UdpServer.ServerAddr;
+      v_IP_AddrInfo := f_Char2IpAddress(v_ServerAddr);  /* @sic R5s141324: IPv4 or IPv6 address sic@ */
+      f_UdpServer_Stop(v_IP_AddrInfo, p_ServerPort);
+    }
+    return valueof(cs_IP_AddrServer_Init);
+  }
+
+  /*
+   * @desc      start UDP server for DHCP or DNS
+   * @param     p_ServerAddr
+   * @param     p_ClientAddr
+   * @param     p_ServerPort
+   * @param     p_DrbInfo
+   * @param     p_PdnIndex
+   * @return    AddrServerInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_UdpServer_Start(charstring p_ServerAddr,
+                                 template (omit) charstring p_ClientAddr,
+                                 integer p_ServerPort,
+                                 IP_DrbInfo_Type p_DrbInfo,
+                                 template (omit) PDN_Index_Type p_PdnIndex) runs on IP_PTC return AddrServerInfo_Type
+  {
+    var template (value) IP_AddrInfo_Type v_IP_AddrInfo := f_Char2IpAddress(p_ServerAddr);  /* @sic R5s141324: IPv4 or IPv6 address sic@ */
+
+    f_UdpServer_Start(v_IP_AddrInfo, p_ServerPort, p_DrbInfo);
+    return valueof(cs_IP_AddrServer_Init(p_ServerAddr, p_ClientAddr, p_PdnIndex));
+  }
+
+  /*
+   * @desc      stop servers (ICMPv6 or DHCP) for a given PDN
+   * @param     p_Index
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServers_Stop(integer p_Index) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+
+    var charstring v_ServerAddr;
+
+    vc_IP_PTC_PDN_AddrServer.DHCP[p_Index] := fl_IP_UdpServer_Stop(vc_IP_PTC_PDN_AddrServer.DHCP[p_Index], tsc_PortNumber_DHCP_Server);               // @sic R5-145754  sic@
+    vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv4[p_Index] := fl_IP_UdpServer_Stop(vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv4[p_Index], tsc_PortNumber_DNS_Server);  // @sic R5-145754  sic@
+    vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv6[p_Index] := fl_IP_UdpServer_Stop(vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv6[p_Index], tsc_PortNumber_DNS_Server);  // @sic R5-145754  sic@
+
+    if (fl_IP_AddrServer_IsRunning(vc_IP_PTC_PDN_AddrServer.ICMPv6[p_Index])) {
+
+      v_ServerAddr := vc_IP_PTC_PDN_AddrServer.ICMPv6[p_Index].ServerAddr;
+      fl_Icmpv6Server_Stop(cs_IPv6Addr(v_ServerAddr));
+
+      v_ServerAddr := f_IPv6AddrGetLinkLocalAddr(v_ServerAddr);
+      fl_Icmpv6Server_Stop(cs_IPv6Addr(v_ServerAddr));   // @sic R5s110603 change 3 sic@
+
+      vc_IP_PTC_PDN_AddrServer.ICMPv6[p_Index] := valueof(cs_IP_AddrServer_Init);
+    }
+  }
+
+  /*
+   * @desc      start servers (ICMPv6 or DHCP) for a given PDN
+   * @param     p_PdnIndex
+   * @param     p_DrbInfo      .. "interface id" for the PDN
+   * @param     p_ServersToBeStarted (default value: allServers)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_AddrServers_Start(PDN_Index_Type p_PdnIndex,
+                                   IP_DrbInfo_Type p_DrbInfo,
+                                   IP_AddrServers_Start_Type p_ServersToBeStarted := allServers) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+    /* @sic R5s130362 - MCC160 Implementation: tsc_PDN_AddressInfo sic@ */
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+    var charstring v_ServerIpAddrv4 := v_PDN_AddressInfo.DHCP_ServerAddress;
+    var charstring v_ServerIpAddrv6 := v_PDN_AddressInfo.ICMPv6_ServerAddress;
+    var charstring v_ClientIpAddrv4 := v_PDN_AddressInfo.UE_IPAddressIPv4;
+    var charstring v_ClientIpAddrv6 := v_PDN_AddressInfo.UE_IPAddressIPv6;
+    var integer v_Index := f_PDN_PdnIndex2Integer(p_PdnIndex);
+
+    fl_IP_AddrServers_Stop(v_Index);    // stop server if any running
+    
+    // DNS
+    vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv4[v_Index] := fl_IP_UdpServer_Start(v_ServerIpAddrv4, omit, tsc_PortNumber_DNS_Server, p_DrbInfo, p_PdnIndex);         // @sic R5-145754  sic@
+    vc_IP_PTC_PDN_AddrServer.DNS_UdpIPv6[v_Index] := fl_IP_UdpServer_Start(v_ServerIpAddrv6, omit, tsc_PortNumber_DNS_Server, p_DrbInfo, p_PdnIndex);         // @sic R5-145754  sic@
+
+    if (p_ServersToBeStarted == allServers) {
+      // DHCP
+      vc_IP_PTC_PDN_AddrServer.DHCP[v_Index] := fl_IP_UdpServer_Start(v_ServerIpAddrv4, v_ClientIpAddrv4, tsc_PortNumber_DHCP_Server, p_DrbInfo, p_PdnIndex);   // @sic R5-145754  sic@
+      
+      // ICMPv6
+      vc_IP_PTC_PDN_AddrServer.ICMPv6[v_Index] := valueof(cs_IP_AddrServer_Init(v_ServerIpAddrv6, v_ClientIpAddrv6, p_PdnIndex));
+      
+      fl_Icmpv6Server_Start(cs_IPv6Addr(v_ServerIpAddrv6), p_DrbInfo);
+      fl_Icmpv6Server_Start(cs_IPv6Addr(f_IPv6AddrGetLinkLocalAddr(v_ServerIpAddrv6)), p_DrbInfo);
+    }
+  }
+
+  /*
+   * @desc      Wrapper to start IMS
+   * @param     p_PdnIndex
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_ImsServer_Start(PDN_Index_Type p_PdnIndex) runs on IP_PTC
+  { /* Multiple PDNs
+     * In case of multiple PDNs (e.g. for emergency calls) there can be
+     * 1) multiple P-CSCFs i.e. one for each PDN; this is typically the case for roaming scenarios when the normal IMS registration is done at the P-CSCF in th home PLMN
+     *    whereas the emergency registration is done in the visited PLMN
+     * 2) one P-CSCF for (both) PDNs, e.g. when visited PLMN is the home PLMN
+     *
+     * Assumption:
+     *   even in case of one P-CSCF for (both) PDNs there shall be different P-CSCF IP addresse i.e. the P-CSCF shall have a different IP address for each PDN.
+     *   (in case of IPv6 as working assumption the P-CSCF and all other entities belonging to the PDN shall have the same network prefix and the network prefix for different PDNs shall be different;
+     *   see TS 36.523-3 cl. 4.2.4.6)
+     * => There can be different UDP servers for the PDNs and the routing table can be configured with IP address and port of the network side only
+     *    (Note: if the P-CSCF would have only one IP address for two PDNs in DL the routing can only be determined based on the destination address
+     *    i.e. the UE's addresses need to be considered when starting the UDP server - what is weird from socket programming point of view) */
+    /* @sic R5s130362 - MCC160 Implementation: tsc_PDN_AddressInfo sic@ */
+    /* @sic R5s150648 Change 3: p_DrbInfo removed sic@ */
+    var integer v_IndexVal := f_PDN_PdnIndex2ImsIndex(p_PdnIndex);    // @sic R5s201177: f_PDN_PdnIndex2ImsIndex instead of f_PDN_PdnIndex2Integer sic@
+    var IMS_Server_Type v_ImsServer := vc_IP_PTC_IMS_Info.Server[v_IndexVal];
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+
+    v_ImsServer := f_IP_IMS_Stop(v_ImsServer);                        // @sic R5s120065 MCC160 Implementation; R5s150118 sic@
+
+    vc_IP_PTC_IMS_Info.Server[v_IndexVal] := f_IP_IMS_Start(v_ImsServer,
+                                                            v_PDN_AddressInfo.PCSCF_IPAddressIPv4,
+                                                            v_PDN_AddressInfo.PCSCF_IPAddressIPv6,
+                                                            p_PdnIndex);
+  }
+
+  /*
+   * @desc      start IP handling for WLAN
+   * @param     p_AddressInfo
+   * @param     p_DrbInfo
+   * @param     p_ExplicitDnsHandling
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_WLAN_Start(WLAN_AddressInfo_Type p_AddressInfo,
+                         IP_DrbInfo_Type p_DrbInfo,
+                         boolean p_ExplicitDnsHandling) runs on IP_PTC
+  {
+    var template (omit) charstring v_ClientAddr := omit;
+    var template (omit) PDN_Index_Type v_PdnIndex := omit;
+    var template (value) IP_AddrInfo_Type v_EPDG_AddrInfo_v4 := cs_IPv4Addr(p_AddressInfo.EPDG_ServerAddressIPv4);
+    var template (value) IP_AddrInfo_Type v_EPDG_AddrInfo_v6 := cs_IPv6Addr(p_AddressInfo.EPDG_ServerAddressIPv6);
+
+    vc_IP_PTC_WLAN_Info.AddressInfo := p_AddressInfo;
+    vc_IP_PTC_WLAN_Info.DrbInfo := p_DrbInfo;
+    vc_IP_PTC_WLAN_Info.ExplicitDnsHandling := p_ExplicitDnsHandling;  /* @sic R5-169075 (test case 20.1) sic@ */
+
+    vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv4 := fl_IP_UdpServer_Start(p_AddressInfo.DNS_ServerAddressIPv4, v_ClientAddr, tsc_PortNumber_DNS_Server, p_DrbInfo, v_PdnIndex);
+    vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv6 := fl_IP_UdpServer_Start(p_AddressInfo.DNS_ServerAddressIPv6, v_ClientAddr, tsc_PortNumber_DNS_Server, p_DrbInfo, v_PdnIndex);
+
+    f_IP_PTC_RoutingTable_AddEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v4, tsc_PortNumber_ISAKMP)), p_DrbInfo, IPsecTunnel);
+    f_IP_PTC_RoutingTable_AddEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v6, tsc_PortNumber_ISAKMP)), p_DrbInfo, IPsecTunnel);
+    f_IP_PTC_RoutingTable_AddEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v4, tsc_PortNumber_IPsecNAT_T)), p_DrbInfo, IPsecTunnel);
+    f_IP_PTC_RoutingTable_AddEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v6, tsc_PortNumber_IPsecNAT_T)), p_DrbInfo, IPsecTunnel);
+  }
+
+  /*
+   * @desc      stop IP handling for WLAN
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_WLAN_Stop() runs on IP_PTC
+  {
+    var template (value) IP_AddrInfo_Type v_EPDG_AddrInfo_v4 := cs_IPv4Addr(vc_IP_PTC_WLAN_Info.AddressInfo.EPDG_ServerAddressIPv4);
+    var template (value) IP_AddrInfo_Type v_EPDG_AddrInfo_v6 := cs_IPv6Addr(vc_IP_PTC_WLAN_Info.AddressInfo.EPDG_ServerAddressIPv6);
+
+    vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv4 := fl_IP_UdpServer_Stop(vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv4, tsc_PortNumber_DNS_Server);
+    vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv6 := fl_IP_UdpServer_Stop(vc_IP_PTC_WLAN_Info.DNS_UdpServerIPv6, tsc_PortNumber_DNS_Server);
+
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v4, tsc_PortNumber_ISAKMP)));
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v6, tsc_PortNumber_ISAKMP)));
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v4, tsc_PortNumber_IPsecNAT_T)));
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_IP_ConnectionId(udp, cs_IP_Socket(v_EPDG_AddrInfo_v6, tsc_PortNumber_IPsecNAT_T)));
+    
+    vc_IP_PTC_WLAN_Info := valueof(cs_IP_PTC_WLAN_Info_Init);
+  }
+
+  /*
+   * @desc      wrapper: return true in case of WLAN being started
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_WLAN_IsStarted() runs on IP_PTC return boolean
+  {
+    return isvalue(vc_IP_PTC_WLAN_Info.AddressInfo);
+  }
+
+  /*
+   * @desc      get WLAN's DRB info
+   * @return    IP_DrbInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_WLAN_DrbInfo_Get() runs on IP_PTC return IP_DrbInfo_Type
+  {
+    return vc_IP_PTC_WLAN_Info.DrbInfo;
+  }
+
+  /*
+   * @desc      start a ICMPv6 socket by binding its address to the given socket
+   *            Note: there is no default behaviour activated for the IP_PTC
+   *                  => waiting for the SA's response is blocking (what helps to avoid unexpected behaviour)
+   * @param     p_LocalIpAddr
+   * @param     p_AllowBroadcast
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_ICMPv6_Bind(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                          boolean p_AllowBroadcast) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+    /* @sic R5s221255: use of a_IP_PTC_ReceiveCNF_NonBlocking sic@ */
+
+    f_IP_PTC_SendREQ_ReceiveCNF_NonBlocking(cs_ICMPv6_SOCKET_REQ(cs_IP_Socket(p_LocalIpAddr, omit), p_AllowBroadcast),  // LocalPort=omit -> ICMP does not have a port number
+                                            cr_ICMPv6_SOCKET_CNF(cr_IP_Socket(p_LocalIpAddr, omit)));                   // LocalPort=omit -> ICMP does not have a port number
+  }
+
+  /*
+   * @desc      Just close a ICMPv6 socket;
+   *            Note: there is no confirmation needed to close a ICMPv6 server
+   * @param     p_LocalSocket
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_ICMPv6_Close(template (value) IP_Socket_Type p_LocalSocket) runs on IP_PTC
+  {
+    IP_SOCK_CTRL.send(cs_ICMPv6_CLOSE_REQ(p_LocalSocket));
+  }
+
+  /*
+   * @desc      start a ICMPv6 socket by binding its address to the given socket;
+   *            the routing table is updated acc.
+   * @param     p_LocalIpAddr
+   * @param     p_DrbInfo
+   * @param     p_AllowBroadcast    (default value: true)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_Icmpv6Server_Start(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                                 IP_DrbInfo_Type p_DrbInfo,
+                                 boolean p_AllowBroadcast := true) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, omit);
+
+    // Bind ICMPv6 socket
+    fl_ICMPv6_Bind(p_LocalIpAddr, p_AllowBroadcast);
+
+    // Modify routing table
+    f_IP_PTC_RoutingTable_AddEntry(cs_ICMPv6_ConnectionId(v_LocalSocket), p_DrbInfo);
+  }
+
+  /*
+   * @desc      common function to close a ICMPv6 socket acting as ICMPv6 server;
+   *            the routing table is updated acc.
+   * @param     p_LocalIpAddr
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_Icmpv6Server_Stop(template (value) IP_AddrInfo_Type p_LocalIpAddr) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, omit);
+
+    // Close ICMPv6 socket
+    fl_ICMPv6_Close(v_LocalSocket);
+
+    // Modify routing table
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_ICMPv6_ConnectionId(v_LocalSocket));
+  }
+
+  /*
+   * @desc      handling of common UDP client
+   * @param     p_UdpHandlerInfo    (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_UdpPacketHandler(inout IP_PTC_UdpHandlerInfo_Type p_UdpHandlerInfo) runs on IP_PTC
+  {
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var IP_PTC_UdpPacketHandler_Request_Type v_UdpClientCommand;
+    var IP_Socket_Type v_LocalSocket;
+    var IP_Socket_Type v_ClientSocket;
+    var boolean v_PacketHandlerIsStarted := isvalue(p_UdpHandlerInfo.LocalSocket.IpAddr) and isvalue(p_UdpHandlerInfo.LocalSocket.Port);   /* @sic R5s201440: receiving of UDP packets sic@ */
+
+    [] UDPHANDLER.receive(cr_IP_PTC_UdpPacketHandler_Start) -> value v_UdpClientCommand
+      {
+        if (not v_PacketHandlerIsStarted) {
+          v_LocalSocket := v_UdpClientCommand.Start.LocalSocket;                                                            /* port may be omit ... */
+          v_ClientSocket := f_UdpClient_Start(v_LocalSocket.IpAddr, v_LocalSocket.Port, v_UdpClientCommand.Start.DrbInfo);  /* ... v_ClientSocket has port (now)
+                                                                                                                               NOTE: f_UdpClient_Start and f_UdpServer_Start are effectively the same */
+          p_UdpHandlerInfo.LocalSocket := v_ClientSocket;                                                                   /* @sic R5s201440: receiving of UDP packets sic@ */
+          if (not isvalue(v_LocalSocket.Port)) {                                                                            /* ephemeral port has been assigned and needs to be returned
+                                                                                                                               @sic R5s201440: receiving of UDP packets sic@ */
+            UDPHANDLER.send(cs_IP_PTC_UdpPacketHandler_StartResponse(v_ClientSocket));
+          }
+        }
+      }
+    [] UDPHANDLER.receive(cr_IP_PTC_UdpPacketHandler_DataRequest) -> value v_UdpClientCommand
+      {
+        if (not v_PacketHandlerIsStarted) {
+          FatalError(__FILE__, __LINE__, "UDP packet handler is not started yet");
+        }
+        IP_SOCK_DATA.send(cs_UDP_DATA_REQ(v_UdpClientCommand.Send.LocalSocket, v_UdpClientCommand.Send.RemoteSocket, v_UdpClientCommand.Send.Datagram));
+      }
+    [] UDPHANDLER.receive(cr_IP_PTC_UdpPacketHandler_Stop) -> value v_UdpClientCommand
+      {
+        v_LocalSocket := v_UdpClientCommand.Stop.LocalSocket;
+        f_UdpServer_Stop(v_LocalSocket.IpAddr, v_LocalSocket.Port);
+        p_UdpHandlerInfo := valueof(cs_IP_PTC_UdpHandlerInfo_Init);
+      }
+    [v_PacketHandlerIsStarted] IP_SOCK_DATA.receive(cr_UDP_DATA_IND(p_UdpHandlerInfo.LocalSocket)) -> value  v_IP_SOCKET_IND   /* @sic R5s201440: receiving of UDP packets sic@ */
+      {
+        UDPHANDLER.send(cs_IP_PTC_UdpPacketHandler_DataIndication(v_IP_SOCKET_IND.DATA.ConnectionId.Local,
+                                                                  v_IP_SOCKET_IND.DATA.ConnectionId.Remote,
+                                                                  v_IP_SOCKET_IND.DATA.Ind.UDP.RecvFrom.Buffer));
+      }
+  }
+
+  /*
+   * @desc      generic handling of TCP server and TCP connection (e.g. for MSRP; in general not used for SIP or HTTP)
+   * @param     p_TcpHandlerInfo    (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_GenericTcpHandler(inout IP_PTC_TcpHandlerInfo_Type p_TcpHandlerInfo) runs on IP_PTC
+  {
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var IP_PTC_TcpHandler_Request_Type v_Command;
+    var IP_Connection_Type v_NewConnectionByRef;          /* @sic R5s250228 change 2.1.8: no template (omit) anymore sic@ */
+    var TcpHandler_StartServer_Type v_StartServer;
+    var TcpHandler_StopServer_Type v_StopServer;
+    var TcpHandler_ConnectReq_Type v_ConnectReq;
+    var TcpHandler_CloseReq_Type v_CloseReq;
+    var TcpHandler_Data_Type v_DataReq;
+    var template (value) IP_PTC_TcpHandler_RespOrInd_Type v_Confirmation := cs_IP_PTC_TcpHandler_Cnf;
+    var boolean v_ServerIsStarted := isvalue(p_TcpHandlerInfo.TcpServer);
+    var boolean v_IsConnected := isvalue(p_TcpHandlerInfo.TcpConnection);
+
+    [] TCPHANDLER.receive(cr_IP_PTC_TcpHandler_Request) -> value v_Command
+      {
+        select union (v_Command.Request) {
+          case (StartServer) {
+            if (v_ServerIsStarted) {
+              FatalError(__FILE__, __LINE__, "TCP server is started already");          // NOTE: TCP handler support only a single server as long as there is no requirement otherwise
+            }
+            v_StartServer := v_Command.Request.StartServer;
+            f_TcpServer_Start(v_StartServer.Socket.IpAddr, v_StartServer.Socket.Port, v_StartServer.DrbInfo, v_StartServer.Application, v_StartServer.TLSConfig);
+            p_TcpHandlerInfo.TcpServer := v_StartServer.Socket;
+          }
+          case (StopServer) {
+            v_StopServer := v_Command.Request.StopServer;
+            if (not match(v_StopServer.Socket, p_TcpHandlerInfo.TcpServer)) {           // NOTE: in principle it is not needed to hand over and check the server's socket, but it will be needed, if more than one server shall be supported
+              FatalError(__FILE__, __LINE__, "TCP server not started or invalid socket");
+            }
+            f_TcpServer_Stop(v_StopServer.Socket.IpAddr, v_StopServer.Socket.Port);
+            p_TcpHandlerInfo.TcpServer := omit;
+          }
+          case (ConnectReq) {
+            if (v_ServerIsStarted) {
+              FatalError(__FILE__, __LINE__, "TCP handler acts as server already");     // NOTE: TCP handler support only a single connection as long as there is no requirement otherwise
+            }
+            if (v_IsConnected) {
+              FatalError(__FILE__, __LINE__, "There is a TCP connection already");      // NOTE: TCP handler support only a single connection as long as there is no requirement otherwise
+            }
+            v_ConnectReq := v_Command.Request.ConnectReq;
+            p_TcpHandlerInfo.TcpConnection := f_TcpClient_Connect(v_ConnectReq.LocalSocket, v_ConnectReq.RemoteSocket, v_ConnectReq.Application, v_ConnectReq.DrbInfo);
+            v_Confirmation.ConnectCnf := p_TcpHandlerInfo.TcpConnection;
+          }
+          case (CloseReq) {
+            v_CloseReq := v_Command.Request.CloseReq;
+            if (not match(v_CloseReq.Connection, p_TcpHandlerInfo.TcpConnection)) {     // NOTE: in principle it is not needed to hand over and check the connection, but it will be needed, if more than one connection shall be supported
+              FatalError(__FILE__, __LINE__, "invalid connection");
+            }
+            f_TcpClient_CloseConnection(p_TcpHandlerInfo.TcpConnection);
+            p_TcpHandlerInfo.TcpConnection := omit;
+          }
+          case (DataReq) {
+            v_DataReq := v_Command.Request.DataReq;
+            if (not match(v_DataReq.Connection, p_TcpHandlerInfo.TcpConnection)) {      // NOTE: in principle it is not needed to hand over and check the connection, but it will be needed, if more than one connection shall be supported
+              FatalError(__FILE__, __LINE__, "invalid connection");
+            }
+            IP_SOCK_DATA.send(cs_TCP_DATA_REQ(v_DataReq.Connection, v_DataReq.Data));
+          }
+        }
+        if (v_Command.CnfFlag) {
+          TCPHANDLER.send(v_Confirmation);
+        }
+      }
+    [v_ServerIsStarted] a_TcpServer_AcceptConnection(v_NewConnectionByRef, p_TcpHandlerInfo.TcpServer)
+      {
+        if (v_IsConnected) {
+          FatalError(__FILE__, __LINE__, "There is a TCP connection already");
+        }
+        p_TcpHandlerInfo.TcpConnection := v_NewConnectionByRef;
+        TCPHANDLER.send(cs_IP_PTC_TcpHandler_ConnectInd(p_TcpHandlerInfo.TcpConnection));
+      }
+    [v_IsConnected] a_TcpServer_CloseConnection(p_TcpHandlerInfo.TcpConnection)
+      {
+        TCPHANDLER.send(cs_IP_PTC_TcpHandler_CloseInd(p_TcpHandlerInfo.TcpConnection));
+        p_TcpHandlerInfo.TcpConnection := omit;
+      }
+    [v_IsConnected] IP_SOCK_DATA.receive(cr_TCP_DATA_IND(p_TcpHandlerInfo.TcpConnection)) -> value v_IP_SOCKET_IND
+      {
+        TCPHANDLER.send(cs_IP_PTC_TcpHandler_DataInd(p_TcpHandlerInfo.TcpConnection, v_IP_SOCKET_IND.DATA.Ind.TCP.Recv));
+      }
+  }
+
+  /*
+   * @desc      handling of DHCP messages sent by the UE
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_DHCP_Handler() runs on IP_PTC
+  {
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var IP_Socket_Type v_RemoteSocket;
+    var IP_Socket_Type v_LocalSocket;
+    var Datagram_UL_Type v_Datagram;
+    var octetstring v_RespData;
+    var charstring v_ServerIpAddr;
+    var charstring v_ClientIpAddr;
+    var integer v_PdnIndex;
+    var template (omit) IP_DrbInfo_Type v_DrbInfo := omit;
+
+    [] IP_SOCK_DATA.receive(cr_UDP_DATA_IND(cr_IP_Socket(?, tsc_PortNumber_DHCP_Server)))   /* allow any IP address to deal with broadcasts */
+      -> value  v_IP_SOCKET_IND
+      {
+        v_RemoteSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Remote;
+        v_LocalSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Local;
+        v_Datagram := v_IP_SOCKET_IND.DATA.Ind.UDP.RecvFrom;
+        v_ServerIpAddr := v_LocalSocket.IpAddr.V4.Addr;         /* causes runtime error if address is V6; => SS implementation error */
+        v_ClientIpAddr := v_RemoteSocket.IpAddr.V4.Addr;        /* causes runtime error if address is V6; => SS implementation error */
+
+        if (fl_IPv4AddrIsBroadcast(v_ServerIpAddr) or fl_IPv4AddrIsAny(v_ClientIpAddr)) {
+          /* Assumption:
+             we have either unicast addresses for src and dest or boadcast as dest and any address as source;
+             if this is not always the case in the future this semantics need to be enhanced */
+          v_DrbInfo := v_Datagram.DrbInfo;
+          v_PdnIndex := fl_IP_AddrServer_Find(vc_IP_PTC_PDN_AddrServer.DHCP, v_DrbInfo);
+          v_ServerIpAddr := vc_IP_PTC_PDN_AddrServer.DHCP[v_PdnIndex].ServerAddr;
+          v_ClientIpAddr := vc_IP_PTC_PDN_AddrServer.DHCP[v_PdnIndex].ClientAddr;
+
+          v_LocalSocket.IpAddr.V4.Addr  := v_ServerIpAddr;              // server address is source address
+          v_RemoteSocket.IpAddr.V4.Addr := tsc_INADDR_BROADCAST;        // send response as broadcast (dest address)
+        } else {
+          v_DrbInfo := fl_IP_AddrServer_GetDrbInfo(vc_IP_PTC_PDN_AddrServer.DHCP, v_LocalSocket.IpAddr);      // @sic R5-133612: trigger to GERAN sic@
+        }
+
+        v_RespData := f_DHCPv4_GetEncodedResponse(v_Datagram.Buffer, v_ClientIpAddr, v_ServerIpAddr);
+        if (lengthof(v_RespData) >  0) {
+          fl_IP_AddrServer_SendTriggerToGeran(v_DrbInfo);               // @sic R5-133612: trigger to GERAN sic@
+          IP_SOCK_DATA.send(cs_UDP_DATA_REQ(v_LocalSocket, v_RemoteSocket, v_RespData));
+        }
+      }
+  }
+
+  /*
+   * @desc      to build up address resolution table for 3GPP PDNs
+   *            NOTE: currently there is just one entry to match any domain name
+   * @param     p_PdnIndex
+   * @return    DNS_AddressResolutionTable_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_DNS_AddressResolutionTable_PDN(PDN_Index_Type p_PdnIndex) return DNS_AddressResolutionTable_Type
+  { /* @sic R5s160593: v_DNS_AddressResolutionTable is updated with the return value from f_DNS_AddressResolutionTable_Add sic@ */
+    /* @sic R5s170448: separate AddressResolutionTables for 3GPP PDNs and WLAN sic@ */
+    var template (value) DNS_AddressResolutionTable_Type v_DNS_AddressResolutionTable := {};
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+
+    // NOTE: if e.g. for MCX a more complex table is needed, it shall be a global variable which can be configured by a new coordination message
+
+    v_DNS_AddressResolutionTable := f_DNS_AddressResolutionTable_Add(v_DNS_AddressResolutionTable, cs_DNS_AddressResolution("*", v_PDN_AddressInfo.XCAP_ServerAddressIPv4, v_PDN_AddressInfo.XCAP_ServerAddressIPv6));
+    return valueof(v_DNS_AddressResolutionTable);
+  }
+
+  /*
+   * @desc      to build up address resolution table for WLAN
+   * @return    DNS_AddressResolutionTable_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_DNS_AddressResolutionTable_WLAN() runs on IP_PTC return DNS_AddressResolutionTable_Type
+  { /* @sic R5s170448: separate AddressResolutionTables for 3GPP PDNs and WLAN sic@ */
+    var template (value) DNS_AddressResolutionTable_Type v_DNS_AddressResolutionTable := {};
+    var charstring v_DomainNamePatternEPDG := "epdg.epc.mnc*.mcc*.pub.3gppnetwork.org";
+    var charstring v_DomainNamePatternEmergencyEPDG := "sos." & v_DomainNamePatternEPDG;
+    var WLAN_AddressInfo_Type v_WLAN_AddressInfo;
+
+    v_WLAN_AddressInfo := vc_IP_PTC_WLAN_Info.AddressInfo;
+    v_DNS_AddressResolutionTable := f_DNS_AddressResolutionTable_Add(v_DNS_AddressResolutionTable, cs_DNS_AddressResolution(v_DomainNamePatternEPDG,
+                                                                                                                            v_WLAN_AddressInfo.EPDG_ServerAddressIPv4,
+                                                                                                                            v_WLAN_AddressInfo.EPDG_ServerAddressIPv6));
+    v_DNS_AddressResolutionTable := f_DNS_AddressResolutionTable_Add(v_DNS_AddressResolutionTable, cs_DNS_AddressResolution(v_DomainNamePatternEmergencyEPDG,
+                                                                                                                            v_WLAN_AddressInfo.EmergencyEPDG_ServerAddressIPv4,
+                                                                                                                            v_WLAN_AddressInfo.EmergencyEPDG_ServerAddressIPv6));
+    v_DNS_AddressResolutionTable := f_DNS_AddressResolutionTable_Add(v_DNS_AddressResolutionTable, cs_DNS_AddressResolution("*",
+                                                                                                                            v_WLAN_AddressInfo.Non3GPP_XCAP_ServerAddressIPv4,
+                                                                                                                            v_WLAN_AddressInfo.Non3GPP_XCAP_ServerAddressIPv6));
+    return valueof(v_DNS_AddressResolutionTable);
+  }
+
+  /*
+   * @desc      DNS server
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_DNS_Handler() runs on IP_PTC
+  { /* NOTE: handling of DNS is supported for UDP only */
+    /* @sic R5-145754: support of DNS sic@ */
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var IP_Socket_Type v_RemoteSocket;
+    var IP_Socket_Type v_LocalSocket;
+    var Datagram_UL_Type v_Datagram;
+    var IP_ConfigReq_Type v_IP_ConfigReq;
+    var octetstring v_RespData;
+    var AddrServerInfo_Type v_AddrServerInfo;
+    var template (omit) IP_DrbInfo_Type v_DrbInfo;
+    var PDN_Index_Type v_PdnIndex;
+    var DNS_AddressResolutionTable_Type v_DNS_AddressResolutionTable;
+    var boolean v_ExplicitDnsHandling := false;
+
+    [] IP_SOCK_DATA.receive(cr_UDP_DATA_IND(cr_IP_Socket(?, tsc_PortNumber_DNS_Server)))
+      -> value  v_IP_SOCKET_IND
+      {
+        v_RemoteSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Remote;
+        v_LocalSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Local;
+        v_Datagram := v_IP_SOCKET_IND.DATA.Ind.UDP.RecvFrom;
+
+        v_AddrServerInfo := valueof(fl_IP_DNS_Server_Get(v_LocalSocket.IpAddr));    /* @sic R5s170448: WLAN sic@ */
+        if (isvalue(v_AddrServerInfo.PdnIndex)) {     /* => DNS server belongs to 3GPP PDN */
+          v_PdnIndex := v_AddrServerInfo.PdnIndex;
+          v_DrbInfo := f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(v_PdnIndex); /* @sic R5s150648 Change 4 sic@ */
+          v_DNS_AddressResolutionTable := fl_DNS_AddressResolutionTable_PDN(v_PdnIndex);
+        } else {                                      /* => DNS server belongs to WLAN (non-3GPP); @sic R5s170448 sic@  */
+          v_DrbInfo := fl_WLAN_DrbInfo_Get();
+          v_DNS_AddressResolutionTable := fl_DNS_AddressResolutionTable_WLAN();
+          if (vc_IP_PTC_WLAN_Info.ExplicitDnsHandling) {  /* @sic R5-169075 (test case 20.1) sic@ */
+            WLAN_CTRL.send(cs_IP_DnsQuery(v_Datagram.Buffer));
+            WLAN_CTRL.receive(cr_IP_DnsResponse) -> value v_IP_ConfigReq;
+            v_RespData := v_IP_ConfigReq.DnsResponse;
+            v_ExplicitDnsHandling := true;
+          }
+        }
+        if (not v_ExplicitDnsHandling) {                 /* @sic R5-169075 (test case 20.1) sic@ */
+          v_RespData := f_DNS_GetEncodedResponse(v_Datagram.Buffer, v_DNS_AddressResolutionTable);
+        }
+        if (lengthof(v_RespData) >  0) {
+          fl_IP_AddrServer_SendTriggerToGeran(v_DrbInfo);               // @sic R5-133612: trigger to GERAN sic@
+          IP_SOCK_DATA.send(cs_UDP_DATA_REQ(v_LocalSocket, v_RemoteSocket, v_RespData));
+        }
+      }
+  }
+
+  /*
+   * @desc      handling of ICMPv6 messages sent by the UE
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_ICMPv6_Handler() runs on IP_PTC
+  {
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var IP_Socket_Type v_RemoteSocket;
+    var IP_Socket_Type v_LocalSocket;
+    var Datagram_UL_Type v_Datagram;
+    var octetstring v_RespData;
+    var charstring v_ServerIpAddr;
+    var integer v_PdnIndex;
+    var charstring v_ClientIpAddr;
+    var template (omit) IP_DrbInfo_Type v_DrbInfo := omit;
+
+    [] IP_SOCK_DATA.receive(cr_ICMPv6_DATA_IND(cr_IP_Socket(?, omit)))   /* allow any IP address to deal with multicasts */
+      -> value  v_IP_SOCKET_IND
+      {
+        v_RemoteSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Remote;
+        v_LocalSocket := v_IP_SOCKET_IND.DATA.ConnectionId.Local;
+        v_Datagram := v_IP_SOCKET_IND.DATA.Ind.ICMP.RecvFrom;
+        v_ServerIpAddr := v_LocalSocket.IpAddr.V6.Addr;         /* causes runtime error if address is V4; => SS implementation error */
+        v_ClientIpAddr := v_RemoteSocket.IpAddr.V6.Addr;        /* causes runtime error if address is V4; => SS implementation error */
+
+        if (f_IPv6AddrIsMulticast(v_ServerIpAddr)) {            /* deal with multicast */
+          /* NOTE:
+             when the local link address (as assigned as interface identifier via NAS) for different PDNs is different
+             it would also be possible to search for the server by looking for the client's local link address;
+             but for simplification we use the DRB info as for DHCP */
+          v_DrbInfo := v_Datagram.DrbInfo;
+          v_PdnIndex := fl_IP_AddrServer_Find(vc_IP_PTC_PDN_AddrServer.ICMPv6, v_DrbInfo);
+          v_ServerIpAddr := vc_IP_PTC_PDN_AddrServer.ICMPv6[v_PdnIndex].ServerAddr;
+          v_ClientIpAddr := vc_IP_PTC_PDN_AddrServer.ICMPv6[v_PdnIndex].ClientAddr;
+          v_LocalSocket.IpAddr.V6.Addr  := f_IPv6AddrGetLinkLocalAddr(v_ServerIpAddr);  /* Assumption: response for a multicast needs to be sent with SRC address as local link address (as for ROUTER SOLICITATION)
+                                                                                            @sic R5s110449 change 4 sic@ */
+          if (v_RemoteSocket.IpAddr.V6.Addr == "0000:0000:0000:0000:0000:0000:0000:0000") { /* check for unspecified IPv6 in RemoteSocket: acc. to RFC 4291, section 2.5.2,
+                                                                                               the Unspecified Address must not be used as the destination address of IPv6 packets
+                                                                                               => needs to replaced in the response by unspecified all-nodes multicast address  @sic R5s130378 sic@ */
+            v_RemoteSocket.IpAddr.V6.Addr := "FF01:0000:0000:0000:0000:0000:0000:0001";
+          }
+        } else {
+          v_DrbInfo := fl_IP_AddrServer_GetDrbInfo(vc_IP_PTC_PDN_AddrServer.ICMPv6, v_LocalSocket.IpAddr); // @sic R5-133612: trigger to GERAN sic@
+        }
+
+        v_RespData := f_ICMPv6_GetEncodedResponse(v_Datagram.Buffer, v_ClientIpAddr);           /* NOTE: only the address prefix is used for encoding of the RouterAdvertisement */
+
+        if (lengthof(v_RespData) >  0) {
+          /* v_LocalSocket:
+             - same address as for the corresponding request if this has been unicast or
+             - link local address e.g. for router advertisement
+             v_ClientIpAddr:
+             - same address as for the corresponding request (note: in case of a router solicitation the source address is a link local) */
+
+          v_RespData := f_ICMPv6_UpdateCRCChecksum(v_LocalSocket.IpAddr.V6.Addr,
+                                                   v_RemoteSocket.IpAddr.V6.Addr, //@sic R5s110773 sic@
+                                                   v_RespData);
+          fl_IP_AddrServer_SendTriggerToGeran(v_DrbInfo); // @sic R5-133612: trigger to GERAN sic@
+          IP_SOCK_DATA.send(cs_ICMPv6_DATA_REQ(v_LocalSocket, v_RemoteSocket, v_RespData));
+        }
+      }
+  }
+
+  /*
+   * @desc      Send unsolicited ROUTER ADVERTISEMENT to the UE
+   * @param     p_PdnIndex
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_ICMPv6_SendRouterAdvertisement(PDN_Index_Type p_PdnIndex) runs on IP_PTC
+  {
+    var template (value) IP_Socket_Type v_RemoteSocket;
+    var template (value) IP_Socket_Type v_LocalSocket;
+    var charstring v_ServerIpAddr;
+    var charstring v_LinkLocalAddr;
+    var charstring v_MulticastAddr := "FF02::1";
+    var octetstring v_Data;
+    var integer v_Index := f_PDN_PdnIndex2Integer(p_PdnIndex);
+    var template (omit) IP_DrbInfo_Type v_DrbInfo;
+    var AddrServerInfo_Type v_AddrServerInfo;
+
+    if (fl_IP_AddrServer_IsRunning(vc_IP_PTC_PDN_AddrServer.ICMPv6[v_Index])) {
+      v_AddrServerInfo := vc_IP_PTC_PDN_AddrServer.ICMPv6[v_Index];
+      v_ServerIpAddr := v_AddrServerInfo.ServerAddr;
+      v_DrbInfo := f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(v_AddrServerInfo.PdnIndex);
+      v_LinkLocalAddr := f_IPv6AddrGetLinkLocalAddr(v_ServerIpAddr);
+      v_Data := f_ICMPv6_GetRouterAdvertisement(v_ServerIpAddr);
+      v_RemoteSocket := cs_IP_Socket(cs_IPv6Addr(v_MulticastAddr), omit);
+      v_LocalSocket := cs_IP_Socket(cs_IPv6Addr(v_LinkLocalAddr), omit);
+      v_Data := f_ICMPv6_UpdateCRCChecksum(v_LinkLocalAddr, v_MulticastAddr, v_Data);
+      
+      fl_IP_AddrServer_SendTriggerToGeran(v_DrbInfo); // @sic R5-133612: trigger to GERAN sic@
+      IP_SOCK_DATA.send(cs_ICMPv6_DATA_REQ(v_LocalSocket, v_RemoteSocket, v_Data));
+    }
+  }
+
+  /*
+   * @desc      reset all information for the given PDN (if p_PdnIndex is present) or all PDNs (if p_PdnIndex is omit)
+   * @param     p_PdnIndex          (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_StopPDNs(template (omit) PDN_Index_Type p_PdnIndex := omit) runs on IP_PTC
+  { /* @sic R5s201177: optional p_PdnIndex instead of integer sic@ */
+    var integer i;
+    
+    // Reset address servers and mapping info @sic R5s201177 sic@
+    for (i := 0; i < tsc_NoOfPDNs; i := i + 1) {
+      if (not isvalue(p_PdnIndex) or (i == f_PDN_PdnIndex2Integer(valueof(p_PdnIndex)))) {               /* NOTE: p_PdnIndex is not checked against vc_IP_PTC_PDN_AddrServer[i].PdnIndex to cope with the case that p_PdnIndex is not the same at start and stop */
+        fl_IP_AddrServers_Stop(i);
+        vc_IP_PTC_PDN_MappingTable[i].DefaultDrb := omit;   /* @sic R5s150648 Change 6 sic@ */
+      }
+    }
+    // Reset IMS server(s) @sic R5s201177 sic@
+    for (i := 0; i < tsc_NoOfIMSPDNs; i := i + 1) {
+      if (not isvalue(p_PdnIndex) or (vc_IP_PTC_IMS_Info.Server[i].PdnIndex == valueof(p_PdnIndex))) {   // NOTE: requires that the same PdnIndex is used as for start of the IMS server
+        vc_IP_PTC_IMS_Info.Server[i] := f_IP_IMS_Stop(vc_IP_PTC_IMS_Info.Server[i]);
+      }
+    }
+  }
+
+  /*
+   * @desc      get and handle configuration messages from the test cases (running on EUTRA, GERAN, UTRAN)
+   * @param     p_CtrlPort
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_ApplicationCtrl(IP_PTC_CTRL_PORT p_CtrlPort) runs on IP_PTC
+  {
+    var IP_ConfigReq_Type v_IP_ConfigReq;
+    var PDN_Index_Type v_PdnIndex;
+    var IP_DrbInfo_Type v_DrbInfo;
+    var template (omit) IP_DrbInfo_Type v_CurrentDrbInfo;
+    var integer i;
+
+    [] p_CtrlPort.receive(cr_IP_CtrlAnyReq) -> value v_IP_ConfigReq {
+      if (ischosen(v_IP_ConfigReq.StartPDN)) {
+        v_PdnIndex := v_IP_ConfigReq.StartPDN.PdnId;
+        v_DrbInfo := v_IP_ConfigReq.StartPDN.DrbInfo;
+
+        f_IP_PTC_PDN_SetDrbInfoForDefaultDrb(v_PdnIndex, v_DrbInfo);
+        
+        select (v_PdnIndex) {
+          case (PDN_1, PDN_2, PDN_2a) {
+            fl_IP_AddrServers_Start(v_PdnIndex, v_DrbInfo);
+            fl_IP_ImsServer_Start(v_PdnIndex);
+          }
+          case (PDN_Internet, nrPDN_Internet, PDN_3, PDN_4, PDN_5, PDN_6) { // @sic R5s191074, R5-221467 sic@
+            fl_IP_AddrServers_Start(v_PdnIndex, v_DrbInfo);
+          }
+          case (ePDG_IMS1, ePDG_IMS2) {
+            fl_IP_ImsServer_Start(v_PdnIndex);
+          }
+          case (ePDG_XCAP) {
+            fl_IP_AddrServers_Start(v_PdnIndex, v_DrbInfo, dnsServerOnly);
+          }
+          case (ePDG_Internet) {
+            // nothing to be done
+          }
+        }
+        
+      } else if (ischosen(v_IP_ConfigReq.StopPDN)) {
+        if (ischosen(v_IP_ConfigReq.StopPDN.PdnId)) {       /* @sic R5s131000: stop particular PDN sic@ */
+          v_PdnIndex := v_IP_ConfigReq.StopPDN.PdnId;       /* @sic R5s201177 sic@ */
+          fl_StopPDNs(v_PdnIndex);                          /* stop particular PDN */
+        } else {
+          fl_StopPDNs();                                    /* => stop all PDNs and IMS servers @sic R5s201177 sic@ */
+        }
+        
+      } else if (ischosen(v_IP_ConfigReq.StartWLAN)) {
+        fl_WLAN_Start(v_IP_ConfigReq.StartWLAN.AddressInfo, v_IP_ConfigReq.StartWLAN.DrbInfo, v_IP_ConfigReq.StartWLAN.ExplicitDnsHandling);
+        
+      } else if (ischosen(v_IP_ConfigReq.StopWLAN)) {
+        fl_WLAN_Stop();
+
+      } else if (ischosen(v_IP_ConfigReq.ChangeCell)) {   /* @sic R5s150648 Change 6 sic@ @sic R5s210603: extension of ChangeEutraCell sic@ */
+
+        if (vc_IP_PTC_MuSimConfiguration) {
+          FatalError(__FILE__, __LINE__, "'ChangeCell' is not supported for MUSIM yet");
+        }
+        if (f_RoutingTable_ChangeCell(v_IP_ConfigReq.ChangeCell)) {                             /* For all entries in the routing table matching the RAT given by ChangeCell the CellId is changed independent of their current CellId
+                                                                                                   => not applicable for MUSIM where the registrations for the different SIMs are at different cells (but may use the same DrbIds) */
+          for (i:=0; i<tsc_NoOfPDNs; i:=i+1) {
+            if (isvalue(vc_IP_PTC_PDN_MappingTable[i].DefaultDrb)) { /* => PDN i is in use @sic R5s201501 sic@ */
+              f_IP_DrbInfo_ChangeCell(vc_IP_PTC_PDN_MappingTable[i].DefaultDrb, v_IP_ConfigReq.ChangeCell);
+            }
+          }
+        }
+        
+      } else if (ischosen(v_IP_ConfigReq.ChangeDrbInfo)) {   /* @sic R5s150648 Change 6 sic@ */
+        v_PdnIndex := v_IP_ConfigReq.ChangeDrbInfo.PdnId;
+        v_DrbInfo := v_IP_ConfigReq.ChangeDrbInfo.DrbInfo;                                      /* new DrbInfo (CellId and DRB/QoSFlow); DRB/QoSFlow may different from the current one when the RAT changes */
+        v_CurrentDrbInfo := f_IP_PTC_PDN_GetDrbInfoForDefaultDrb(v_PdnIndex);                   /* DrbInfo (CellId and DRB/QoSFlow) being associated with the PDN; omit, if the PDN is not in use */
+
+        if (isvalue(v_CurrentDrbInfo)) {                     /* @sic R5s211657 - Additional change sic@ */
+          if (vc_IP_PTC_MuSimConfiguration) {
+            FatalError(__FILE__, __LINE__, "'ChangeDrbInfo' is not supported for MUSIM yet");
+          }
+          if (f_RoutingTable_ChangeDrbInfo(valueof(v_CurrentDrbInfo), v_DrbInfo)) {             /* All entries in the routing table where the DRB/QoSFlow matches the current DrbInfo are changed to the new DrbInfo;
+                                                                                                 * the CellId is not considered => 'ChangeDrbInfo' is not applicable for MUSIM where the DRB/QoSFlow may be the same for the different registrations but the CellId differs
+                                                                                                 * => In order to support MUSIM f_RoutingTable_ChangeDrbInfo may be changed to match the complete DrbInfo (including the CellId);
+                                                                                                 *    => to be done when there are MSUM test cases which need the cell to be changed for one or the other registration (not done for now, as it affects many test cases)
+                                                                                                 * NOTE: Routing table entries for dedicated bearers are left unchanged */
+            f_IP_PTC_PDN_SetDrbInfoForDefaultDrb(v_PdnIndex, v_DrbInfo);
+          }
+        }
+
+      } else if (ischosen(v_IP_ConfigReq.SendRouterAdvertisement)) {
+        fl_ICMPv6_SendRouterAdvertisement(v_IP_ConfigReq.SendRouterAdvertisement.PdnId);
+        
+      } else if (ischosen(v_IP_ConfigReq.ExplicitRouting)) {
+        if (ischosen(v_IP_ConfigReq.ExplicitRouting.Add)) {
+          f_IP_PTC_RoutingTable_AddEntry(v_IP_ConfigReq.ExplicitRouting.Add.IpInfo,
+                                         v_IP_ConfigReq.ExplicitRouting.Add.DRB,
+                                         v_IP_ConfigReq.ExplicitRouting.Add.DataMode);
+        } else if (ischosen(v_IP_ConfigReq.ExplicitRouting.Remove)) {  /* @sic R5s160131 sic@ */
+          f_IP_PTC_RoutingTable_RemoveEntry(v_IP_ConfigReq.ExplicitRouting.Remove);
+        }
+      } else if (ischosen(v_IP_ConfigReq.ChangeToRawmode)) {  /* @sic R5s150074 - Additional change sic@ */
+        f_RoutingInfo_ChangeMode(true);   // @sic R5s200044 change 4, R5s200490 sic@
+
+      } else if (ischosen(v_IP_ConfigReq.RestoreRoutingTable)) { // @sic R5s200044 change 4 sic@
+        f_RoutingInfo_ChangeMode(false);  // @sic R5s200490 sic@
+      }
+
+      p_CtrlPort.send(cs_IP_CommonCnf);
+    }
+  }
+
+  /*
+   * @desc      IP PTC main loop (started by the MTC)
+   * @param     p_DnsRequired       (default value: false)
+   * @param     p_HttpRequired      (default value: false)
+   * @param     p_UdpHandlerRequired (default value: false)
+   * @param     p_TcpHandlerRequired (default value: false)
+   * @param     p_SecondSIM         (default value: false)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_PTC_MainLoop(boolean p_DnsRequired := false,
+                             boolean p_HttpRequired := false,
+                             boolean p_UdpHandlerRequired := false,
+                             boolean p_TcpHandlerRequired := false,
+                             boolean p_SecondSIM := false) runs on IP_PTC
+  { /* @sic R5-123085: integration of IMS into LTE test model; parameters p_HandlingOfDHCPv6, p_DnsRequired sic@ */
+    /* @sic R5w140125: additional parameter p_HttpRequired sic@ */
+    /* @sic R5-153795: support of ProSe - new parameter p_UdpHandlerRequired; order of parameters changed, p_HandlingOfDHCPv6 removed (for now) sic@ */
+    /* MUSIM: p_SecondSIM */
+
+    var HTTP_Info_Type v_HttpInfo := f_HTTP_Info_Init();
+    var IP_PTC_UdpHandlerInfo_Type v_UdpHandlerInfo := valueof(cs_IP_PTC_UdpHandlerInfo_Init);
+    var IP_PTC_TcpHandlerInfo_Type v_TcpHandlerInfo := valueof(cs_IP_PTC_TcpHandlerInfo_Init);
+    
+    fl_IP_PTC_Init(p_SecondSIM);
+
+    while (true) {
+      alt {
+        [] a_ApplicationCtrl(EUTRA_CTRL);
+        [] a_ApplicationCtrl(UTRAN_CTRL);
+        [] a_ApplicationCtrl(GERAN_CTRL);
+        [] a_ApplicationCtrl(WLAN_CTRL);                                /* @sic R5w160107 sic@ */
+        [] a_ApplicationCtrl(IPCAN_CTRL);                               /* @sic R5-203077: MCX IP test model - common IPCAN port independent from test model sic@ */
+        [] a_ApplicationCtrl(NR_CTRL);                                  /* @sic R5s190109 sic@ */
+        [p_SecondSIM] a_ApplicationCtrl(USIM_B_CTRL);                   /* MUSIM */
+
+        [] a_DHCP_Handler();
+        //[p_HandlingOfDHCPv6] a_DHCPv6_Handler();
+        [p_DnsRequired] a_DNS_Handler();
+        [] a_ICMPv6_Handler();
+        [] a_IP_IMS_Handler(vc_IP_PTC_IMS_Info);
+        [p_HttpRequired] a_IP_HTTP_Handler(v_HttpInfo);                     /* @sic R5w140125 sic@ */
+        [p_UdpHandlerRequired] a_UdpPacketHandler(v_UdpHandlerInfo);        /* @sic R5-153795: support of ProSe sic@ */
+        [p_TcpHandlerRequired] a_GenericTcpHandler(v_TcpHandlerInfo);       /* @sic R5w220009: support of MSRP sic@ */
+        [] any port.receive {
+          f_ErrorLog(__FILE__, __LINE__, "unexpected message (skipped)");
+          repeat;
+        }
+      }
+    }
+  }
+
+}

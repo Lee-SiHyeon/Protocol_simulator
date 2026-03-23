@@ -1,0 +1,307 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-06-12 21:37:13 +0200 (Wed, 12 Jun 2024) $
+// $Rev: 38972 $
+/******************************************************************************/
+
+module MCX_IMS_CommonProcedures {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_Component all;
+  import from IMS_IPCAN_Coordination all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_CoordMsgs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_MediaControl_Common all;
+  import from MCX_SIP_Common all;
+  import from MCX_SIP_Registration all;
+  import from MCX_SecurityParameters all;
+  import from MIKEY_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      trigger IPCAN to start signalling for given test procedure (including audio and video)
+   * @param     p_TestProcedure
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IPCAN_StartSignalling(IMS_TestProcedure_Type p_TestProcedure) runs on IMS_PTC
+  {
+    select (p_TestProcedure) {
+      case (IPCAN_InitialRegistration, IPCAN_MO_IMS_Signalling, IPCAN_MO_SpeechCall, IPCAN_MO_VideoCall, IPCAN_MO_DataCall) {
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure);
+      }
+      case (IPCAN_MT_IMS_Signalling, IPCAN_MT_SpeechCall, IPCAN_MT_VideoCall, IPCAN_MT_DataCall) {
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure);
+        f_IMS_IPCAN_WaitForTrigger(IPCAN);         // wait for RRC connection to be established
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+  }
+
+  /*
+   * @desc      Trigger IPCAN to deactivate dedicated bearers (if any) and to release the RRC connection
+   * @param     p_TestProcedure     (default value: omit)
+   * @param     p_DelayValue        (default value: 2.0)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IPCAN_ReleaseConnection(template (omit) IMS_TestProcedure_Type p_TestProcedure := omit,
+                                         float p_DelayValue := 2.0) runs on IMS_PTC
+  { /* NOTE: In contrast to IMS in general the p_TestProcedure is not needed at the IPCAN PTC but IPCAN shall store it from the IPCAN_STARTPROCEDURE command
+     *       Nevertheless in case of preestablished session, when only the RRC connection shall be released but the session (i.e EPS bearers) is kept,
+     *       IPCAN_MO_IMS_Signalling or IPCAN_MT_IMS_SignallingIPCAN_MO_IMS_Signalling shall be sent to the IPCAN */
+    var float v_Delay := p_DelayValue;  /* NOTE 1: in contrast to IMS where after initial registration a delay is neeeded to allow the UE to release the unprotected ports,
+                                         *         for MCX there is the User Authentication, Service Authorization and Key Generation what should take long enough so that no additional delay is needed
+                                         * NOTE 2: When the last SIP message before RRC connection release is in DL a delay is needed to ensure that the SIP message is processed and sent out by the SS, received by the UE and that potential TCP signalling has finished;
+                                         *         when the last SIP message before RRC connection release is in UL, the delay coud be shorter as the SIP has already been received (in general there should even be no ongoing TCP signalling anymore).
+                                         *         nevertheless to simplify implementation the delay is kept the same independent from whether the last SIP message is UL or DL */
+    f_Delay(v_Delay);
+
+    /* @sic R5-236320, R5-236323: sic@
+     * There is no reset of SSRC values anymore: when multiplexing of media plane control channels is supported (optionally for Rel-18), the RTCP SSRCs are assigned using the mc_floor_ssrc or mc_transmission_ssrc parameters at session establishment.
+     * When there is no multiplexing (normal case), the RTCP SSRCs have no meaning, i.e. can have any values and are not checked.
+     * The media SSRC(s) to be used by the UE is assigned by the floor/transmission granted messages or in case of MCPTT and implicit floor granted with the mc_ssrc parameter in as SDP message.
+     * NOTE: For MCVideo and before Rel-18 there is no way to assign SSRC values for audio and video in an implicit transmission grant and
+     *       there is only one SSRC in transmssion control messages without clarification whether it is for audio, for video or for both */
+    f_IMS_IPCAN_EndProcedure(IPCAN, p_TestProcedure);
+  }
+
+  /*
+   * @desc      CSK download
+   * @param     p_ServiceType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CSK_Download(MCX_ServiceType_Type p_ServiceType) runs on MCX_IMS_PTC
+  {
+    var integer v_KeyOffset := 3;  // arbitrarily selected
+    var MCX_SecurityKey_Type v_OldCSK;
+    var MCX_SecurityKey_Type v_NewCSK;
+    var MCX_SecurityParameters_Type v_SecurityParameters;
+    var template (value) MIKEY_Message v_MIKEY_Message;
+    var bitstring v_EncodedMikeyMessage;
+    var template (value) MessageHeader v_MessageHeader;
+    var charstring v_FeatureTag;
+
+    // Generate new CSK
+    v_OldCSK := valueof(f_MCX_IMS_PTC_SecurityParameters_GetKey(CSK));
+    do {  // ensure that the key id is different from the one being assigned by the UE
+      v_KeyOffset := v_KeyOffset + 1;
+      v_NewCSK := f_MCX_SecurityParameters_CreateKey(CSK, v_KeyOffset);
+    } while (v_NewCSK.Id == v_OldCSK.Id);
+    f_MCX_IMS_PTC_SecurityParameters_SetKey(CSK, v_NewCSK);  // => new CSK is used from now on; NOTE: The key download procedure itself does not use any CSK (e.g. there are no XML message bodies
+
+    // Generate and encode MIKEY message
+    v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    v_MIKEY_Message := f_MIKEY_SAKKE_MessageTX_CSK(MCPTT, v_SecurityParameters);
+    v_EncodedMikeyMessage := encvalue(v_MIKEY_Message);
+
+    // procedure 'MCX SIP MESSAGE CT' as described in 36.579-1 Table 5.3.33.3-1
+
+    // EXCEPTION
+    f_MCX_IPCAN_StartSignalling(IPCAN_MT_IMS_Signalling);
+
+    // step 2 - 3"
+    v_MessageHeader := f_MCX_MessageRequest_MessageHeaderTX(p_ServiceType);
+    v_FeatureTag := f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_ServiceType);
+    v_MessageHeader.pAssertedService := cs_PAssertedService(v_FeatureTag);
+    v_MessageHeader.contentType := cs_ContentType(tsc_MimeType_Mikey);
+    f_MCX_SendMESSAGE_Receive200OK(-, v_MessageHeader, cs_MessageBody_CommonText(f_Base64Encode(v_EncodedMikeyMessage)));
+
+    // EXCEPTION
+    f_MCX_IPCAN_ReleaseConnection();
+  }
+
+  /*
+   * @desc      UE intitated MCX functional alias status determination and subscription according to 36.579-1 clause 5.3.36
+   * @param     p_ServiceType
+   * @param     p_Subscription      (default value: INITIAL_SUBSCRIBE)
+   * @param     p_DialogIndex       (default value: presenceDialog1)
+   * @param     p_SessionType       (default value: ON_DEMAND)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_FunctionalAliasSubscription(MCX_ServiceType_Type p_ServiceType,
+                                             MCX_Subscription_Type p_Subscription := INITIAL_SUBSCRIBE,
+                                             IMS_PTC_DialogIndex_Type p_DialogIndex := presenceDialog1,
+                                             MCX_SessionType_Type p_SessionType := ON_DEMAND) runs on MCX_IMS_PTC
+  {
+    var charstring v_ServiceName := f_MCX_ServiceName(p_ServiceType);
+    var template (omit) IMS_TestProcedure_Type v_TestProcedure := omit;
+
+    // Step 1, 2a1:
+    f_MCX_IPCAN_StartSignalling(IPCAN_MO_IMS_Signalling);
+
+    select (p_Subscription) {
+      case (INITIAL_SUBSCRIBE) {                        // MMI according to 36.579-1 clause 5.3.36 step 1
+        f_UT_MCX_UserAction(MMI, "Make the UE (" & v_ServiceName & " client) request to determine the current status of a functional alias and later notification of status changes of a functional alias");
+      }
+      case (UN_SUBSCRIBE) {                             // MMI according to 36.579-2 test case 5.8 step 4
+        f_UT_MCX_UserAction(MMI, "Make the UE (" & v_ServiceName & " client) de-subscribe from functional alias status change notifications");
+      }
+    }
+
+    // Step 3 - 6:
+    f_MCX_SIP_FunctionalAliasSubscription(p_ServiceType, p_DialogIndex, p_Subscription);
+
+    // EXCEPTION: RRC connection release
+    if (p_SessionType == PRE_ESTABLISHED) {
+      v_TestProcedure := IPCAN_MO_IMS_Signalling;      // for pre-established session only the RRC connection gets released but the EPS bearers are kept
+    }
+    f_MCX_IPCAN_ReleaseConnection(v_TestProcedure);
+  }
+
+  /*
+   * @desc      UE inititated MCX functional alias status change according to 36.579-1 clause 5.3.37
+   * @param     p_ServiceType
+   * @param     p_ExpiresDeltaSec   (default value: tsc_MCX_ExpiresMax)
+   * @param     p_DialogIndex       (default value: presenceDialog1)
+   * @param     p_SessionType       (default value: ON_DEMAND)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_FunctionalAliasChange(MCX_ServiceType_Type p_ServiceType,
+                                       charstring p_ExpiresDeltaSec := tsc_MCX_ExpiresMax,
+                                       IMS_PTC_DialogIndex_Type p_DialogIndex := presenceDialog1,
+                                       MCX_SessionType_Type p_SessionType := ON_DEMAND) runs on MCX_IMS_PTC
+  {
+    var charstring v_ServiceName := f_MCX_ServiceName(p_ServiceType);
+    var template (omit) IMS_TestProcedure_Type v_TestProcedure := omit;
+
+    // Step 1, 2a1:
+    f_MCX_IPCAN_StartSignalling(IPCAN_MO_IMS_Signalling);
+    
+    select (p_ExpiresDeltaSec) {
+      case (tsc_MCX_ExpiresMax) {                       // MMI according to 36.579-1 clause 5.3.37 step 1
+        f_UT_MCX_UserAction(MMI, "Make the UE (" & v_ServiceName & " client) request to change the status of a functional alias to 'activated'");
+      }
+      case (tsc_MCX_Expires0) {                         // MMI according to 36.579-2 test case 5.8 step 3
+        f_UT_MCX_UserAction(MMI, "Make the UE (" & v_ServiceName & " client) request status change of a functional alias to 'not activated'");
+      }
+    }
+
+    // Step 3 - 6:
+    f_MCX_SIP_FunctionalAliasStatusChange(p_ServiceType, p_DialogIndex, p_ExpiresDeltaSec);
+
+    // EXCEPTION: RRC connection release
+    if (p_SessionType == PRE_ESTABLISHED) {
+      v_TestProcedure := IPCAN_MO_IMS_Signalling;      // for pre-established session only the RRC connection gets released but the EPS bearers are kept
+    }
+    f_MCX_IPCAN_ReleaseConnection(v_TestProcedure);
+  }
+
+  /*
+   * @desc      subscription and activation of functional alias
+   * @param     p_ServiceType
+   * @param     p_DialogIndex       (default value: presenceDialog1)
+   * @param     p_SessionType       (default value: ON_DEMAND)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_FunctionalAliasActivate(MCX_ServiceType_Type p_ServiceType,
+                                         IMS_PTC_DialogIndex_Type p_DialogIndex := presenceDialog1,
+                                         MCX_SessionType_Type p_SessionType := ON_DEMAND) runs on MCX_IMS_PTC
+  {
+    f_MCX_FunctionalAliasSubscription(p_ServiceType, -, p_DialogIndex, p_SessionType);       /* Generic Test Procedure for UE intitated MCX functional alias status determination and subscription (36.579-1 clause 5.3.36) */
+    f_MCX_FunctionalAliasChange(p_ServiceType, -, p_DialogIndex, p_SessionType);             /* Generic Test Procedure for UE initiated MCX functional alias status change (36.579-1 clause 5.3.37) */
+  }
+
+  /*
+   * @desc      Init IMS PTC and IPCAN
+   * @param     p_TestConfiguration
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Preamble_Init_IMS(IMS_TestConfiguration_Type p_TestConfiguration) runs on MCX_IMS_PTC
+  {
+    f_MCX_IMS_PTC_Init(PDN_1);                                  // MCPTT runs on PDN1
+    f_IMS_IPCAN_Init(IPCAN, p_TestConfiguration);
+  }
+
+  /*
+   * @desc      Switch on UE, coordinate with HTTP and do initial SIP registration
+   * @param     p_ServiceType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Preamble_InitialRegistration_IMS(MCX_ServiceType_Type p_ServiceType) runs on MCX_IMS_PTC
+  {
+    var IP_DrbInfo_Type v_DrbInfo;
+
+    f_MCX_IPCAN_StartSignalling(IPCAN_InitialRegistration);                     /* switch on UE and start MCX IMS registration at IPCAN */
+
+    v_DrbInfo := f_IMS_IPCAN_GetDrbInfo(IPCAN);                                 /* receive DrbInfo from IPCAN as it may depend on the kind od IPCAN implementation */
+
+    f_MCX_SendCoOrdMsg(HTTP, cms_MCX_DrbInfo(v_DrbInfo));
+    f_MCX_WaitForTrigger(HTTP);                                                 /* wait for trigger from HTTP PTC to ensure that the HTTP servers are startet before the UE is switched on */
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    f_MCX_SIP_Registration(p_ServiceType);                                      /* Table 5.3.2.4.1-1 */
+ 
+    f_MCX_MediaControl_Start(v_DrbInfo);                                        /* start UDP packet handler at the IP_PTC with DrbInfo as gotten from the IPCAN_PTC;
+                                                                                   needs to be done after the initial registration when the IP addresses are known
+                                                                                   NOTE: UDP packet handler may be stopped in the postamble (if needed) */
+  }
+
+  /*
+   * @desc      Common IMS preamble for MCX test cases
+   * @param     p_ServiceType
+   * @param     p_TestConfiguration
+   * @param     p_InitState         (default value: REGISTERED_AUTHORIZED)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Preamble_IMS(MCX_ServiceType_Type p_ServiceType,
+                              IMS_TestConfiguration_Type p_TestConfiguration,
+                              MCX_InitState_Type p_InitState := REGISTERED_AUTHORIZED) runs on MCX_IMS_PTC
+  {
+    var MCX_Coordination_MSG v_MCX_Coordination_MSG;
+
+    timer t_GuardTimer := tsc_GuardTimePreamble;
+
+    t_GuardTimer.start;
+    
+    f_MCX_Preamble_Init_IMS(p_TestConfiguration);                               /* @sic R5-242351: f_MCX_Preamble_Init_IMS for test case 5.1 sic@ */
+    f_MCX_Preamble_InitialRegistration_IMS(p_ServiceType);                      /* @sic R5-242351: f_MCX_Preamble_InitialRegistration_IMS for test case 5.1 sic@ */
+
+    v_MCX_Coordination_MSG := f_MCX_WaitForCoOrdMsg(HTTP, cmr_MCX_SecurityParameters);          /* MCX Initial Configuration and User Authentication according to 36.579-1 Table 5.3.2.3.1-1 (f_MCX_HTTP_UserAuthentication) is finished at HTTP PTC */
+    
+    f_MCX_IMS_PTC_SecurityParameters_Set(v_MCX_Coordination_MSG.SecurityParameters);
+    
+    f_MCX_IMS_InitialServiceSettingsAndSubscriptions(p_ServiceType);                            /* Table 5.3.2.2.1-1 3, 4, 5 (all parallel): Publication of MCX service settings, Configuration management and Group management subscription */
+    
+    f_MCX_SIP_LocationReportingConfiguration(p_ServiceType);                                    /* Table 5.3.2.2.1-1 Step 6 - 7: configuration of Location Info reporting
+                                                                                                   NOTE: For MCData location procedures (clause 17) have been added to 24.282 as clause 17 just in version 16.1 (and above)
+                                                                                                   => Rel-15 implementation may support it */
+    f_MCX_IPCAN_ReleaseConnection();
+    
+    if (p_InitState == REGISTERED_AUTHORIZED_FA_ACTIVATED) {
+      f_MCX_FunctionalAliasActivate(p_ServiceType);
+    }
+    
+    t_GuardTimer.stop;
+  }
+
+  /*
+   * @desc      Common postamble to release IMS
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Postamble_IMS() runs on MCX_IMS_PTC
+  {
+    f_MCX_SendTrigger(HTTP);                    // Inform HTTP component that IMS signalling is completed
+    
+    // Further steps like f_IMS_PTC_Deregistration() may need to be added
+
+    IPCAN.send(cms_IMS_IPCAN_ReleaseReq);       // release IPCAN
+
+    // !!!! IPCAN sends trigger after release of IPCAN configurations => there should be a p_Port.receive(cmr_IMS_IPCAN_Trigger) !!!!
+
+  }
+
+}

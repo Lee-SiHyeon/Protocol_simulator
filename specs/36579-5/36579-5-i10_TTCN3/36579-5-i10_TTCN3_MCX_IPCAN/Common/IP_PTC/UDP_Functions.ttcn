@@ -1,0 +1,150 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2022-12-08 10:48:37 +0100 (Thu, 08 Dec 2022) $
+// $Rev: 35086 $
+/******************************************************************************/
+
+module UDP_Functions {
+
+  import from CommonDefs all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Routing all;
+  import from IP_PTC_Templates all;
+
+  /*
+   * @desc      Bind IP address to UDP server
+   *            Note: there is no default behaviour activated for the IP_PTC
+   *                  => waiting for the SA's response is blocking (what helps to avoid unexpected behaviour)
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_AllowBroadcast
+   * @return    PortNumber_Type      .. in case of p_LocalPort=omit we need to get back the ephemeral port
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_UDP_Bind(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                       template (omit) PortNumber_Type p_LocalPort,
+                       boolean p_AllowBroadcast) runs on IP_PTC return PortNumber_Type
+  { /* @sic R5-113734 change 8 sic@ */
+    /* @sic R5s221255: use of a_IP_PTC_ReceiveCNF_NonBlocking sic@ */
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+
+    v_IP_SOCKET_IND := f_IP_PTC_SendREQ_ReceiveCNF_NonBlocking(cs_UDP_SOCKET_REQ(cs_IP_Socket(p_LocalIpAddr, p_LocalPort), p_AllowBroadcast),
+                                                               cr_UDP_SOCKET_CNF(cr_IP_Socket(p_LocalIpAddr, ?)));
+    return v_IP_SOCKET_IND.CTRL.ConnectionId.Local.Port;   /* in case of p_LocalPort=omit we need to get back the ephemeral port */
+  }
+
+  /*
+   * @desc      Just close a UDP socket;
+   *            Note: there is no confirmation needed to close a UDP server
+   * @param     p_LocalSocket
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_UDP_Close(template (value) IP_Socket_Type p_LocalSocket) runs on IP_PTC
+  {
+    IP_SOCK_CTRL.send(cs_UDP_CLOSE_REQ(p_LocalSocket));
+  }
+
+  /*
+   * @desc      start a UDP socket by binding its address to the given socket;
+   *            the routing table is updated acc.
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_DrbInfo
+   * @param     p_AllowBroadcast    (default value: false)
+   * @return    IP_Socket_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_UdpClientOrServer_Start(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                                      template (omit) PortNumber_Type p_LocalPort,
+                                      IP_DrbInfo_Type p_DrbInfo,
+                                      boolean p_AllowBroadcast := false)
+    runs on IP_PTC return IP_Socket_Type
+  { /* @sic R5-153795: new common function sic@ */
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, p_LocalPort);
+    var PortNumber_Type v_LocalPort;
+
+    // Bind UDP socket
+    v_LocalPort := fl_UDP_Bind(p_LocalIpAddr, p_LocalPort, p_AllowBroadcast); /* p_LocalPort != omit => v_LocalPort = p_LocalPort
+                                                                                 p_LocalPort == omit => ephemeral port */
+    v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, v_LocalPort);
+
+    // Modify routing table
+    f_IP_PTC_RoutingTable_AddEntry(cs_UDP_ConnectionId(v_LocalSocket), p_DrbInfo);
+
+    return valueof(v_LocalSocket);
+  }
+
+  /*
+   * @desc      Wrapper function: start a UDP server with well defined local port
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_DrbInfo
+   * @param     p_AllowBroadcast    (default value: true)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_UdpServer_Start(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                             template (value) PortNumber_Type p_LocalPort,
+                             IP_DrbInfo_Type p_DrbInfo,
+                             boolean p_AllowBroadcast := true) runs on IP_PTC
+  { /* NOTE: in general the port number of a UDP server can be an ephemeral one; in that case 'bind' returns the valid port number;
+     *       but in our case we assume the port to be well-known and therefore p_LocalPort shall not be omit */
+    /* @sic R5-113734 change 8 sic@ */
+    /* @sic R5-153795: use of fl_UdpClientOrServer_Start sic@ */
+    fl_UdpClientOrServer_Start(p_LocalIpAddr, p_LocalPort, p_DrbInfo, p_AllowBroadcast);
+  }
+
+  /*
+   * @desc      Wrapper function to avoid mixing up server/client
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_DrbInfo
+   * @return    IP_Socket_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_UdpClient_Start(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                             template (omit) PortNumber_Type p_LocalPort,
+                             IP_DrbInfo_Type p_DrbInfo)
+    runs on IP_PTC return IP_Socket_Type
+  { /* @sic R5-153795: use of fl_UdpClientOrServer_Start; p_LocalPort allowed to be omit to use emphemeral port (-> OMA push) sic@ */
+    return fl_UdpClientOrServer_Start(p_LocalIpAddr, p_LocalPort, p_DrbInfo);
+  }
+
+  /*
+   * @desc      close a UDP socket acting as UDP server;
+   *            the routing table is updated acc.
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_UdpServer_Stop(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                            template (value) PortNumber_Type p_LocalPort) runs on IP_PTC
+  { /* @sic R5-113734 change 8 sic@ */
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, p_LocalPort);
+
+    // Close UDP socket
+    fl_UDP_Close(v_LocalSocket);
+
+    // Modify routing table
+    f_IP_PTC_RoutingTable_RemoveEntry(cs_UDP_ConnectionId(v_LocalSocket));
+  }
+
+  /*
+   * @desc      close a UDP socket for a client
+   *            this is only needed when the client is bound to a well-know port and has its own entry in the routing table
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_UdpClient_Stop(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                            template (value) PortNumber_Type p_LocalPort) runs on IP_PTC
+  {
+    f_UdpServer_Stop(p_LocalIpAddr, p_LocalPort); /* => same as for UDP server */
+  }
+
+}

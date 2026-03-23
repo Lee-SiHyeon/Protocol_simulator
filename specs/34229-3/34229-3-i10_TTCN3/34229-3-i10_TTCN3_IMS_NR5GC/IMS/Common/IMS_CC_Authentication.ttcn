@@ -1,0 +1,150 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2020-06-18 12:52:36 +0200 (Thu, 18 Jun 2020) $
+// $Rev: 28221 $
+/******************************************************************************/
+
+module IMS_CC_Authentication {
+
+  import from Base64Encoding all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SIPTypesAndValues all;
+  import from NAS_AuthenticationCommon all;
+
+  type record of SecurityClientParams_Type SecurityClientParamsList_Type; /* @status    APPROVED (IMS) */
+
+  template (present) Authorization cr_Authorization_InvalidMAC :=
+    /* @status    APPROVED (IMS) */
+    /* @sic R5-201458 - NR5GC implementation: use of cr_Authorization, superset sic@ */
+    cr_Authorization(superset(cr_GenericParam_Common("response", cr_GenValue_None)));
+
+  template (present) Authorization cr_Authorization_SqnOutOfRange(charstring p_Nonce,
+                                                                  charstring p_Opaque := tsc_IMS_Opaque) :=
+    /* @status    APPROVED (IMS) */
+    /* @sic R5-201458 - NR5GC implementation: use of cr_Authorization, superset sic@ */
+    cr_Authorization(superset(cr_GenericParam("nonce",    p_Nonce),
+                              cr_GenericParam("opaque",   p_Opaque),
+                              cr_GenericParam("auts",     ?)));
+
+  /*
+   * @desc      generate an invalid NONCE
+   * @param     p_AuthenticationError
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Authentication_GenerateInvalidNonce(AuthenticationError_Type p_AuthenticationError) return charstring
+  {
+    var Common_AuthenticationParams_Type v_AuthenticationParams;
+
+    v_AuthenticationParams := f_IMS_AuthenticationInit(tsc_IMS_AuthRAND, p_AuthenticationError);
+    return f_Base64Encode(v_AuthenticationParams.RandValue & v_AuthenticationParams.AUTN);
+  }
+
+  /*
+   * @desc      check that spi-c, spi-s and port-c are different than in previous REGISTER requests
+   * @param     p_ListOfPreviousSecurityClientParams
+   * @param     p_RegisterRequest
+   * @return    SecurityClientParamsList_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Authentication_CheckSecurityClientParams(SecurityClientParamsList_Type p_ListOfPreviousSecurityClientParams,
+                                                          REGISTER_Request p_RegisterRequest) runs on IMS_PTC return SecurityClientParamsList_Type
+  {
+    var SecurityClientParams_Type v_CurrentSecurityClientParams := f_IMS_Register_GetSecurityClientParams(p_RegisterRequest);
+    var SecurityClientParamsList_Type v_ListOfPreviousSecurityClientParams := p_ListOfPreviousSecurityClientParams;
+    var integer v_NoOfPreviousSecurityClientParams := lengthof(v_ListOfPreviousSecurityClientParams);
+    var SecurityClientParams_Type v_SecurityClientParams;
+    var integer i;
+
+    for (i:=0; i < v_NoOfPreviousSecurityClientParams; i:=i+1) {
+      v_SecurityClientParams := v_ListOfPreviousSecurityClientParams[i];
+      if (v_SecurityClientParams.SPI_us == v_CurrentSecurityClientParams.SPI_us or
+          v_SecurityClientParams.SPI_uc == v_CurrentSecurityClientParams.SPI_uc or
+          v_SecurityClientParams.Port_uc == v_CurrentSecurityClientParams.Port_uc) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "spi-c, spi-s and port-c shall be different than in previous REGISTER request");
+      }
+    }
+    v_ListOfPreviousSecurityClientParams[v_NoOfPreviousSecurityClientParams] := v_CurrentSecurityClientParams;
+    return v_ListOfPreviousSecurityClientParams;
+  }
+
+  /*
+   * @desc      Check that digestResponse does not contain (non-empty) "auts" parameter
+   * @param     p_RegisterReq
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Register_CheckAutsNotPresent(REGISTER_Request p_RegisterReq) runs on IMS_PTC
+  {
+    var template (present) CommaParam_List v_DigestResponseContainingAuts := superset(cr_GenericParam("auts", ?));
+    if (match(p_RegisterReq.msgHeader.authorization.body[0].digestResponse, v_DigestResponseContainingAuts)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "REGISTER request contains AUTS directive");
+    }
+  }
+
+  /*
+   * @desc      receive REGISTER with a specific Authorization (given by p_Authorization)
+   * @param     p_CallId
+   * @param     p_Authorization
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_REGISTER_RequestWithSpecificAuth(charstring p_CallId,
+                                                  template (present) Authorization p_Authorization) runs on IMS_PTC return IMS_DATA_REQ
+  {
+
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var MessageHeader v_MessageHeader;
+    var InternetProtocol_Type v_Protocol;
+    var IMS_RoutingInfo_Type v_RoutingInfo_UL;
+    var IP_AddrInfo_Type v_UE_Address;
+    var IP_AddrInfo_Type v_NW_Address;
+    var template (present) MessageHeader v_MessageHeader_Template;
+    var integer v_CseqValue := f_IMS_PTC_ImsInfo_CseqIncr(register);
+    var template (present) SipUrl v_SipUrl := cr_SipUri_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName());
+    var boolean v_CheckAuthorization;
+    var boolean v_Match := false;
+
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(v_SipUrl)));   // receive any REGISTER
+    v_MessageHeader := v_IMS_DATA_REQ.Request.Register.msgHeader;
+    v_Protocol := v_IMS_DATA_REQ.RoutingInfo.Protocol;
+    
+    v_MessageHeader_Template := f_IMS_RegisterRequest_MessageHeaderRX_Initial(v_Protocol);         // @sic R5s130369 sic@
+    // test case specific message contents:
+    v_MessageHeader_Template.cSeq        := cr_CseqDef(v_CseqValue, "REGISTER");
+    v_MessageHeader_Template.callId      := cr_CallId(p_CallId);
+    // @sic R5-165323: explicit check of "securityVerify := omit" removed; NOTE: this check is still included acc. to A.1.1 (-> f_IMS_RegisterRequest_MessageHeaderRX_Initial) sic@ */
+    v_MessageHeader_Template.authorization  := p_Authorization;
+
+    v_RoutingInfo_UL := v_IMS_DATA_REQ.RoutingInfo;
+    v_UE_Address := v_RoutingInfo_UL.UE_Address;
+    v_NW_Address := v_RoutingInfo_UL.NW_Address;
+    f_IMS_PTC_ImsInfo_Init(v_UE_Address, v_NW_Address);  // @sic R5s170297 sic@
+
+    v_Match := match(v_MessageHeader, v_MessageHeader_Template);
+    if (not v_Match) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid REGISTER Request");
+    }
+    else {
+      v_CheckAuthorization := false;                                           // Authorization needs to be checked separately
+      f_IMS_Register_MessageHeader_CommonChecks(v_MessageHeader, v_Protocol, -, v_UE_Address, -, v_CheckAuthorization);
+      f_IMS_Register_MessageHeader_CheckPublicUserIdentity(v_MessageHeader);   // check 'To' and 'From' field (needed for initial registration only)
+    }
+    return v_IMS_DATA_REQ;
+  }
+
+}

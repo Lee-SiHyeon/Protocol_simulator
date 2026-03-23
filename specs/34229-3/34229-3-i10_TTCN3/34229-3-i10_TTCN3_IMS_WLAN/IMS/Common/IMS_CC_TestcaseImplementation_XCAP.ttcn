@@ -1,0 +1,220 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-03-06 16:46:02 +0100 (Mon, 06 Mar 2023) $
+// $Rev: 35287 $
+/******************************************************************************/
+
+module IMS_CC_TestcaseImplementation_XCAP {
+
+  import from IMS_CC_Component all;
+  import from IMS_CC_Parameters all;
+  import from IMS_Component all;
+  import from IMS_XCAP_Procedures all;
+  import from IMS_XCAP_Simserv all;
+  import from UpperTesterFunctions all;
+  import from http_uri_etsi_org_ngn_params_xml_simservs_xcap language "XSD" all;
+
+  /*
+   * @desc      common test body for XCAP test cases
+   * @param     p_SupplementaryService
+   * @param     p_TargetURI    (default value: omit)
+   * @param     p_CheckDeactivatedRules      (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_XCAP_SupplementaryService_CommonTestBody(SS_Type p_SupplementaryService,
+                                                      template (omit) charstring p_TargetURI := omit,
+                                                      boolean p_CheckDeactivatedRules := false) runs on IMS_XCAP_PTC
+  { /* @sic R5-145720, R5-145721, R5-145722: new parameter p_AllowDeactivationOfRules sic@ */
+    /* @sic R5s150244 change 2: p_PublicUserIdentity replace by template (omit) charstring p_TargetURI sic@ */
+    /* @sic R5-151795: p_GbaRequested sic@ */
+    /* @sic R5-216570..82 p_CheckDeactivatedRules; p_AllowDeactivationOfRules removed sic@ */
+    var float v_MaxDuration := 300.0;       /* @sic R5s130794 change 21: increased to 300.0 sic@ */
+    var Simservs v_SimservsDocument;
+    var SupplementaryServiceInfo_Type v_SupplementaryServiceInfo;
+    var boolean v_Deactivated;
+
+    f_IMS_XCAP_InitialiseSimservsDocument(p_SupplementaryService);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // Step 1 - Activate the service
+    f_UT_IMS_ActivateDeactivateSupplementaryService(MMI, p_SupplementaryService, true, p_TargetURI);   /* @sic R5s150244 change 2 sic@ */
+    
+    // Step 2 - HTTP Request / Response exchange
+    f_IMS_HTTP_Transaction(v_MaxDuration);
+    v_SimservsDocument := f_IMS_XCAP_GetDocument();                     // Get Simservs document from XCAP server
+    v_SupplementaryServiceInfo := f_Simservs_GetSupplementaryServiceInfo(v_SimservsDocument, p_SupplementaryService);   // @sic R5-216570..82 - NOTE: there are no multiple services anymore sic@
+
+    if (not v_SupplementaryServiceInfo.Active) {                            // @sic R5-216570..82: Cleanup for IMSoNR5GC XCAP test cases sic@
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2 - supplementary service is not active");
+    }
+    if (not f_SupplementaryServiceInfo_CheckDeactivated(v_SupplementaryServiceInfo.ListOfRules, false)) {               // @sic R5-216570..82: Cleanup for IMSoNR5GC XCAP test cases - check whether any rule is still deactivated sic@
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2 - at least one rule of supplementary service is deactivated");
+    }
+    if (not f_SupplementaryServiceInfo_CheckListOfRules(v_SupplementaryServiceInfo.ListOfRules, p_SupplementaryService)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2 - supplementary service: invalid rule set");
+    }
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    // Step 3 - Deactivate the service
+    f_UT_IMS_ActivateDeactivateSupplementaryService(MMI, p_SupplementaryService, false, p_TargetURI);   /* @sic R5s150244 change 2 sic@ */
+    
+    // Step 4
+    f_IMS_HTTP_Transaction(v_MaxDuration);
+    v_SimservsDocument := f_IMS_XCAP_GetDocument();
+    v_SupplementaryServiceInfo := f_Simservs_GetSupplementaryServiceInfo(v_SimservsDocument, p_SupplementaryService);   // @sic R5-216570..82: there are no multiple services anymore sic@
+
+    select union (v_SupplementaryServiceInfo.Service) {
+      case (originating_identity_presentation,
+            originating_identity_presentation_restriction,
+            terminating_identity_presentation,
+            terminating_identity_presentation_restriction) {    // services without ruleset
+        if (v_SupplementaryServiceInfo.Active) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4 - supplementary service is still active");
+        }
+      }
+      case else {                                               // services with ruleset
+        if (not v_SupplementaryServiceInfo.Active) {
+          if (f_IMS_PTC_RanTypeIsNR5GC()) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4 - supplementary service shall still be active, but deactivated");
+          }
+        } else {
+          if (not f_SupplementaryServiceInfo_CheckDeactivated(v_SupplementaryServiceInfo.ListOfRules, true)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4 - supplementary service has still rule(s) not being deactivated");
+          }
+        }
+      }
+    }
+    if (p_CheckDeactivatedRules) {                                                                             // @sic R5-216570..82 sic@
+      v_Deactivated := true;
+      if (not f_SupplementaryServiceInfo_CheckListOfRules(v_SupplementaryServiceInfo.ListOfRules, p_SupplementaryService, v_Deactivated)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4 - supplementary service: invalid rule set");
+      }
+    }
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test procedure for Originating Identification Presentation (34.229-1 15.1, G.15.1)
+   * @param     p_AuthenticationRequirement  (default value: gbaPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_OIP(AuthenticationRequirement_Type p_AuthenticationRequirement := gbaPreferred,
+                          template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo); // @sic R5-166278 (NOTE 4) sic@
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(SS_CLIP);  /* @sic R5s150244 change 2 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Termination Identification Presentation (34.229-1 15.3, G.15.3)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_TIP(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                          template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(SS_COLP);  /* @sic R5s150244 change 2 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Comunication Forwarding Unconditional (34.229-1 15.5, G.15.5, 34.229-5 8.7)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_CFU(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                          template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    var SS_Type v_SupplementaryService := SS_CFU;
+    var boolean v_CheckDeactivatedRules := f_IMS_PTC_RanTypeIsNR5GC();               /* @sic R5-216570 sic@ */
+
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(v_SupplementaryService, px_XCAP_TargetUri, v_CheckDeactivatedRules);   /* @sic R5s150244 change 2 sic@ @sic R5-216570 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Comunication Forwarding on non Reply: activation (34.229-1 15.7, G.15.6, 34.229-5 8.15)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_CFNRy(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                            template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    var SS_Type v_SupplementaryService := SS_CFNRy;
+    var boolean v_CheckDeactivatedRules := f_IMS_PTC_RanTypeIsNR5GC();               /* @sic R5-216570 sic@ */
+
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(v_SupplementaryService, px_XCAP_TargetUri, v_CheckDeactivatedRules);   /* @sic R5s150244 change 2 sic@ @sic R5-216570 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Comunication Forwarding on Busy(34.229-1 15.9, G.15.8, 34.229-5 8.11)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_CFB(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                          template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    var SS_Type v_SupplementaryService := SS_CFB;
+    var boolean v_CheckDeactivatedRules := f_IMS_PTC_RanTypeIsNR5GC();               /* @sic R5-216570 sic@ */
+
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(v_SupplementaryService, px_XCAP_TargetUri, v_CheckDeactivatedRules);   /* @sic R5s150244 change 2 sic@ @sic R5-216570 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Comunication Forwarding on Not Reacheable(34.229-1 15.10a, G.15.10, 34.229-5 8.13)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_CFNRc(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                            template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    var SS_Type v_SupplementaryService := SS_CFNRc;
+    var boolean v_CheckDeactivatedRules := f_IMS_PTC_RanTypeIsNR5GC();               /* @sic R5-216570 sic@ */
+
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(v_SupplementaryService, px_XCAP_TargetUri, v_CheckDeactivatedRules);   /* @sic R5s150244 change 2 sic@ @sic R5-216570 sic@ */
+  }
+
+  /*
+   * @desc      Test procedure for Incoming Comunication Barring while roaming (34.229-1 15.14a, G.15.15, 34.229-5 8.25)
+   * @param     p_AuthenticationRequirement  (default value: httpDigestPreferred)
+   * @param     p_XCAP_ServerAddrInfo (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_XCAP_BIC_ROAM(AuthenticationRequirement_Type p_AuthenticationRequirement := httpDigestPreferred,
+                               template (omit) XCAP_ServerAddrInfo_Type p_XCAP_ServerAddrInfo := omit) runs on IMS_XCAP_PTC
+  {
+    var SS_Type v_SupplementaryService := SS_BIC_ROAM;
+    var boolean v_CheckDeactivatedRules := f_IMS_PTC_RanTypeIsNR5GC();               /* @sic R5-216570 sic@ */
+
+    f_XCAP_Preamble(p_AuthenticationRequirement, p_XCAP_ServerAddrInfo);             // @sic R5-166278 (NOTE 5) sic@
+
+    // @siclog "Step 1 - 4" siclog@
+    f_XCAP_SupplementaryService_CommonTestBody(v_SupplementaryService, -, v_CheckDeactivatedRules);   /* @sic R5s150244 change 2 sic@ @sic R5-216570 sic@ */
+  }
+
+}

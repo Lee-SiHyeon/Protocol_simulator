@@ -1,0 +1,1173 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-11-29 11:36:06 +0100 (Fri, 29 Nov 2024) $
+// $Rev: 39978 $
+/******************************************************************************/
+
+module IMS_Procedures_Registration {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_IP_Config all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SIPTypesAndValues all;
+  import from Parameters all;
+
+  group SendReceiveFunctions {
+
+  /*
+   * @desc      Build Contact header template to be used for sending
+   * @param     p_RegisterRequestMessageHeader
+   * @param     p_Expires
+   * @param     p_CondA3            (default value: false)
+   * @param     p_GRUUsInSIP        (default value: pc_IMS_GRUUsInSIP)
+   * @return    template (value) Contact
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_SIP_RegisterResponse_BuildContactHeader(MessageHeader p_RegisterRequestMessageHeader,
+                                                     charstring p_Expires,
+                                                     boolean p_CondA3 := false,
+                                                     boolean p_GRUUsInSIP := pc_IMS_GRUUsInSIP) runs on IMS_PTC return template (value) Contact
+  { /* @sic R5-130750 change 6: for now all parameters will be taken over from the REGISTER's Contact (i.e. without checking whether a particular parameter is really a feature parameter) sic@ */
+    /* @sic R5s130274: wildcard in contact header of de-registration sic@ */
+    /* @sic R5s170098: p_CondA3 sic@ */
+    var boolean v_WildcardedContact := match(p_RegisterRequestMessageHeader.contact, cr_Contact_Wildcard);
+    var template (omit) SemicolonParam_List v_ContactParams := omit;
+    var charstring v_SipUriForGruu;
+    var SipUrl v_DomainNameSipUrl;
+    var SipUrl v_ContactUrl;
+    
+    if (v_WildcardedContact) {    // contact may be wildcard for de-registration
+      v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    }
+    else {
+      v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_RegisterRequestMessageHeader);
+    }
+    
+    if (p_Expires != "0") {                                                        // no de-registration
+      if (v_WildcardedContact) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Wildcarded contact only for de-registration");
+      }
+      else {
+        v_ContactParams := p_RegisterRequestMessageHeader.contact.contactBody.contactAddresses[0].contactParams;  /* @sic R5-130750 change 6 sic@ */
+        v_ContactParams := f_SIP_SemicolonParamList_RemoveParam(v_ContactParams, "expires");  /* @sic R5s150342 sic@ */
+      }
+
+      if (p_GRUUsInSIP) { // Add pub-gruu and temp-gruu parameters @sic R5-153760 sic@
+        v_SipUriForGruu := f_IMS_PTC_ImsInfo_GetUriString(gruu);
+        v_DomainNameSipUrl := f_Addr_Union_GetSipUrl(p_RegisterRequestMessageHeader.toField.addressField);   /* @sic R5s160324 sic@ */
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParamQuoted("pub-gruu",  cs_IMS_PubGRUU(v_SipUriForGruu)));
+        if (not p_CondA3) {
+          v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParamQuoted("temp-gruu", f_IMS_TempGRUU(v_SipUriForGruu, f_SIP_SipUrl_GetDomainName(v_DomainNameSipUrl))));  /* @sic R5s160325 - additional changes: f_SIP_SipUrl_GetDomainName sic@ */
+        }
+      }
+    }
+    v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("expires", p_Expires));
+
+    return cs_Contact(v_ContactUrl, v_ContactParams);
+  }
+
+  /*
+   * @desc      200 OK for Register (see TS 34.229, A.1.3)
+   * @param     p_RegisterRequest
+   * @param     p_CondA3            (default value: false)
+   * @param     p_RegisterExpiration (default value: tsc_IMS_RegisterExpiration)
+   * @param     p_CondA4            (default value: (pc_IMS_CS_PS_SRVCCAlert or pc_IMS_CS_PS_SRVCC))
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_RegisterResponse_200_MessageHeaderTX(REGISTER_Request p_RegisterRequest,
+                                                      boolean p_CondA3 := false,
+                                                      charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration,
+                                                      boolean p_CondA4 := (pc_IMS_CS_PS_SRVCCAlert or pc_IMS_CS_PS_SRVCC)) runs on IMS_PTC return template (value) MessageHeader
+  { /* p_CondA3   ..  condition A3 (Response for an emergency registration) */
+    /* @sic R5-130750 change 1, 4: specific IMPU for messages sent in DL; P-Associated-URI sic@ */
+    var MessageHeader v_MessageHeader_Register := p_RegisterRequest.msgHeader;
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(v_MessageHeader_Register);
+    var CharStringList_Type v_PublicUserIdList := f_IMS_PTC_ImsInfo_GetAllIMPUs();
+    var CharStringList_Type v_AssociatedUriList;
+    var template (value) NameAddrParam_List v_NameAddrParamList;
+    var template (omit) ServiceRoute v_ServiceRoute := omit;
+    var template (value) SemicolonParam_List v_FeatureCapsParamList;
+    var integer i;
+
+    if (p_CondA3) {     // emergency registration
+      v_AssociatedUriList[0] := f_IMS_PTC_ImsInfo_GetUriString(emergencyId);
+    }
+    else {
+      for (i:=0; i < lengthof(v_PublicUserIdList); i := i+1) {
+        v_AssociatedUriList[i] := v_PublicUserIdList[i];
+      }
+      v_AssociatedUriList[i] := px_IMS_AssociatedTelUri;
+
+      v_ServiceRoute := cs_ServiceRouteDef(tsc_IMS_Scscf);
+    }
+
+    for (i:=0; i < lengthof(v_AssociatedUriList); i := i+1) {
+      v_NameAddrParamList[i] := cs_NameAddrParam(f_SIP_BuildSipUri_TX(v_AssociatedUriList[i]));
+    }
+
+    v_MessageHeader_Response.contact         := f_SIP_RegisterResponse_BuildContactHeader(v_MessageHeader_Register, p_RegisterExpiration, p_CondA3);
+    v_MessageHeader_Response.serviceRoute    := v_ServiceRoute;
+    v_MessageHeader_Response.pAssociatedURI  := cs_PAssociatedURI(v_NameAddrParamList);
+    v_MessageHeader_Response.path            := cs_PathDef(f_IMS_PTC_Pcscf_Get());
+    
+    if (p_CondA4) { // @sic R5-145796 sic@
+      v_FeatureCapsParamList := {
+        cs_GenericParam_Common("+g.3gpp.atcf", cs_GenValueQuoted("tel:+1-237-888-999")),
+        cs_GenericParam_Common("+g.3gpp.cs2ps-srvcc", cs_GenValueQuoted("<sip:sti-sr@atcf.visited2.net>"))
+      };
+      v_MessageHeader_Response.featureCaps   := cs_FeatureCaps(v_FeatureCapsParamList);
+    }
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      200 OK for Subscribe or Publish(see TS 34.229 A.1.5 and A.4.4)
+   * @param     p_MessageHeader_Request
+   * @param     p_ToTag
+   * @param     p_ContactHostname   (default value: tsc_IMS_Scscf)
+   * @param     p_ExpireTime        (default value: "600000")
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_SubscribeOrPublishResponse_200_MessageHeaderTX(MessageHeader p_MessageHeader_Request,
+                                                                template (omit) charstring p_ToTag,
+                                                                charstring p_ContactHostname := tsc_IMS_Scscf,
+                                                                charstring p_ExpireTime := "600000") runs on IMS_PTC return template (value) MessageHeader
+  { /* NOTE: acc. to A.1.5 this message does not have a Session-ID */
+    /* @sic R5-153986: parameter p_ToTag to allow different ToTags for different dialogs created by subscription to even packages sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_MessageHeader_Request, p_ToTag);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@
+                                                                                                                                             @sic R5-130750 same as in SUBSCRIBE, R5s130235 additional changes sic@
+                                                                                                                                             @sic R5-131897, R5-132063 - generic handling of to-tags sic@ */
+    var charstring v_RouteHost := f_IMS_PTC_Pcscf_Get();
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var template (omit) GenericParam v_SigCompParam := f_IMS_PTC_ImsInfo_GetSigCompParam();
+    var template (value) RouteBody_List v_RouteBodyList := { f_RouteBodyWithParamsTX(cs_SipUri_HostPort_lr(v_RouteHost, v_Port_ps), v_SigCompParam) };
+
+    v_MessageHeader_Response.contact         := cs_Contact(cs_SipUri_HostPort(p_ContactHostname));                 // @sic R5s120727 change 3 sic@
+    v_MessageHeader_Response.expires         := cs_Expires(p_ExpireTime);                                          // @sic R5-130548 sic@
+    
+    if (p_MessageHeader_Request.cSeq.method == "SUBSCRIBE") {                                                      /* @sic R5-196983: support of PUBLISH for MCX sic@ */
+      v_MessageHeader_Response.recordRoute   := cs_RecordRoute(v_RouteBodyList);
+    }
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      403 Forbidden (see TS 34.229, A.3.2)
+   * @param     p_RegisterRequest
+   * @param     p_RetryAfter        (default value: omit)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT)
+   */
+  function f_IMS_RegisterResponse_403_MessageHeaderTX(REGISTER_Request p_RegisterRequest,
+                                                      template  RetryAfter p_RetryAfter := omit) runs on IMS_PTC return template (value) MessageHeader
+  {
+    /* p_RetryAfter - @sic R5-173677 sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_RegisterRequest.msgHeader);
+    if (ispresent(p_RetryAfter)) {
+      v_MessageHeader_Response.retryAfter := valueof(p_RetryAfter);
+    }
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      423 Interval Too Brief for REGISTER (see TS 34.229, A.1.7)
+   * @param     p_RegisterRequest
+   * @param     p_DeltaSec
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_RegisterResponse_423_MessageHeaderTX(REGISTER_Request p_RegisterRequest,
+                                                      DeltaSec p_DeltaSec) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_RegisterRequest.msgHeader);
+    v_MessageHeader_Response.minExpires := cs_MinExpires(p_DeltaSec);
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      420 Bad Extension (see TS 34.229, A.1.8)
+   * @param     p_RegisterRequest
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_RegisterResponse_420_MessageHeaderTX(REGISTER_Request p_RegisterRequest) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_RegisterRequest.msgHeader);
+    v_MessageHeader_Response.unsupported := cs_Unsupported;
+    v_MessageHeader_Response.contentType := cs_ContentType(c_ims3gppApplication);  /* @sic R5-174442 sic@ */
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      503 Service Unavailable (see TS 34.229, A.4.2)
+   * @param     p_MessageHeader_Request
+   * @param     p_RetryAfter
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_CommonResponse_503_MessageHeaderTX(MessageHeader p_MessageHeader_Request,
+                                                    template (omit) RetryAfter p_RetryAfter) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5-174544: SessionId removed sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_MessageHeader_Request);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@ */
+    v_MessageHeader_Response.retryAfter := p_RetryAfter;
+    return v_MessageHeader_Response;
+  }
+
+  } // end of group SendReceiveFunctions
+
+  group RegistrationFunctions {
+
+  /*
+   * @desc      return true if retransmissions of requests sent by the UE are allowed according to 36.508 clause 4.5A.3A: IMS Signalling over UTRA, UDP, C.2 procedure
+   * @param     p_IMS_DATA_REQ
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_RetransmissionsAllowedDuringRegistration(IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC return boolean
+  {
+    var InternetProtocol_Type v_Protocol := p_IMS_DATA_REQ.RoutingInfo.Protocol;
+    var template (omit) IPCAN_RAN_Type v_RanType := f_IMS_PTC_GetRanType();     // has been set in f_IMS_REGISTER_InitialRequest
+    var boolean v_Result := false;
+
+    if (isvalue(v_RanType)) {
+      v_Result := match(valueof(v_RanType), (UTRAN_FDD, UTRAN_TDD)) and (v_Protocol == udp) and f_IMS_PTC_SecurityScheme_IsImsSecurity();
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      Initialise security during registration procedure
+   * @param     p_RegisterReq
+   * @param     p_Rand              (default value: tsc_IMS_AuthRAND)
+   * @param     p_StartSecurity     (default value: true)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_SecurityInit(REGISTER_Request p_RegisterReq,
+                                       B128_Type p_Rand := tsc_IMS_AuthRAND,
+                                       boolean p_StartSecurity := true) runs on IMS_PTC
+  { /* @sic R5s120858 change 6..8 - MCC160 implementation: additional parameter p_Unprotected to deal with GIBA sic@ */
+    /* @sic R5s130266 change 1.3, 4, 5 - MCC160 Implementation: SPIs for re-authentication sic@ */
+    /* @sic R5s150873 p_StartSecurity instead of p_Unprotected sic@ */
+    var IP_AddrInfo_Type v_UE_Address := f_IMS_PTC_UE_Address_Get();
+    var IP_AddrInfo_Type v_NW_Address := f_IMS_PTC_NW_Address_Get();
+    var SipUrl v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_RegisterReq.msgHeader);
+    var template (omit) PortNumber_Type v_UnprotectedPort_us := f_SIP_ContactUrl_GetPort(v_ContactUrl);           // may be omit in which case 5060 is chosen by the IP PTC
+    
+    if (ispresent(p_RegisterReq.msgHeader.securityClient)) {                              /* @sic R5s150873: false for GIBA sic@ */
+      f_IMS_Register_SecurityInit_ImsSecurity(p_RegisterReq, p_Rand, p_StartSecurity);    /* @sic R5s190727 change 1.5: MCX split sic@ */
+    }
+    else { /* GIBA */
+      f_IMS_PortsAndSecurityConfig(v_UnprotectedPort_us, cs_IMS_RegistrationInfo(v_NW_Address, v_UE_Address));
+    }
+  }
+
+  /*
+   * @desc      receive REGISTER (non GIBA) and send reponse
+   * @param     p_IpcanType         (default value: IPCAN_E)
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @param     p_RegisterExpiration (default value: tsc_IMS_RegisterExpiration)
+   * @param     p_SigCompIsActive   (default value: false)
+   * @param     p_IsEmergency       (default value: false)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_NonGIBA(IMS_IpcanPortType_Type p_IpcanType := IPCAN_E,
+                                  template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit,
+                                  charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration,
+                                  boolean p_SigCompIsActive := false,
+                                  boolean p_IsEmergency := false) runs on IMS_PTC return IMS_DATA_REQ
+  { /* Note:
+       - In case the the function is called in a default handler the Register message has been already received
+       - When used in the IMS CC tests the PTC needs to wait for the reception of the Register message */
+    /* @sic R5s160133: p_IpcanType, return type changed to IMS_DATA_REQ sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var REGISTER_Request v_RegisterReq;
+
+    var default v_RetransmissionHandler := null;
+
+    v_IMS_DATA_REQ := f_IMS_REGISTER_InitialRequest(p_IpcanType, p_IMS_DATA_REQ, -, -, p_SigCompIsActive, p_IsEmergency);         // check REGISTER and init GlobalInfo
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+
+    if (fl_IMS_RetransmissionsAllowedDuringRegistration(v_IMS_DATA_REQ)) {
+      v_RetransmissionHandler := activate(a_IMS_RetransmissionHandler(v_IMS_DATA_REQ));
+    }
+
+    f_IMS_Register_SecurityInit(v_RegisterReq);
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine401, f_IMS_RegisterResponse_401_MessageHeaderTX(v_RegisterReq))));
+
+    v_IMS_DATA_REQ := f_IMS_REGISTER_SubsequentRequest(-, -, p_IsEmergency);
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_RegisterReq, p_IsEmergency, p_RegisterExpiration)))); // @sic R5s130561 sic@
+
+    deactivate(v_RetransmissionHandler);
+
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      common function for IMS registration (GIBA)
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @param     p_RegisterExpiration (default value: tsc_IMS_RegisterExpiration)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_GIBA(template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit,
+                               charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration) runs on IMS_PTC return IMS_DATA_REQ
+  { /* Note:
+       - In case the the function is called in a default handler the Register message has been already received
+       - When used in the IMS CC tests the PTC needs to wait for the reception of the Register message */
+    /* @sic R5s160133: return type changed to IMS_DATA_REQ sic@ */
+
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var REGISTER_Request v_RegisterReq;
+    var boolean v_CondA3 := true;
+
+    v_IMS_DATA_REQ := f_IMS_REGISTER_InitialRequest(-, p_IMS_DATA_REQ, -, -, -, -, v_CondA3);         // check REGISTER and init GlobalInfo; @sic R5s140356: v_CondA3 sic@
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+
+    f_IMS_Register_SecurityInit(v_RegisterReq);                             /* @sic R5s120858 change 6..8 - MCC160 implementation sic@
+                                                                               @sic R5s170050: v_StartSecurity := false not needed as third parameter anymore sic@ */
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_RegisterReq, -, p_RegisterExpiration))));
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      common function for IMS registration
+   * @param     p_IpcanType         (default value: IPCAN_E)
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @param     p_SigCompIsActive   (default value: false)
+   * @param     p_RegisterExpiration   (default value: tsc_IMS_RegisterExpiration)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register(IMS_IpcanPortType_Type p_IpcanType := IPCAN_E,
+                          template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit,
+                          boolean p_SigCompIsActive := false,
+                          charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration) runs on IMS_PTC return IMS_DATA_REQ
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-151769 additional parameter p_RegisterExpiration sic@ */
+    /* @sic R5s160133: p_IpcanType sic@ */
+    /* @sic R5s160133: return type changed to IMS_DATA_REQ sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    if (f_IMS_PTC_SecurityScheme_IsGiba()) {
+      if (p_SigCompIsActive) {
+        FatalError(__FILE__, __LINE__, "sigcomp is not supported for GIBA");
+      }
+      v_IMS_DATA_REQ := f_IMS_Register_GIBA(p_IMS_DATA_REQ, p_RegisterExpiration);
+    } else {
+      v_IMS_DATA_REQ := f_IMS_Register_NonGIBA(p_IpcanType, p_IMS_DATA_REQ, p_RegisterExpiration, p_SigCompIsActive);
+    }
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Receive SUBSCRIBE acc. to 34.229-1 Annex A.1.4
+   * @param     p_DialogIndex       (default value: regEventDialog)
+   * @param     p_SipUrlTo          (default value: ?)
+   * @param     p_ExpireTime        (default value: "600000")
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_SUBSCRIBE_Request(IMS_PTC_DialogIndex_Type p_DialogIndex := regEventDialog,
+                                   template (present) SipUrl p_SipUrlTo := ?,
+                                   template (present) charstring p_ExpireTime := "600000") runs on IMS_PTC return IMS_DATA_REQ
+  { /* @sic R5-130750 change 4: specific IMPU for messages sent in DL sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s200743: p_DialogIndex instead of p_EventType sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var EventType v_EventType := f_SIP_SUBSCRIBE_DialogIndex2EventType(p_DialogIndex);
+    var template (present) SipUrl v_SipUrlRequestUri := f_IMS_PTC_ImsInfo_GetSipUriSubscriptionRX();
+    var template (present) MessageHeader v_ExpectedMessageHeader := f_IMS_SubscribeRequest_MessageHeaderRX(v_EventType, p_SipUrlTo, p_ExpireTime);
+    
+    a_IMS_SUBSCRIBE_Request(v_IMS_DATA_REQ_ByRef, p_DialogIndex, v_SipUrlRequestUri, v_ExpectedMessageHeader);       /* @sic R5-150705: altstep a_IMS_SUBSCRIBE_Request sic@
+                                                                                                                        @sic R5s200000: v_ExpectedMessageHeader sic@ */
+    return v_IMS_DATA_REQ_ByRef;
+  }
+
+  /*
+   * @desc      Send 200 OK for SUBSCRIBE acc. to 34.229-1 Annex A.1.5 or Annex 5.2
+   * @param     p_DialogIndex
+   * @param     p_IMS_Subscribe_Request
+   * @param     p_ExpireTime        (default value: "600000")
+   * @param     p_ContactHostname   (default value: tsc_IMS_Scscf)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_SUBSCRIBE_Response(IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                    IMS_DATA_REQ p_IMS_Subscribe_Request,
+                                    charstring p_ExpireTime := "600000",
+                                    charstring p_ContactHostname := tsc_IMS_Scscf) runs on IMS_PTC
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-153756, R5-153986: new parameter p_DialogIndex to use to-tag as stored for the respective "subscribe-dialog" sic@ */
+    var IMS_RoutingInfo_Type v_RoutingInfo_UL := p_IMS_Subscribe_Request.RoutingInfo;
+    var SUBSCRIBE_Request v_SubscribeRequest := p_IMS_Subscribe_Request.Request.Subscribe;
+    var template (omit) charstring v_ToTag := f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex);    /* @sic R5-153756, R5-153986 sic@ */
+    
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_RoutingInfo_UL),
+                                     cs_Response(c_statusLine200, f_IMS_SubscribeOrPublishResponse_200_MessageHeaderTX(v_SubscribeRequest.msgHeader,
+                                                                                                                       v_ToTag,
+                                                                                                                       p_ContactHostname,
+                                                                                                                       p_ExpireTime))));
+  }
+
+  /*
+   * @desc      receive SUBSCRIBE and send response
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_Subscribe() runs on IMS_PTC return IMS_DATA_REQ
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-176758: return type changed to IMS_DATA_REQ sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    v_IMS_DATA_REQ := f_IMS_SUBSCRIBE_Request();
+    f_IMS_SUBSCRIBE_Response(regEventDialog, v_IMS_DATA_REQ);
+
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Send NOTIFY acc. to 34.229-1 Annex A.1.6
+   * @param     p_SubscriptionState
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_NotifyRequest_MessageHeader_A_1_6(template (value) SubscriptionState p_SubscriptionState) runs on IMS_PTC return template (value) MessageHeader
+  { /* NOTE: acc. to A.1.6 this message does not have a Session-ID */
+    /* @sic R5s130756 additional changes: p_CondA2 removed sic@ */
+    /* @sic R5s130768 additional MCC160 change: use of new function f_IMS_NotifyRequest_MessageHeader_Common sic@ */
+    /* @sic R5-153756, R5-153986: p_SubscribeRequest and p_CseqValue removed sic@ */
+    var charstring v_NW_AddrStr := f_IMS_PTC_NW_Address_GetAddrStr();    /* @sic R5s130133 change 6: f_IMS_PTC_NW_Address_GetHostFormat replaced by f_IMS_PTC_NW_Address_GetAddrStr sic@ */
+    var CharStringList_Type v_ViaAddressList := {v_NW_AddrStr, tsc_IMS_Scscf};
+    var template (value) Via v_Via := f_IMS_NotifyRequest_ViaTX(v_ViaAddressList);              /* @sic R5-153986: new function f_IMS_NotifyRequest_ViaTX sic@ */
+    var template (value) SipUrl v_ContactSipUrl := cs_SipUri_HostPort(tsc_IMS_Scscf);           /* @sic R5s120727 change 10 sic@ */
+    var template (value) ContentType v_ContentType := cs_ContentType(c_xmlreginfoApplication);  /* @sic R5-153756 sic@ */
+
+    return f_IMS_NotifyRequest_MessageHeader_Common(regEventDialog, v_Via, cs_Contact(v_ContactSipUrl), "reg", p_SubscriptionState, v_ContentType);
+  }
+
+  /*
+   * @desc      Send NOTIFY acc. to 34.229-1 Annex A.1.6
+   * @param     p_ContactUrl
+   * @param     p_XmlMessage
+   * @param     p_SubscriptionState (default value: cs_SubscriptionState_Active)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_Notify(SipUrl p_ContactUrl,
+                                 template (value) Reginfo_Type p_XmlMessage,
+                                 template (value) SubscriptionState p_SubscriptionState := cs_SubscriptionState_Active) runs on IMS_PTC
+  { /* @sic R5s130756 additional changes: p_CondA2 removed sic@ */
+    /* @sic R5-153756, R5-153986: p_SubscribeRequest and p_CseqValue removed sic@ */
+    var template (value) MessageHeader v_MessageHeader_Notify;
+    var template (present) MessageHeader v_MessageHeader_Response;
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+
+    v_MessageHeader_Notify := f_IMS_NotifyRequest_MessageHeader_A_1_6(p_SubscriptionState);  /* @sic R5-153756, R5-153986 sic@ */
+    IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(v_Protocol), cs_NOTIFY_Request(p_ContactUrl, v_MessageHeader_Notify, cs_MessageBody_RegInfo(p_XmlMessage))));
+
+    v_MessageHeader_Response := f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Notify);
+    f_IMS_ReceiveResponse(v_MessageHeader_Notify, v_Protocol, cr_Response(c_statusLine200, v_MessageHeader_Response));  /* @sic R5s140350 sic@ */
+  }
+
+  /*
+   * @desc      return RegInfo.Registration
+   * @param     p_RegisterRequest
+   * @param     p_Aor
+   * @param     p_RegistrationId
+   * @param     p_ContactId
+   * @param     p_ContactState      (default value: active)
+   * @param     p_ContactEvent      (default value: registered)
+   * @param     p_Expires           (default value: omit)
+   * @param     p_ApplyGRUU         (default value: pc_IMS_GRUUsInSIP)
+   * @param     p_AliasSipUri       (default value: omit)
+   * @return    template (value) RegInfo_Registration_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_XML_RegistrationInfo(REGISTER_Request p_RegisterRequest,
+                                  charstring p_Aor,
+                                  charstring p_RegistrationId,
+                                  charstring p_ContactId,
+                                  RegInfo_Contact_State_Type p_ContactState := active,
+                                  RegInfo_Contact_Event_Type p_ContactEvent := registered,
+                                  template (omit) integer p_Expires := omit,
+                                  boolean p_ApplyGRUU := pc_IMS_GRUUsInSIP,
+                                  template (omit) charstring p_AliasSipUri := omit)
+    runs on IMS_PTC return template (value) RegInfo_Registration_Type
+  { /* @sic R5-165941: p_AliasSipUri instead of p_IsTelUri; for GRUU p_AliasSipUri shall be present when p_Aor is a Tel URI sic@ */
+    var charstring v_ContactUri := f_SIP_SipUrl2Str(f_MessageHeader_GetContactSipUrl(p_RegisterRequest.msgHeader));     // same value as in Contact header of REGISTER request
+    var template (omit) charstring v_CallId := omit;
+    var template (omit) integer v_Cseq := omit;
+    var template (omit) PubGruu_Type v_PubGruu := omit;
+    var template (omit) TempGruu_Type v_TempGruu := omit;
+    var template (value) RegInfo_Contact_UnknownParams_Type v_UnknownParams := {};
+    var RegInfo_Registration_State_Type v_RegistrationState;
+    var charstring v_InstanceId;
+    var charstring v_DomainName;
+    var charstring v_GruuURI;
+
+    if (p_ContactState == active) {
+      v_RegistrationState := active;
+    } else {
+      v_RegistrationState := terminated;
+    }
+
+    if (p_ApplyGRUU) {   /* @sic R5-153760: support of GRUU sic@ */
+      v_DomainName := f_IMS_PTC_ImsInfo_GetHomeDomainName();                            /* @sic R5-162048 has not been agreed => R5s160325 is not applied sic@ */
+      if (ispresent(p_AliasSipUri)) {   /* => Tel URI    @sic R5-165941 sic@ */
+        v_GruuURI := valueof(p_AliasSipUri);
+      } else {                          /* => no Tel URI */
+        v_CallId := p_RegisterRequest.msgHeader.callId.callid;                          /* Call-Id of most recent REGISTER */
+        v_Cseq := p_RegisterRequest.msgHeader.cSeq.seqNumber;                           /* CSeq value of most recent REGISTER */
+        v_GruuURI := p_Aor;
+      }
+      v_PubGruu := cs_XML_PubGruu(cs_IMS_PubGRUU(v_GruuURI));                           /* acc. to RFC 5628 each contact (i.e. aor) has its own pub-gruu  */
+      v_TempGruu := cs_XML_TempGruu(f_IMS_TempGRUU(v_GruuURI, v_DomainName),
+                                    p_RegisterRequest.msgHeader.cSeq.seqNumber);        /* acc. to RFC 5628 each contact (i.e. aor) has its own temp-gruu */
+      v_InstanceId := f_SIP_InstanceIdWithAngleBrackets();
+      v_UnknownParams := { cs_XML_UEInstance(v_InstanceId) };
+    }
+    return cs_XML_RegistrationInfo(cs_XML_RegistrationContact(v_ContactUri, p_ContactId, p_ContactState, p_ContactEvent, v_CallId, v_Cseq, p_Expires, v_UnknownParams, v_PubGruu, v_TempGruu),
+                                   p_Aor,
+                                   p_RegistrationId,
+                                   v_RegistrationState);
+  }
+
+  /*
+   * @desc      return default Reginfo for NOTIFY message
+   * @param     p_RegisterRequest
+   * @return    template (value) Reginfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_XmlMessageForNotify_Active(REGISTER_Request p_RegisterRequest) runs on IMS_PTC return template (value) Reginfo_Type
+  { /* @sic R5-130750 sic@ */
+    var CharStringList_Type v_PublicUserIdList := f_IMS_PTC_ImsInfo_GetAllIMPUs();
+    var template (value) RegInfo_RegistrationList_Type v_RegistrationList;
+
+    v_RegistrationList[0] := f_XML_RegistrationInfo(p_RegisterRequest, v_PublicUserIdList[0],  "a100", "980", active, registered);
+    v_RegistrationList[1] := f_XML_RegistrationInfo(p_RegisterRequest, px_IMS_AssociatedTelUri, "a101", "981", active, created, -, -, v_PublicUserIdList[0]); /* @sic R5-165941: v_PublicUserIdList[0] as AliasSipUri sic@ */
+    if (lengthof(v_PublicUserIdList) > 1) {
+      v_RegistrationList[2] := f_XML_RegistrationInfo(p_RegisterRequest, v_PublicUserIdList[1],  "a102", "982", active, registered);
+      v_RegistrationList[3] := f_XML_RegistrationInfo(p_RegisterRequest, v_PublicUserIdList[2],  "a103", "983", active, registered);
+    }
+    return f_XML_RegInfo(-, -, v_RegistrationList);
+  }
+
+  /*
+   * @desc      C.2 / C.2a Generic Registration Test Procedure - IMS support
+   *            This is the second half of the generic Registration procedure (Steps 8 to 11)
+   * @param     p_IMS_REGISTER_REQ
+   * @param     p_WaitForPublish    (default value: false)
+   * @param     p_RetryAfter        (default value: 7200)
+   * @return    SUBSCRIBE_Request
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Register_SubscribeNotify(IMS_DATA_REQ p_IMS_REGISTER_REQ,
+                                          boolean p_WaitForPublish := false,
+                                          integer p_RetryAfter := 7200) runs on IMS_PTC return SUBSCRIBE_Request
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-155916: p_WaitForPublish sic@ */
+    /* @sic R5-176758: p_IMS_REGISTER_REQ instead of p_RegisterRequest sic@ */
+    /* @sic R5-201458 (34.229-5): p_RetryAfter sic@ */
+    var REGISTER_Request v_RegisterRequest := p_IMS_REGISTER_REQ.Request.Register;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ;
+    var SUBSCRIBE_Request v_SubscribeReq;
+    var SipUrl v_ContactUrl := f_MessageHeader_GetContactSipUrl(v_RegisterRequest.msgHeader);
+    var float v_WaitForPublishDuration := 3.0;   /* @sic R5-155916: PUBLISH expected within 3.0s after 200 OK for REGISTER sic@ */
+    var float v_ElapsedTime;
+    var float v_RemainingTime;
+    var boolean v_AllowRetransmissions := fl_IMS_RetransmissionsAllowedDuringRegistration(p_IMS_REGISTER_REQ);
+
+    var default v_PublishHandler := null;
+    var default v_RetransmissionHandler := null;
+
+    timer t_WaitForPublish;
+
+    if (v_AllowRetransmissions) {
+      v_RetransmissionHandler := activate(a_IMS_RetransmissionHandler(p_IMS_REGISTER_REQ));
+    }
+
+    if (p_WaitForPublish) {                    /* @sic R5-155916: handle PUBLISH during registration sic@ */
+      f_IMS_WaitForPublish_Set(true);
+      v_PublishHandler := activate(a_IMS_PublishHandling(p_RetryAfter));
+      t_WaitForPublish.start(1000.0);          /* "endless" timer to avoid timeout during subscribe/notify */
+    }
+
+    // Steps 8 and 9
+    v_IMS_SUBSCRIBE_REQ := f_IMS_Register_Subscribe();
+    v_SubscribeReq := v_IMS_SUBSCRIBE_REQ.Request.Subscribe;
+
+    if (v_AllowRetransmissions) {
+      deactivate(v_RetransmissionHandler);
+      v_RetransmissionHandler := activate(a_IMS_RetransmissionHandler(v_IMS_SUBSCRIBE_REQ));
+    }
+
+    // Steps 10  and 11
+    f_IMS_Register_Notify(v_ContactUrl, f_IMS_XmlMessageForNotify_Active(v_RegisterRequest));              /* @sic R5-153756, R5-153986: p_SubscribeRequest and p_CseqValue removed sic@ */
+
+    deactivate(v_PublishHandler);
+    deactivate(v_RetransmissionHandler);
+    
+    if (f_IMS_WaitForPublish_Get()) {                               // still waiting for PUBLISH
+      v_ElapsedTime := t_WaitForPublish.read;
+      v_RemainingTime := v_WaitForPublishDuration - v_ElapsedTime;
+      if (v_RemainingTime >= 0.0) {                                 // wait duration is not expired yet
+        t_WaitForPublish.start(v_RemainingTime);
+        alt {
+          [] a_IMS_PublishHandling(p_RetryAfter) {}
+          [] t_WaitForPublish.timeout {}
+        }
+      }
+    }
+    t_WaitForPublish.stop;
+    f_IMS_WaitForPublish_Set(false);
+
+    return v_SubscribeReq;
+  }
+
+  /*
+   * @desc      Get Security Client parameters for re-registration (if re-authentication is applicable)
+   * @return    SecurityClientParams_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_PTC_ReRegistration_SecurityClientParamsGet()
+    runs on IMS_PTC return SecurityClientParams_Type
+  {
+    var SecurityClientParams_Type v_SecurityClientParams;
+    var IMS_ProtectedPorts_Type v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+    var IMS_SPIs_Type v_SPIs := f_IMS_PTC_Security_GetSPIs();
+
+    v_SecurityClientParams.Port_us := v_Protected.Port_us;
+    v_SecurityClientParams.Port_uc := v_Protected.Port_uc;
+    v_SecurityClientParams.SPI_us  := v_SPIs.SPI_us;
+    v_SecurityClientParams.SPI_uc  := v_SPIs.SPI_uc;
+
+    return v_SecurityClientParams;
+  }
+
+  /*
+   * @desc      check port numbers and SPIs sent by the UE for re-registration
+   * @param     p_RegisterReq
+   * @param     p_PrevSecurityClientParams
+   * @return    SecurityClientParams_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_PTC_ReRegistration_SecurityClientParamsCheck(REGISTER_Request p_RegisterReq,
+                                                              SecurityClientParams_Type p_PrevSecurityClientParams)
+    runs on IMS_PTC return SecurityClientParams_Type
+  { /* p_PrevSecurityClientParams  .. security parameters as being used for configuration of the security at the SS side
+     *                                i.e. as used for the latest (re-)authentication */
+    var SecurityClientParams_Type v_SecurityClientParams := f_IMS_Register_GetSecurityClientParams(p_RegisterReq); // @sic R5s140266 sic@
+
+    if ((v_SecurityClientParams.SPI_uc  == p_PrevSecurityClientParams.SPI_uc) or
+        (v_SecurityClientParams.SPI_us  == p_PrevSecurityClientParams.SPI_us) or
+        (v_SecurityClientParams.Port_uc == p_PrevSecurityClientParams.Port_uc) or
+        (v_SecurityClientParams.Port_us != p_PrevSecurityClientParams.Port_us)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "");
+    } else {
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "");
+    }
+    return v_SecurityClientParams;
+  }
+
+  /*
+   * @desc      Wait for the UE to do re-registration
+   * @param     p_TRegExpireMin
+   * @param     p_TRegExpireMax
+   * @param     p_Nc
+   * @param     p_ExplicitExpiry    (default value: omit)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_PTC_ReRegistration_WaitForRegistration(timer p_TRegExpireMin,
+                                                        timer p_TRegExpireMax,
+                                                        integer p_Nc,
+                                                        template (omit) charstring p_ExplicitExpiry := omit)
+    runs on IMS_PTC return IMS_DATA_REQ
+  { /* @sic R5s130266 change 1.2 - MCC160 Implementation: upper, lower bound for TRegExpire sic@ */
+    /* @sic R5s201611 Change 4: p_ExplicitExpiry sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var template (present) SipUrl v_SipUrl := cr_SipUri_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName());
+
+    alt { // @sic R5s130266 change 1.2 - MCC160 Implementation sic@
+      [] a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request), v_IMS_DATA_REQ_ByRef)
+        {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "re-registration before timeout of expiry timer");
+        }
+      [] p_TRegExpireMin.timeout {}
+    }
+
+    alt {
+      [] a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(v_SipUrl)), v_IMS_DATA_REQ_ByRef)   // receive any REGISTER
+        {
+          p_TRegExpireMax.stop;
+          f_IMS_REGISTER_SubsequentRequest(v_IMS_DATA_REQ_ByRef, -, -, p_Nc, p_ExplicitExpiry);
+
+        }
+      [] p_TRegExpireMax.timeout
+        {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout while waiting for re-registration");
+        }
+    }
+    return v_IMS_DATA_REQ_ByRef;
+  }
+
+  /*
+   * @desc      Generic procedure to register IMS
+   * @param     p_IpcanType         (default value: IPCAN_E)
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @param     p_SigCompIsActive   (default value: false)
+   * @param     p_RegisterExpiration   (default value: tsc_IMS_RegisterExpiration)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Registration(IMS_IpcanPortType_Type p_IpcanType := IPCAN_E,
+                              template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit,
+                              boolean p_SigCompIsActive := false,
+                              charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration) runs on IMS_PTC return IMS_DATA_REQ
+  { /* NOTE:
+     * - In case the the function is called in a default handler, the Register message has been already received
+     * - When used in the IMS CC tests, the PTC needs to wait for the reception of the Register message */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed as security scheme is managed at the IMS PTC (-> f_IMS_PTC_SecurityScheme_IsGiba()) sic@ */
+    /* @sic R5s160133: p_IpcanType sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var boolean v_WaitForPublish := true;
+    v_IMS_DATA_REQ := f_IMS_Register(p_IpcanType, p_IMS_DATA_REQ, p_SigCompIsActive, p_RegisterExpiration);
+    f_IMS_Register_SubscribeNotify(v_IMS_DATA_REQ, v_WaitForPublish);
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Emergency registration according to 34.229-1 Annex C.20 and 34.229-5 A.3
+   *            NOTE: 34.229-1 Annex C.20 and 34.229-5 A.3 are identical apart from the P-Access-Network-Info
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @param     p_RegisterExpiration (default value: tsc_IMS_RegisterExpiration)
+   * @param     p_IpcanType         (default value: IPCAN_E)
+   * @return    REGISTER_Request
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_EmergencyRegistration(template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit,
+                                       charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration,
+                                       IMS_IpcanPortType_Type p_IpcanType := IPCAN_E) runs on IMS_PTC return REGISTER_Request
+  {
+    var boolean v_IsEmergency := true;
+    var IMS_DATA_REQ v_IMS_DATA_REQ := f_IMS_Register_NonGIBA(p_IpcanType, p_IMS_DATA_REQ, p_RegisterExpiration, -, v_IsEmergency); // @sic R5-212384 sic@
+    return v_IMS_DATA_REQ.Request.Register;
+  }
+
+  /*
+   * @desc      Unsubscribe from event package for given dialog
+   * @param     p_DialogIndex
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SubscribeRequest_MessageHeaderRX_C30(IMS_PTC_DialogIndex_Type p_DialogIndex) runs on IMS_PTC return template (present) MessageHeader
+  { /* @sic R5-155913: From/To-header acc. to dialog being created by initial subscribtion sic@ */
+    /* @sic R5s160045: CSeqValue shall not be incremeted in this function (i.e. f_IMS_RequestInDialog_CSeqValueRX shall not be used) as function is used in altesteps what would cause incrementing of CSeqValue for every snapshot - independent from whether or not there is a match sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    var template (present) MessageHeader v_MessageHeader_Subscribe := cr_MessageHeader_Dummy;
+    var EventType v_EventType := f_SIP_SUBSCRIBE_DialogIndex2EventType(p_DialogIndex);   /* @sic R5s200743: f_SIP_SUBSCRIBE_DialogIndex2EventType sic@ */
+
+    v_MessageHeader_Subscribe.cSeq        := cr_CseqDef(?, "SUBSCRIBE");   /* @sic R5s160045: any CSeqValue; CSeqValue to be check after the SUBSCRIBE has been effectively matched an appropriate receive statement sic@ */
+    v_MessageHeader_Subscribe.fromField   := f_IMS_RequestInDialog_FromHeaderRX(p_DialogIndex);             // @sic R5s150843: p_DialogIndex sic@
+    v_MessageHeader_Subscribe.toField     := f_IMS_RequestInDialog_ToHeaderRX(p_DialogIndex);               // @sic R5s150843: p_DialogIndex sic@
+    v_MessageHeader_Subscribe.callId      := f_IMS_PTC_ImsInfo_DialogGetCallId(p_DialogIndex);              // @sic R5s150843: p_DialogIndex sic@
+    v_MessageHeader_Subscribe.expires     := cr_Expires("0");
+    v_MessageHeader_Subscribe.event       := cr_EventDef(v_EventType);
+
+    return v_MessageHeader_Subscribe;
+  }
+
+  /*
+   * @desc      Notfiy the UE of being unsubscribed
+   * @param     p_DialogIndex
+   * @param     p_SubscribeRequest
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_NotifyRequest_MessageHeader_C30(IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                 SUBSCRIBE_Request p_SubscribeRequest) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var charstring v_NW_AddrStr := f_IMS_PTC_NW_Address_GetAddrStr();
+    var CharStringList_Type v_ViaAddressList := {v_NW_AddrStr, tsc_IMS_Scscf};
+    var template (value) SubscriptionState v_SubscriptionState := cs_SubscriptionState_Terminated;
+    var template (omit) ContentType v_ContentType := omit;
+    var template (value) SipUrl v_ContactSipUrl;
+    var template (value) Via v_Via;
+    var EventType v_EventType := f_SIP_SUBSCRIBE_DialogIndex2EventType(p_DialogIndex);   /* @sic R5s200743: f_SIP_SUBSCRIBE_DialogIndex2EventType sic@ */
+
+    select (p_DialogIndex) {
+      case (regEventDialog)  {        // A3
+        v_ContactSipUrl := cs_SipUri_HostPort(tsc_IMS_Scscf);
+      }
+      case (confEventDialog) {        // A4
+        v_ContactSipUrl := p_SubscribeRequest.requestLine.requestUri;    /* the UE shall use the FinalConferenceUri in the request line of the SUBSCRIBE message */
+      }
+      case (msgSummaryDialog) {       // A5
+        /* v_ViaAddressList[lengthof(v_ViaAddressList)] := f_IMS_PTC_ImsInfo_GetHomeDomainName();  !!!! PROSE ISSUE: acc. to A.6.2 the via header for message-summary has 3 entries nevertheless C.30 step 0C defines only 2 entries !!!! */
+        v_ContactSipUrl := cs_SipUri_HostPort(tsc_IMS_Scscf);
+      }
+      case (presenceDialog1, presenceDialog2) {
+        // v_ContactSipUrl := cs_SipUri_HostPort(tsc_IMS_Scscf);
+        FatalError(__FILE__, __LINE__, "not supported yet");
+      }
+      case (xcapDiffDialogCMS, xcapDiffDialogGMS1, xcapDiffDialogGMS2, xcapDiffDialogGMS3, xcapDiffDialogGMS4) {
+        // v_ContactSipUrl := cs_SipUri_HostPort(tsc_IMS_Scscf);
+        FatalError(__FILE__, __LINE__, "not supported yet");
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid dialog");
+      }
+    }
+    v_Via := f_IMS_NotifyRequest_ViaTX(v_ViaAddressList);
+
+    return f_IMS_NotifyRequest_MessageHeader_Common(p_DialogIndex, v_Via, cs_Contact(v_ContactSipUrl), v_EventType, v_SubscriptionState, v_ContentType);
+  }
+
+  /*
+   * @desc      to let the UE unsubscribe from event package before de-registration
+   * @param     p_DialogIndex
+   * @param     p_Protocol
+   * @param     p_MessageHeader_Notify (by reference)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  altstep a_IMS_Deregister_Unsubcribe(IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                      InternetProtocol_Type p_Protocol,
+                                      out template (value) MessageHeader p_MessageHeader_Notify) runs on IMS_PTC
+  { /* @sic R5-155913: From/To-header acc. to dialog being created by initial subscribtion => no check for To-tag being absent sic@ */
+    var template (present) SipUrl v_SubscribeRequestUri := ?;                                   /* @sic R5s150647 sic@ */
+    var template (present) MessageHeader v_MessageHeader_Subscribe := f_IMS_SubscribeRequest_MessageHeaderRX_C30(p_DialogIndex);
+    var template (value) MessageHeader v_MessageHeader_Notify;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var SUBSCRIBE_Request v_SubscribeRequest;
+    var SipUrl v_ContactUrl;
+    
+    [] a_IMS_ReceiveRequest(car_IMS_Subscribe_Request(cr_SUBSCRIBE_Request(v_SubscribeRequestUri, v_MessageHeader_Subscribe)), v_IMS_SUBSCRIBE_REQ_ByRef)  /* @sic R5s150647 sic@ */
+      {
+        v_SubscribeRequest := v_IMS_SUBSCRIBE_REQ_ByRef.Request.Subscribe;
+        f_IMS_RequestInDialog_IncrAndCheckCSeqValue(v_SubscribeRequest.msgHeader, -, p_DialogIndex); /* @sic R5s160045: sic@
+                                                                                                        CSeqValue shall not be incremeted in f_IMS_SubscribeRequest_MessageHeaderRX_C30 as this would be done
+                                                                                                        for every snapshot when the altstep is checked (i.e. independent from whether or not there is a match) */
+        f_IMS_SUBSCRIBE_Response(p_DialogIndex, v_IMS_SUBSCRIBE_REQ_ByRef, "0");
+        v_MessageHeader_Notify := f_IMS_NotifyRequest_MessageHeader_C30(p_DialogIndex, v_SubscribeRequest);
+        v_ContactUrl := f_MessageHeader_GetContactSipUrl(v_SubscribeRequest.msgHeader);
+        IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(p_Protocol), cs_NOTIFY_Request(v_ContactUrl, v_MessageHeader_Notify)));
+        p_MessageHeader_Notify := v_MessageHeader_Notify;
+      }
+  }
+
+  /*
+   * @desc      procedure to de-register UE acc. to 34.229-1 C.30
+   * @param     p_IMS_DATA_REQ      (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Deregistration(template (omit) IMS_DATA_REQ p_IMS_DATA_REQ := omit) runs on IMS_PTC
+  { /* @sic R5-140902: no delay needed anymore to wait for TCP close sic@ */
+    /* @sic R5s170445: closing of TCP connection done outside this function again sic@ */
+    var charstring v_Expires := "0";
+    var IMS_DATA_REQ v_IMS_DATA_REQ := f_IMS_REGISTER_DeregistrationRequest(p_IMS_DATA_REQ);    /* @sic R5s190727 change 1.4: MCX split sic@ */
+
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo),
+                                     cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_IMS_DATA_REQ.Request.Register, -, v_Expires))));  // @sic R5s130274: v_Expires sic@
+  }
+
+  type enumerated IMS_OptionalDeregistrationOrC24Reinvite_State_Type
+  {  /* @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT) */
+    waiting,
+    reInviteC24,
+    timeoutC24,
+    deRegistration,
+    deRegistrationAndIpcanRelease,
+    ipcanReleaseOnly
+  };
+
+  /*
+   * @desc      handle optional de-registration
+   * @param     p_Port
+   * @param     p_TimerC24
+   * @param     p_WaitForIpcanRelease (default value: true)
+   * @param     p_AllowRetransmission (default value: false)
+   * @return    IMS_OptionalDeregistrationOrC24Reinvite_State_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_OptionalDeregistrationOrC24Reinvite(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                                     timer p_TimerC24,
+                                                     boolean p_WaitForIpcanRelease := true,
+                                                     boolean p_AllowRetransmission := false) runs on IMS_PTC return IMS_OptionalDeregistrationOrC24Reinvite_State_Type
+  { /* @sic R5s140710 - MCC160 Implementation: parameter p_AllowRetransmission sic@ */
+    /* @sic R5s170198 - p_TimerC24 sic@ */
+    var IMS_DATA_REQ v_IMS_REGISTER_REQ_ByRef;
+    var template (present) SipUrl v_SipUrl := cr_SipUri_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName());
+    var InternetProtocol_Type v_ProtocolForRequestInDL := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+
+    var boolean v_WaitForUnsubscribe_RegEvent   := f_IMS_PTC_ImsInfo_DialogIsStarted(regEventDialog);   /* @sic R5-153756 sic@ */
+    var boolean v_WaitForUnsubscribe_MsgSummary := f_IMS_PTC_ImsInfo_DialogIsStarted(msgSummaryDialog); /* @sic R5-153756 sic@ */
+    var boolean v_WaitForUnsubscribe_ConfEvent  := f_IMS_PTC_ImsInfo_DialogIsStarted(confEventDialog);  /* @sic R5-153756 sic@ */
+    var template (value) MessageHeader v_MessageHeader_Notify_RegEvent_ByRef;
+    var template (value) MessageHeader v_MessageHeader_Notify_MsgSummary_ByRef;
+    var template (value) MessageHeader v_MessageHeader_Notify_ConfEvent_ByRef;
+    var boolean v_C24 := p_TimerC24.running;
+    var IMS_OptionalDeregistrationOrC24Reinvite_State_Type v_State := waiting;
+
+    var default v_RetransmissionHandler := null;
+    var default v_WaitFor200OK_RegEvent_Handler := null;
+    var default v_WaitFor200OK_MsgSummary_Handler := null;
+    var default v_WaitFor200OK_ConfEvent_Handler := null;
+    var boolean v_DeRegister := false;
+
+    while (v_State == waiting) { // @sic R5-141113: de-registration is not mandatory, R5s170028, R5s170198, R5s170445, R5-176429 sic@
+      alt {
+        [v_WaitForUnsubscribe_RegEvent] a_IMS_Deregister_Unsubcribe(regEventDialog, v_ProtocolForRequestInDL, v_MessageHeader_Notify_RegEvent_ByRef) {  /* @sic R5-153756 sic@ */
+          v_WaitForUnsubscribe_RegEvent := false;
+          v_WaitFor200OK_RegEvent_Handler := activate(a_IMS_ReceiveResponse200OK(v_MessageHeader_Notify_RegEvent_ByRef, v_ProtocolForRequestInDL));     /* @sic R5-176429: UE may or may not send 200 OK sic@ */
+        }
+        [v_WaitForUnsubscribe_ConfEvent] a_IMS_Deregister_Unsubcribe(confEventDialog, v_ProtocolForRequestInDL, v_MessageHeader_Notify_ConfEvent_ByRef) {  /* @sic R5-153756 sic@ */
+          v_WaitForUnsubscribe_ConfEvent := false;
+          v_WaitFor200OK_RegEvent_Handler := activate(a_IMS_ReceiveResponse200OK(v_MessageHeader_Notify_ConfEvent_ByRef, v_ProtocolForRequestInDL));     /* @sic R5-176429: UE may or may not send 200 OK sic@ */
+        }
+        [v_WaitForUnsubscribe_MsgSummary] a_IMS_Deregister_Unsubcribe(msgSummaryDialog, v_ProtocolForRequestInDL, v_MessageHeader_Notify_MsgSummary_ByRef) {  /* @sic R5-153756 sic@ */
+          v_WaitForUnsubscribe_MsgSummary := false;
+          v_WaitFor200OK_RegEvent_Handler := activate(a_IMS_ReceiveResponse200OK(v_MessageHeader_Notify_MsgSummary_ByRef, v_ProtocolForRequestInDL));     /* @sic R5-176429: UE may or may not send 200 OK sic@ */
+        }
+        [] a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(v_SipUrl)), v_IMS_REGISTER_REQ_ByRef) {
+          if (ispresent(v_IMS_REGISTER_REQ_ByRef.Request.Register.msgHeader.expires)) { // @sic R5-187772 sic@
+             v_DeRegister := not match(v_IMS_REGISTER_REQ_ByRef.Request.Register.msgHeader.expires, cr_Expires(tsc_IMS_ExpiresDef));
+          }
+          if (v_DeRegister) { // @sic R5-187772 sic@
+            if (p_AllowRetransmission) {
+              v_RetransmissionHandler := activate(a_IMS_RetransmissionHandler(v_IMS_REGISTER_REQ_ByRef));  /* when re-transmissions are allowed they may colide with f_Delay in f_IMS_TCP_CloseHandling
+                                                                                                            or with the confirmation in f_IMS_CloseTCP (if any); */
+            }
+            f_IMS_PTC_Deregistration(v_IMS_REGISTER_REQ_ByRef);
+            v_State := deRegistration;
+          } else {// Re-registration
+            f_IMS_PTC_ImsInfo_CseqIncr (register); // @sic R5s190213 sic@
+            IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_REGISTER_REQ_ByRef.RoutingInfo),
+                                     cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_IMS_REGISTER_REQ_ByRef.Request.Register))));
+          }
+        }
+        [p_WaitForIpcanRelease] p_Port.receive(cmr_IMS_IPCAN_Trigger) { // @sic R5-142919 sic@
+          v_State := ipcanReleaseOnly;
+        }
+        [v_C24] p_TimerC24.timeout { // @sic R5s170198 sic@
+          v_State := timeoutC24;
+        }
+        [v_C24] IMS_Server.check(receive(car_IMS_Invite_Request())) { // @sic R5s170198 sic@
+          v_State := reInviteC24;
+        }
+      }
+    }
+    p_TimerC24.stop;         /* NOTE: acc. to ES 201 873-1 cl. 23.3 the timer can be stopped even if it has not been started before */
+    
+    select (v_State) {
+      case (deRegistration) {
+        f_IMS_TCP_CloseHandling(waitAndClose);  /* @sic R5s170445 sic@
+                                                   @sic R5-176429 sic@:
+                                                   a UE may (or may not send) send pending 200 OK reponses for NOTIFY messages;
+                                                   if so, these messages are sent before the UE closes the TCP connections at its side
+                                                   => if the 3s (tsc_IMS_WaitForTcpClose) in f_IMS_TCP_CloseHandling are not sufficient the prose needs to specify a proper timer in C.30 */
+        if (p_WaitForIpcanRelease) {            /* trigger not received yet */
+          p_Port.receive(cmr_IMS_IPCAN_Trigger);
+          v_State := deRegistrationAndIpcanRelease
+        }
+      }
+      case else {
+        /* @sic R5-176429 Assumption: in case the UE does not send any de-REGISTER it also has not sent any un-SUBSCRIBE before and therefore it does not send any 200 OK for the NOTIFY either sic@ */
+      }
+    }
+    deactivate(v_RetransmissionHandler);
+    deactivate(v_WaitFor200OK_RegEvent_Handler);
+    deactivate(v_WaitFor200OK_MsgSummary_Handler);
+    deactivate(v_WaitFor200OK_ConfEvent_Handler);
+
+    return v_State; // @sic R5s170198 sic@
+  }
+
+  /*
+   * @desc      Emergency Reregistration occuring within a specific time
+   * @param     p_OldSecNotRequired (default value: true)
+   * @param     p_RegisterExpiration (default value: tsc_IMS_RegisterExpiration)
+   * @param     p_TRegExpireMax
+   * @param     p_StepRegister1     (default value: "")
+   * @param     p_StepRegister2     (default value: "")
+   * @return    REGISTER_Request
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_EmergencyReRegistration(boolean p_OldSecNotRequired := true,
+                                          charstring p_RegisterExpiration := tsc_IMS_RegisterExpiration,
+                                          timer p_TRegExpireMax,
+                                          charstring p_StepRegister1 := "",
+                                          charstring p_StepRegister2 := "") runs on IMS_PTC return REGISTER_Request // @sic R5-140037 sic@ @sic R5s160427 sic@
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var REGISTER_Request v_RegisterReq;
+    var boolean v_IsEmergency := true;
+    var integer v_NonceCount;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+
+    v_NonceCount := 2;
+    v_IMS_DATA_REQ := f_IMS_REGISTER_SubsequentRequest(-, -, v_IsEmergency, v_NonceCount);
+    if (p_StepRegister1 != "") {f_IMS_PreliminaryPass(__FILE__, __LINE__, p_StepRegister1)}; // @sic R5s230537 sic@
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+
+    p_TRegExpireMax.stop; // @sic R5s160427 sic@
+    
+    f_IMS_Register_SecurityInit(v_RegisterReq, not4b tsc_IMS_AuthRAND);    /* generate a new RAND */
+    
+    v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine401, f_IMS_RegisterResponse_401_MessageHeaderTX(v_RegisterReq))));
+    
+    v_NonceCount := 1; // nonce counter is reset to 1 due to re-authentication
+    
+    v_IMS_DATA_REQ := f_IMS_REGISTER_SubsequentRequest(-, -, v_IsEmergency, v_NonceCount);
+    if (p_StepRegister2 != "") {f_IMS_PreliminaryPass(__FILE__, __LINE__, p_StepRegister2)};  // @sic R5s230537 sic@
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+    v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo); /* @sic R5s141326, R5s150245 change 1 sic@ */
+
+    if (p_OldSecNotRequired) { // @sic R5s141335 sic@
+      f_IMS_Register_SecurityRelease(oldestProtectedContextOnly); // @sic R5s140909; R5w150015: v_SecurityInfo is removed sic@
+      v_RoutingInfo.Security := protectedContext1;    /* @sic R5s141326: by releasing the old security context the new one becomes context 1; R5s150245 change 1 sic@ */
+    }
+  
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine200, f_IMS_RegisterResponse_200_MessageHeaderTX(v_RegisterReq, v_IsEmergency, p_RegisterExpiration)))); /* @sic R5s150809 sic@ */
+    return v_RegisterReq;
+  }
+
+  /*
+   * @desc      (mandatory) de-registration; does not wait for IPCAN release
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Deregistration() runs on IMS_PTC
+  { // @sic R5s170198 sic@
+    var boolean v_WaitForIpcanRelease := false;
+    timer t_Dummy;
+    f_IMS_OptionalDeregistrationOrC24Reinvite(IPCAN, t_Dummy, v_WaitForIpcanRelease);
+  }
+
+  /*
+   * @desc      handle optional de-registration
+   * @param     p_AllowRetransmission (default value: false)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_IpcanReleaseWithOptionalDeregistration(boolean p_AllowRetransmission := false) runs on IMS_PTC
+  { // @sic R5s170198 sic@
+    timer t_Dummy;
+    f_IMS_OptionalDeregistrationOrC24Reinvite(IPCAN, t_Dummy, -, p_AllowRetransmission); // @sic R5-154047, R5s170028, R5s170198, R5s170541 sic@
+  }
+
+  } // end of group RegistrationFunctions
+
+    /*
+   * @desc      PUBLISH (see TS 34.229, A.4.3)
+   * @param     p_SipUrlTo          (default value: ?)
+   * @param     p_EventType         (default value: ?)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PublishRequest_MessageHeaderRX(template (present) SipUrl p_SipUrlTo := ?,
+                                                template (present) EventType p_EventType := ?)  runs on IMS_PTC return template (present) MessageHeader
+  { /* @sic R5-196983: p_SipUrlTo tocope with specific To-URI for MCX sic@ */
+    var template (present) MessageHeader v_MessageHeader_Publish := cr_MessageHeader_Dummy;
+    var IMS_ProtectedPorts_Type v_Protected;
+    var template (present) PAccessNetworkInfo v_PAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    var template (present) Expires v_Expires := cr_Expires(tsc_IMS_ExpiresDef);
+    var template integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var template integer v_Port_us_Via := *;
+    var template (present) SipUrl v_SipUrlFrom := ?;  /* "any IMPU within the set of IMPUs on ISIM" */
+
+    v_MessageHeader_Publish.cSeq        := cr_CseqDef(?, "PUBLISH");
+    v_MessageHeader_Publish.fromField   := cr_FromWithTag(v_SipUrlFrom);         // checked by f_IMS_PublishRequest_CheckPublicUserIdentity
+    v_MessageHeader_Publish.toField     := cr_ToDef(p_SipUrlTo);                 // NOTE: absence of the To tag needs to be checked separately (f_IMS_MessageHeader_CheckTo)
+    v_MessageHeader_Publish.callId      := cr_CallId(?);
+    v_MessageHeader_Publish.maxForwards := cr_MaxForwardsDef;
+
+    if (f_IMS_PTC_SecurityScheme_IsGiba()) {
+      v_MessageHeader_Publish.require := omit;
+      v_MessageHeader_Publish.proxyRequire := omit;
+      v_MessageHeader_Publish.securityVerify := omit;
+      v_MessageHeader_Publish.pAccessNetworkInfo := v_PAccessNetworkInfo ifpresent;
+      v_MessageHeader_Publish.expires := v_Expires ifpresent;   // "same as registration timer" acc. to A.4.3
+    }
+    else {
+      v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+      v_Port_us_Via := v_Protected.Port_us;
+      v_MessageHeader_Publish.pAccessNetworkInfo := v_PAccessNetworkInfo;
+      v_MessageHeader_Publish.securityVerify := f_IMS_PTC_BuildSecurityVerifyHeader();
+      v_MessageHeader_Publish.expires := v_Expires ifpresent;   // "same as registration timer" acc. to A.4.3
+    }
+    v_MessageHeader_Publish.route   := cr_Route(cr_RouteBodyList_InitialReq(v_Port_ps));   /* P-SCCF needs to be checked after receiving (f_IMS_MessageHeader_Request_CheckRoute) */
+    v_MessageHeader_Publish.via     := cr_ViaDef(-, cr_HostPort(?, v_Port_us_Via));        /* host address needs to be checked after receiving (f_IMS_MessageHeader_Request_CheckVia) */
+    v_MessageHeader_Publish.event   := cr_EventDef(p_EventType);
+
+    return v_MessageHeader_Publish;
+  }
+
+  /*
+   * @desc      acc. to A.4.3 in the PUBLISH request the public user id to be used in the Request-Line, From and To is "any IMPU within the set of IMPUs on ISIM"
+   *            => UE has to have an ISIM
+   * @param     p_SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PublishRequest_CheckPublicUserIdentity(SipUrl p_SipUrl) runs on IMS_PTC
+  {
+    if (not f_IMS_PTC_ImsInfo_GetUEwithISIM()) {       /* @sic R5-203077: f_IMS_PTC_ImsInfo_GetUEwithISIM instead of px_UEwithISIM sic@ */
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.4.3 requires ISIM");
+    } else {
+      if (not f_IMS_PublicUserId_Match(f_IMS_PTC_ImsInfo_GetAllIMPUs(), p_SipUrl)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid public user id in PUBLISH request");
+      }
+    }
+  }
+
+  /*
+   * @desc      handling of PUBLISH requests acc. to 34.229-1 C.5 Default
+   * @param     p_RetryAfter        (default value: 7200)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_PublishHandling(integer p_RetryAfter := 7200) runs on IMS_PTC
+  { /* @sic R5-201458 (34.229-5): p_RetryAfter sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var MessageHeader v_MessageHeader;
+    var InternetProtocol_Type v_Protocol;
+    var template (present) SipUrl v_SipUrlRequestLine := ?;    /* "any IMPU within the set of IMPUs on ISIM" */
+    var boolean v_WaitForPublish := f_IMS_WaitForPublish_Get();
+
+    [v_WaitForPublish] a_IMS_ReceiveRequest(car_IMS_Publish_Request(cr_PUBLISH_Request(v_SipUrlRequestLine, f_IMS_PublishRequest_MessageHeaderRX())), v_IMS_DATA_REQ_ByRef)
+      {
+        v_MessageHeader := v_IMS_DATA_REQ_ByRef.Request.Publish.msgHeader;
+        v_Protocol := v_IMS_DATA_REQ_ByRef.RoutingInfo.Protocol;
+
+        f_IMS_MessageHeader_CheckTo(v_MessageHeader, noToTag);
+        f_IMS_MessageHeader_Request_CheckRoute(v_MessageHeader);
+        f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol);
+        f_IMS_PublishRequest_CheckPublicUserIdentity(f_Addr_Union_GetSipUrl(v_MessageHeader.fromField.addressField));
+        f_IMS_PublishRequest_CheckPublicUserIdentity(f_Addr_Union_GetSipUrl(v_MessageHeader.toField.addressField));
+        f_IMS_PublishRequest_CheckPublicUserIdentity(v_IMS_DATA_REQ_ByRef.Request.Publish.requestLine.requestUri);
+
+        IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ_ByRef.RoutingInfo),
+                                         cs_Response(c_statusLine503, f_IMS_CommonResponse_503_MessageHeaderTX(v_MessageHeader, cs_RetryAfter(p_RetryAfter)))));
+        f_IMS_WaitForPublish_Set(false);
+      }
+  }
+
+}

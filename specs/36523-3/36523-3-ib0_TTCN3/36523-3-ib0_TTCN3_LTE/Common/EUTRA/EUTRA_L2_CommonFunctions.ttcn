@@ -1,0 +1,853 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-03-01 18:50:39 +0100 (Sun, 01 Mar 2026) $
+// $Rev: 43068 $
+/******************************************************************************/
+
+module EUTRA_L2_CommonFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EPS_NAS_LoopBack_TypeDefs all;
+  import from EUTRA_ASP_DrbDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_L2_CommonTemplates all;
+  import from EUTRA_LoopBack all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_ASP_TypeDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_CommonL2 all;
+  import from EUTRA_NB_CommonRLC all;
+  import from EUTRA_RRC_Templates all;
+  import from NAS_CommonTemplates all;
+  import from Parameters all;
+
+  group SubframeTiming {
+
+  /*
+   * @desc      function to calculate subframe numbers for PDU/SDUs to be sent in subsequent TTIs
+   *            This function shall be used to calculate subframe offsets used in the timing info of ASPs;
+   *            the offset is the absolute index of a subframe (in contrast to f_EUTRA_DataListSubframeOffset where relative values are calculated).
+   *            for FDD that are simply subsequent subframes but for TDD not all subframes can be used.
+   *            This function is not suitable for sending UL grants requiring subframes 4, 9, 14, 19, ..
+   *            but it can can be used for this by employing even indices.
+   * @param     p_EUTRA_FDD_TDD_Mode  ... FDD/TDD
+   * @param     p_Index               ... index of the PDU/SUDs
+   * @return    integer
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_TimingInfoSubframeOffset(EUTRA_FDD_TDD_Mode_Type p_EUTRA_FDD_TDD_Mode,
+                                            integer p_Index)
+    return integer
+  {
+    var integer j;
+    var integer v_SubframeOffset;
+    
+    if (p_EUTRA_FDD_TDD_Mode == TDD)
+      {
+        // index  = 0, 1, 2, 3,  4,  5,  6, .. =>
+        // offset = 4, 5, 9, 10, 14, 15, ..
+        p_Index := p_Index+1;
+        j := ((p_Index+1) / 2);
+        v_SubframeOffset := p_Index + j * 3;
+      }
+    else // FDD
+      {
+        v_SubframeOffset := p_Index + tsc_EUTRA_SN4;
+      }
+    return v_SubframeOffset;
+  } // f_EUTRA_CalcSubframeOffset
+
+  /*
+   * @desc      function to adjust timing in the following situation:
+   *            - subframe information has been calulated using function f_EUTRA_CalcSubframeOffset;
+   *            - a must when the resulting subframe value becomes  > 9
+   *            Unlike in ASPs there is no adjustment of SFN and subframe of the resulting timing.
+   * @param     p_Timing              ... Timing to be adjusted
+   * @param     p_Subframe            ... Subframe to be used with the current timing's SFN (possibly adjusted)
+   * @return    SubFrameTiming_Type   ... Adjusted timing
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_TimingInfoSubframeOffsetAdjust(SubFrameTiming_Type p_Timing,
+                                                  integer p_Subframe)
+    return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_Timing;
+    
+    v_Timing.SFN.Number := (p_Timing.SFN.Number + (p_Subframe/10)) mod 1024;
+    v_Timing.HSFN.Number := (p_Timing.HSFN.Number + ((p_Timing.SFN.Number + (p_Subframe/10))/1024)) mod 1024; // @sic R5w160204r1 sic@
+    v_Timing.Subframe.Number := p_Subframe mod 10;
+
+    return v_Timing;
+  }
+
+  /*
+   * @desc      function to calculate subframe numbers for PDU/SDUs to be sent in subsequent TTIs.
+   *            This function shall be used to calculate subframe offsets used in PDU/SDU lists (DRB_DataPerSubframeList_DL_Type);
+   *            the offset is relative to the subframe given in the timing info of the ASP.
+   *            For FDD that are simply subsequent subframes but for TDD not all subframes can be used.
+   *            Note: This function shall not be used to calculate the subfame being used in the timing info of the ASP which is an absolute value (as e.g. for UL grants).
+   *            For Cat M1 the subframe offsets are calculated considering the available subframes.
+   * @param     p_EUTRA_FDD_TDD_Mode  ... FDD/TDD
+   * @param     p_Index               ... index of the PDU/SUDs
+   * @return    integer
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_DataListSubframeOffset(EUTRA_FDD_TDD_Mode_Type p_EUTRA_FDD_TDD_Mode,
+                                          integer p_Index) return integer
+  {
+    var integer j;
+    var integer v_SubframeOffset;
+
+    if (pc_ue_CategoryDL_M1) {
+      // index  = 0, 1,  2,  3,  4,  5,  6, .. =>
+      // offset = 0, 1, 10, 11, 20,  21, 30, ..
+      j := ((p_Index) mod 2);
+      if (j == 0) {
+        v_SubframeOffset := p_Index * 5;
+      } else {
+        v_SubframeOffset := ((p_Index - 1) * 5) + j;
+      }
+    } else {
+    if (p_EUTRA_FDD_TDD_Mode == TDD)
+    {
+      // index  = 0, 1, 2, 3,  4,  5,  6, .. =>
+      // offset = 0, 1, 5, 6, 10, 11, ..
+      j := ((p_Index) / 2);
+      v_SubframeOffset := p_Index + j * 3;
+    }
+    else { // FDD
+      v_SubframeOffset := p_Index;
+    }
+    }
+
+    return v_SubframeOffset;
+  } // f_EUTRA_CalcSubframeOffset_DataList
+
+  } // end of group SubframeTiming
+
+  group ULGRant_DLAllocation {
+
+  /*
+   * @desc      Function to start configurable periodic UL grant allocation and  auto PUCCH synchronisation
+   *            Configures SS to start periodic UL grant transmission
+   *            Suitable for RLC and MAC test cases.
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_Imcs
+   * @param     p_Nprb
+   * @param     p_Period
+   * @status    APPROVED (LTE, LTE_A_R10_R11)
+   */
+  function f_EUTRA_PeriodicULGrantTransmission(EUTRA_CellId_Type p_CellId,
+                                               template (value) TimingInfo_Type p_TimingInfo,
+                                               ImcsValue_Type  p_Imcs,
+                                               integer p_Nprb,
+                                               integer p_Period) runs on EUTRA_PTC
+  {
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(p_Imcs,  p_Nprb, -, f_EUTRA_FirstRB_UL(p_CellId)), //@sic R5s170277 sic@
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,  // @sic R5-101177, R5-101178, R5-101050 sic@
+                                        cs_UL_GrantConfig_ContPeriodic(p_Period));
+  }
+
+  /*
+   * @desc      Function to start configurable UL grant allocation and keep PUCCH synchronisation unchanged
+   *            with period and num of cycles configured
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_Imcs
+   * @param     p_Nprb
+   * @param     p_Period
+   * @param     p_Cycles
+   * @param     p_TransRetransList  (default value: cs_TransRetransmissionListUL_Def)
+   * @status    APPROVED (LTE, LTE_A_PRO)
+   */
+  function f_EUTRA_PeriodicCyclicULGrantTransmission(EUTRA_CellId_Type p_CellId,
+                                                     template (value) TimingInfo_Type p_TimingInfo ,
+                                                     ImcsValue_Type  p_Imcs,
+                                                     integer p_Nprb,
+                                                     integer p_Period,
+                                                     integer p_Cycles,
+                                                     template (value) UL_TransRetransmissionList_Type p_TransRetransList := cs_TransRetransmissionListUL_Def) runs on EUTRA_PTC
+  {
+    /* Configures SS to start periodic UL grant transmission
+       Suitable for RLC and MAC test cases. */
+    /* @sic R5s100522: Additional MCC 160 changes sic@ */
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(p_Imcs, p_Nprb, p_TransRetransList, f_EUTRA_FirstRB_UL(p_CellId)), //@sic R5s170230 sic@
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,  // @sic R5-101177, R5-101178, R5-101050 sic@
+                                        cs_UL_GrantConfig_NoOfGrants(p_Period, p_Cycles));
+  };
+
+  /*
+   * @desc      Function to start configurable one time grant allocation and keep PUCCH synchronisation unchanged
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_Imcs
+   * @param     p_Nprb
+   * @param     p_TransRetransList  (default value: cs_TransRetransmissionListUL_Def)
+   * @param     p_PUCCH_Synch       (default value: cs_UplinkTimeAlignment_Synch_Auto_Def)
+   * @param     p_HARQProcessID     (default value: omit)
+   * @param     p_FirstRbIndex      (default value: omit)
+   * @param     p_RepetitionNumber  (default value: omit)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_OneULGrantTransmission(EUTRA_CellId_Type p_CellId,
+                                          template (value) TimingInfo_Type p_TimingInfo,
+                                          ImcsValue_Type  p_Imcs,
+                                          integer p_Nprb,
+                                          template (value) UL_TransRetransmissionList_Type p_TransRetransList := cs_TransRetransmissionListUL_Def, //@sic R5s160315 sic@
+                                          template (omit)  UplinkTimeAlignment_Synch_Type p_PUCCH_Synch := cs_UplinkTimeAlignment_Synch_Auto_Def,//@sic R5s260061 sic@
+                                          template (omit) integer p_HARQProcessID := omit,
+                                          template (omit) integer p_FirstRbIndex := omit, //@sic R5-171563 R5s170230 R5s170555 sic@
+                                          template (omit) RepetitionNumber_Type p_RepetitionNumber :=omit) runs on EUTRA_PTC
+  { /* Configures SS to start periodic UL grant transmission
+     * Suitable for RLC and MAC test cases. */
+    /* @sic R5s100522: Additional MCC 160 changes sic@ */
+    var integer v_FirstRbIndex ;
+    //@sic R5s170555 sic@
+    if (isvalue(p_FirstRbIndex)) {
+      v_FirstRbIndex := valueof(p_FirstRbIndex);
+    }
+    else {
+       v_FirstRbIndex := f_EUTRA_FirstRB_UL(p_CellId);
+    }
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(p_Imcs, p_Nprb, p_TransRetransList, v_FirstRbIndex, -, p_HARQProcessID, p_RepetitionNumber), //@sic R5-167193 sic@
+                                        p_PUCCH_Synch,  // @sic R5-101177, R5-101178, R5-101050 R5s160711 sic@
+                                        cs_UL_GrantConfig_OneTime);
+  }
+
+  /*
+   * @desc      Function to start configurable UL grant allocation on SR reception and PUCCH synchronisation:
+   *            starts UL grant transmission on SI reception
+   *            configures SS to maintain UE in PUCCH synchronised state
+   *            needs to be called when UE enters connected mode in a cell (after reception of RRCConnectionReq or HandoverComplete)
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_ULDCIInfo
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_StartULGrantTransmissionOnSR_Reception(EUTRA_CellId_Type p_CellId,
+                                                          template (value) TimingInfo_Type p_TimingInfo,
+                                                          template (value) DciUlInfo_Type  p_ULDCIInfo) runs on EUTRA_PTC
+  {
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        p_ULDCIInfo,
+                                        cs_UplinkTimeAlignment_Synch_KeepAsItIs,
+                                        cs_UL_GrantConfig_OnSR);
+  }
+
+  /*
+   * @desc      Function to start configurable UL grant allocation on SR reception and No PUCCH synchronisation
+   *            suitable when time alignment timer is configured as infinity
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_ULDCIInfo
+   * @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_StartULGrantTransmissionOnSR_Reception_No_PUCCH_Sync(EUTRA_CellId_Type p_CellId,
+                                                                        template (value) TimingInfo_Type p_TimingInfo,
+                                                                        template (value) DciUlInfo_Type  p_ULDCIInfo) runs on EUTRA_PTC
+  { /* starts UL grant transmission on SI reception
+       configures SS to maintain UE in PUCCH synchronised state
+       needs to be called when UE enters connected mode in a cell [after reception of RRCConnectionReq or HandoverComplete] */
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        p_ULDCIInfo,
+                                        cs_UplinkTimeAlignment_Synch_None,
+                                        cs_UL_GrantConfig_OnSR);
+  }
+
+  /*
+   * @desc      Function to start configurable UL grant allocation on SR reception and PUCCH synchronisation
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_Imcs
+   * @param     p_Nprb
+   * @status    APPROVED (LTE, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_StartExplicitULGrantTransmissionOnSR_Reception(EUTRA_CellId_Type p_CellId,
+                                                                  template (value) TimingInfo_Type p_TimingInfo,
+                                                                  ImcsValue_Type  p_Imcs,
+                                                                  integer p_Nprb) runs on EUTRA_PTC {
+    // starts UL grant transmission on SI reception
+    // configures SS to maintain UE in PUCCH synchronised state
+    //  needs to be called when UE enters connected mode in a cell [after reception of RRCConnectionReq or HandoverComplete]
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        cs_DciInfo_CcchDcchDtchUL_Explicit(p_Imcs,  p_Nprb,-, f_EUTRA_FirstRB_UL(p_CellId)), //@sic R5s170277 sic@
+                                        cs_UplinkTimeAlignment_Synch_KeepAsItIs,
+                                        cs_UL_GrantConfig_OnSR);
+  }
+
+  /*
+   * @desc      Function to stop UL Grant transmision but keep PUCCH synchronisation unchanged
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_StopULGrantTransmission_PUCCH_Sync(EUTRA_CellId_Type p_CellId,
+                                                      template (value) TimingInfo_Type p_TimingInfo) runs on EUTRA_PTC
+  { // stops UL grant transmission
+    // configures SS to not maintain UE in PUCCH synchronised state
+    //  needs to be called when UE enters idle mode in a cell [after RRCConnectionRelease]
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        omit,   // no DCI info
+                                        cs_UplinkTimeAlignment_Synch_Auto_Def,  // @sic R5-101177, R5-101178, R5-101050 sic@
+                                        cs_UL_GrantConfig_Stop);
+  }
+
+  /*
+   * @desc      Function to stop UL Grant transmision and not maintain PUCCH synchronisation
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_StopULGrantTransmission_No_PUCCH_Sync(EUTRA_CellId_Type p_CellId,
+                                                         template (value) TimingInfo_Type p_TimingInfo) runs on EUTRA_PTC
+  { // stops UL grant transmission
+    // configures SS to not maintain UE in PUCCH synchronised state
+    //  needs to be called when UE enters idle mode in a cell [after RRCConnectionRelease]
+    // NOTE:used in tc 7.1.2.6 step 8
+    f_EUTRA_ULGrantConfiguration_Common(p_CellId,
+                                        p_TimingInfo,
+                                        omit,   // no DCI info
+                                        cs_UplinkTimeAlignment_Synch_None,
+                                        cs_UL_GrantConfig_Stop);
+  }
+
+  } // end of group ULGRant_DLAllocation
+
+  group L2_EncodeDecode {
+
+  /*
+   * @desc      encode PDCP PDU
+   * @param     p_PDCP_PDU
+   * @return    octetstring
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_PDCP_PDU_Encvalue(template (value) PDCP_PDU_Type p_PDCP_PDU) return octetstring
+  {
+    var bitstring v_Bitstring := encvalue(p_PDCP_PDU);
+    var octetstring v_Octetstring := bit2oct(f_OctetAlignedBitString(v_Bitstring));
+    return v_Octetstring;
+  }
+
+  /*
+   * @desc      To check if received MAC SDU is a RLC Status PDU
+   * @param     p_MAC_SDU
+   * @return    boolean
+   * @status    APPROVED (LTE, LTE_A_R12)
+   */
+  function f_CheckIf_MAC_SDU_Is_RLC_AM_StatusPDU(MAC_SDU_Type p_MAC_SDU) return boolean
+  {
+    var bitstring v_RLCPDU := oct2bit(p_MAC_SDU);
+    var boolean v_Result := true;
+    var integer v_FirstBit := bit2int(substr(v_RLCPDU, 0, 1));
+    
+    if (v_FirstBit != 0) { // D/C bit is not 0 i.e. not a status PDU but data PDU
+      v_Result := false;
+    }
+    return v_Result;
+  }
+
+  } // end of group L2_EncodeDecode
+
+  /*
+   * @desc      To configure Scheduling Request MAC indication Mode
+   * @param     p_CellId
+   * @param     p_SR_Mode
+   * @status    APPROVED (LTE, LTE_A_R10_R11)
+   */
+  function f_SS_ConfigSchedulingRequestIndMode(EUTRA_CellId_Type p_CellId,
+                                               IndicationAndControlMode_Type p_SR_Mode) runs on EUTRA_PTC
+  {
+    f_EUTRA_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_SchedulingReqIndConfig_REQ (p_CellId, p_SR_Mode));
+  }
+
+  group DRB_UM {
+
+  /*
+   * @desc      Readio Bearer configuration for one DRB (UM bearer in TM mode)
+   * @param     p_CellId
+   * @param     p_UM_SN_Size
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_SS_DRB2_ConfigUM_TM_Mode(EUTRA_CellId_Type p_CellId,
+                                            integer p_UM_SN_Size)
+    runs on EUTRA_PTC
+  { // @sic R5w100002r1 sic@
+    if (p_UM_SN_Size == tsc_UM_SN_Size_5) {
+      f_EUTRA_SS_CommonRadioBearerConfig_SingleDRB(p_CellId, cds_DRB2_ConfigUM_TM_Mode_SN5);
+      
+    } else {
+      f_EUTRA_SS_CommonRadioBearerConfig_SingleDRB(p_CellId, cs_DRB2_ConfigUM_TM_Mode_SN10);
+    }
+  }
+
+  } // end of group DRB_UM
+
+  group L1_MAC_Ind_Functions {
+
+  /*
+   * @desc      Function to Config SS for reporting Buffer Status Report Reception
+   * @param     p_CellId
+   * @param     p_BSR_Mode
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11)
+   */
+  function f_SS_ConfigBufferStatusReportIndMode(EUTRA_CellId_Type p_CellId,
+                                                IndicationAndControlMode_Type p_BSR_Mode,
+                                                template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on EUTRA_PTC
+  {
+    f_EUTRA_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_BSR_IndConfig_REQ(p_CellId, p_BSR_Mode, p_TimingInfo));
+  }
+
+  /*
+   * @desc      Function to Config SS for reporting UL HAR ACK/NACK Reception
+   * @param     p_CellId
+   * @param     p_UL_HARQ_Mode
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_CnfFlag           (default value: omit)
+   * @status    APPROVED (ENDC, LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_SS_ConfigUL_HARQ_IndMode(EUTRA_CellId_Type p_CellId,
+                                      IndicationAndControlMode_Type p_UL_HARQ_Mode,
+                                      template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                      template (omit) boolean p_CnfFlag := omit)  runs on EUTRA_PTC
+  {  /* @sic R5s120201: parameter p_CnfFlag sic@ */
+    f_EUTRA_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_UL_HARQ_IndConfig_REQ (p_CellId, p_UL_HARQ_Mode, p_TimingInfo, p_CnfFlag));  //@sic R5s120024 sic@)
+  }
+
+  /*
+   * @desc      Altstep to receive any BSR or Scheduling Request
+   * @param     p_CellId
+   * @status    APPROVED (LTE)
+   */
+  altstep a_EUTRA_MAC_SchedulingReq_BSR(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC
+  {
+    [] SYSIND.receive(car_SchedulingReq_IND (p_CellId, ?))
+      {
+        repeat;
+      }
+    [] SYSIND.receive (car_BSR_IND (p_CellId, ?,?))
+    {
+        repeat;
+    }
+  }
+
+  /*
+   * @desc      Altstep to receive and discard scheduling requests
+   * @param     p_CellId
+   * @status    APPROVED (LTE)
+   */
+  altstep a_EUTRA_MAC_SchedulingReq(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC
+  {
+    [] SYSIND.receive(car_SchedulingReq_IND (p_CellId, ?))
+      {
+        repeat;
+      }
+    
+  }
+
+  } // end of group L1_MAC_Ind_Functions
+
+  group Generic_L2_RRC_ReconfigSteps {
+
+  /*
+   * @desc      This function is same as  f_EUTRA_RbEst_Def except for no_periodic_BSR_or_PHR branch of table
+   *            Table 4.8.2.1.5-1 (@sic result of R5-096458 sic@)
+   * @param     p_CellId
+   * @param     p_PDCP_StatusReportRequired (default value: true)
+   * @param     p_UDC_r15           (default value: omit)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_RbEst_Def_DisableBSR_PHR(EUTRA_CellId_Type p_CellId,
+                                            boolean p_PDCP_StatusReportRequired := true,
+                                            template (omit) UplinkDataCompression_r15_Type p_UDC_r15 := omit) runs on EUTRA_PTC
+  {
+    f_EUTRA_GenericRbEst_DisableBSR_PHR(p_CellId, 0, 0, -, -, -, -, -, -, p_PDCP_StatusReportRequired, -, -, p_UDC_r15);   /* @sic R5s150338 sic@ */
+  }
+
+  /*
+   * @desc      This function is same as  f_EUTRA_RbEst_508_UM except for no_periodic_BSR_or_PHR branch
+   *            of table Table 4.8.2.1.5-1 (@sic result of R5-096458 sic@)
+   * @param     p_CellId
+   * @param     p_DrbConfigAtSS              (default value: tsc_DRB_ConfigurationAtSS_Default)
+   * @status    APPROVED (LTE, LTE_A_R12)
+   */
+  function f_EUTRA_RbEst_508_UM_DisableBSR_PHR(EUTRA_CellId_Type p_CellId,
+                                               template (value) DRB_ConfigurationAtSS_Type p_DrbConfigAtSS := tsc_DRB_ConfigurationAtSS_Default) runs on EUTRA_PTC
+  { /* additional UM bearer will be established */
+    /* @sic R5s150338: parameter p_DrbConfigAtSS sic@ */
+    var template (value) EPS_QoSList_Type v_Qos_List := {cs_508_EPS_QoS_Dedicated_1};
+    var template (value) Tft_List_Type v_Tft_List := {f_EUTRA_Get_508_TrafficFlowTemplate(1)};
+    f_EUTRA_GenericRbEst_DisableBSR_PHR(p_CellId, 0, 1, p_DrbConfigAtSS, -, -, -, v_Qos_List, v_Tft_List);
+  }
+
+  /*
+   * @desc      This function is same as f_EUTRA_LoopBackActivation_State4_Def except for no_periodic_BSR_or_PHR branch
+   *            of Table 4.8.2.1.5-1 (@sic result of R5-096458 sic@)
+   * @param     p_CellId
+   * @param     p_UE_TestLoopModeA_LB_Setup
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_EUTRA_LoopBackActivation_State4_Def_DisableBSR_PHR(EUTRA_CellId_Type p_CellId,
+                                                                template (value) UE_TestLoopModeA_LB_Setup_Type p_UE_TestLoopModeA_LB_Setup) runs on EUTRA_PTC
+  {
+    f_EUTRA_RbEst_Def_DisableBSR_PHR(p_CellId);                                       // bring UE to State 3
+    f_EUTRA_CloseUE_TestLoopModeA(p_CellId, p_UE_TestLoopModeA_LB_Setup);             // Step 1-2
+  }
+
+   /*
+   * @desc      To move to state 4 as required for test case 7.1.3.4
+   * @param     p_PDCP_StatusReportRequired (default value: true)
+   * @param     p_DRB_ToAddModList  (default value: omit)
+   * @param     p_DataInactivityTimerConfig (default value: omit)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11)
+   */
+  function f_EUTRA_LoopBackActivation_State4_TA_Infinity_LB_NoScaling(boolean p_PDCP_StatusReportRequired := true ,
+                                                                      template (omit) DRB_ToAddModList p_DRB_ToAddModList := omit,
+                                                                      template (omit) DataInactivityTimerConfig_Type p_DataInactivityTimerConfig := omit) //@sic R5s100852 p_PDCP_StatusReportRequired added  R5-174575 sic@
+    runs on EUTRA_PTC
+  { //@sic R5-101183 R5s110576 sic@
+    var template (omit) MAC_MainConfig_Type v_MAC_MainConfig := cs_MAC_MainConfig_Explicit_DisableBSR_TA_Infinity;   // time alignment timer is infinity
+    var template (omit) PhysicalConfigDedicated v_PhysicalConfigDedicated := omit;
+    var template (omit) DRB_ToAddModList v_DRB_ToAddModList:= p_DRB_ToAddModList;
+    /* @sic R5-174575 sic@ */
+    if (isvalue (p_DataInactivityTimerConfig))
+    {
+        v_MAC_MainConfig.explicitValue.dataInactivityTimerConfig_r14 := valueof (p_DataInactivityTimerConfig);
+    }
+
+    f_EUTRA_GenericRbEst_DisableBSR_PHR(eutra_Cell1,
+                                        0,
+                                        0,
+                                        tsc_DRB_ConfigurationAtSS_Default,   // @sic R5s150338 sic@
+                                        v_DRB_ToAddModList,
+                                        v_MAC_MainConfig,
+                                        v_PhysicalConfigDedicated,
+                                        omit,
+                                        omit,
+                                        p_PDCP_StatusReportRequired);     // bring UE to State 3
+    f_EUTRA_CloseUE_TestLoopModeA(eutra_Cell1, cs_UE_TestLoopModeA_LB_Setup_NoScaling);             // Step 1-2
+  }
+
+  /*
+   * @desc      To move to state 4 as required for test cases 7.1.4.8
+   * @param     p_CellId            (default value: eutra_Cell1)
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_LoopBackActivation_State4_7148(EUTRA_CellId_Type p_CellId := eutra_Cell1) runs on EUTRA_PTC
+  {
+
+    var template (omit) MAC_MainConfig_Type v_MAC_MainConfig := cds_MAC_MainConfig_Explicit_PeriodicBSR_Timer(sf10);
+    var template (omit) PhysicalConfigDedicated v_PhysicalConfigDedicated := omit;
+    var template (omit) DRB_ToAddModList v_DRB_ToAddModList := omit;
+    v_DRB_ToAddModList[0] :=  cds_508_DRB_ToAddMod_Common(tsc_DRB1,
+                                                          cs_508_PDCP_Config_DRB_AM,
+                                                          cs_508_RLC_Config_DRB_AM,
+                                                          cs_508_LogicalChannelConfig_DRB_AM(7, kBps0, 2)); //@sic R5s100274 sic@
+    v_DRB_ToAddModList[1] := cds_508_DRB_ToAddMod_Common(tsc_DRB2,
+                                                         cs_508_PDCP_Config_DRB_AM,
+                                                         cs_508_RLC_Config_DRB_AM,
+                                                         cs_508_LogicalChannelConfig_DRB_AM(6, kBps0, 1)); //@sic R5s100274 sic@
+
+    f_EUTRA_GenericRbEst_DisableBSR_PHR(p_CellId,
+                                        1,
+                                        0,
+                                        tsc_DRB_ConfigurationAtSS_Default,   // @sic R5s150338 sic@
+                                        v_DRB_ToAddModList,
+                                        v_MAC_MainConfig,
+                                        v_PhysicalConfigDedicated,
+                                        { cs_508_EPS_QoS_Dedicated_1},
+                                        { f_EUTRA_Get_508_TrafficFlowTemplate(1) } );     // bring UE to State 3
+    f_EUTRA_CloseUE_TestLoopModeA(p_CellId, cs_UE_TestLoopModeA_LB_Setup_NoScaling);             // Step 1-2
+  };
+
+  /*
+   * @desc      Genric function to establsih SRB2 and DRB's but with special L2 option to disable BSR and PHR
+   *            according to the condition no_periodic_BSR_or_PHR as specified in TS 36.508 subclause 4.8.2.1.5
+   * @param     p_CellId
+   * @param     p_NoOfAddDRBs_AM    (default value: 0)
+   * @param     p_NoOfAddDRBs_UM    (default value: 0)
+   * @param     p_DrbConfigAtSS     (default value: tsc_DRB_ConfigurationAtSS_Default)
+   * @param     p_DRB_ToAddModList  (default value: omit)
+   * @param     p_MAC_MainConfig    (default value: omit)
+   * @param     p_PhysicalConfigDedicated (default value: omit)
+   * @param     p_QoS               (default value: omit)
+   * @param     p_Tft               (default value: omit)
+   * @param     p_PDCP_StatusReportRequired (default value: true)
+   * @param     p_DownlinkAntennaGroupConfig (default value: omit)
+   * @param     p_RRCConnectionReconfiguration_v890_IEs (default value: omit)
+   * @param     p_UDC_r15           (default value: omit)
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_EUTRA_GenericRbEst_DisableBSR_PHR(EUTRA_CellId_Type p_CellId,
+                                               integer p_NoOfAddDRBs_AM := 0,
+                                               integer p_NoOfAddDRBs_UM := 0,
+                                               template (value) DRB_ConfigurationAtSS_Type p_DrbConfigAtSS := tsc_DRB_ConfigurationAtSS_Default,
+                                               template (omit) DRB_ToAddModList p_DRB_ToAddModList := omit,
+                                               template (omit) MAC_MainConfig_Type p_MAC_MainConfig := omit,
+                                               template (omit) PhysicalConfigDedicated p_PhysicalConfigDedicated := omit,
+                                               template (omit) EPS_QoSList_Type p_QoS := omit,
+                                               template (omit) Tft_List_Type p_Tft := omit,
+                                               boolean p_PDCP_StatusReportRequired := true, //@sic R5s100852 p_PDCP_StatusReportRequired added sic@
+                                               template (omit) DownlinkAntennaGroupConfig_Type p_DownlinkAntennaGroupConfig := omit,
+                                               template (omit) RRCConnectionReconfiguration_v890_IEs p_RRCConnectionReconfiguration_v890_IEs := omit,
+                                               template (omit) UplinkDataCompression_r15_Type p_UDC_r15 := omit)
+    runs on EUTRA_PTC
+  { /* @sic R5s150338: new parameter p_DrbConfigAtSS; default values sic@ */
+    var template (value) MAC_MainConfig_Type v_MAC_MainConfig;
+    if (isvalue(p_MAC_MainConfig)) {
+      v_MAC_MainConfig := valueof(p_MAC_MainConfig);
+    } else {
+      if (p_NoOfAddDRBs_UM > 0) {
+        v_MAC_MainConfig := cs_508_MAC_MainConfig_Explicit_RBC_DrxS_DisableBSR_PHR; // short DRX cycle acc. to note in 36.508 table 4.6.3-16
+      } else {
+        v_MAC_MainConfig := cs_508_MAC_MainConfig_Explicit_RBC_DrxL_DisableBSR_PHR; // long DRX cycle acc. to note in 36.508 table 4.6.3-16
+      }
+    }
+    f_EUTRA_GenericRbEst_Common(p_CellId,
+                                p_NoOfAddDRBs_AM,
+                                p_NoOfAddDRBs_UM,
+                                p_DrbConfigAtSS,  /* @sic R5s150338 sic@ */
+                                p_DRB_ToAddModList,
+                                v_MAC_MainConfig,
+                                p_PhysicalConfigDedicated,
+                                p_QoS,
+                                p_Tft,
+                                p_PDCP_StatusReportRequired,
+                                -,
+                                p_DownlinkAntennaGroupConfig,
+                                -,
+                                p_RRCConnectionReconfiguration_v890_IEs,
+                                p_UDC_r15); // @sic R5-175050 sic@
+  }
+
+  /*
+   * @desc      Genric function to establsih SRB2 and DRB's but with special L2 option to  PHR
+   *            according to the condition no_periodic_BSR_or_PHR but default value of periodic_BSR as specified in TS 36.508 subclause 4.8.2.1.5
+   * @param     p_CellId
+   * @param     p_NoOfAddDRBs_AM
+   * @param     p_NoOfAddDRBs_UM
+   * @param     p_DRB_ToAddModList
+   * @param     p_MAC_MainConfig
+   * @param     p_PhysicalConfigDedicated
+   * @param     p_QoS
+   * @param     p_Tft
+   * @param     p_PDCP_StatusReportRequired (default value: true)
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_GenericRbEst_DisablePHR(EUTRA_CellId_Type p_CellId,
+                                           integer p_NoOfAddDRBs_AM,
+                                           integer p_NoOfAddDRBs_UM,
+                                           template (omit) DRB_ToAddModList p_DRB_ToAddModList,
+                                           template (omit) MAC_MainConfig_Type p_MAC_MainConfig,
+                                           template (omit) PhysicalConfigDedicated p_PhysicalConfigDedicated,
+                                           template (omit) EPS_QoSList_Type p_QoS,
+                                           template (omit) Tft_List_Type p_Tft,
+                                           boolean p_PDCP_StatusReportRequired := true) //@sic R5s100852 p_PDCP_StatusReportRequired added sic@
+    runs on EUTRA_PTC
+  { // @sic R5-110712 sic@
+    var template (value) MAC_MainConfig_Type v_MAC_MainConfig;
+    if (isvalue(p_MAC_MainConfig)) {
+      v_MAC_MainConfig := valueof(p_MAC_MainConfig);
+    } else {
+      if (p_NoOfAddDRBs_UM > 0) {
+        v_MAC_MainConfig := cs_MAC_MainConfig_Explicit_ReleasePHR(f_GetUeDrxConfig(DRX_S)); // short DRX cycle acc. to note in 36.508 table 4.6.3-16
+      } else {
+        v_MAC_MainConfig := cs_MAC_MainConfig_Explicit_ReleasePHR(f_GetUeDrxConfig(DRX_L)); // long DRX cycle acc. to note in 36.508 table 4.6.3-16
+      }
+    }
+    f_EUTRA_GenericRbEst_Common(p_CellId,
+                                p_NoOfAddDRBs_AM,
+                                p_NoOfAddDRBs_UM,
+                                tsc_DRB_ConfigurationAtSS_Default,   // @sic R5s150338 sic@
+                                p_DRB_ToAddModList,
+                                v_MAC_MainConfig,
+                                p_PhysicalConfigDedicated,
+                                p_QoS,
+                                p_Tft,
+                                p_PDCP_StatusReportRequired);
+  }
+
+  /*
+   * @desc     Generic step to config DRB[1,1] combination with parameterised RLC MAC and physical
+   * @param     p_CellId
+   * @param     p_DrbConfigAtSS             (default value: tsc_DRB_ConfigurationAtSS_Default)
+   * @param     p_PDCP_Config
+   * @param     p_UL_UM_RLC
+   * @param     p_DL_UM_RLC
+   * @param     p_MAC_MainConfig    (default value: omit)
+   * @param     p_PhysicalConfigDedicated (default value: omit)
+   * @param     p_PDCP_StatusReportRequired (default value: true)
+   * @status    APPROVED (LTE)
+   */
+  function f_EUTRA_GenericRbEst_UM_Params(EUTRA_CellId_Type p_CellId,
+                                          template (value) DRB_ConfigurationAtSS_Type p_DrbConfigAtSS := tsc_DRB_ConfigurationAtSS_Default,
+                                          template (value) PDCP_Config  p_PDCP_Config,
+                                          template (value) UL_UM_RLC p_UL_UM_RLC,
+                                          template (value) DL_UM_RLC p_DL_UM_RLC,
+                                          template (omit) MAC_MainConfig_Type p_MAC_MainConfig := omit,
+                                          template (omit) PhysicalConfigDedicated p_PhysicalConfigDedicated := omit,
+                                          boolean p_PDCP_StatusReportRequired := true) runs on EUTRA_PTC
+  { /* @sic R5s150338: new parameter p_DrbConfigAtSS sic@ */
+    var template (value) EPS_QoSList_Type v_Qos_List := {cs_508_EPS_QoS_Dedicated_1};
+    var template (value) Tft_List_Type v_Tft_List := {f_EUTRA_Get_508_TrafficFlowTemplate(1)};
+    var template (omit) DRB_ToAddModList v_DRB_ToAddModList;
+    
+    if (p_PDCP_StatusReportRequired) {  // @sic R5s110207 sic@
+      v_DRB_ToAddModList[0] := cs_508_DRB_ToAddMod_DEFAULT_AM(tsc_DRB1);
+    }
+    else {
+      v_DRB_ToAddModList[0] := cs_DRB_ToAddMod_NoPDCP_StatusReport(tsc_DRB1);
+    }
+    v_DRB_ToAddModList[1] := cs_DRB_ToAddMod_RLC_UM(tsc_DRB2,
+                                                    p_PDCP_Config,
+                                                    p_UL_UM_RLC,
+                                                    p_DL_UM_RLC);
+    f_EUTRA_GenericRbEst_DisableBSR_PHR(p_CellId,
+                                        0,
+                                        1,
+                                        p_DrbConfigAtSS,   // @sic R5s150338 sic@
+                                        v_DRB_ToAddModList,
+                                        p_MAC_MainConfig,
+                                        p_PhysicalConfigDedicated,
+                                        v_Qos_List,
+                                        v_Tft_List);
+  }
+
+  } // end of group Generic_L2_RRC_ReconfigSteps
+
+  group Common_L2Functions {
+
+  /*
+   * @desc      to configure SS to transmit a PDCCH order
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_RA_PDCCH_Order
+   * @status    APPROVED (LTE, LTE_A_R10_R11)
+   */
+  function f_Send_PDCCH_Order(EUTRA_CellId_Type p_CellId,
+                               template (value) TimingInfo_Type p_TimingInfo,
+                               template (value) RA_PDCCH_Order_Type p_RA_PDCCH_Order) runs on EUTRA_PTC
+  {
+    SYS.send(cas_RA_PDCCH_Order(p_CellId, p_TimingInfo, p_RA_PDCCH_Order)); //@sic Baseline R5s100135: cas_RA_PDCCH_Order does not require a confirmation sic@
+  }
+
+  /*
+   * @desc      Wrapper function setting cell specific parameters
+   * @param     p_CellId
+   * @param     p_Dsr_TransMax      (default value: n64)
+   * @return    template (value) PhysicalConfigDedicated
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_PhysicalConfigDedicated_Dsr_TransMax(EUTRA_CellId_Type p_CellId,
+                                                  Dsr_TransMax_Type p_Dsr_TransMax := n64) runs on EUTRA_PTC return template (value) PhysicalConfigDedicated
+  { /* @sic R5s150362 - Additional change: cs_508_PhysicalConfigDedicated_Default_RBC_HO instead of cs_PhysicalConfigDedicated_Default_RBC_Dsr_TransMax sic@ */
+    var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_Info := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_CellId);
+    var SR_PUCCH_ResourceIndex_Type v_Sr_PUCCH_ResourceIndex := f_EUTRA_CellInfo_GetSR_PUCCH_ResourceIndex(p_CellId);
+    var template (value) PhysicalConfigDedicated_AntennaInfo_Type v_AntennaInfo := f_EUTRA_CellInfo_GetAntennaInfoDedicated (p_CellId);
+    var SR_ConfigIndex_Type v_SR_ConfigIndex := f_EUTRA_CellInfo_GetSR_ConfigIndex (p_CellId);
+    return cs_508_PhysicalConfigDedicated_Default_RBC_HO(-,
+                                                         v_EUTRA_FDD_TDD_Info.cqi_ReportConfig,
+                                                         v_EUTRA_FDD_TDD_Info.soundingRS_UL_Config,
+                                                         v_AntennaInfo,
+                                                         cs_508_SchedulingRequest_Config_Default(v_Sr_PUCCH_ResourceIndex, v_SR_ConfigIndex, p_Dsr_TransMax));
+  }
+
+  } // end of group Common_L2Functions
+
+  /*
+   * @desc      Transmission of a STATUS PDU with ACK_SN and NACK LIST
+   * @param     p_RLC_Rec           (by reference)
+   * @param     p_NACK_List
+   * @param     p_Padding
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (LTE)
+   */
+  function f_TxSTATUS_PDU_NACK(inout RLC_SS_State p_RLC_Rec,
+                               template (value) RLC_Status_NACK_List_Type p_NACK_List,
+                               RLC_Status_Padding_Type p_Padding,
+                               template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on EUTRA_PTC
+  {
+    p_RLC_Rec.StatusPDU := valueof(cs_STATUS_PDU_Nack(p_RLC_Rec.AM_VRR,             // Note: valueof cannot be avoided here
+                                                      p_NACK_List,
+                                                      p_Padding));
+    //  send STATUS PDU
+    DRB.send (cas_DRB1_RLCStatusReq (eutra_Cell1,
+                                     p_TimingInfo,
+                                     p_RLC_Rec.StatusPDU));
+  }  // f_TxSTATUS_PDU_NACK
+
+  /*
+   * @desc      Transmission of one AMD SDU
+   * @param     p_RLC_Rec           (by reference)
+   * @param     p_TimingInfo
+   * @param     p_Poll
+   * @param     p_SDU_Num
+   * @status    APPROVED (LTE)
+   */
+  function f_TxAMD_SDU (inout RLC_SS_State p_RLC_Rec,
+                        template (value) TimingInfo_Type p_TimingInfo,
+                        B1_Type p_Poll,
+                        integer p_SDU_Num)
+    runs on EUTRA_PTC
+  {
+    //  build PDU constraint, can be simplified !
+    p_RLC_Rec.AMD_PDU := valueof(cs_AMD_PDUoneSDU(p_RLC_Rec.AM_VTS,             // Note: valueof cannot be avoided here
+                                                  p_Poll,
+                                                  p_RLC_Rec.RLC_DataList[p_SDU_Num]));
+    //  send PDU containing SDU
+    DRB.send (cas_DRB1_RLCAmDataReq (eutra_Cell1,
+                                     p_TimingInfo,
+                                     p_RLC_Rec.AMD_PDU));
+    p_RLC_Rec.AM_VTS := (p_RLC_Rec.AM_VTS + 1) mod 1024;
+  } // f_TxAMD_SDU
+
+  /*
+   * @desc      Reception of one AMD SDU
+   * @param     p_RLC_Rec           (by reference)
+   * @param     p_Poll
+   * @param     p_SDU_Num
+   * @status    APPROVED (LTE)
+   */
+  function f_RxAMD_SDU (inout RLC_SS_State p_RLC_Rec,
+                        B1_Type p_Poll,
+                        integer p_SDU_Num)
+    runs on EUTRA_PTC
+  {
+    var DRB_COMMON_IND v_ReceivedAsp;
+    DRB.receive (car_DRB1_RLCAmDataInd (eutra_Cell1,
+                                        cr_AMD_PDUoneSDU(p_RLC_Rec.AM_VRR,
+                                                         p_Poll,
+                                                         {p_RLC_Rec.RLC_DataList[p_SDU_Num]} ))) -> value v_ReceivedAsp;
+    p_RLC_Rec.AM_VRR := (p_RLC_Rec.AM_VRR + 1) mod 1024;
+    p_RLC_Rec.TimeStampLastReceivedPDU := v_ReceivedAsp.Common.TimingInfo.SubFrame;
+  } // f_RxAMD_SDU
+
+}

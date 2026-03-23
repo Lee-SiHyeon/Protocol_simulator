@@ -1,0 +1,567 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-04-10 18:06:05 +0200 (mi., 10 abr. 2024) $
+// $Rev: 38406 $
+/******************************************************************************/
+module SDAP_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_LoopBack all;
+  import from NR5GC_NASSteps all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from NasEmu5G_Main_NRNG all;
+  import from SDAP_NR5GC_Templates all;
+  import from SDAP_TypeDefs all;
+
+  /*
+   * @desc      Sends an SDAP PDU including an SDAP header
+   * @param     p_NR_CellId
+   * @param     p_DrbId
+   * @param     p_Rdi
+   * @param     p_Rqi
+   * @param     p_Qfi
+   * @param     p_SDAP_Sdu
+   * @status    APPROVED (NR5GC)
+   */
+   function f_SDAP_SendWithHeader(NR_CellId_Type p_NR_CellId,
+                                 DRB_Identity p_DrbId,
+                                 B1_Type p_Rdi,
+                                 B1_Type p_Rqi,
+                                 B6_Type p_Qfi,
+                                 octetstring p_SDAP_Sdu) runs on NR_BASE_PTC
+  {
+    var template (value) SDAP_PDU_Type v_SdapDlPdu;
+    var SubFrameTiming_Type v_TimingInfo;
+    
+    v_SdapDlPdu := cs_SDAP_PDU_DL_WithHeader(cs_SDAP_DL_PduHeader(p_Rdi, p_Rqi, p_Qfi), p_SDAP_Sdu);
+    v_TimingInfo := f_NR_GetNextSendOccasion_DL(p_NR_CellId);
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_PDUList(p_NR_CellId,
+                                                p_DrbId,
+                                                cs_TimingInfo_NR(v_TimingInfo),
+                                                {v_SdapDlPdu} ));
+  }
+
+  /*
+   * @desc      Sends and SDAP PDU without an SDAP header
+   * @param     p_NR_CellId
+   * @param     p_DrbId
+   * @param     p_SDAP_Sdu
+   * @status    APPROVED (NR5GC)
+   */
+  function f_SDAP_SendNoHeader(NR_CellId_Type p_NR_CellId,
+                                  DRB_Identity p_DrbId,
+                                  octetstring p_SDAP_Sdu) runs on NR_BASE_PTC
+  {
+    var template (value) SDAP_PDU_Type v_SdapDlPdu;
+    var SubFrameTiming_Type v_TimingInfo;
+    
+    v_SdapDlPdu := cs_SDAP_PDU_DL_NoHeader(p_SDAP_Sdu);
+    v_TimingInfo := f_NR_GetNextSendOccasion_DL(p_NR_CellId);
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_PDUList(p_NR_CellId,
+                                                p_DrbId,
+                                                cs_TimingInfo_NR(v_TimingInfo),
+                                                {v_SdapDlPdu} ));
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.4.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_4_1_NR5GC() runs on NR5GC_PTC
+  {//SDAP Data Transfer and PDU Header Handling UL/DL
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_Type;
+    var IntegerList_Type v_DRBList;
+    var integer v_FirstDRB;
+    var integer v_SecondDRB;
+    var template (value) QoS_Rules v_QoS_Rules;
+    var template (value) QoSFlowDescr v_QoSFlowDescr;
+    var template (value) NR_RadioBearerList_Type v_SS_Drb_ConfigList;
+    var PDN_Index_Type v_PDN_Index;
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var integer v_PduSessionId; // @sic R5s191119 sic@
+    
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //Preamble
+    // Perform Registration and get PDU Establishment Request message
+    v_GSM_MobilityInfo_Type := f_MultipleQoSPreamble_Part1 (nr_Cell1);
+    v_PduSessionId := oct2int(v_GSM_MobilityInfo_Type.SessionId); // @sic R5s191119, R5s200564 sic@
+    
+    //Get DRB identities
+    v_DRBList:= f_NR_GetNextDRBIds(v_GSM_MobilityInfo_Type, true, 2); // First is Default DRB
+    v_FirstDRB := v_DRBList[0];
+    v_SecondDRB := v_DRBList[1];
+
+    v_SS_Drb_ConfigList := {f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_SecondDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_Configuration(v_PduSessionId, Present, Present, {1,2})), //Configure SDAP in normal mode for the moment; TTCN CR 190946
+                            f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_FirstDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_Configuration(v_PduSessionId, Present, Present, {5,6}))}; //Configure SDAP in normal mode for the moment; TTCN CR 190946
+                                                         
+    v_DRB_ToAddModList := {cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, present_, present_, false, {1,2}), // @sic R5s191119 sic@
+                                                   v_SecondDRB,
+                                                   cs_38508_PDCP_Config(ms300)),
+                           cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, present_, present_, true, {5,6}), // @sic R5s191119 sic@
+                                                   v_FirstDRB,
+                                                   cs_38508_PDCP_Config(ms300))};
+                                              
+    v_QoS_Rules := cs_QoS_Rules ({f_BuildDefaultQoSRule("1"), f_BuildQoSRuleRemoteAccess("4"), f_BuildQoSRuleRemoteAccess("5"), f_BuildQoSRuleRemoteAccess("6")}); // @sic R5-215714, R5s211487, R5-221435, R5s220550 sic@
+    // REMOVED: v_QoS_Rules.listofQoSRules[0].packetFilterList := cs_PacketFilterList_1MatchAll; //@sic R5s211487, R5-221435, R5s220550 sic@
+    v_QoS_Rules.listofQoSRules[1].dqrBit := '0'B; //@sic R5s220550 sic@ Acc. Table 7.1.4.1.3.3-7
+    v_QoSFlowDescr := cs_QoSFlowDescr ({cs_QoS_Flow1, cs_QoS_Flow2, cs_QoS_Flow3, cs_QoS_Flow4});
+
+    // Start IP handling in order for the TTCN to handle IPv6 address allocation,
+    // then stop it before the test body, so that TTCN can route the IP data
+    v_PDN_Index := f_NR5GC_GetPdnIndex(v_GSM_MobilityInfo_Type);
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(v_GSM_MobilityInfo_Type.SessionId), 1); //IP handling will go through QFI 1, the QFI with the match-all filter @sic R5s200564, R5s201505, R5s211487 sic@
+    f_IP_Handling_StartPDN(IP, v_PDN_Index, cs_DrbInfo_NR(nr_Cell1, v_QosFlowId));
+  
+    f_MultipleQoSPreamble_Part2 (nr_Cell1,
+                                 v_GSM_MobilityInfo_Type,
+                                 {v_FirstDRB,v_SecondDRB}, // @sic R5-241606 sic@
+                                 v_DRB_ToAddModList,
+                                 v_SS_Drb_ConfigList,
+                                 v_QoS_Rules,
+                                 v_QoSFlowDescr,
+                                 v_PDN_Index); //@sic R5s201361 sic@
+                            
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+
+    // Stop IP handling before reconfiguring SDAP to transparent mode
+    f_IP_Handling_StopPDN(IP);
+    
+    // Reconfigure SDAP to transparent mode when moving to connected state
+    v_SS_Drb_ConfigList := {f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_SecondDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_ConfigTransparentMode(Present)), //Configure SDAP in transparent mode; TTCN CR 190946
+                            f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_FirstDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_ConfigTransparentMode(Present))}; //Configure SDAP in transparent mode; TTCN CR 190946
+    
+    f_NR5GC_RRC_ConnectedState3N_Def(nr_Cell1,
+                                     TEST_LOOPModeB_ON,
+                                     -,
+                                     '01'O, //IP PDU delay  = 1 second
+                                     -,-,
+                                     v_DRB_ToAddModList,
+                                     v_SS_Drb_ConfigList);
+    
+    f_NR_TestBody_Set(true);
+    fl_TC_7_1_4_1_NR_TestBody(v_FirstDRB, v_SecondDRB, v_GSM_MobilityInfo_Type);
+    f_NR_TestBody_Set(false);
+    
+    //@sic R5s230130 sic@
+    //f_NR5GC_OpenUE_TestLoopMode_Deactivate_TestMode(nr_Cell1); // @sic R5s191119 sic@
+    
+    //Postamble
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+    //f_NR_ReleaseAllCells(); @sic R5s230130 sic@
+  }
+
+  /*
+   * @desc      test body of TC_7_1_4_1_NR
+   * @param     p_FirstDRB
+   * @param     p_SecondDRB
+   * @param     p_GSM_MobilityInfo_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_7_1_4_1_NR_TestBody(integer p_FirstDRB,
+                                     integer p_SecondDRB,
+                                     GSM_MobilityInfo_Type p_GSM_MobilityInfo_Type) runs on NR_BASE_PTC
+  {
+    var template (present) SDAP_PDU_Type v_ExpectedPdu;
+    var octetstring v_IPDataQFI2 := f_SdapTests_CreateDatagram("3"); // Packet with remote address matching filter #3 @sic R5s211487 sic@
+    var octetstring v_IPDataQFI5 := f_SdapTests_CreateDatagram("4"); // Packet with remote address matching filter #4
+    var octetstring v_IPDataQFI4 := f_SdapTests_CreateDatagram("3a"); // Packet with remote address matching filter #3a
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var integer v_PduSessionId := oct2int(p_GSM_MobilityInfo_Type.SessionId);  // @sic R5s191119, R5s200564 sic@
+    var boolean v_PDU := false; // @sic R5s191119 sic@; boolean to indicate if the SDAP PDU has been received
+    var boolean v_EndMarker := false; // @sic R5s191119 sic@; boolean to indicate if the End-Marker has been received
+    var boolean v_RrcMsg := false; // @sic R5s191119 sic@; boolean to indicate if the RRC message has been received
+    var boolean v_NasMsg := false; // @sic R5s191119 sic@; boolean to indicate if the NAS message has been received
+    var NR_SRB_COMMON_IND v_ReceivedAsp; // @sic R5s191119 sic@
+    
+    // @siclog "Step 1" siclog@
+    // The SS sends the SDAP Data PDU with SDAP header on DRB 2 and the following content to the UE: RDI=0. RQI=0, QFI=2.
+    f_SDAP_SendWithHeader(nr_Cell1, p_SecondDRB, tsc_RDI0, tsc_RQI0, tsc_QFI2, v_IPDataQFI2); //@sic R5-215714, R5s211487 sic@
+        
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE re-transmit SDAP Data PDU on DRB 2 with SDAP header as per the stored DRB mapping flow with QFI=1?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI2),v_IPDataQFI2); //@sic R5-215714, R5s211487 sic@
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_SecondDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 2A-2D" siclog@
+    // Open and close the test loop to reactivate the IP PDU delay
+    // @sic R5-224448/R5s220938 sic@
+    f_NR5GC_OpenUE_TestLoopMode(nr_Cell1);
+    f_NR5GC_CloseUE_TestLoopModeB(nr_Cell1, '01'O);
+
+    // @siclog "Step 3" siclog@
+    // The SS sends the SDAP Data PDU with SDAP header on DRB 2 and the following content to the UE: RDI=1, RQI=0, QFI=5.
+    f_SDAP_SendWithHeader(nr_Cell1, p_SecondDRB, tsc_RDI1, tsc_RQI0, tsc_QFI5, v_IPDataQFI5);
+    
+    // EXCEPTION: In parallel to the event described in step 4 the events specified in Table 7.1.4.1.3.2-2 shall take place.
+    // @siclog "Table 7.1.4.1.3.2-2, Step 1" siclog@
+    // @siclog "Step 4" siclog@
+
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI5),v_IPDataQFI5);
+    // @sic R5s191119 sic@
+    do {
+      alt {
+        [not v_PDU] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_SecondDRB, -, {v_ExpectedPdu}))
+          { // Check: Does the UE re-transmit SDAP Data PDU on DRB 2 with SDAP header as per the stored DRB mapping Flow with QFI=5?
+            v_PDU := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+          }
+        [not v_EndMarker] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {cr_SDAP_PDU_UL_EndMarker(tsc_QFI5)}))
+          { // Check: Does the UE transmits End-Marker Control PDU on DRB1 for QFI=5?
+            v_EndMarker := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "End-Marker received");
+          }
+      }
+    }
+    while (not(v_PDU and v_EndMarker));
+
+    // @siclog "Step 4A-4D" siclog@
+    // Open and close the test loop to reactivate the IP PDU delay
+    // @sic R5-224448/R5s220938 sic@
+    f_NR5GC_OpenUE_TestLoopMode(nr_Cell1);
+    f_NR5GC_CloseUE_TestLoopModeB(nr_Cell1, '01'O);
+    
+    // @siclog "Step 5" siclog@
+    // The SS transmits an RRCReconfiguration message including a PDU SESSION MODIFICATION COMMAND
+    // Note: As SDAP is in transparent mode, there is no need to reconfigure the SS
+    v_DRB_ToAddModList := {cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, present_, present_, false, {4}), // @sic R5s191119 sic@
+                                                   p_SecondDRB,
+                                                   cs_38508_PDCP_Config(ms300))};
+   
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(omit,
+                                                         v_DRB_ToAddModList,
+                                                         omit,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+                                                         
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionModificationCommand (p_GSM_MobilityInfo_Type.SessionId,
+                                                                      -,-,-,-,-,
+                                                                      cs_QoS_Rules ({f_BuildQoSRuleRemoteAccess("4a")}, '7A'O), // @sic R5s191119 sic@
+                                                                      cs_QoSFlowDescr ({cs_QoS_Flow2a}));
+   
+    SRB.send(cas_NR_RrcNasPduList_REQ(nr_Cell1,
+                                      tsc_NR_RbId_SRB1,
+                                      cs_TimingInfo_Now,
+                                      cs_NR_RRC_MSG_RequestDCCH(cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig)),
+                                      {cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend)},
+                                      -, -, cs_RlcBearerRouting_NR(nr_Cell1)));
+    
+    // EXCEPTION: In parallel to the event described in step 6 the events specified in Tables 7.1.4.1.3.2-3 and 7.1.4.1.3.2-4 shall take place.
+    // @siclog "Table 7.1.4.1.3.3-3, Step 1" siclog@
+    // @siclog "Table 7.1.4.1.3.3-4, Step 1" siclog@
+    // @siclog "Step 6" siclog@
+    // @sic R5s191119 sic@
+    v_EndMarker := false; // Reset variable for reusing
+    do {
+      alt {
+        [not v_RrcMsg] SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete))
+          { // The UE transmits an RRCReconfigurationComplete message.
+            v_RrcMsg := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+          }
+        [not v_EndMarker] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {cr_SDAP_PDU_UL_EndMarker(tsc_QFI4)}))
+          { // Check: Does the UE transmit End-Marker Control PDU on DRB 1 for QFI=4?
+            v_EndMarker := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "End-Marker received");
+          }
+        [not v_NasMsg] SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell1, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+          { // The UE Transmits PDU SESSION MODIFICATION COMPLETE
+            if (match (v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg , cr_NG_PDU_SESSION_MODIFICATION_COMPLETE(?,?))) {
+              v_NasMsg := true;
+            }
+            else {
+              f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected NAS message received");
+            }
+          }
+      }
+    }
+    while (not(v_RrcMsg and v_EndMarker and v_NasMsg));
+    
+    // @siclog "Step 7" siclog@
+    // The SS sends the SDAP Data PDU with SDAP header on DRB 2 and the following content to the UE: RDI=0. RQI=0, QFI=4.
+    f_SDAP_SendWithHeader(nr_Cell1, p_SecondDRB, tsc_RDI0, tsc_RQI0, tsc_QFI4, v_IPDataQFI4);
+    
+    // @siclog "Step 8" siclog@
+    // Check: Does the UE re-transmit SDAP Data PDU on DRB 2 with SDAP header as per the stored DRB mapping Flow with QFI=4?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI4),v_IPDataQFI4);
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_SecondDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+      
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.4.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_4_2_NR5GC() runs on NR5GC_PTC
+  {//SDAP Data Transfer handling without Header UL/DL
+
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_Type;
+    var IntegerList_Type v_DRBList;
+    var integer v_FirstDRB;
+    var integer v_SecondDRB;
+    var template (value) QoS_Rules v_QoS_Rules;
+    var template (value) QoSFlowDescr v_QoSFlowDescr;
+    var template (value) NR_RadioBearerList_Type v_SS_Drb_ConfigList;
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var PDN_Index_Type v_PDN_Index;
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var integer v_PduSessionId; //@sic R5s190948 sic@
+    var template (value) QoS_Rule v_QosRule1; //@sic R5s200715 sic@
+    var template (value) QoS_Rule v_QosRule4; //@sic R5s200715 sic@
+    
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //Preamble
+    // Perform Registration and get PDU Establishment Request message
+    v_GSM_MobilityInfo_Type := f_MultipleQoSPreamble_Part1 (nr_Cell1);
+    v_PduSessionId := oct2int(v_GSM_MobilityInfo_Type.SessionId); //@sic R5s190948, R5s200564 sic@
+    
+    //Get DRB identities
+    v_DRBList:= f_NR_GetNextDRBIds(v_GSM_MobilityInfo_Type, true, 2); // First is Default DRB; @sic R5s200106 sic@
+    v_FirstDRB := v_DRBList[0];
+    v_SecondDRB := v_DRBList[1];
+
+    //Note: In order to be able to start the IP handling during the preamble, QFI=1 is mapped temporarily to the default DRB (v_FirtDRB).
+    //      This mapping will be removed when moving to connected mode
+    v_SS_Drb_ConfigList := {f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_SecondDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_Configuration(v_PduSessionId, Absent, Absent)), //Configure SDAP in normal mode for the moment; @sic R5s190948 sic@
+                            f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_FirstDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_Configuration(v_PduSessionId, Absent, Present, {1}))}; //Configure SDAP in normal mode for the moment; @sic R5s190948, R5s200715 sic@
+                                                         
+    v_DRB_ToAddModList := {cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, absent, absent, false), //@sic R5s190948 sic@
+                                                   v_SecondDRB,
+                                                   cs_38508_PDCP_Config(ms300)),
+                           cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, absent, present_, true, {1}), //@sic R5s190948, R5s200715 sic@
+                                                   v_FirstDRB,
+                                                   cs_38508_PDCP_Config(ms300))};
+                                              
+    v_QosRule1 := f_BuildDefaultQoSRule ("1"); // @sic R5-202585, R5s200715 sic@
+    v_QosRule4 := f_BuildQoSRuleRemoteAccess("4"); //@sic R5s200715 sic@
+    v_QosRule4.dqrBit := '0'B; //@sic R5s200715 sic@
+
+    v_QoS_Rules := cs_QoS_Rules ({v_QosRule1, v_QosRule4, f_BuildQoSRuleRemoteAccess("5")}); //@sic R5s200715 sic@
+    v_QoSFlowDescr := cs_QoSFlowDescr ({cs_QoS_Flow1, cs_QoS_Flow2, cs_QoS_Flow3}); //@sic R5s200715 sic@
+
+    // Start IP handling in order for the TTCN to handle IPv6 address allocation,
+    // then stop it before the test body, so that TTCN can route the IP data
+    v_PDN_Index := f_NR5GC_GetPdnIndex(v_GSM_MobilityInfo_Type);
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(v_GSM_MobilityInfo_Type.SessionId), 1); //Indicate the QoS flow associated with the default DRB to start the IP handling @sic R5s200715 sic@
+    f_IP_Handling_StartPDN(IP, v_PDN_Index, cs_DrbInfo_NR(nr_Cell1, v_QosFlowId));
+  
+    f_MultipleQoSPreamble_Part2 (nr_Cell1,
+                                 v_GSM_MobilityInfo_Type,
+                                 {v_FirstDRB,v_SecondDRB}, // @sic R5-241606 sic@
+                                 v_DRB_ToAddModList,
+                                 v_SS_Drb_ConfigList,
+                                 v_QoS_Rules,
+                                 v_QoSFlowDescr,
+                                 v_PDN_Index); //@sic R5s201361 sic@
+                            
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+
+    // Stop IP handling before reconfiguring SDAP to transparent mode
+    f_IP_Handling_StopPDN(IP);
+    
+    // Reconfigure SDAP to transparent mode when moving to connected state
+    v_DRB_ToAddModList := {cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, absent, absent, false), //@sic R5s190948 sic@
+                                                   v_SecondDRB,
+                                                   cs_38508_PDCP_Config(ms300)),
+                           cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(v_PduSessionId, absent, present_, true), // Removed mapping of QoS to default DRB; @sic R5s190948 sic@
+                                                   v_FirstDRB,
+                                                   cs_38508_PDCP_Config(ms300))};
+    
+    v_SS_Drb_ConfigList := {f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_SecondDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_ConfigTransparentMode(Absent)), //Configure SDAP in transparent mode; @sic R5s190948 sic@
+                            f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                             v_FirstDRB,
+                                                             -, //RLC normal mode
+                                                             -, //PDCP normal mode
+                                                             -,
+                                                             cs_SDAP_ConfigTransparentMode(Present))}; //Configure SDAP in transparent mode; @sic R5s190948, R5s200106 sic@
+    
+    f_NR5GC_RRC_ConnectedState3N_Def(nr_Cell1,
+                                     TEST_LOOPModeB_ON,
+                                     -,-,-,-,
+                                     v_DRB_ToAddModList,
+                                     v_SS_Drb_ConfigList);
+       
+    f_NR_TestBody_Set(true);
+    fl_TC_7_1_4_2_NR_TestBody(v_FirstDRB, v_SecondDRB, v_PduSessionId); //@sic R5s190948 sic@
+    f_NR_TestBody_Set(false);
+    
+    //@sic R5s230130 sic@
+    //f_NR5GC_OpenUE_TestLoopMode_Deactivate_TestMode(nr_Cell1);  //@sic R5s190948 sic@
+    
+    //Postamble
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+    //f_NR_ReleaseAllCells(); @sic R5s230130 sic@
+  }
+
+  /*
+   * @desc      test body of TC_7_1_4_2_NR
+   * @param     p_FirstDRB
+   * @param     p_SecondDRB
+   * @param     p_PduSessionId
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_7_1_4_2_NR_TestBody(integer p_FirstDRB, integer p_SecondDRB, integer p_PduSessionId) runs on NR_BASE_PTC //@sic R5s190948 sic@
+  {
+    var template (present) SDAP_PDU_Type v_ExpectedPdu;
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var octetstring v_IPDataQFI2 := f_SdapTests_CreateDatagram("3"); // Packet with remote address matching filter #3
+    var octetstring v_IPDataQFI5 := f_SdapTests_CreateDatagram("4"); // Packet with remote address matching filter #4
+    var boolean v_EndMarker := false; // @sic R5s190948 sic@; boolean to indicate if the End-Marker has been received
+    var boolean v_RrcMsg := false; // @sic R5s190948 sic@; boolean to indicate if the RRC message has been received
+    
+    // @siclog "Step 1" siclog@
+    // The SS sends the SDAP Data PDU without SDAP header on DRB 2 for QFI =2.
+    f_SDAP_SendNoHeader(nr_Cell1, p_SecondDRB, v_IPDataQFI2);
+        
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE transmits SDAP Data PDU on DRB 1, which is default DRB, with SDAP header including QFI=2?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI2), v_IPDataQFI2);
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 3" siclog@
+    // The SS sends the SDAP Data PDU without SDAP header on DRB 1 for QFI 5.
+    f_SDAP_SendNoHeader(nr_Cell1, p_FirstDRB, v_IPDataQFI5);
+
+    // @siclog "Step 4" siclog@
+    // Check: Does the UE transmits SDAP Data PDU on DRB 1, which is default DRB, with SDAP header including QFI=5?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI5), v_IPDataQFI5);
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+ 
+    // @siclog "Step 5" siclog@
+    // The SS transmits an NR RRCReconfiguration message to configure QoS Flow rules
+    // Note: As SDAP is in transparent mode, there is no need to reconfigure the SS
+    v_DRB_ToAddModList := {cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(p_PduSessionId, absent, absent, false, {2}),
+                                                   p_SecondDRB,
+                                                   cs_38508_PDCP_Config(ms300)),
+                           cs_38508_NRDRB_ToAddMod(cs_SDAP_Config_Sdap(p_PduSessionId, absent, present_, true), //@sic R5s190948, R5s200106 sic@
+                                                   p_FirstDRB,
+                                                   cs_38508_PDCP_Config(ms300))};
+   
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(omit,
+                                                         v_DRB_ToAddModList,
+                                                         omit,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+                                      
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1,
+                                    -,
+                                    cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig)));
+    
+    // EXCEPTION: In parallel to the event described in step 8 the events specified in Table 7.1.4.2.3.2-2 shall take place.
+    // @siclog "Table 7.1.4.2.3.2-2, Step 1" siclog@
+    // @siclog "Step 6" siclog@
+
+    //@sic R5s190948 sic@
+    do {
+      alt {
+        [not v_RrcMsg] SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete))
+          { // The UE transmits an RRCReconfigurationComplete message.
+            v_RrcMsg := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+          }
+        [not v_EndMarker] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {cr_SDAP_PDU_UL_EndMarker(tsc_QFI2)}))
+          { // Check: Does the UE transmits End-Marker Control PDU on DRB1 for QFI=2?
+            v_EndMarker := true;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "End-Marker received");
+          }
+      }
+    }
+    while (not(v_RrcMsg and v_EndMarker));
+    
+    // @siclog "Step 7" siclog@
+    // The SS sends the SDAP Data PDU without SDAP header on DRB 2 for QFI=2.
+    f_SDAP_SendNoHeader(nr_Cell1, p_SecondDRB, v_IPDataQFI2);
+ 
+    // @siclog "Step 8" siclog@
+    // Check: Does the UE transmits SDAP Data PDU on DRB 2?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_NoHeader(v_IPDataQFI2); //@sic R5s190948 sic@
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_SecondDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+ 
+    // @siclog "Step 9" siclog@
+    // The SS sends the SDAP Data PDU without SDAP header on DRB 1 for QFI=5.
+    f_SDAP_SendNoHeader(nr_Cell1, p_FirstDRB, v_IPDataQFI5);
+ 
+    // @siclog "Step 10" siclog@
+    // Check: Does the UE transmits SDAP Data PDU on DRB 1, with SDAP header including QFI=5?
+    v_ExpectedPdu := cr_SDAP_PDU_UL_WithHeader(cr_SDAP_UL_PduHeader_Data(tsc_QFI5), v_IPDataQFI5);
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_PDUList(nr_Cell1, p_FirstDRB, -, {v_ExpectedPdu}));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+  }
+
+}

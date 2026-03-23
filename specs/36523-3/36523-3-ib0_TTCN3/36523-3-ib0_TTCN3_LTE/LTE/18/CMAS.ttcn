@@ -1,0 +1,373 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2023-10-09 22:34:37 +0200 (Mon, 09 Oct 2023) $
+// $Rev: 37215 $
+/******************************************************************************/
+
+module CMAS {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Functions all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_Paging all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_SysInfo_Templates all;
+  import from EUTRA_Timing all;
+  import from IP_PTC_CtrlMsgs all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  const MessageIdentifier_Type tsc_CMAS_MsgID_PresidentAlert := '0001000100010010'B;  /* CMAS message identifier for CMAS Presidential Level Alerts
+                                                                                         @status    APPROVED (LTE) */
+
+  const SerialNumber_Type  tsc_CMAS_SerialNumber_CellWide := '0011000000000000'B;     /* CMAS serial number: Cell wide, Activate emergency user alert,Activate popup, For each update, incremented by one
+                                                                                         @status    APPROVED (LTE) */
+
+  const SerialNumber_Type  tsc_CMAS_SerialNumber2_CellWide := '0011000000000001'B;    /* CMAS serial number: Cell wide, Activate emergency user alert,Activate popup, For each update, incremented by one
+                                                                                         @status    APPROVED (LTE) */
+
+  const SerialNumber_Type  tsc_CMAS_SerialNumber3_CellWide := '0011000000000010'B;    /* CMAS serial number: Cell wide, Activate emergency user alert,Activate popup, For each update, incremented by one
+                                                                                         @status    APPROVED (LTE) */
+
+  const DataCodingScheme_Type tsc_CMAS_DataCodingScheme := bit2oct(px_PWS_CB_DataCodingScheme); /* (See TS 23.038)
+                                                                                                   @status    APPROVED (LTE) */
+
+  template (value) Paging_v890_IEs cs_Paging_CMAS :=
+  { /* @status    APPROVED (LTE) */
+    lateNonCriticalExtension :=  omit,
+    nonCriticalExtension     := {
+      cmas_Indication_r9 := true_,
+      nonCriticalExtension := omit
+    }
+  };
+
+  /*
+   * @desc      Prepare the CB-Data message according to 23.041 cl 9.4.2.2.5 and insert in SIB 12 segments
+   *            Then segment it in 3.
+   * @param     p_Page1
+   * @param     p_Page2
+   * @param     p_MessageIdentifier (default value: tsc_CMAS_MsgID_PresidentAlert)
+   * @param     p_SerialNumber      (default value: tsc_CMAS_SerialNumber_CellWide)
+   * @param     p_DataCodingScheme  (default value: tsc_CMAS_DataCodingScheme)
+   * @return    SegmentedSI_List_Type
+   * @status    APPROVED (LTE)
+   */
+  function fl_GenerateSib12Segments (charstring p_Page1,
+                                     charstring p_Page2,
+                                     template (value) MessageIdentifier_Type p_MessageIdentifier :=tsc_CMAS_MsgID_PresidentAlert,
+                                     template (value) SerialNumber_Type p_SerialNumber := tsc_CMAS_SerialNumber_CellWide,
+                                     template (omit) DataCodingScheme_SIB12_Type p_DataCodingScheme := tsc_CMAS_DataCodingScheme) return SegmentedSI_List_Type
+  {
+    var WarningMessageSegment_List v_WarningMsgSegList ;
+    var template (value) SegmentedSI_List_Type v_SegmentedSI_List;
+    //Prepare CB Data segments to include in SIB11 segments
+    v_WarningMsgSegList := f_SegmentWarningCB_Data(p_Page1, p_Page2);
+    v_SegmentedSI_List := {
+      {
+        cs_SystemInformation_Common(cs_SI_SIB12(cs_SystemInformationBlockType12_Def(p_MessageIdentifier,
+                                                                                    p_SerialNumber,
+                                                                                    notLastSegment,
+                                                                                    0,
+                                                                                    v_WarningMsgSegList[0],
+                                                                                    p_DataCodingScheme))),
+        cs_SystemInformation_Common(cs_SI_SIB12(cs_SystemInformationBlockType12_Def(p_MessageIdentifier,
+                                                                                    p_SerialNumber,
+                                                                                    notLastSegment,
+                                                                                    1,
+                                                                                    v_WarningMsgSegList[1],
+                                                                                    omit))),
+        cs_SystemInformation_Common(cs_SI_SIB12(cs_SystemInformationBlockType12_Def(p_MessageIdentifier,
+                                                                                    p_SerialNumber,
+                                                                                    lastSegment,
+                                                                                    2,
+                                                                                    v_WarningMsgSegList[2],
+                                                                                    omit)))
+      }
+    };
+    return valueof(v_SegmentedSI_List);
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 18.1.1
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_18_1_1_EUTRA() runs on EUTRA_PTC
+  { /* PWS reception in RRC_IDLE state / Duplicate detection */
+    
+    var template (value) SegmentedSI_List_Type v_SegmentedSI_List;
+    var SubFrameTiming_Type v_Timing_SFN;
+    var SubFrameTiming_Type v_Timing;
+    var boolean v_UT_COMMON_CNF_Result1;
+    var boolean v_UT_COMMON_CNF_Result2; //@sic R5-120638 sic@
+    
+    f_EUTRA_Init(c1);
+    
+    //Prepare CB Data segments to include in SIB11 segments
+    v_SegmentedSI_List := fl_GenerateSib12Segments(px_PWS_CB_DataPage1, px_PWS_CB_DataPage2);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    
+    //Bring UE to initial state state 2
+    f_EUTRA_Preamble(eutra_Cell1, STATE2_IDLEUPDATE);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //The SS include an ETWS message with new messageIdentifier and serialNumber in SystemInformationBlockType10 and SystemInformationBlockType11 and transmit a Paging message including etws-Indication on Cell 1 (NOTE1).
+    //NOTE1: SystemInformationBlockType12 contain 3 segments.
+    //Change SYSINFO combination to 8
+    f_EUTRA_SetSysinfoCombinationC17_CMAS(eutra_Cell1, v_SegmentedSI_List);
+    
+    //Broadcast the modified systemInfomation with SIB10 and SIB11 and Page UE
+    f_EUTRA_ModifySysinfo_PWS(eutra_Cell1, false, true, RRC_IDLE, -,cs_Paging_CMAS ); //@sic R5s180398 sic@
+    
+    //@siclog "parallel behaviour Step 1" siclog@
+    //Check: Does the UE indicate the contents of the "warning message" to the user, and alert or activate alerting the user?
+    //NOTE2: The data indication and user alerting are the UE implementation issues
+    v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, px_PWS_CB_DataPage1, px_PWS_CB_DataPage2,true);
+    
+    v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_Alert(UT,true);
+    if (v_UT_COMMON_CNF_Result1 and v_UT_COMMON_CNF_Result2){
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 18.1.1 Step 2");
+    }
+    else {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.1 Step 2");
+    }
+    
+    if (pc_PWS_UpperLayer)  {
+      
+      //@siclog "Step 3a1" siclog@
+      //The SS wait for 10s.
+      f_Delay(10.0);
+      
+      //@siclog "Step 3a2" siclog@
+      //The SS include an ETWS message with same messageIdentifier and serialNumber in SystemInformationBlockType10 and SystemInformationBlockType11 and transmit a Paging message including etws-Indication on Cell 1 (NOTE1).
+      //Get the current SFN and subframe
+      v_Timing := f_EUTRA_GetCurrentTiming(eutra_Cell1);
+      
+      //Add processing delay to current SFN
+      v_Timing_SFN.HSFN.Number := (v_Timing.HSFN.Number + (v_Timing.SFN.Number + tsc_SfnDelay)/1024) mod 1024;//@sic R5w160204r1 sic@
+      v_Timing_SFN.SFN.Number := (v_Timing.SFN.Number + tsc_SfnDelay) mod 1024;
+      f_EUTRA_UE_PageSysinfoMod(eutra_Cell1, v_Timing_SFN, RRC_IDLE, omit, -, cs_Paging_CMAS);
+      
+      //@siclog "Step 3a3" siclog@
+      //Check: Does the UE indicate the contents of the "warning message" to the user,or alert or activate alerting the user?
+      //NOTE2: The data indication and user alerting are the UE implementation issues
+      v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, "", "",true);
+      v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_NoAlert(UT,true);
+      if (not v_UT_COMMON_CNF_Result1 or not v_UT_COMMON_CNF_Result2) {
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.1 Step 3a3");
+      }
+    }
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(eutra_Cell1, E1_IDLE);
+    
+  } // end of f_TC_18_1_1_EUTRA
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 18.1.2
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_18_1_2_EUTRA() runs on EUTRA_PTC
+  { /* PWS reception in RRC_CONNECTED state / Duplicate detection */
+    var template (value) SegmentedSI_List_Type v_SegmentedSI_List;
+    var SubFrameTiming_Type v_Timing_SFN;
+    var SubFrameTiming_Type v_Timing;
+    var boolean v_UT_COMMON_CNF_Result1;
+    var boolean v_UT_COMMON_CNF_Result2; //@sic R5-120638 sic@
+    
+    f_EUTRA_Init(c1);
+    
+    //Prepare CB Data segments to include in SIB11 segments
+    v_SegmentedSI_List := fl_GenerateSib12Segments(px_PWS_CB_DataPage1, px_PWS_CB_DataPage2);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    
+    //Bring UE to initial state state 3
+    f_EUTRA_Preamble(eutra_Cell1, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(eutra_Cell1);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //The SS include an ETWS message with new messageIdentifier and serialNumber in SystemInformationBlockType10 and SystemInformationBlockType11 and transmit a Paging message including etws-Indication on Cell 1 (NOTE1).
+    //NOTE1: SystemInformationBlockType11 contain 3 segments.
+    
+    //Change SYSINFO combination to 8
+    f_EUTRA_SetSysinfoCombinationC17_CMAS(eutra_Cell1, v_SegmentedSI_List);
+    
+    //Broadcast the modified systemInfomation with SIB10 and SIB11 and Page UE
+    f_EUTRA_ModifySysinfo_PWS(eutra_Cell1, false, true, RRC_CONNECTED, -, cs_Paging_CMAS);
+    
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE indicate the contents of the "warning message" to the user, and alert or activate alerting the user?
+    //NOTE2: The data indication and user alerting are the UE implementation issues
+    v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, px_PWS_CB_DataPage1, px_PWS_CB_DataPage2, true);
+    
+    v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_Alert(UT, true);
+    if (v_UT_COMMON_CNF_Result1 and v_UT_COMMON_CNF_Result2) {
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 18.1.2 Step 2");
+    }
+    else {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.2 Step 2");
+    }
+    
+    if (pc_PWS_UpperLayer) {
+      //@siclog "Step 3a1" siclog@
+      //The SS wait for 10s.
+      f_Delay(10.0);
+      
+      //@siclog "Step 3a2" siclog@
+      //The SS include an ETWS message with same messageIdentifier and serialNumber in SystemInformationBlockType10 and SystemInformationBlockType11 and transmit a Paging message including etws-Indication on Cell 1 (NOTE1).
+      //Get the current SFN and subframe
+      v_Timing := f_EUTRA_GetCurrentTiming(eutra_Cell1);
+      
+      //Add processing delay to current SFN
+      v_Timing_SFN.HSFN.Number := (v_Timing.HSFN.Number + (v_Timing.SFN.Number + tsc_SfnDelay)/1024) mod 1024;//@sic R5w160204r1 sic@
+      v_Timing_SFN.SFN.Number := (v_Timing.SFN.Number + tsc_SfnDelay) mod 1024;
+      f_EUTRA_UE_PageSysinfoMod(eutra_Cell1, v_Timing_SFN, RRC_CONNECTED, omit, -, cs_Paging_CMAS);
+      
+      //@siclog "Step 3a3" siclog@
+      //Check: Does the UE indicate the contents of the "warning message" to the user,or alert or activate alerting the user?
+      //NOTE2: The data indication and user alerting are the UE implementation issues
+      v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, "", "",true);
+      v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_NoAlert(UT,true);
+      if (not v_UT_COMMON_CNF_Result1 or not v_UT_COMMON_CNF_Result2) {
+        f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.2 Step 3a3");
+      }
+    }
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(eutra_Cell1, E2_CONNECTED);
+    
+  } // end of f_TC_18_1_2_EUTRA
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 18.1.3
+   * @status    APPROVED (LTE)
+   */
+  function f_TC_18_1_3_EUTRA() runs on EUTRA_PTC
+  { /* PWS reception in RRC_CONNECTED State/Power On */
+    var template (value) SegmentedSI_List_Type v_SegmentedSI_List;
+    var boolean v_UT_COMMON_CNF_Result1;
+    var boolean v_UT_COMMON_CNF_Result2; //@sic R5-120638 sic@
+    var EPS_BearerIdentity v_EpsBearerId;
+    
+    f_EUTRA_Init(c1);
+    
+    //Prepare CB Data segments to include in SIB11 segments
+    v_SegmentedSI_List := fl_GenerateSib12Segments(px_PWS_CB_DataPage1, px_PWS_CB_DataPage2);
+    //@siclog "Step 1" siclog@
+    f_EUTRA_SetSysinfoCombinationC17_CMAS(eutra_Cell1, v_SegmentedSI_List);
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    //Change SYSINFO combination to 8
+    //The SS include an CMAS message with new messageIdentifier and serialNumber in SystemInformationBlockType10 and SystemInformationBlockType11 and transmit a Paging message including etws-Indication on Cell 1 (NOTE1).
+    //NOTE1: SystemInformationBlockType11 contain 3 segments.
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //Bring UE to initial state state 3
+    //@siclog "Step 2-17" siclog@
+    f_EUTRA_Preamble(eutra_Cell1, STATE2_IDLEUPDATE, -, -, -, noRrcConnectionRelease); // @sic R5-155534 sic@
+    //@siclog "Parallel behaviour Step 1" siclog@
+    //Check: Does the UE indicate the contents of the "warning message" to the user, and alert or activate alerting the user?
+    //NOTE2: The data indication and user alerting are the UE implementation issues
+    v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, px_PWS_CB_DataPage1, px_PWS_CB_DataPage2,true);
+    
+    v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_Alert(UT, true);
+    if (v_UT_COMMON_CNF_Result1 and v_UT_COMMON_CNF_Result2) {
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 18.1.3 parallel behaviour Step 1");
+    }
+    else {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.3 parallel behaviour Step 1");
+    }
+    //@siclog "Step 18" siclog@
+    //Prepare CB Data segments to include in SIB11 segments
+    v_SegmentedSI_List := fl_GenerateSib12Segments(px_PWS_CB_DataPage3, px_PWS_CB_DataPage4,-,tsc_CMAS_SerialNumber2_CellWide);
+    
+    //Change SYSINFO combination to 8
+    f_EUTRA_SetSysinfoCombinationC17_CMAS(eutra_Cell1, v_SegmentedSI_List);
+    
+    //Broadcast the modified systemInfomation with SIB10 and SIB11 and Page UE
+    f_EUTRA_ModifySysinfo_PWS(eutra_Cell1, false, true, RRC_CONNECTED, -,cs_Paging_CMAS );
+    
+    //@siclog "step 19" siclog@
+    //Check: Does the UE indicate the contents of the "warning message" to the user, and alert or activate alerting the user?
+    //NOTE2: The data indication and user alerting are the UE implementation issues
+    v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, px_PWS_CB_DataPage3, px_PWS_CB_DataPage4,true);
+    
+    v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_Alert(UT, true);
+    if (v_UT_COMMON_CNF_Result1 and v_UT_COMMON_CNF_Result2) {
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 18.1.3 Step 19");
+    }
+    else {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.3 Step 19");
+    }
+    
+    //@siclog "Step 20" siclog@
+    //The SS wait for 10s.
+    f_Delay(10.0);
+    
+    //@siclog "Step 21" siclog@
+    //Prepare CB Data segments to include in SIB11 segments
+    v_SegmentedSI_List := fl_GenerateSib12Segments(px_PWS_CB_DataPage1, px_PWS_CB_DataPage2, -, tsc_CMAS_SerialNumber3_CellWide);
+    
+    //Change SYSINFO combination to 8
+    f_EUTRA_SetSysinfoCombinationC17_CMAS(eutra_Cell1, v_SegmentedSI_List);
+    
+    //Broadcast the modified systemInfomation with SIB10 and SIB11 and Page UE
+    f_EUTRA_ModifySysinfo_PWS(eutra_Cell1, false, true, RRC_CONNECTED, -, cs_Paging_CMAS);
+    
+    //@siclog "step 22" siclog@
+    //Check: Does the UE indicate the contents of the "warning message" to the user, and alert or activate alerting the user?
+    //NOTE2: The data indication and user alerting are the UE implementation issues
+    v_UT_COMMON_CNF_Result1 := f_UT_CheckETWS_CMAS(UT, px_PWS_CB_DataPage1, px_PWS_CB_DataPage2, true);
+    
+    v_UT_COMMON_CNF_Result2 := f_UT_CheckETWS_CMAS_Alert(UT, true);
+    if (v_UT_COMMON_CNF_Result1 and v_UT_COMMON_CNF_Result2) {
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 18.1.3 Step 18");
+    }
+    else {
+      f_EUTRA_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 18.1.3 Step 18");
+    }
+    
+    //@siclog "Step 23 - 25" siclog@
+    //IF MULTI_PDN = TRUE (NOTE) THEN steps 10-12 of the generic procedure for network initiated release of additional PDN connectivity specified in TS 36.508 subclause 4.5A.18.3 are performed for the non-IMS PDN.
+    if (tsc_EUTRA_Registration_MultiplePDN) { // @sic R5s160418 sic@
+      v_EpsBearerId := f_EUTRA_InitialRegistrationEpsBearerId(firstPDN);
+      f_EUTRA_DeactivateEPS_BearerContext(eutra_Cell1, v_EpsBearerId); // @sic R5s160050 sic@
+      f_IP_Handling_StopPDN(IP, cs_IP_StopPDN(PDN_Internet));
+    }
+
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(eutra_Cell1, E2_CONNECTED);
+  }
+
+}

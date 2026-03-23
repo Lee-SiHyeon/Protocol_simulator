@@ -1,0 +1,303 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-11-12 16:25:34 +0100 (Sun, 12 Nov 2023) $
+// $Rev: 37277 $
+/******************************************************************************/
+
+module MCX_PreestablishedSession {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_CommonProcedures all;
+  import from MCX_MIME_Functions all;
+  import from MCX_SIP_CallControl_Common all;
+  import from MCX_SIP_Common all;
+  import from XSD all;
+
+  type record MCX_ReferRequestWithSdpAndXml_Type {  /* @status    APPROVED (MCX) */
+    IMS_RoutingInfo_Type        RoutingInfo,
+    REFER_Request               Refer,
+    SDP_Message                 SdpOffer  optional,
+    MCX_MIME_XmlBodies_Type     XmlBodies optional
+  };
+
+  /*
+   * @desc      Initialise MCX_ReferRequestWithSdpAndXml_Type
+   * @param     p_IMS_DATA_REQ
+   * @param     p_SdpOffer
+   * @param     p_XmlBodies
+   * @return    MCX_ReferRequestWithSdpAndXml_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ReferRequestWithSdpAndXml(IMS_DATA_REQ p_IMS_DATA_REQ,
+                                           template (omit) SDP_Message p_SdpOffer,
+                                           template (omit) MCX_MIME_XmlBodies_Type p_XmlBodies) return MCX_ReferRequestWithSdpAndXml_Type
+  {
+    var template (value) MCX_ReferRequestWithSdpAndXml_Type v_ReferRequestWithSdpAndXml;
+    
+    v_ReferRequestWithSdpAndXml.RoutingInfo := p_IMS_DATA_REQ.RoutingInfo;
+    v_ReferRequestWithSdpAndXml.Refer := p_IMS_DATA_REQ.Request.Refer;
+    v_ReferRequestWithSdpAndXml.SdpOffer := p_SdpOffer;
+    v_ReferRequestWithSdpAndXml.XmlBodies := p_XmlBodies;
+    return valueof(v_ReferRequestWithSdpAndXml);
+  }
+
+  template (present) TargetDialog cr_TargetDialog(template (present) CallidString p_CallidString) :=
+  { /* @status    APPROVED (MCX) */
+    fieldName := TARGET_DIALOG_E,
+    callid := p_CallidString,
+    tdParam := omit
+  };
+
+  template (present) UriComponents cr_UriComponents_Other(template (present) charstring p_String) := { other := p_String };     /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      Check whether ContentId (typically contained in Refer-To header field) matches with one of the ResourceLists MIME body
+   * @param     p_ContentId
+   * @param     p_MIME_Message
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PreestablishedSession_ReferCheckContentId(charstring p_ContentId,
+                                                           MIME_Message p_MIME_Message) runs on IMS_PTC
+  {
+    var MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(p_MIME_Message, c_xmlresourcelistApplication);
+    var charstring v_AddrSpec := f_MIME_ContentId_GetAddrSpec(v_MIME_Part.header.contentId);     // @sic R5s230480: f_MIME_ContentId_GetAddrSpec sic@
+
+    if (p_ContentId != v_AddrSpec) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Content id does not match to Resource-Lists' MIME body");
+    }
+  }
+
+  /*
+   * @desc      Core specs (23.279, 23.280) do not specify MC Service ID or MC Service Group ID to be SIP URIs;
+   *            nevertheless according to 24.379 the uri attribute of the resource-lists' entry needs to be a SIP URI (e.g. clause 10.1.1.3.1.2)
+   *            => if the MC Service ID or MC Service Group ID is not a SIP URI it needs to be made one (by adding the "sip:" scheme)
+   * @param     p_Id
+   * @return    template (present) XSD.AnyURI
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PreestablishedSession_ResourceListsURI_RX(XSD.AnyURI p_Id) return template (present) XSD.AnyURI
+  {
+    var XSD.AnyURI v_Id := p_Id;
+    var SipUrl v_SipUrl := f_SIP_ParseURI(f_UniCharstring2Charstring(v_Id));
+
+    if (not match("sip", v_SipUrl.scheme)) {
+      if (not match("", v_SipUrl.scheme)) {
+        FatalError(__FILE__, __LINE__, "Service Id or Group Id with scheme other than sip");
+      } else {
+        v_Id := "sip:" & v_Id;
+      }
+    }
+    return pattern v_Id & "*";
+  }
+
+  /*
+   * @desc      Establish RRC connection and release the preestablished session
+   * @param     p_SessionId         (default value: tsc_MCX_SessionID_B)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PreestablishedSession_ReleaseMT(charstring p_SessionId := tsc_MCX_SessionID_B) runs on IMS_PTC
+  {
+    f_MCX_IPCAN_StartSignalling(IPCAN_MT_IMS_Signalling);
+    f_MCX_CallReleaseMT(p_SessionId);
+  }
+
+  /*
+   * @desc      decode headers portion of SIP URI nad match SIP headers and the body type
+   *            (in general the content of the body needs to be further checked by decoding the returned MessageBody)
+   * @param     p_SipUriHeaders
+   * @param     p_MessageHeader
+   * @param     p_MessageBody       (default value: cr_MessageBody_MIME)
+   * @return    MessageBody
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ReferResourceListsEntryURI_DecodeAndMatchHeaders(AmpersandParam_List p_SipUriHeaders,
+                                                                  template (present) MessageHeader p_MessageHeader,
+                                                                  template MessageBody p_MessageBody := cr_MessageBody_MIME) runs on IMS_PTC return MessageBody
+  {
+    var SipUrl v_DummyUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();              // any valid URL
+    var template (value) RequestLine v_RequestLineDummy := cs_RequestLineSip(REFER_E, v_DummyUrl);
+    var MessageHeader v_MessageHeader;
+    var MessageBody v_MessageBody;
+    var IMS_Request_Type v_RequestDummy;
+    var CharStringList_Type v_SipRequestLines;
+    var charstring v_Name;
+    var charstring v_Value;
+    var charstring v_Text;
+    var charstring v_Body := "";
+    var bitstring v_BitString;
+    var integer i;
+    var integer k;
+
+    /* build up SIP message according to RFC 3261 clause 7:
+     *   generic-message  =  start-line
+     *                       *message-header
+     *                       CRLF
+     *                       [ message-body ]
+     *   start-line       =  Request-Line / Status-Line
+     * with start-line, each message-header line, and the empty line MUST be terminated by a carriage-return line-feed sequence (CRLF) */
+
+    v_SipRequestLines[0] := f_Bit2Char(encvalue(v_RequestLineDummy));           // start-line
+    k := 1;
+    for (i := 0; i < lengthof(p_SipUriHeaders); i := i + 1) {                   // message headers
+      v_Name := f_URL_Decoding(p_SipUriHeaders[i].id);
+      v_Value := f_URL_Decoding(f_GenericParam_GetValue(p_SipUriHeaders[i]));
+      if (v_Name == "body") {
+        v_Body := v_Value;
+      } else {
+        v_SipRequestLines[k] := v_Name & ": " & v_Value;
+        k := k + 1;
+      }
+    }
+    v_SipRequestLines[k] := tsc_CarriageReturnLineFeed;                         // CRLF  (shall be there even when there is no message body)
+    if (v_Body != "") {
+      v_SipRequestLines[k + 1] := v_Body;                                       // message-body
+    }
+    v_Text := f_StringJoin(v_SipRequestLines, tsc_CarriageReturnLineFeed);
+
+    v_BitString := f_Char2Bit(v_Text);
+    if (decvalue(v_BitString, v_RequestDummy) != 0) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SIP URI headers cannot be decoded");
+    }
+    v_MessageHeader := v_RequestDummy.Refer.msgHeader;
+    v_MessageBody := v_RequestDummy.Refer.messageBody;
+
+    if (not match(v_MessageHeader, p_MessageHeader) or not match(v_MessageBody, p_MessageBody)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SIP URI headers not as expected");
+    }
+    return v_MessageBody;
+  }
+
+  /*
+   * @desc      36.579 Table 5.5.2.12-1
+   * @param     p_ServiceType
+   * @param     p_PriorityCallType  (default value: NORMAL_CALL)
+   * @param     p_RequestUri
+   * @param     p_ReferToUrl
+   * @param     p_CallidString
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ReferRequest_MessageHeaderRX(MCX_ServiceType_Type p_ServiceType,
+                                              MCX_PriorityCallType_Type p_PriorityCallType := NORMAL_CALL,
+                                              template (present) SipUrl p_RequestUri,
+                                              template (present) SipUrl p_ReferToUrl,
+                                              template (present) CallidString p_CallidString)
+    runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) SemicolonParam_List v_MandatoryContactParams := f_MCX_SIP_CallControl_ContactParams_RX(p_ServiceType);
+    var template (present) MessageHeader v_MessageHeader := f_MCX_InviteReferCommon_MessageHeaderRX(p_ServiceType, "REFER", p_PriorityCallType, p_RequestUri, v_MandatoryContactParams);
+
+    v_MessageHeader.supported           := cr_Supported(tsc_OptionTagList_norefersub);
+    v_MessageHeader.referSub            := cr_ReferSub(false);
+    v_MessageHeader.targetDialog        := cr_TargetDialog(p_CallidString);
+    v_MessageHeader.require             := cr_Require(tsc_OptionTagList_sec_agree & tsc_OptionTagList_multiple_refer);
+    v_MessageHeader.referTo             := cr_ReferTo(p_ReferToUrl, omit);  // ReferToParams are omit as the "method" parameter (if any) is a SIP URI parameter but not a header parameter
+    v_MessageHeader.contentType         := cr_ContentTypeMIME;
+
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      SIP headers carried in the headers portion of SIP URI
+   * @param     p_ServiceType
+   * @param     p_CallType
+   * @param     p_CommencementMode  (default value: NONE)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ReferRequest_SipUrlHeadersRX(MCX_ServiceType_Type p_ServiceType,
+                                              MCX_CallType_Type p_CallType,
+                                              MCX_CommencementMode_Type p_CommencementMode := NONE) return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader := cr_MessageHeader_Dummy;
+    v_MessageHeader.fromField := *;
+    v_MessageHeader.toField := *;
+    v_MessageHeader.via := *;
+    v_MessageHeader.callId := *;
+    v_MessageHeader.cSeq := *;
+    v_MessageHeader.contentType := cr_ContentTypeMIME;
+
+    v_MessageHeader := f_MCX_InviteRefer_MessageHeaderRX_SetAnswerMode(v_MessageHeader, p_CommencementMode);
+
+    select (p_CallType) {
+      case (GROUP_CALL, CHAT_GROUP_CALL) {
+        v_MessageHeader.acceptContact := cr_AcceptContact_Common(f_MCX_AcceptContact_AcValues_RX(p_ServiceType));
+      }
+    }
+
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      Common function to receive REFER in case of call establishment or call release
+   * @param     p_ServiceType
+   * @param     p_PriorityCallType  (default value: NORMAL_CALL)
+   * @param     p_RequestUri
+   * @param     p_ReferToUrl
+   * @param     p_MessageBodyREFER  (default value: omit)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PreestablishedSession_ReceiveREFER(MCX_ServiceType_Type p_ServiceType,
+                                                    MCX_PriorityCallType_Type p_PriorityCallType := NORMAL_CALL,
+                                                    template (present) SipUrl p_RequestUri,
+                                                    template (present) SipUrl p_ReferToUrl,
+                                                    template MessageBody p_MessageBodyREFER := omit) runs on IMS_PTC return IMS_DATA_REQ
+  {
+    var template (value) CallId v_CallId := f_IMS_PTC_ImsInfo_DialogGetCallId();
+    var template (present) SipUrl v_ToURI := f_IMS_PTC_ImsInfo_GetSipUriRX(dialogLocalId);
+    var template (present) CallidString v_CallidString := v_CallId.callid;
+    var template (present) MessageHeader v_MessageHeaderREFER := f_MCX_ReferRequest_MessageHeaderRX(p_ServiceType, p_PriorityCallType, v_ToURI, p_ReferToUrl, v_CallidString);   /* @sic R5-213657 v_ToURI instead of p_RequestUri sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+
+    if (not ispresent(p_MessageBodyREFER)) {
+      v_MessageHeaderREFER.contentType := omit;
+    }
+
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Refer_Request(cr_REFER_Request(p_RequestUri, v_MessageHeaderREFER, p_MessageBodyREFER)));
+    f_MCX_InviteRefer_CommonChecks(v_IMS_DATA_REQ);
+
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.4, 5.3C.13: receive REFER, send 200 OK
+   * @param     p_ServiceType
+   * @param     p_SessionId         (default value: tsc_MCX_SessionID_B)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PreestablishedSession_CallReleaseMO_ReceiveREFER_Send200OK(MCX_ServiceType_Type p_ServiceType,
+                                                                            charstring p_SessionId := tsc_MCX_SessionID_B) runs on IMS_PTC
+  {
+    var template (present) SipUrl v_RequestUri := f_SIP_BuildSipUri_RX(p_SessionId);
+    var template (present) SipUrl v_ReferToUrl := v_RequestUri;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+ 
+    v_ReferToUrl.urlParameters := { cr_GenericParam(c_methodId, "BYE") };
+    v_IMS_DATA_REQ := f_MCX_PreestablishedSession_ReceiveREFER(p_ServiceType, -, v_RequestUri, v_ReferToUrl);
+    v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine200, f_MCX_CommonResponse_200_MessageHeaderTX(v_IMS_DATA_REQ.Request.Refer.msgHeader))));
+  }
+
+}

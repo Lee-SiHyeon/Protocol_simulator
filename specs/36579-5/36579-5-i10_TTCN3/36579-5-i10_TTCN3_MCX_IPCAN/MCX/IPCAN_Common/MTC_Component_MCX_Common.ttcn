@@ -1,0 +1,132 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2021-12-15 20:03:24 +0100 (Wed, 15 Dec 2021) $
+// $Rev: 32358 $
+/******************************************************************************/
+
+module MTC_Component_MCX_Common {
+
+  import from CommonDefs all;
+  import from IMS_Component all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Main all;
+  import from MCX_HTTP_CommonFunctions all;
+  import from MCX_HTTP_Component all;
+  import from MCX_IMS_Component all;
+  import from MTC_Base all;
+  import from MTC_UpperTester all;
+  import from SRTP_ASP_TypeDefs all;
+
+  type record MTC_MCX_Components_Type {                                         /* @status    APPROVED (MCX) */
+    MCX_IMS_PTC  MCX,
+    MCX_HTTP_PTC HTTP,
+    IP_PTC   IP
+  };
+
+  type component MTC_MCX extends MTC_BASE {                                     /* @status    APPROVED (MCX) */
+    var MTC_MCX_Components_Type vc_Components;
+  };
+
+  type component SYSTEM_MCX_BASE extends MTC_BASE_SYSTEM, IP_SYSTEM {           /* @status    APPROVED (MCX) */
+    port SRTP_PORT      SRTP;
+  };
+
+  /*
+   * @desc      Initialise MTC and connect IMS, HTTP with IP
+   * @param     p_System
+   * @param     p_MCX
+   * @param     p_HTTP
+   * @param     p_IMS               (default value: null)
+   * @param     p_UseDNS            (default value: false)
+   * @status    APPROVED (MCX)
+   */
+  function f_MTC_MCX_InitAndConnect_IP_IMS_HTTP(SYSTEM_MCX_BASE p_System,
+                                                MCX_IMS_PTC p_MCX,
+                                                MCX_HTTP_PTC p_HTTP,
+                                                IMS_PTC p_IMS := null,
+                                                boolean p_UseDNS := false) runs on MTC_MCX
+  {
+    var IP_PTC v_IP;
+    var MCX_HTTP_PTC v_HTTP;
+    var boolean v_HttpHandlerRequired := true;
+    var boolean v_UdpHandlerRequired := true;
+    var boolean v_TcpHandlerRequired := true;
+    
+    f_MTC_BASE_Map(p_System);
+    
+    v_IP := f_IP_PTC_CreateAndMap(p_System);
+    
+    vc_Components.MCX := p_MCX;
+    vc_Components.IP  := v_IP;
+
+    if (p_HTTP == null) { v_HTTP := MCX_HTTP_PTC.create("MCX_HTTP") alive; }
+    else                { v_HTTP := p_HTTP; }
+
+    map(p_MCX:SRTP, p_System:SRTP);    /* FloorCtrl port of type SRTP_PORT attached to IMS-PTC, see MCX_IMS_Component.ttcn */
+    
+    connect(p_MCX:IMS_CTRL,     v_IP:IMS_CTRL[tsc_Index_IMS1]);
+    connect(p_MCX:IMS_Server,   v_IP:IMS_Server[tsc_Index_IMS1]);
+    connect(p_MCX:IMS_Client,   v_IP:IMS_Client[tsc_Index_IMS1]);
+    
+    connect(p_MCX:MEDIA_CTRL,   v_IP:UDPHANDLER);
+    connect(p_MCX:MSRP,         v_IP:TCPHANDLER);
+    
+    connect(v_HTTP:HTTPCTRL,     v_IP:HTTPCTRL);
+    connect(v_HTTP:HTTPDATA,     v_IP:HTTPDATA);
+    connect(v_HTTP:IMS,          p_MCX:HTTP); // Coordination ports
+    
+    
+    connect(mtc:PTC_Ut[tsc_MTC_PortIndex_IMS1], p_MCX:MMI);
+    connect(mtc:PTC_Ut[tsc_MTC_PortIndex_HTTP], v_HTTP:MMI);
+ 
+    if (p_IMS != null) {
+      connect(p_IMS:IMS_CTRL,   v_IP:IMS_CTRL[tsc_Index_IMS2]);
+      connect(p_IMS:IMS_Server, v_IP:IMS_Server[tsc_Index_IMS2]);
+      connect(p_IMS:IMS_Client, v_IP:IMS_Client[tsc_Index_IMS2]);
+      
+      // connect(mtc:PTC_Ut[tsc_MTC_PortIndex_IMS2], p_IMS:MMI);        There shall be no need for any upper tester at the IMS PTC
+      // connect(p_IMS:OtherPDN,   p_MCX:OtherPDN);                     There shall be no need for communication between MCX and IMS
+    }
+    v_IP.start(f_IP_PTC_MainLoop(p_UseDNS, v_HttpHandlerRequired, v_UdpHandlerRequired, v_TcpHandlerRequired));
+
+    if (p_HTTP == null) {
+      v_HTTP.start(f_MCX_HTTP_DefaultHandler());
+    }
+  }
+
+  /*
+   * @desc      MTC main loop; called from the testcases
+   * @param     p_GuardTimer
+   * @status    APPROVED (MCX)
+   */
+  function f_MTC_MainLoop_MCX(timer p_GuardTimer) runs on MTC_MCX
+  {
+    var boolean v_MCX_Done := false;
+
+    f_MTC_BASE_Init();
+
+    while (not v_MCX_Done) {
+      alt {
+        [not v_MCX_Done] vc_Components.MCX.done {  // terminate the loop when the MCX PTC has done its work
+          v_MCX_Done := true;
+        }
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_MCX_IPCAN);  // handle upper tester for PTC 0 (IPCAN)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_MCX);        // handle upper tester for PTC 4 (MCX)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_HTTP);       // handle upper tester for PTC 6 (HTTP)
+        [] a_MTC_ReceiveFromUT_SendToPTC();
+        [] p_GuardTimer.timeout {f_MTC_Stop(fail);}    /* acc. to the assumption that preamble and postamble are short compared to the testbody
+                                                          a FAIL verdict is assigned (rather than an INCONC) */
+        [] any component.killed {
+          f_MTC_Stop(inconc);
+        }
+      }
+    }
+    f_MTC_Stop(pass);   /* Note: "pass" overrules "none" only */
+  }
+
+}

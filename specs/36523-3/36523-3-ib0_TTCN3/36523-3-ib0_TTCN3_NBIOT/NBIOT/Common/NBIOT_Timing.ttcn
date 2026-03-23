@@ -1,0 +1,273 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2024-09-08 13:45:48 +0200 (Sun, 08 Sep 2024) $
+// $Rev: 39574 $
+/******************************************************************************/
+
+module NBIOT_Timing {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Functions all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_Component all;
+
+  type record NBIOT_SearchSpaceParameters_Type {  /* @status    APPROVED (NBIOT) */
+    UInt_Type Rmax,
+    UInt_Type G,
+    UInt_Type Alpha
+  };
+
+  const NBIOT_SearchSpaceParameters_Type tsc_NBIOT_SearchSpaceParameters_Def := { 16, 4, 0 };  /* @status    APPROVED (NBIOT) */
+
+  /*
+   * @desc      calculate timer tolerance acc. to 36.508 cl. 8.3.7
+   * @param     p_ProtocolTimer    .. kind of timer
+   * @param     p_Timer
+   * @return    float .. timer value
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NBIOT_TimerTolerance(ProtocolTimer_Type p_ProtocolTimer,
+                                   float p_Timer) return float
+  { /* calculate timer tolerance acc. to 36.508 cl. 8.3.7 */
+    var float v_Tolerance;
+
+    select (p_ProtocolTimer) {
+      case (l2Timer, rrcTimer, nasTimer) {
+        if (p_Timer < 0.5) {    /* @sic R5-184075: reduced to 500ms (needed for TC_22_3_1_4) sic@ */
+          FatalError(__FILE__, __LINE__, "timer value < 500ms is applicable for NBIOT");
+        }
+        else if (p_Timer < 10.0) {       // @sic R5s190043: lower bound does not need to be checked sic@
+          v_Tolerance := p_Timer * 0.1;
+        }
+        else if (p_Timer < 40.0) {       // @sic R5s190043: lower bound does not need to be checked sic@
+          v_Tolerance := p_Timer * 0.05;
+        }
+        else {
+          v_Tolerance := p_Timer * 0.025;
+        }
+      }
+      case else {  /* non-protocol timers; see 36.523-3 clause 7.8.4 */
+        v_Tolerance := 0.0;   /* no tolerance */
+      }
+    }
+    return v_Tolerance;
+  }
+
+  /*
+   * @desc      to calculate lower bound of timer tolerance acc. to 36.508 cl. 6.7
+   * @param     p_ProtocolTimer
+   * @param     p_Timer
+   * @return    float
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SetTimerToleranceMin(ProtocolTimer_Type p_ProtocolTimer,
+                                        float p_Timer) return float
+  {
+    var float v_Tolerance := fl_NBIOT_TimerTolerance(p_ProtocolTimer, p_Timer);
+    if (p_Timer < v_Tolerance) {
+      return 0.0;
+    }
+    return p_Timer - v_Tolerance;
+  }
+
+  /*
+   * @desc      calculate upper bound of timer tolerance acc. to 36.508 cl. 6.7
+   * @param     p_ProtocolTimer    .. kind of timer
+   * @param     p_Timer
+   * @return    float .. timer value
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SetTimerToleranceMax(ProtocolTimer_Type p_ProtocolTimer,
+                                        float p_Timer)  return float
+  {
+    var float v_Tolerance := fl_NBIOT_TimerTolerance(p_ProtocolTimer, p_Timer);
+    return p_Timer + v_Tolerance;
+  }
+
+  /*
+   * @desc      check whether given duration is valid considering expected duration and given tolerance
+   * @param     p_ProtocolTimer    .. kind of timer
+   * @param     p_Duration         .. messured duration (in milliseconds)
+   * @param     p_ExpectedDuration .. duration as specified by the standard (in milliseconds)
+   * @return    boolean
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SubFrameTimingCheckDuration(ProtocolTimer_Type p_ProtocolTimer,
+                                               integer p_Duration,
+                                               integer p_ExpectedDuration) return boolean
+  {
+   
+    var float v_ToleranceFloat := fl_NBIOT_TimerTolerance(p_ProtocolTimer, int2float(p_ExpectedDuration)/1000.0);
+    var integer v_ToleranceInt := float2int(v_ToleranceFloat * 1000.0);
+    var integer v_Min := p_ExpectedDuration - v_ToleranceInt;
+    var integer v_Max := p_ExpectedDuration + v_ToleranceInt;
+
+    return ((v_Min <= p_Duration) and (p_Duration <= v_Max));
+  }
+
+  /*
+   * @desc      return PDCCH period in milliseconds
+   * @param     p_SearchSpaceParameters (default value: tsc_NBIOT_SearchSpaceParameters_Def)
+   * @return    UInt_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SearchSpace_GetPdcchPeriod(NBIOT_SearchSpaceParameters_Type p_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def) return UInt_Type
+  {
+    return (p_SearchSpaceParameters.Rmax * p_SearchSpaceParameters.G);
+  }
+
+  /*
+   * @desc      Return the current SFN and subframe
+   * @param     p_CellId
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GetCurrentTiming(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return SubFrameTiming_Type
+  {
+    var NB_SYSTEM_CTRL_CNF v_ReceivedCnf;
+    var SubFrameTiming_Type v_Timing;
+
+    SYS.send(cas_NB_EnquireTiming(p_CellId));
+    SYS.receive(car_NB_EnquireTiming(p_CellId)) -> value v_ReceivedCnf;
+    v_Timing := v_ReceivedCnf.Common.TimingInfo.SubFrame;
+
+    return v_Timing;
+  }
+
+  /*
+   * @desc      get the send occasion: start of the next UE specific search space which starts at least p_MilliSeconds in advance from now on
+   * @param     p_CellId
+   * @param     p_MilliSeconds      (default value: 100)
+   * @param     p_SearchSpaceParameters (default value: tsc_NBIOT_SearchSpaceParameters_Def)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GetNextSearchSpace(NBIOT_CellId_Type p_CellId,
+                                      UInt_Type p_MilliSeconds := 100, // minimum time (in ms) before the next send occasion
+                                      NBIOT_SearchSpaceParameters_Type p_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def) runs on NBIOT_PTC return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_Timing;
+    var SubFrameTiming_Type v_NextSearchSpace;
+    var UInt_Type v_CycleLength := f_NBIOT_SearchSpace_GetPdcchPeriod(p_SearchSpaceParameters);
+    var UInt_Type v_CycleOffset := p_SearchSpaceParameters.Alpha;
+
+    if (p_MilliSeconds < 100) {
+      FatalError(__FILE__, __LINE__, "next send occasion shall be at least 100ms in advance");
+    }
+    
+    v_Timing := f_NBIOT_GetCurrentTiming(p_CellId);
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(v_Timing, p_MilliSeconds);
+    v_NextSearchSpace := f_SubFrameTiming_CalculateCycleStartTime(v_Timing, v_CycleLength, v_CycleOffset);
+
+    return v_NextSearchSpace;
+  }
+
+  /*
+   * @desc      return timing based on NPDCCH cycles
+   * @param     p_CurrentSearchSpace
+   * @param     p_Offset            (default value: 1.0)
+   * @param     p_SearchSpaceParameters (default value: tsc_NBIOT_SearchSpaceParameters_Def)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_IncrementSearchSpace(SubFrameTiming_Type p_CurrentSearchSpace,
+                                        float p_Offset := 1.0,
+                                        NBIOT_SearchSpaceParameters_Type p_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def) return SubFrameTiming_Type
+  { /* p_Offset as float to have possibility of half cycles */
+    var UInt_Type v_CycleLength := f_NBIOT_SearchSpace_GetPdcchPeriod(p_SearchSpaceParameters);
+    var UInt_Type v_MilliSeconds := float2int(int2float(v_CycleLength) * p_Offset);
+    return f_SubFrameTiming_AddMilliSeconds(p_CurrentSearchSpace, v_MilliSeconds);
+  }
+
+  /*
+   * @desc      return true, if the given time stamp is within the current search space
+   * @param     p_CurrentSearchSpace
+   * @param     p_TimeStampOfReceivedMsg
+   * @param     p_SearchSpaceParameters (default value: tsc_NBIOT_SearchSpaceParameters_Def)
+   * @return    boolean
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TimeStamp_CheckSearchSpace(SubFrameTiming_Type p_CurrentSearchSpace,
+                                              SubFrameTiming_Type p_TimeStampOfReceivedMsg,
+                                              NBIOT_SearchSpaceParameters_Type p_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def) return boolean
+  {
+    var UInt_Type v_CycleLength := f_NBIOT_SearchSpace_GetPdcchPeriod(p_SearchSpaceParameters);
+    var UInt_Type v_CycleOffset := p_SearchSpaceParameters.Alpha;
+    var SubFrameTiming_Type v_NextSearchSpace := f_SubFrameTiming_CalculateCycleStartTime(p_TimeStampOfReceivedMsg, v_CycleLength, v_CycleOffset);
+    
+    return (v_NextSearchSpace == f_NBIOT_IncrementSearchSpace(p_CurrentSearchSpace, 1.0, p_SearchSpaceParameters));
+  }
+
+  /*
+   * @desc      get t_NTNdelay of a cell with a given index (p_CellId) that is a sum of Koffset and Kmac configured for the cell
+   * @param     p_CellId
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_NTN_Get_T_NTNoffset(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return integer
+  {//@sic R5-237436 sic@
+       return f_NBIOT_CellInfo_Get_Kmac(p_CellId) + f_NBIOT_CellInfo_Get_Koffset(p_CellId)
+  }
+
+  /*
+   * @desc      retrieves T_NTNoffset (DLoffset) of a cell with a given index (p_CellId) in seconds
+   * @param     p_CellId
+   * @return    float
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_NTN_Get_T_NTNoffset_InSeconds(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return float
+  {
+       return int2float(f_NBIOT_NTN_Get_T_NTNoffset(p_CellId))/1000.0
+  }
+
+  /*
+   * @desc      get NDPCCH  period bundle acc. 36.523-3 cl 7A.14.2.3 for a given cell
+   * @param     p_CellId
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GetNPDCCH_PeriodBundle(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return integer
+  {
+    var integer v_T_offset;
+    var integer v_NPDCCH_Period;
+      
+    v_NPDCCH_Period := f_NBIOT_SearchSpace_GetPdcchPeriod();
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()!= ntn_None)
+    {//@sic R5-235443, R5s230478 cl 2.7, R5-237436 sic@
+        v_T_offset := f_NBIOT_NTN_Get_T_NTNoffset(p_CellId);
+        return(f_RoundedUpDivision(v_T_offset,v_NPDCCH_Period)*v_NPDCCH_Period + v_NPDCCH_Period)
+    }
+    else
+    {
+        return v_NPDCCH_Period
+    }
+    
+
+  }
+
+  /*
+   * @desc      Get the number of NDPCCH periods corresponding to a period bundle for a given cell.
+                The result can be used as an offeset parameter when incrementing a search space
+   * @param     p_CellId
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GetNPDCCH_PeriodsInBundle(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return integer
+  {
+    var integer v_NPDCCH_Period;
+    v_NPDCCH_Period := f_NBIOT_SearchSpace_GetPdcchPeriod();
+    return f_NBIOT_GetNPDCCH_PeriodBundle(p_CellId)/ v_NPDCCH_Period
+  }
+
+}

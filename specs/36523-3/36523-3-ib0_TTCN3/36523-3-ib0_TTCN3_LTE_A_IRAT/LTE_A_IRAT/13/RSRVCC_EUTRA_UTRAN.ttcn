@@ -1,0 +1,193 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-11-01 08:32:18 +0100 (sá., 01 nov. 2025) $
+// $Rev: 42143 $
+/******************************************************************************/
+
+module RSRVCC_EUTRA_UTRAN {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EUTRA_CapabilityFunctions all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_CommonTypeDefs all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_CommonProcedures all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_RRC_Handover_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+
+  template (value) RSR_VCC_Info cs_RSRVCCInfo  :=
+  { /* @status    APPROVED (LTE_A_IRAT) */
+    nonce                  := oct2bit(tsc_NonceMSC),
+    ims_Information        := f_Encode_ATGWTransferDetails()
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.32
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_32_UTRAN() runs on UTRAN_IRAT_PTC
+  { /* Inter-system mobility / UTRA CS voice to E-UTRA voice / rSRVCC */
+    
+    // Power levels as specified in Table 13.4.3.32.3.2-1:
+    var integer v_T0_CPICH_Cell5 := -88;
+    var integer v_T0_PCCPCH_Cell5 := -88;
+    var integer v_T1_CPICH_Cell5 := -64;
+    var integer v_T1_PCCPCH_Cell5 := -64;
+    var integer v_T2_CPICH_Cell5 := -88;
+    var integer v_T2_PCCPCH_Cell5 := -88;
+    var octetstring v_RRCConnectionConfigurationMessage;
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var TI v_TI;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    // Create and configure Cell 5
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5);
+    
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    
+    //Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo (EUTRA);
+    
+    f_UTRAN_SetCellPower(utran_Cell5, v_T0_CPICH_Cell5, v_T0_PCCPCH_Cell5);
+    
+    //Receive updated auth parameters
+    f_UTRAN_InterRAT_InitialiseAuthParams(); // @sic R5s150704 sic@
+    
+    //@siclog "Step 7" siclog@
+    // Wait for trigger from EUTRAN side
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    f_UTRAN_SetCellPower(utran_Cell5, v_T1_CPICH_Cell5, v_T1_PCCPCH_Cell5);
+    
+    //@siclog "Step 8" siclog@
+    /* Check: Does the test result of generic test procedure in TS 36.508 subclause 6.4.2.8 indicate
+       that the UE is camped on UTRAN Cell 5? */
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5, cell_Dch); // @sic R5s150704 sic@
+    
+    // @siclog "Step 9 - 10" siclog@
+    v_TI := f_UTRAN_MO_SpeechCall(utran_Cell5); // @sic R5s150704 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_Data (int2str(bit2int(v_TI.tiVal))));
+    // --- CS Call is now established
+    
+    // @siclog "Step 11" siclog@
+    // SS adjusts cell levels according to row "T2" of table 13.4.3.32.3.2-1.
+    f_UTRAN_SendAuthCoOrdParameters (EUTRA, omit);
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA); // @sic R5s150704 sic@
+    f_UTRAN_SetCellPower(utran_Cell5, v_T2_CPICH_Cell5, v_T2_PCCPCH_Cell5);
+    
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    
+    // @siclog "Step 12" siclog@
+    // The SS transmit a HANDOVER FROM UTRAN COMMAND including rSRVCC details on Cell 5.
+    
+    v_RRCConnectionConfigurationMessage := f_Encode_RRCConnectionReconfiguration_HOToEUTRA (v_EUTRASysInfo.Eutra[0], -, v_SecurityInfo.authKeys.AuthCS.CKeySeq); // @sic R5s150704 sic@
+    
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated,
+                                     tsc_RB2,
+                                     cs_HandoverFromUTRANCommand_EUTRA_r11(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                           tsc_RRC_TI,
+                                                                           v_RRCConnectionConfigurationMessage,
+                                                                           cs_RSRVCCInfo)));
+    // Wait for the end of the test case
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    
+    f_UTRAN_TestBody_Set(false);
+    f_UTRAN_ReleaseCell(utran_Cell5, f_UTRAN_CellInfo_GetConfigType (utran_Cell5));
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.34
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_34_UTRAN() runs on UTRAN_IRAT_PTC
+  { /* Inter-system mobility / UTRA CS voice to E-UTRA voice / rSRVCC */
+  
+    var octetstring v_RRCConnectionConfigurationMessage;
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var TI v_TI;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    // Create and configure Cell 5
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5);
+    
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    
+    //Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo (EUTRA);
+    
+    f_UTRAN_SetCellPower(utran_Cell5, -88, -88);
+    
+    //Receive updated auth parameters
+    f_UTRAN_InterRAT_InitialiseAuthParams(); // @sic R5s150704 sic@
+
+    //@siclog "Step 7" siclog@
+    // Wait for trigger from EUTRAN side
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    f_UTRAN_SetCellPower(utran_Cell5, -64, -64);
+    
+    //@siclog "Step 8" siclog@
+    /* Check: Does the test result of generic test procedure in TS 36.508 subclause 6.4.2.8 indicate
+       that the UE is camped on UTRAN Cell 5? */
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5, cell_Dch); // @sic R5s150704 sic@
+    
+    // @siclog "Step 9 - 10" siclog@
+    // stop at Alerting
+    v_TI := f_UTRAN_MO_SpeechCall(utran_Cell5, -, -, -, true); // @sic R5s150751 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_Data (int2str(bit2int(v_TI.tiVal))));
+    
+    // --- CS Call is now established
+    
+    // @siclog "Step 11" siclog@
+    // SS adjusts cell levels according to row "T2" of table 13.4.3.32.3.2-1.
+    f_UTRAN_SendAuthCoOrdParameters (EUTRA, omit);
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA); // @sic R5s150704 sic@
+    f_UTRAN_SetCellPower(utran_Cell5, -88, -88);
+    
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    
+    // @siclog "Step 12" siclog@
+    // The SS transmit a HANDOVER FROM UTRAN COMMAND including rSRVCC details on Cell 5.
+    v_RRCConnectionConfigurationMessage := f_Encode_RRCConnectionReconfiguration_HOToEUTRA (v_EUTRASysInfo.Eutra[0], -, v_SecurityInfo.authKeys.AuthCS.CKeySeq); // @sic R5s150704 sic@
+    
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated,
+                                     tsc_RB2,
+                                     cs_HandoverFromUTRANCommand_EUTRA_r11(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                           tsc_RRC_TI,
+                                                                           v_RRCConnectionConfigurationMessage,
+                                                                           cs_RSRVCCInfo)));
+    // Wait for the end of the test case
+    f_IRAT_WaitForCoOrd_Trigger ( EUTRA );
+    
+    f_UTRAN_TestBody_Set(false);
+    f_UTRAN_ReleaseCell(utran_Cell5, f_UTRAN_CellInfo_GetConfigType(utran_Cell5));
+  }
+
+}

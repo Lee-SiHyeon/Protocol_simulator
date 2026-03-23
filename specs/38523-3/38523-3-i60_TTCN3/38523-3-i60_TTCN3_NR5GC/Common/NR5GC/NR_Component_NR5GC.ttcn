@@ -1,0 +1,451 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-12-16 17:36:20 +0100 (Tue, 16 Dec 2025) $
+// $Rev: 42667 $
+/******************************************************************************/
+
+module NR_Component_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_5GC_Parameters all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_SecurityFunctions all;
+  import from NG_NasEmu_CtrlAspTypes all;
+  import from NR_ASP_MrbDefs all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from Parameters all;
+
+  type record NG_CellInfo_Type {                                                                        /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NG_NAS_GutiParameters_Type  Guti
+  };
+
+  type record of NG_CellInfo_Type NG_CellInfoList_Type;                                                 /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  type record of NR_DRBInfo_Type NR_DRBInfoList_Type;                                                   /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  type record NR_DRBInfo_Type {                                                                         /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    integer                         DRB_Id,
+    integer                         PDUSessionId,
+    boolean                         DefaultDRB,
+    boolean                         DC_SCG, // only relevant for DC tests @sic R5s204475 sic@
+    SDAP_Config                     SDAP_Config     optional, // Not specified for L2 tests
+    RLC_BearerConfig                RLC_Config,     // for each DRB
+    NR_RadioBearer_Type             SS_Config,
+    boolean                         IMS
+  };
+
+  type record NG_Ctrl_Type {                                                                            /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    boolean     LoopbackIsActivated
+  };
+
+  type record NG_MobileInfo_Type {                                                                     /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    GMM_MobilityInfo_Type   GMMInfo     optional,
+    PDUSessionInfoList_Type PDUSessions,
+    NR_DRBInfoList_Type     ListOfDRBs,
+    IntegerList_Type        EPS_BearerIds,   // @sic R5s201094 sic@
+    integer                 NumOfIPAddressesToAllocate, // @sic R5-213400 sic@
+    hexstring               DefaultIMSI      // @sic R5s2302125 sic@
+  };
+
+  type record of NR_SRB_COMMON_IND     NR_SRB_COMMON_INDList_Type;  /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT) */
+
+  type record NASMessageReq_Type {          // @sic R5s220174 sic@                                                         /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    integer                         L_NoOfMsgsRxd,
+    record of NR_SRB_COMMON_IND     ListOfMsgs  optional
+  };
+
+  type union MsgInDefault_Type {                                                                        /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NASMessageReq_Type   msg        // @sic R5s220174 sic@
+  };
+
+  type record NR5GC_Global_Type {                                                                       /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NG_Ctrl_Type                Ctrl,
+    NG_NAS_SecurityParams_Type  Security,
+    NG_CellInfoList_Type        CellArray,
+    NG_MobileInfo_Type          MobileInfo,
+    MsgInDefault_Type           MsgInDefault,
+    InterworkWithoutN26         NetworkSupport                                                          /* @sic R5-255943 sic@ */
+  };
+
+  type component NR5GC_PTC extends NR_BASE_PTC {                                                        /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    var NR5GC_Global_Type           vc_NR5GC_Global;
+  
+    port IMS_IPCAN_CO_ORD_PORT      IMS[tsc_NoOfIMSPDNs];                  /* @sic R5s201177: tsc_NoOfIMSPDNs instead of tsc_NoOfPDNs sic@ */
+    
+    port NG_NASCTRL_PORT            NASCTRL;
+    port IRAT_CO_ORD_PORT           GERAN;
+    port IRAT_CO_ORD_PORT           UTRAN;
+    port IRAT_CO_ORD_PORT           WLAN;  //@sic R5w220023 sic@
+    port NR_MRB_PORT                MRB;
+  };
+
+  /*
+   * @desc      send back IPCAN specific information to the IMS PTC
+   * @return    template (value) IPCAN_INFO_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_IMS_IpcanInfo() runs on NR_BASE_PTC return template (value) IPCAN_INFO_Type
+  {
+    var IPCAN_RAN_Type v_RanType;
+    var template (omit) integer v_AuthResLength;
+    var template (omit) integer v_UE_Release := omit;
+    var boolean v_VoiceOverIMS;
+
+    if (isvalue(vc_NR_Global.MobileInfo.NR_Capability.accessStratumRelease)) {
+      v_UE_Release := f_NR_ConvertAccessStratumReleaseToInteger(vc_NR_Global.MobileInfo.NR_Capability.accessStratumRelease);
+    }
+
+    v_RanType := NR;
+    v_AuthResLength := px_NAS_5GC_XRES_Length; // @sic R5s201327 sic@
+    v_VoiceOverIMS := true;   // Assume always true
+
+    return cs_IPCAN_INFO(v_RanType, v_UE_Release, v_AuthResLength, v_VoiceOverIMS);
+  }
+
+  /*
+   * @desc      Handling of async. queries sent from the IMS PTC
+   * @param     p_ImsCoorPort
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_NR_IMS_QueryHandler(IMS_IPCAN_CO_ORD_PORT p_ImsCoorPort) runs on NR_BASE_PTC
+  {
+    [] p_ImsCoorPort.receive(cmr_IMS_IPCAN_Command(IPCAN_QUERY))
+      {
+        p_ImsCoorPort.send(cms_IPCAN_IMS_QueryResponse(f_NR_IMS_IpcanInfo()));
+      }
+  }
+
+  template (present) NG_NAS_CTRL_CNF cr_NG_NAS_CTRL_CNF_Any := ?;               /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  /*
+   * @desc      default behaviour for NR5GC_PTC
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_NR5GC_StandardDefault() runs on NR5GC_PTC
+  {
+    [] NASCTRL.receive(cr_NG_NAS_CTRL_CNF_Any) {
+      /* unexpected CNF shall always result in INCONC */
+      all timer.stop;
+      f_SetVerdictInconc(__FILE__, __LINE__, "unexpected receive event at port NASCTRL");
+    }
+    [] a_NR_IMS_QueryHandler(IMS[tsc_Index_IMS1]) {
+      repeat;
+    }
+    [] a_NR_IMS_QueryHandler(IMS[tsc_Index_IMS2]) {
+      repeat;
+    }
+    [] a_NR_BASE_StandardDefault() {
+    }
+  }
+
+  /*
+   * @desc      to activate the standard default behaviour
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_ActivateDefault() runs on NR5GC_PTC
+  {
+    deactivate(vc_NR_Global.Ctrl.Default);
+    vc_NR_Global.Ctrl.Default := activate(a_NR5GC_StandardDefault());
+  }
+
+  /*
+   * @desc      Return if loopback is activated
+   * @return    boolean
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_GetLoopbackIsActivated() runs on NR5GC_PTC return boolean
+  {
+    return vc_NR5GC_Global.Ctrl.LoopbackIsActivated;
+  }
+
+  /*
+   * @desc      set LoopbackIsActivated
+   * @param     p_LoopbackIsActivated
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_SetLoopbackIsActivated(boolean p_LoopbackIsActivated) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.Ctrl.LoopbackIsActivated := p_LoopbackIsActivated;
+  }
+
+  /*
+   * @desc      disables LoopbackIsActivated for initialization
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_Ctrl_Init()  runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.Ctrl.LoopbackIsActivated := false;
+  }
+
+  /*
+   * @desc      Return GMM_MobilityInfo_Type
+   * @return    GMM_MobilityInfo_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetGMM_MobilityInfo() runs on NR5GC_PTC return GMM_MobilityInfo_Type
+  {
+    return vc_NR5GC_Global.MobileInfo.GMMInfo;
+  }
+
+  /*
+   * @desc      set GMM_MobilityInfo_Type
+   * @param     p_GMM_MobilityInfo
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_SetGMM_MobilityInfo(GMM_MobilityInfo_Type p_GMM_MobilityInfo) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.GMMInfo := p_GMM_MobilityInfo;
+  }
+
+  /*
+   * @desc      Return No of PDU Sessions
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetNoOfSessions() runs on NR5GC_PTC return integer
+  {
+    return lengthof(vc_NR5GC_Global.MobileInfo.PDUSessions);
+  }
+
+  /*
+   * @desc      Return List of PDU Session Info
+   * @return    PDUSessionInfoList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetSessionInfoList() runs on NR5GC_PTC return PDUSessionInfoList_Type
+  {
+    return vc_NR5GC_Global.MobileInfo.PDUSessions;
+  }
+
+  /*
+   * @desc      set updated list of PDU Session Info
+   * @param     p_SessionInfoList
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_SetSessionInfoList(PDUSessionInfoList_Type p_SessionInfoList) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.PDUSessions := p_SessionInfoList;
+  }
+
+  /*
+   * @desc      Return No of DRBs Configured
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetNoOfDRBs() runs on NR5GC_PTC return integer
+  {
+    return lengthof(vc_NR5GC_Global.MobileInfo.ListOfDRBs);
+  }
+
+  /*
+   * @desc      Returns List of DRBs Configured
+   * @return    NR_DRBInfoList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetDRBInfoList() runs on NR5GC_PTC return NR_DRBInfoList_Type
+  {
+    return vc_NR5GC_Global.MobileInfo.ListOfDRBs;
+  }
+
+  /*
+   * @desc      set updated list of DRB Info
+   * @param     p_DRBInfoList
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_SetDRBInfoList(NR_DRBInfoList_Type p_DRBInfoList) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.ListOfDRBs := p_DRBInfoList;
+  }
+
+  /*
+   * @desc      Returns List of stored EPS Bearer Ids
+   * @return    IntegerList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetEPS_BearerIdList() runs on NR5GC_PTC return IntegerList_Type
+  {
+    return vc_NR5GC_Global.MobileInfo.EPS_BearerIds;
+  }
+
+  /*
+   * @desc      set updated list of EPS Bearer Ids
+   * @param     p_EPS_BearerIds
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_SetEPS_BearerIdList(IntegerList_Type p_EPS_BearerIds) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.EPS_BearerIds := p_EPS_BearerIds;
+  }
+
+  /*
+   * @desc      Returns NumOfIPAddressesToAllocate
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetNumOfIPAddressesToAllocate() runs on NR5GC_PTC return integer
+  {
+    return vc_NR5GC_Global.MobileInfo.NumOfIPAddressesToAllocate;
+  }
+
+  /*
+   * @desc      Returns DefaultIMSI
+   * @return    hexstring
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_GetDefaultIMSI() runs on NR5GC_PTC return hexstring
+  {
+    return vc_NR5GC_Global.MobileInfo.DefaultIMSI;
+  }
+
+  /*
+   * @desc      set DefaultIMSI
+   * @param     p_IMSI
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_MobileInfo_SetDefaultIMSI(hexstring p_IMSI) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.DefaultIMSI := p_IMSI;
+  }
+
+  /*
+   * @desc      to be called during initialization of the NR5GC_PTC
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MobileInfo_Init()  runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MobileInfo.GMMInfo := omit;
+    vc_NR5GC_Global.MobileInfo.PDUSessions := {};
+    vc_NR5GC_Global.MobileInfo.ListOfDRBs := {};
+    vc_NR5GC_Global.MobileInfo.EPS_BearerIds := {};   // @sic R5s201094 sic@
+    vc_NR5GC_Global.MobileInfo.NumOfIPAddressesToAllocate := 1; // @sic R5-213400 sic@
+    vc_NR5GC_Global.MobileInfo.DefaultIMSI := px_IMSI_Def;     // @sic R5s230215 sic@
+  }
+
+  /*
+   * @desc      Returns true if Network supports N26
+   * @return    InterworkWithoutN26
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_GetNetworkSupport() runs on NR5GC_PTC return InterworkWithoutN26
+  {
+    return vc_NR5GC_Global.NetworkSupport;
+  }
+
+  /*
+   * @desc      set  Network support of N26
+   * @param     p_IwkN26
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_SetNetworkSupport(InterworkWithoutN26 p_IwkN26) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.NetworkSupport := p_IwkN26;
+  }
+
+  /*
+   * @desc      Return extended security parameters
+   * @return    NG_NAS_SecurityParams_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_Security_Get() runs on NR5GC_PTC return NG_NAS_SecurityParams_Type
+  {
+    return vc_NR5GC_Global.Security;
+  }
+
+  /*
+   * @desc      set extended security parameters
+   * @param     p_Auth_Params
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_Security_Set(NG_NAS_SecurityParams_Type p_Auth_Params) runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.Security := p_Auth_Params;
+  }
+
+  /*
+   * @desc      to be called during initialization of the NR5GC_PTC
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_Security_Init()  runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.Security := valueof(cs_NG_NAS_SecurityParamsInit);
+  }
+
+  /*
+   * @desc      reset / clear list of PDU NAS messsages stored
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq() runs on NR5GC_PTC
+  {
+    vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd := 0;
+    vc_NR5GC_Global.MsgInDefault.msg.ListOfMsgs := omit;
+  }
+
+  /*
+   * @desc      Store 1 NAS messsage
+   * @param     p_Msg
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MsgInDefault_StoreNASMessageReq(NR_SRB_COMMON_IND p_Msg) runs on NR5GC_PTC
+  {
+    var integer L := vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd;
+    
+    vc_NR5GC_Global.MsgInDefault.msg.ListOfMsgs[L] := p_Msg;
+    vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd := L + 1;
+  }
+
+  /*
+   * @desc      Get 1 NAS messsage from store
+   * @param     p_L
+   * @return    NR_SRB_COMMON_IND
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MsgInDefault_GetOneNASMessageReq(integer p_L) runs on NR5GC_PTC return NR_SRB_COMMON_IND
+  {
+    return vc_NR5GC_Global.MsgInDefault.msg.ListOfMsgs[p_L-1];
+  }
+
+  /*
+   * @desc      Remove 1 NAS messsage from store
+   * @param     p_Index             (default value: 0)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT)
+   */
+  function f_NR5GC_MsgInDefault_RemoveOneNASMessageReq(integer p_Index := 0) runs on NR5GC_PTC
+  {
+    var integer i;
+    var integer j := 0;
+    var NR_SRB_COMMON_INDList_Type v_ExistingList := vc_NR5GC_Global.MsgInDefault.msg.ListOfMsgs;
+    var NR_SRB_COMMON_INDList_Type v_NewList := {};
+    
+    for (i := 0; i < vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd; i := i+1) {
+      if (i != p_Index) {
+        v_NewList[j] := v_ExistingList[i];
+        j := j+1;
+      }
+    }
+    vc_NR5GC_Global.MsgInDefault.msg.ListOfMsgs := v_NewList;
+    vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd := j;
+  }
+
+  /*
+   * @desc      Get number of NAS messsages in store
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_MsgInDefault_GetNumOfNASMessageReq() runs on NR5GC_PTC return integer
+  {
+    return vc_NR5GC_Global.MsgInDefault.msg.L_NoOfMsgsRxd;
+  }
+
+}

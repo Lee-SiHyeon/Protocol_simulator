@@ -1,0 +1,2282 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module IMS_NR5GC_CallControlTestcases {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CC_CommonFunctions5G all;
+  import from IMS_CC_CustomizedAlertingTonesCommon all;
+  import from IMS_CC_Parameters all;
+  import from IMS_CC_SessionTimerCommon all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_IPCAN_Coordination all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_5G all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_Procedures_Video all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_MessagesVideo all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      return Contact URL sent by the SS in the 183 Session Progress
+   * @param     p_CallInfo
+   * @return    SipUrl
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_CC_MO_CallInfo_GetContactUrlSS(IMS_CC_MO_CallInfo_Type p_CallInfo) return SipUrl
+  {
+    return f_Contact_GetSipUrl(p_CallInfo.MessageHeader183.contact);
+  }
+
+  /*
+   * @desc      Steps 2-7 of generic procedure specified in Table 4.9.15.2.2-1 of TS 38.508-1
+   * @return    boolean
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MOCallSetup_CheckInviteWithPreconditions() runs on IMS_PTC return boolean
+  {
+    var template (present) SDP_attribute_list v_MediaAttributesWithPreconditions := superset(all from cr_SDP_PreconditionAttributes(?, ?, ?, ?));
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var SDP_Message v_SdpOffer;
+
+    IMS_Server.check(receive(car_IMS_Invite_Request) -> value v_IMS_DATA_REQ);
+    v_SdpOffer := f_IMS_SDP_Message_Decode(v_IMS_DATA_REQ.Request.Invite.messageBody.sdpMessageBody);
+    
+    return match(v_SdpOffer.media_list[0].attributes, v_MediaAttributesWithPreconditions);
+  }
+
+  /*
+   * @desc      add video to DL SDP message, if video has been contained in the initial SDP offer sent by the UE
+   * @param     p_InitialSdpOffer
+   * @param     p_SdpMessageAudioOnly
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NoSdpInINVITE_SdpAddVideoIfNeeded_TX(SDP_Message p_InitialSdpOffer,
+                                                                  template (value) SDP_Message p_SdpMessageAudioOnly) return template (value) SDP_Message
+  {
+    var SDP_media_desc v_SDP_Media_Video;
+    var template (value) SDP_Message v_SdpMessage := p_SdpMessageAudioOnly;
+
+    if (isvalue(p_InitialSdpOffer.media_list[1])) {  // @sic R5-217998: if SDP offer contains video sic@
+      v_SDP_Media_Video := p_InitialSdpOffer.media_list[1];
+      v_SDP_Media_Video.media_field.ports.port_number := 0;
+      v_SdpMessage.media_list[1] := v_SDP_Media_Video;
+    }
+    return v_SdpMessage;
+  }
+
+  /*
+   * @desc      add video to UL SDP message template, if video has been contained in the initial SDP offer sent by the UE
+   * @param     p_InitialSdpOffer
+   * @param     p_SdpMessageAudioOnly
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NoSdpInINVITE_SdpAddVideoIfNeeded_RX(SDP_Message p_InitialSdpOffer,
+                                                                  template (present) SDP_Message p_SdpMessageAudioOnly) return template (present) SDP_Message
+  {
+    var template (present) SDP_Message v_SdpMessage := p_SdpMessageAudioOnly;
+
+    if (isvalue(p_InitialSdpOffer.media_list[1])) {
+      v_SdpMessage.media_list[1] := cr_SDP_Media_Desc_Common(cr_SDP_Media_Video(-, 0, ?), -, *, *, *);
+    }
+    return v_SdpMessage;
+  }
+
+  /*
+   * @desc      steps 1 - 6 of test cases 7.10 and 7.25
+   * @param     p_PreconditionsRequired
+   * @param     p_EvsConfiguration  (default value: EVS_A2)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NoSdpInINVITE_Step1_6(boolean p_PreconditionsRequired,
+                                                   SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := EVS_A2) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* NOTE: the returned InviteRequestWithSdp contains the SDP offer sent by the UE in the 183 Session Progress */
+    /* @sic R5-231495: A.4.1 -> A.4.1a sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var template (present) SDP_attribute_list v_PreconditionAttributesOffer := {};
+    var template (present) SDP_Message v_SdpOfferAudioOnly;
+    var template (present) SDP_Message v_SdpOfferAudioVideo;
+    var template (present) SDP_Message v_SdpOffer;
+    var template (value) MessageHeader v_MessageHeader_Prack;
+    var template (omit)  SDP_attribute_list v_PreconditionAttributesAnswer := omit;
+    var template (value) SDP_Message v_SdpAnswer;
+    var IMS_SDP_AudioCodecList_Type v_AudioCodecList;
+    var SDP_media_desc v_MediaDescAudio;
+    var boolean v_CheckForbiddenCodecParameters := true;
+    var InternetProtocol_Type v_Protocol;
+    var SipUrl v_ContactUrl;
+
+    if (p_PreconditionsRequired) {
+      v_PreconditionAttributesOffer := cr_SDP_PreconditionAttributesWithConf(c_none, c_none, c_mandatory, c_optional);  /* @sic R5s210462 change 2 -> R5-212770 has been withdrawn at TSGR5#91 => des:qos kept optional for remote sic@
+                                                                                                                           @sic R5-223349: WithConf sic@ */
+      v_PreconditionAttributesAnswer := cs_SDP_PreconditionAttributes(c_none, c_none, c_mandatory, c_mandatory);        /* @sic R5-223349: No Conf sic@ @sic R5s220877: c_none, c_none instead of c_sendrecv, c_sendrecv sic@ */
+    }
+
+    // Step 2:                  INVITE
+    v_AudioCodecList := {};                     // => no SDP
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(p_PreconditionsRequired, v_AudioCodecList);
+
+    // Step 3 - 4:              100 Trying, 183 Session Progress
+    v_AudioCodecList := tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR;
+    v_SdpOfferAudioOnly := f_IMS_BuildSDP_InitialOfferAudioWithPreconditions_RX(v_AudioCodecList, v_PreconditionAttributesOffer);     /* @sic R5s210462 change 2 sic@ */
+    v_SdpOfferAudioVideo := v_SdpOfferAudioOnly;
+    v_SdpOfferAudioVideo.media_list[1] := cr_SDP_Media_Desc(cr_SDP_Media_Video(-, -, ?), ?, ?, ?);                      // @sic R5-217998: SDP offer may contain video sic@ @sic R5s220110: cr_SDP_Media_Video(-, ?) sic@
+    v_SdpOffer := (v_SdpOfferAudioOnly, v_SdpOfferAudioVideo);
+
+    v_ResponseWithSdp := f_IMS_MTCallSetup_Receive100Trying_Receive183SessionProgress(v_InviteRequestWithSdp.Invite, v_SdpOffer, v_InviteRequestWithSdp.RoutingInfo.Protocol, p_PreconditionsRequired);   /* @sic R5s210393: p_PreconditionsRequired sic@ */
+    v_MediaDescAudio := v_ResponseWithSdp.SdpMessage.media_list[0];
+    f_IMS_SDP_CheckMediaDescr_AudioCodecs(v_MediaDescAudio, v_AudioCodecList, v_CheckForbiddenCodecParameters);
+    f_IMS_SDP_CheckMediaDescr_EVS_Configuration(v_MediaDescAudio, p_EvsConfiguration);                                  /* @sic R5-231495: p_EvsConfiguration sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    // Step 5:                  PRACK
+    v_SdpAnswer := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_ResponseWithSdp.SdpMessage, p_PreconditionsRequired, EVS_16000, p_EvsConfiguration, 65, v_PreconditionAttributesAnswer);      /* @sic R5-231495: p_EvsConfiguration sic@ */
+    v_SdpAnswer := f_IMS_MTCallSetup_NoSdpInINVITE_SdpAddVideoIfNeeded_TX(v_ResponseWithSdp.SdpMessage, v_SdpAnswer);   // @sic R5-217998: if SDP offer contains video sic@
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_MessageHeader_Prack := f_IMS_PrackRequest_MessageHeaderTX(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader, cs_ContentTypeSDP);
+    if (p_PreconditionsRequired) {
+      v_MessageHeader_Prack.require := cs_Require(tsc_OptionTagList_precondition);                                      /* @sic R5-214226 sic@ */
+    }
+    IMS_Client.send(cas_IMS_Prack_Request(cs_IMS_RoutingInfo(v_Protocol), cs_PRACK_Request(v_ContactUrl, v_MessageHeader_Prack, cs_MessageBody_SDP(v_SdpAnswer))));
+
+    // Step 6:                  200 OK
+    a_IMS_ReceiveResponse200OK(v_MessageHeader_Prack, v_Protocol);
+
+    // Establish Dedicated EPS bearer
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall, p_PreconditionsRequired);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer
+                                                                                                 @sic R5s210423: p_PreconditionsRequired sic@ */
+
+    v_InviteRequestWithSdp.SdpOffer := v_ResponseWithSdp.SdpMessage;
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.5.1a Step 1 - 10: MT call esteblishment with preconditions
+   * @param     p_SessionExpires    (default value: omit)
+   * @param     p_Allow             (default value: omit)
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_Invite_C11)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10(template (omit) SessionExpires p_SessionExpires := omit,
+                                                   template (omit) Allow p_Allow := omit,
+                                                   OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_Invite_C11) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-231489: use of f_IMS_MTCallSetup_BuildInviteRequestWithSpecificSdp, f_IMS_MTCallSetup_NR5GC_A_5_1x_Step2_7 sic@ */
+    /* @sic R5-231494, R5-231496, R5-231497: step 1 - 10 only sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    // step 1 - 7:              INVITE, 100 Trying, 183 Session Progress, PRACK, 200 OK, UPDATE, 200 OK
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_7(-, p_SessionExpires, p_Allow, p_OptionTagsForSupported);
+
+    // Step 8 - 10:             180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithPreconditions);
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.5.1a Step 1 - 10A: MT call esteblishment with preconditions up to MMI accepting the call
+   * @param     p_SessionExpires    (default value: omit)
+   * @param     p_Allow             (default value: omit)
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_Invite_C11)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A(template (omit) SessionExpires p_SessionExpires := omit,
+                                                    template (omit) Allow p_Allow := omit,
+                                                    OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_Invite_C11) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-231498: A.5.1a instead of A.5.1 sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    // step 1 - 10
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10(p_SessionExpires, p_Allow, p_OptionTagsForSupported);  /* @sic R5s230345: f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10 instead of f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A sic@ */
+
+    // Step 10A
+    f_UT_AnswerCall(MMI);
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.5.1a: MT call establishment (Default Configuration)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_1a() runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A();
+
+    f_IMS_MTCallSetup_Receive200OK_SendACK(v_InviteRequestWithSdp);
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      MO release of video
+   * @param     p_PrevSdpMessage
+   * @param     p_CallIdentification
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_VideoCall_NR5GC_ReleaseVideoMO(SDP_Message p_PrevSdpMessage,
+                                                charstring p_CallIdentification) runs on IMS_PTC
+  {
+    var boolean v_PreconditionsRequired := f_SDP_MediaDescr_CheckWithPreconditions(p_PrevSdpMessage.media_list[0]);  /* NOTE: it is assumed that audio/video either both use precondition or both don't use precondition */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUrl;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) SDP_Message v_SdpAnswer;
+    var template (value) MessageBody v_MessageBody;
+    var template (value) MessageHeader v_MessageHeader200OK;
+    var template (present) MessageHeader v_MessageHeaderACK;
+    
+    f_UT_IMS_RemoveVideoMedia(MMI, p_CallIdentification);
+
+    // Receive INVITE
+    v_InviteRequestWithSdp := f_IMS_VideoCall_ReleaseVideoMO_Invite(p_PrevSdpMessage, EVS_16000, H265_90000, v_PreconditionsRequired);
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+    
+    // Send 100 Trying
+    f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_ReleaseVideo);
+
+    // Send 200 OK
+    v_SdpAnswer := f_IMS_BuildSDP_CommonResponseToOfferTX(v_InviteRequestWithSdp.SdpOffer);
+    v_MessageBody := cs_MessageBody_SDP(v_SdpAnswer);
+    v_MessageHeader200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, cs_ContentTypeSDP, -, -, v_PreconditionsRequired);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader200OK, v_MessageBody)));
+
+    // Receive ACK
+    v_ContactUrl := v_InviteRequest.requestLine.requestUri;
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUrl, v_MessageHeaderACK)));
+    
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);    // Wait for trigger from IPCAN to ensure that radio resources have been released
+  }
+
+  /*
+   * @desc      MT release of video
+   * @param     p_LatestSdpMessageFromSS
+   * @param     p_PreconditionRequiredForSDP (default value: true)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_VideoCall_NR5GC_ReleaseVideoMT(template (value) SDP_Message p_LatestSdpMessageFromSS,
+                                                boolean p_PreconditionRequiredForSDP := true) runs on IMS_PTC
+  { /* @sic R5s220336: p_PreconditionRequiredForSDP sic@ */
+    var SipUrl v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);   // The UE's Contact URI
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) SDP_Message v_SdpOffer := p_LatestSdpMessageFromSS;
+    var template (value) MessageHeader v_MessageHeaderINVITE;
+    var template (present) MessageHeader v_MessageHeader200OK;
+
+    // Send INVITE
+    v_SdpOffer.origin.session_version := f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX();
+    v_SdpOffer.media_list[1].media_field.ports.port_number := 0;
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_Video_SendInvite(RemoveVideo, v_SdpOffer, v_ContactUrlUE);
+
+    // Receive 100 Trying (optional) and 200 OK
+    v_MessageHeaderINVITE := v_InviteRequestWithSdp.Invite.msgHeader;
+    v_MessageHeader200OK := f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeaderINVITE, cr_ContentTypeSDP, p_PreconditionRequiredForSDP);
+    f_IMS_ReceiveResponse_OptionalTrying(v_InviteRequestWithSdp.Invite.msgHeader,
+                                         v_InviteRequestWithSdp.RoutingInfo.Protocol,
+                                         cr_Response(c_statusLine200, v_MessageHeader200OK, cr_MessageBody_SDP));
+
+    f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_ReleaseVideo);
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+
+    // Send ACK
+    f_IMS_InviteMT_SendACK(v_InviteRequestWithSdp);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.1.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_1_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / 503 Service Unavailable / 5GS
+    var template (present) SipUrl v_CalleeUri := f_IMS_INVITE_CalleeUriRX();    // as used per default in the INVITE and in this test case for the ACK as the UE has not gotten any callee's contact URI
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var INVITE_Request v_InviteRequest;
+    var template (value) MessageHeader v_MessageHeader503;
+    var template (present) MessageHeader v_MessageHeaderACK;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var integer v_RetryAfter := 20;   // @sic R5-210882: 60s -> 20s sic@
+    var float v_RetryAfterMin := f_IMS_SetTimerToleranceMin(int2float(v_RetryAfter));
+    var boolean v_InviteWithPreconditions;
+    
+    timer t_Timer;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2 - 7" siclog@
+    v_InviteWithPreconditions := fl_IMS_MOCallSetup_CheckInviteWithPreconditions();
+
+    if (v_InviteWithPreconditions) {  // @sic R5-213521 sic@
+      // @siclog "Step 8a" siclog@              INVITE
+      v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1(v_CalleeUri);               // @sic R5-225925, R5-236507: A_4_1 -> A_4_1a sic@
+    } else {
+      // @siclog "Step 8b" siclog@              INVITE
+      v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step1(v_CalleeUri);               // @sic R5-236507: A_4_2 -> A_4_2a sic@
+    }
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+
+    // @siclog "Step 9" siclog@                 503 Service Unavailable
+    v_MessageHeader503 := f_IMS_CommonResponse_503_MessageHeaderTX(v_InviteRequest.msgHeader, cs_RetryAfter(v_RetryAfter));
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine503, v_MessageHeader503)));
+    
+    // @siclog "Step 10" siclog@                ACK
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine503);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_CalleeUri, v_MessageHeaderACK)));
+    
+    f_IMS_PTC_ImsInfo_DialogRelease();
+
+    // @siclog "Step 11 - 13" siclog@           Check: Does the UE (not) transmit INVITE request message
+    f_Delay(v_RetryAfterMin);
+    
+    t_Timer.start(30.0);
+    alt {                     // @sic R5-216210 sic@
+      [] IMS_Server.check(receive(car_IMS_Invite_Request)) {
+        t_Timer.stop;
+        if (v_InviteWithPreconditions) {  // @sic R5-213521 sic@
+          // @siclog "Step 14a1" siclog@            INVITE
+          v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1(v_CalleeUri);        // @sic R5-225925, R5-236507: A_4_1 -> A_4_1a sic@
+          f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 14a1");
+          // @siclog "Step 14a2-14a15" siclog@      Steps 2 to 12 of A.4.1a
+          f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_12(v_InviteRequestWithSdp);                    // @sic R5-225925, R5-236507: A_4_1 -> A_4_1a sic@
+        } else {
+          // @siclog "Step 14b1" siclog@            INVITE
+          v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step1(v_CalleeUri);        // @sic R5-236507: A_4_2 -> A_4_2a sic@
+          f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 14b1");
+          // @siclog "Step 14b2-14b13" siclog@      Steps 2 to 8 of subclause A.4.2a
+          f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_8(v_InviteRequestWithSdp);                     // @sic R5-236507: A_4_2 -> A_4_2a sic@
+        }
+      }
+      [] t_Timer.timeout {
+        f_IMS_CC_AbortCall();         // @sic R5s230086 sic@
+      }
+    }
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.2.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_2_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / 504 Server Time-out / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader504;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) MessageHeader v_MessageHeaderACK;
+    var boolean v_InviteWithPreconditions;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2 - 7" siclog@             Steps 2-7 of generic procedure specified in Table 4.9.15.2.2-1 of TS 38.508-1
+    
+    v_InviteWithPreconditions := fl_IMS_MOCallSetup_CheckInviteWithPreconditions();     // @sic R5-225443 sic@
+
+    if (v_InviteWithPreconditions) {
+      // @siclog "Step 8a" siclog@              INVITE
+      v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();                 // @sic R5-225926, R5-236508: A_4_1 -> A_4_1a sic@
+    }
+    else {
+      // @siclog "Step 8b" siclog@              INVITE
+      v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step1();                 // @sic R5-236508: A_4_2 -> A_4_2a sic@
+    }
+
+    // @siclog "Step 9" siclog@                 504 Server Time-out
+    v_MessageHeader504 := f_IMS_CommonResponse_504_MessageHeaderTX(v_InviteRequestWithSdp.Invite.msgHeader);
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine504, v_MessageHeader504, cs_MessageBody_XML_Ims_3gpp(cs_Ims_3gpp_Restoration))));
+
+    // @siclog "Step 9A" siclog@                ACK
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequestWithSdp.Invite, c_statusLine504);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_InviteRequestWithSdp.Invite.requestLine.requestUri, v_MessageHeaderACK)));
+
+    f_IMS_GlobalRelease(keepUnprotected);               // release security context but keep unprotected context (TCP) @sic R5s220609 - Additional changes: keepUnprotected instead of oldestProtectedContextOnly sic@
+    f_IMS_CC_AbortCall();                               // abort call establishment procedure at the IPCAN PTC
+
+    // @siclog "Step 10 - 17" siclog@
+    f_IMS_Registration();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_IMS_Signalling);   // @sic R5s210100: IPCAN_MO_IMS_Signalling instead of IPCAN_MO_SpeechCall sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.4a.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_4a_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call with preconditions at both originating UE and terminating UE / Default Configuration / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var SipUrl v_ContactUrlUE;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 3 - 6" siclog@             100 Trying, 183 Session Progress, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_5(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);     // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+
+    // @siclog "Step 7 - 8" siclog@             UPDATE, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+
+    // @siclog "Step 9 - 11" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 12 - 13" siclog@           200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+
+
+    // @siclog "Step 14 - 15" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);                                // @sic R5-223458: Call release within the test body but without delay sic@
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.5.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_5_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call without preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step1();           // @sic R5-236896: A_4_2 -> A_4_2a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 3 - 6" siclog@             100 Trying, 183 Session Progress, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_5(v_InviteRequestWithSdp);             // @sic R5-236896: A_4_2 -> A_4_2a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);             // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+
+    // @siclog "Step 7 - 7B" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_2a_Step6(v_InviteRequestWithSdp, tsc_OptionTagList_100rel);     // @sic R5-241655: 100rel sic@
+
+    // @siclog "Step 8 - 9" siclog@             200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.6a.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_6a_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call with preconditions at both originating UE and terminating UE / Default Configuration / 5GS
+    /* @sic R5-230323: re-implementation using A.5.1a (R5-231489) sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var SipUrl v_ContactUrlUE;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(tsc_SDP_WithPreconditions);
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step2_3(v_InviteRequestWithSdp, tsc_SDP_WithPreconditions);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    // Establish Dedicated EPS bearer
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer*/
+
+    // @siclog "Step 6 - 7" siclog@             UPDATE, 200 OK
+    f_IMS_MTCallSetup_NR5GC_A_5_1a_Step6_7(v_InviteRequestWithSdp, v_ResponseWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+    
+    // @siclog "Step 8 - 10" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithPreconditions);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 10A - 12" siclog@          MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+
+    // @siclog "Step 13 - 14" siclog@           BYE, 200 OK
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 14");
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.7.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_7_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call without preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(tsc_SDP_WithoutPreconditions);                        /* @sic R5-235324: A.5.2a (EVS_A2) instead of A.5.2 (EVS_B0_A1) sic@ */
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step2_3(v_InviteRequestWithSdp, tsc_SDP_WithoutPreconditions);   /* @sic R5-235324: A.5.2a (EVS_A2) instead of A.5.2 (EVS_B0_A1) sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    // Establish Dedicated EPS bearer
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall, tsc_SDP_WithoutPreconditions);                       /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer
+                                                                                                                           @sic R5s210423: tsc_SDP_WithoutPreconditions sic@ */
+    // @siclog "Step 6 - 8" siclog@             180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithoutPreconditions);        /* @sic R5s210423: tsc_SDP_WithoutPreconditions sic@
+                                                                                                                                   @sic R5-235324: in A.5.2a 100rel is mandatory sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    // @siclog "Step 8A - 10" siclog@           MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.8.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_8_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call without preconditions at originating UE and with preconditions at terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var SipUrl v_ContactUrlUE;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);                      // @sic R5-212208 sic@
+    f_IMS_MOCallSetup_NR5GC_A_4_1a();                             // @sic R5-212208 sic@ @sic R5-235093: A.4.1a instead of A.4.1 sic@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);  // @sic R5-212208 sic@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);                          // @sic R5-212208 sic@
+    f_IMS_CC_ReleaseConnection(IPCAN_MO_SpeechCall);              // @sic R5-212208 sic@
+
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" siclog@             Steps 1-8 of generic procedure specified in Table 4.9.16.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 9" siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(tsc_SDP_WithoutPreconditions);                        /* @sic R5-235093: A.5.2a (EVS_A2) instead of A.5.2 (EVS_B0_A1) sic@ */
+
+    // @siclog "Step 10 - 18" siclog@
+    f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_10(v_InviteRequestWithSdp);                                                    /* @sic R5-235093: A.5.2a instead of A.5.2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 17");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.9.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_9_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call with preconditions at originating UE and without preconditions at terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" siclog@             Steps 1-8 of generic procedure specified in Table 4.9.16.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 9" siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(tsc_SDP_WithPreconditions);                           /* @sic R5-235094: A.5.1a (EVS_A2) instead of A.5.1 (EVS_B0_A1) sic@ */
+
+    // @siclog "Step 10 - 18" siclog@
+    f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_10(v_InviteRequestWithSdp);                                                    /* @sic R5-235094: A.5.2a instead of A.5.2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 17");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.10.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_10_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice call without preconditions and without SDP offer in MT INVITE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);    // @sic R5s210326 sic@
+
+    // @siclog "Step 1" siclog@                 Steps 1-8 of generic procedure specified in Table 4.9.16.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 2 - 6" siclog@             INVITE, 100 Trying, 183 Session Progress, PRACK, 200 OK
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NoSdpInINVITE_Step1_6(tsc_SDP_WithoutPreconditions);    /* @sic R5-231495: EVS_AnyNG114 sic@
+                                                                                                           @sic R5-236897: EVS_A2 instead of EVS_AnyNG114 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4, 6");
+    
+    // @siclog "Step 7 - 9" siclog@             180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithoutPreconditions);        /* @sic R5s210423: tsc_SDP_WithoutPreconditions sic@
+                                                                                                                                   @sic R5-242750: tsc_OptionTagList_100rel sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+
+    // @siclog "Step 10A - 11" siclog@          MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.11.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_11_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice call without preconditions at terminating UE and originating UE requiring them / 5GS
+    var template (value) IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (present) MessageHeader v_MessageHeader_Response420;
+    var template (value) MessageHeader v_MessageHeaderACK;
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+
+    f_IMS_CC_Preamble(IPCAN_SignallingOnly, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartSignalling(IPCAN_MT_IMS_Signalling);
+
+    // @siclog "Step 1 - 8" siclog@             Steps 1-8 of generic procedure specified in Table 4.9.16.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 9" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSdp(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, EVS_A2, tsc_SDP_WithPreconditions);         /* @sic R5-246475: EVS_B0_A1 replaced by EVS_A2 sic@ */
+    v_InviteRequestWithSdp.Invite.msgHeader.require := cs_Require(tsc_OptionTagList_precondition);
+    IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+
+    // @siclog "Step 10" siclog@                420 Bad Extension
+    v_MessageHeader_Response420 := f_IMS_InviteResponse_4XX_MessageHeaderRX(v_InviteRequestWithSdp.Invite.msgHeader);
+    v_MessageHeader_Response420.unsupported := cr_Unsupported(tsc_OptionTagList_precondition);
+    v_IMS_DATA_RSP := f_IMS_ReceiveResponse_OptionalTrying(v_InviteRequestWithSdp.Invite.msgHeader, v_InviteRequestWithSdp.RoutingInfo.Protocol, cr_Response(c_statusLine420, v_MessageHeader_Response420)); /* @sic R5s210136: f_IMS_ReceiveResponse_OptionalTrying sic@ */
+    f_IMS_Dialog_CompleteCreationForMTCall(v_IMS_DATA_RSP.Response.msgHeader);                                                                                                                               /* @sic R5s210136 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 11" siclog@                ACK
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderTX(v_InviteRequestWithSdp.Invite, c_statusLine420);
+    IMS_Client.send(cas_IMS_Ack_Request(v_InviteRequestWithSdp.RoutingInfo, cs_ACK_Request(v_InviteRequestWithSdp.Invite.requestLine.requestUri, v_MessageHeaderACK)));
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_IMS_Signalling);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.12.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_12_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call with preconditions at originating UE and without preconditions at terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2" siclog@                 Steps 2-7 of generic procedure specified in Table 4.9.15.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 3" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();   // @sic R5-236898: A.4.1a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+
+    // @siclog "Step 4 - 7" siclog@             100 Trying, 183 Session Progress, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_5(v_InviteRequestWithSdp);     // @sic R5-236898: A.4.2a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);     // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+
+    // @siclog "Step 8 - 8B" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_2a_Step6(v_InviteRequestWithSdp, tsc_OptionTagList_100rel);     // @sic R5-241656: 100rel sic@
+
+    // @siclog "Step 9 - 10" siclog@            200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.13.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_13_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call with RTCP disabled / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var InternetProtocol_Type v_Protocol;
+    var template (value) SDP_Message v_SdpOffer;
+    var template (present) SDP_Message v_SdpAnswer;
+    var template (value) SDP_bandwidth_list v_BandwidthListTX := cs_SDP_Bandwidth_List_Media(65, 0, 0);
+    var template (present) SDP_bandwidth_list v_BandwidthListRX := cr_SDP_Bandwidth_List_Media(?, 0, 0);
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_SdpOffer := f_IMS_BuildSDP_InitialOfferAudio_TX(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, EVS_A2, tsc_SDP_WithPreconditions);     /* @sic R5-232152: EVS_B0_A1 replaced by EVS_A2 sic@ */
+    v_SdpOffer.media_list[0].bandwidth := v_BandwidthListTX;
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSpecificSdp(v_SdpOffer);
+    IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_SdpAnswer := f_IMS_BuildSDP_InitialAnswerAudio_RX(EVS_16000, EVS_A2, tsc_SDP_WithPreconditions);                                  /* @sic R5-232152: EVS_B0_A1 replaced by EVS_A2 sic@ */
+    v_SdpAnswer.media_list[0].bandwidth := v_BandwidthListRX;
+    v_Protocol := v_InviteRequestWithSdp.RoutingInfo.Protocol;
+    v_ResponseWithSdp := f_IMS_MTCallSetup_Receive100Trying_Receive183SessionProgress(v_InviteRequestWithSdp.Invite, v_SdpAnswer, v_Protocol, tsc_SDP_WithPreconditions);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader);
+    
+    // Establish Dedicated EPS bearer
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer*/
+
+    // @siclog "Step 6 - 7" siclog@             UPDATE, 200 OK
+    v_SdpOffer := f_IMS_BuildSDP_UpdatedOfferAudio_TX(v_ResponseWithSdp.SdpMessage, EVS_16000);
+    v_SdpOffer.media_list[0].bandwidth := v_BandwidthListTX;
+    v_SdpAnswer := f_IMS_BuildSDP_FinalAnswerAudio_RX(EVS_16000);
+    v_SdpAnswer.media_list[0].bandwidth := v_BandwidthListRX;
+    f_IMS_MTCallSetup_NR5GC_SendUPDATE_Receive200OK(v_InviteRequestWithSdp, v_SdpOffer, v_SdpAnswer);
+    
+    // @siclog "Step 8 - 10" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithPreconditions);                   /* @sic R5-232152: tsc_OptionTagList_100rel sic@ */
+
+    // @siclog "Step 11 - 13" siclog@           MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.14.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_14_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Video Call with preconditions at both originating and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_VideoCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_VideoCall);
+
+    // @siclog "Step 2" IPCAN siclog@
+    
+    // @siclog "Step 3" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_Video_Step2(SetupVideoCall, -, tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, tsc_IMS_SDP_VideoCodecList_H265_H264, EVS_A2); // @sic R5-230324: EVS_A2 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+
+    // @siclog "Step 4 - 5" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Video_Step3_4(SetupVideoCall, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2);        // @sic R5-230324: EVS_A2 sic@
+
+    // @siclog "Step 6 - 7" siclog@             PRACK, 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_VideoCall);
+
+    // @siclog "Step 8 - 9" siclog@             UPDATE, 200 OK
+    f_IMS_MOCallSetup_NR5GC_Video_Step6_7(SetupVideoCall, v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Step 10 - 12" siclog@           180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+
+    // @siclog "Step 13 - 14" siclog@           200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 14");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_VideoCall);
+  }
+
+   /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.15.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_15_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Video call without preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_VideoCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 0A" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_VideoCall);
+
+    // @siclog "Step 0B - 0H" IPCAN siclog@
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_Video_Step2(SetupVideoCall, -, tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, tsc_IMS_SDP_VideoCodecList_H265_H264, EVS_A2, tsc_SDP_WithoutPreconditions); /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@
+                                                                                                                                                                                                         @sic R5-241254: EVS_AnyNG114 -> EVS_A2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 1");
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Video_Step3_4(SetupVideoCall, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2);   /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@
+                                                                                                                                      @sic R5-241254: EVS_AnyNG114 -> EVS_A2 sic@ */
+
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_VideoCall);
+
+    // @siclog "Step 6 - 8" siclog@             180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);                 /* @sic R5-241554: f_IMS_MOCallSetup_Send180_Reliable instead of f_IMS_MOCallSetup_NR5GC_A_15_2_Step6_8 sic@ */
+
+    // @siclog "Step 9 - 10" siclog@            200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_VideoCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.16.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_16_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Video call with preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var template (value) SDP_Message v_SdpOffer;
+    var SipUrl v_ContactUrl;
+
+    f_IMS_CC_Preamble(IPCAN_VideoCall, IMS_REGISTERED);                         // @sic R5s220235: IPCAN_VideoCall instead of IPCAN_SpeechCall sic@
+        
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 0A - 0H" siclog@
+    f_IMS_CC_StartCall(IPCAN_MT_VideoCall);
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_SdpOffer := f_IMS_BuildSDP_InitialOfferAudioVideo_TX(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, tsc_IMS_SDP_VideoCodecList_H265_only, EVS_A2);     /* @sic R5s220505: tsc_IMS_SDP_VideoCodecList_H265_only instead of tsc_IMS_SDP_VideoCodecList_H264_only sic@
+                                                                                                                                                           @sic R5-232153: EVS_B0_A1 replaced by EVS_A2 sic@ */
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_Video_SendInvite(SetupVideoCall, v_SdpOffer);
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MTCallSetup_Video_Receive183(SetupVideoCall, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2);                     /* @sic R5-232153: EVS_A2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    // @siclog "Step 5A" siclog@
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_VideoCall);
+    
+    // @siclog "Step 6 - 7" siclog@             UPDATE, 200 OK
+    f_IMS_MTCallSetup_NR5GC_Video_Step6_7(SetupVideoCall, v_InviteRequestWithSdp, v_ResponseWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+
+    // @siclog "Step 8 - 10" siclog@            180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel);      /* @sic R5-242749, R5-242752: tsc_OptionTagList_100rel sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 11 - 13" siclog@           MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    // @siclog "Step 14 - 15" siclog@
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrl);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+    
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_VideoCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.17.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_17_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Video call without preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var template (value) SDP_Message v_SdpOffer;
+
+    f_IMS_CC_Preamble(IPCAN_VideoCall, IMS_REGISTERED);                         // @sic R5s220239: IPCAN_VideoCall instead of IPCAN_SpeechCall sic@
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 0A - 0H" siclog@
+    f_IMS_CC_StartCall(IPCAN_MT_VideoCall);                                     // @sic R5s220239: IPCAN_MT_VideoCall instead of IPCAN_MT_SpeechCall sic@
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_SdpOffer := f_IMS_BuildSDP_InitialOfferAudioVideo_TX(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, tsc_IMS_SDP_VideoCodecList_H265_only, EVS_A2, tsc_SDP_WithoutPreconditions);       /* @sic R5s220239: tsc_IMS_SDP_VideoCodecList_H265_only instead of tsc_IMS_SDP_VideoCodecList_H264_only sic@
+                                                                                                                                                                                           @sic R5-241255: EVS_A2 instead of EVS_B0_A1 sic@ */
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_Video_SendInvite(SetupVideoCall, v_SdpOffer);
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MTCallSetup_Video_Receive183(SetupVideoCall, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2, tsc_SDP_WithoutPreconditions);                       /* @sic R5-241255: EVS_A2 instead of EVS_B0_A1 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    // @siclog "Step 5A" siclog@
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_VideoCall, tsc_SDP_WithoutPreconditions);
+    
+    // @siclog "Step 6 - 8" siclog@             180 Ringing, PRACK, 200 OK
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel, tsc_SDP_WithoutPreconditions);        /* @sic R5s220239: tsc_SDP_WithoutPreconditions sic@
+                                                                                                                                   @sic R5-241255: tsc_OptionTagList_100rel sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 9 - 11" siclog@            MMI (Accept Call), 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_VideoCall);                    // @sic R5s220239: IPCAN_MT_VideoCall instead of IPCAN_MT_SpeechCall sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.18.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_18_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / EVS / AMR-WB / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var integer v_BandwidthAS := 38;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 7" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 8" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();          // @sic R5-225927: A_4_1 -> A_4_1a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Step 9" siclog@                 100 Trying
+    f_IMS_MOCallSetup_Send100Trying(v_InviteRequestWithSdp);
+
+    // @siclog "Step 10 - 12" siclog@           183 Session Progress, PRACK, 200 OK for PRACK
+    f_IMS_MOCallSetup_NR5GC_A_4_X_Step3_5(v_InviteRequestWithSdp, -, -, -, -, AMR_16000, v_BandwidthAS, tsc_SDP_WithPreconditions);
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);     // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+
+    // @siclog "Step 13 - 14" siclog@           UPDATE, 200 OK
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(v_InviteRequestWithSdp, -, -, -, AMR_16000);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+
+    // @siclog "Step 15 - 17" siclog@           180 Ringing, PRACK, 200 OK
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp);
+
+    // @siclog "Step 18 - 19" siclog@           200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      Step 20 for test case 7.19.NR5GC
+   * @param     p_LatestSdpOfferFromUE
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_TC_7_19_SdpOfferStep20(SDP_Message p_LatestSdpOfferFromUE) runs on IMS_PTC return template (value) SDP_Message
+  {
+    var template (value) SDP_Message v_SdpMessage := f_IMS_BuildSDP_UpdatedAnswer_TX(p_LatestSdpOfferFromUE); /* same SDP message as used at step 7 of A.4.1a but with actual value for sess-version */
+    var SDP_media_desc v_SDP_Media_Desc := valueof(v_SdpMessage.media_list[0]);
+    var charstring v_Fmt := f_SDP_MediaDescr_GetAudioCodec(v_SDP_Media_Desc, EVS_16000);
+    var template (value) SDP_attribute v_FmtpAttribute := valueof(f_SDP_AttributeList_GetAttribute(v_SDP_Media_Desc.attributes, cr_SDP_Attribute_fmtp(v_Fmt)));
+
+    v_FmtpAttribute.fmtp.params.paramList := f_SemicolonParam_List_Add_TX(v_FmtpAttribute.fmtp.params.paramList, cs_GenericParam("evs-mode-switch", "1"));
+    v_SdpMessage.media_list[0].attributes := f_SDP_ExchangeAttribute(v_SdpMessage.media_list[0].attributes, cr_SDP_Attribute_fmtp(v_Fmt), v_FmtpAttribute);
+
+    return v_SdpMessage;
+  }
+
+  /*
+   * @desc      Step 22 for test case 7.19.NR5GC
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_TC_7_19_SdpAnswerStep22() runs on IMS_PTC return template (present) SDP_Message
+  {
+    var template (present) SDP_attribute_list v_PreconditionAttributes := cr_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);
+    var template (present) SDP_attribute_list v_MediaAttributes := {
+      cr_SDP_Attribute_rtpmap(-, cr_RTPMAP_EVS_16000),
+      cr_SDP_Attribute_fmtp(-, cr_Fmtp_ParamList(superset(cr_GenericParam("evs-mode-switch", "1"))))
+    };
+
+    return f_IMS_BuildSDP_RX(-, cr_SDP_Media_Audio, v_MediaAttributes, v_PreconditionAttributes);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.19.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_19_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call / EVS / AMR-WB IO mode / 5GS
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) SDP_Message v_SdpOffer;
+    var template (present) SDP_Message v_SdpAnswer;
+    var SipUrl v_ContactUrl_UE;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 7" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 8 - 19" siclog@
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a();             /* @sic R5-231492: f_IMS_MOCallSetup_NR5GC_A_4_1a instead of f_IMS_MOCallSetup_NR5GC_A_4_1 sic@ */
+
+    // @siclog "Step 20 - 23" siclog@
+    v_SdpOffer := fl_TC_7_19_SdpOfferStep20(v_CallInfo.LatestSdpOffer);
+    v_SdpAnswer := fl_TC_7_19_SdpAnswerStep22();
+    v_ContactUrl_UE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_MTSessionModification(v_ContactUrl_UE, v_SdpOffer, v_SdpAnswer);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.20.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_20_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / add video and remove video / with preconditions at both originating UE and terminating UE / 5GS */
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var charstring v_CallIdentification;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall, -, normalCall_ReturnId);
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a();             /* @sic R5-231493: A.4.1a sic@ */
+    v_CallIdentification := f_UT_ReceivedIMSCallId(MMI);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_UT_AddVideoToIMSCall(MMI, v_CallIdentification);
+
+    // @siclog "Step 2" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_Video_Step2(AddVideo, -, tsc_IMS_SDP_AudioCodecList_EVS_only, tsc_IMS_SDP_VideoCodecList_H265_H264, EVS_A2);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 3 - 4" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Video_Step3_4(AddVideo, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2);
+
+    // @siclog "Step 5 - 6" siclog@             PRACK, 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    // @siclog "Step 6A" siclog@
+    f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_MO_AddVideo);
+      
+    // @siclog "Step 7 - 8" siclog@             UPDATE, 200 OK
+    f_IMS_MOCallSetup_NR5GC_Video_Step6_7(AddVideo, v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+
+    // @siclog "Step 9 - 10" siclog@            200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    // @siclog "Step 11 - 16" siclog@           Release Video
+    f_IMS_VideoCall_NR5GC_ReleaseVideoMO(v_InviteRequestWithSdp.SdpOffer, v_CallIdentification);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 12, 16");
+
+    // @siclog "Step 17 - 19" siclog@
+    f_IMS_CallReleaseMO(v_CallInfo.InviteRequestWithSdp.Invite);
+    
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.21.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_21_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / add video and remove video / without preconditions at both originating UE and terminating UE / 5GS
+    var template (omit) IMS_DATA_RSP v_IMS_DATA_RSP;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdpAudio;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdpVideo;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdpAudio;
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpListAudio;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdpVideo;
+    var template (value) SDP_Message v_SdpOffer;
+    var SDP_media_desc v_MediaDescrAudio;
+    var SDP_attribute v_FmtpAttributeAudio;
+    var charstring v_FmtAudio;
+    var charstring v_BrVal;
+    var charstring v_BwVal;
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParamsAudio;
+    var template (present) SDP_Message v_ExpectedSdpAnswer;
+    var template (present) IMS_Response_Type v_Response183;
+    var IMS_Response_Type v_Response;
+    var SDP_Message v_SdpAnswer;
+    var charstring v_CallIdentification;
+
+    timer t_Timer := 2.0;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall, -, normalCall_ReturnId);
+
+    v_InviteRequestWithSdpAudio := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step1();                                                      /* @sic R5-241256: A_4_2a instead of A_4_2 sic@ */
+    v_ResponseWithSdpAudio := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_8(v_InviteRequestWithSdpAudio);                              /* @sic R5-241256: A_4_2a instead of A_4_2 sic@ */
+    v_CallIdentification := f_UT_ReceivedIMSCallId(MMI);
+
+    f_IMS_TestBody_Set(true);
+
+    v_MediaDescrAudio := valueof(f_IMS_SDP_MediaList_GetMediaStream(v_ResponseWithSdpAudio.SdpMessage.media_list, c_audio));    /* @sic R5s221127: Get media description from 183 session progress sic@ */
+    v_MediaDescriptionRtpListAudio := cs_IMS_SDP_MediaDescriptionRtpList(v_MediaDescrAudio.media_field.fmts, v_MediaDescrAudio.attributes);
+    v_SdpOffer := f_IMS_BuildSDP_InitialOfferAddVideo_TX(v_MediaDescriptionRtpListAudio, tsc_IMS_SDP_VideoCodecList_H265_only, tsc_SDP_WithoutPreconditions);
+
+    v_FmtAudio := f_SDP_MediaDescr_GetAudioCodec(v_MediaDescrAudio, EVS_16000);
+    v_FmtpAttributeAudio := valueof(f_SDP_AttributeList_GetAttribute(v_MediaDescrAudio.attributes, cr_SDP_Attribute_fmtp(v_FmtAudio)));
+    v_BrVal := f_SIP_SemicolonParamList_GetParamValue(v_FmtpAttributeAudio.fmtp.params.paramList, "br");
+    v_BwVal := f_SIP_SemicolonParamList_GetParamValue(v_FmtpAttributeAudio.fmtp.params.paramList, "bw");
+    v_FmtpParamsAudio := cr_Fmtp_ParamList(cr_EVS_Fmtp_AudioParamsBrBwMaxRed(v_BrVal, v_BwVal));
+    v_ExpectedSdpAnswer := f_IMS_BuildSDP_MTCallAudioVideo_RX(AddVideo, InitialAnswer, EVS_16000, v_FmtAudio, v_FmtpParamsAudio, H265_90000, tsc_SDP_WithoutPreconditions); // @sic R5-225423: audio description for 183 Session Progress (step 3a1) or 200 OK (step 3b2) sic@
+
+    f_IMS_IPCAN_Query(IPCAN);           // @sic R5s220939 change 1.1: IPCAN will not send the response before f_NR5GC_IPCAN_MO_SpeechCall (calling f_NR5GC_ModifyPDUSession_AddVoice) has finished sic@
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_InviteRequestWithSdpVideo := f_IMS_MTCallSetup_Video_SendInvite(AddVideo, v_SdpOffer);
+
+    // @siclog "Step 2A" siclog@                Start timer
+    t_Timer.start;
+
+    // @siclog "Step 2 - 3a1" siclog@           100 Trying, 183 Session Progress (optional)
+    v_Response183 := cr_Response(c_statusLine183,
+                                 f_IMS_InviteResponse_183_MessageHeaderRX(v_InviteRequestWithSdpVideo.Invite, -, tsc_OptionTagList_100rel),
+                                 cr_MessageBody_SDP);
+    v_IMS_DATA_RSP := f_IMS_ReceiveResponse_OptionalTrying_Timeout(t_Timer,
+                                                                   v_InviteRequestWithSdpVideo.Invite.msgHeader,
+                                                                   v_InviteRequestWithSdpVideo.RoutingInfo.Protocol,
+                                                                   v_Response183);
+    if (isvalue(v_IMS_DATA_RSP)) {
+      v_Response := valueof(v_IMS_DATA_RSP.Response);
+      v_SdpAnswer := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_Response.messageBody, v_ExpectedSdpAnswer);
+
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3a1");
+      
+      // @siclog "Step 3a2" siclog@             Stop timer
+      t_Timer.stop;
+
+      // @siclog "Step 3a3 - 3a4" siclog@       PRACK, 200 OK
+      f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdpVideo.Invite, v_Response.msgHeader);
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3a4");
+    
+      // @siclog "Step 3a5" siclog@
+      f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_MT_AddVideo);
+      f_IMS_IPCAN_WaitForTrigger(IPCAN);
+      
+      // @siclog "Step 3a6 - 3a8" siclog@       MMI (Accept Call), 200 OK, ACK
+      f_UT_IMS_AcceptMediaChange(MMI, v_CallIdentification);   // @sic R5s221287 sic@
+      f_IMS_MTCallSetup_Receive200OK_SendACK(v_InviteRequestWithSdpVideo);  // @sic R5s221287 sic@
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3a7");
+    }
+    else {
+      // @siclog "Step 3b1" siclog@             MMI (Accept Call)
+      f_UT_IMS_AcceptMediaChange(MMI, v_CallIdentification);  // @sic R5s221287 sic@
+
+      // @siclog "Step 3b2" siclog@             200 OK
+      v_ResponseWithSdpVideo := f_IMS_MTCallSetup_Receive200OKforINVITE(v_InviteRequestWithSdpVideo, v_ExpectedSdpAnswer);
+      v_SdpAnswer := v_ResponseWithSdpVideo.SdpMessage;
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 3b2");
+
+      // @siclog "Step 3b3" siclog@
+      f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_MT_AddVideo);
+      f_IMS_IPCAN_WaitForTrigger(IPCAN);
+
+      // @siclog "Step 3b4" siclog@             ACK
+      f_IMS_InviteMT_SendACK(v_InviteRequestWithSdpVideo);
+    }
+
+    // @siclog "Step 4 - 7" Void siclog@
+
+    // @siclog "Step 8 - 13" siclog@            MMI (Remove Video), INVITE, 100 Trying, 200 OK, ACK
+    f_IMS_VideoCall_NR5GC_ReleaseVideoMO(v_SdpAnswer, v_CallIdentification);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9, 13");
+
+    // @siclog "Step 14 - 16" siclog@           MMI (Release Call), BYE, 200 OK
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdpAudio.Invite);
+    
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.22.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_22_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call / add video and remove video / with preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var SDP_Message v_LatestSdpOfferFromUE;
+    var template (value) SDP_Message v_LatestSdpAnswerFromSS;
+    var charstring v_CallIdentification;
+    var boolean v_DontIncrementSessVers := true;
+    var charstring v_ContactUrlStrSS;
+    var SipUrl v_ContactSipUrlSS;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a();                                         /* @sic R5-232154: f_IMS_MTCallSetup_NR5GC_A_5_1a sic@ */
+    v_ContactSipUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequestWithSdp.Invite.msgHeader);     /* @sic R5s220500 change 1, R5-222412: get contact from INVITE creating the dialog sic@ */
+    v_ContactUrlStrSS := f_SIP_SipUrl2Str(v_ContactSipUrlSS);
+
+    v_CallIdentification := f_UT_GetCallId(MMI);
+
+    f_IMS_TestBody_Set(true);
+
+    f_UT_AddVideoToIMSCall(MMI, v_CallIdentification);
+
+    // @siclog "Step 1" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_Video_Step2(AddVideo, v_ContactSipUrlSS, tsc_IMS_SDP_AudioCodecList_EVS_only, tsc_IMS_SDP_VideoCodecList_H265_H264, EVS_A2);    /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@
+                                                                                                                                                                                   @sic R5-232154: EVS_A2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 1");
+
+    // @siclog "Step 2 - 3" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Video_Step3_4(AddVideo, v_InviteRequestWithSdp, EVS_16000, H265_90000, EVS_A2, v_ContactUrlStrSS);                                   /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@
+                                                                                                                                                                                   @sic R5-232154: EVS_A2 sic@ */
+    // @siclog "Step 4 - 5" siclog@             PRACK, 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    // @siclog "Step 5A" siclog@
+    f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_MO_AddVideo);
+      
+    // @siclog "Step 6 - 7" siclog@             UPDATE, 200 OK
+    v_LatestSdpOfferFromUE := f_IMS_MOCallSetup_NR5GC_Video_Step6_7(AddVideo, v_InviteRequestWithSdp, v_ContactUrlStrSS);
+    v_LatestSdpAnswerFromSS := f_IMS_BuildSDP_UpdatedAnswer_TX(v_LatestSdpOfferFromUE, v_DontIncrementSessVers);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+
+    // @siclog "Step 8 - 9" siclog@             200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp, v_ContactUrlStrSS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+
+    // @siclog "Step 10 - 14" siclog@           Release Video
+    f_IMS_VideoCall_NR5GC_ReleaseVideoMT(v_LatestSdpAnswerFromSS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.23.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_23_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call / add video and remove video / without preconditions at both originating UE and terminating UE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var charstring v_CallIdentification;
+    var charstring v_ContactUrlStrSS;
+    var SipUrl v_ContactSipUrlSS;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step1(tsc_SDP_WithoutPreconditions);                        /* @sic R5-241257: EVS_A2 instead of EVS_B0_A1 sic@ */
+    v_ContactSipUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequestWithSdp.Invite.msgHeader);
+    v_ContactUrlStrSS := f_SIP_SipUrl2Str(v_ContactSipUrlSS);
+    f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_10(v_InviteRequestWithSdp);                                                    /* @sic R5-241257: EVS_A2 instead of EVS_B0_A1 sic@ */
+    v_CallIdentification := f_UT_GetCallId(MMI);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_UT_AddVideoToIMSCall(MMI, v_CallIdentification);
+
+    // @siclog "Step 2" siclog@                 INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_Video_Step2(AddVideo,
+                                                            v_ContactSipUrlSS,                                          /* @sic R5s220336 2.5 change 1, R5-222412: v_ContactSipUrlSS sic@ */
+                                                            tsc_IMS_SDP_AudioCodecList_EVS_only,
+                                                            tsc_IMS_SDP_VideoCodecList_H265_H264,
+                                                            EVS_A2,                                                     /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@ @sic R5-232157: EVS_A2 sic@ */
+                                                            tsc_SDP_WithoutPreconditions);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    // @siclog "Step 3 - 4" siclog@             100 Trying, 183 Session Progress
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Video_Step3_4(AddVideo,
+                                                         v_InviteRequestWithSdp,
+                                                         EVS_16000,
+                                                         H265_90000,
+                                                         EVS_A2,                                                        /* @sic R5-231490, R5-230324: EVS_AnyNG114 sic@ */
+                                                         v_ContactUrlStrSS);                                            /* @sic R5s220336 2.5 change 1, R5-222099, R5-223453: v_ContactUrlStrSS sic@ */
+    // @siclog "Step 5 - 6" siclog@             PRACK, 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    // @siclog "Step 6A" siclog@
+    f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_MO_AddVideo);
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+      
+    // @siclog "Step 7 - 8" siclog@             200 OK, ACK
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp, v_ContactUrlStrSS);                                  /* @sic R5s220336 2.5 change 1, R5-222099: v_ContactUrlStrSS sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Step 9 - 13" siclog@            Release Video
+    f_IMS_VideoCall_NR5GC_ReleaseVideoMT(v_ResponseWithSdp.SdpMessage, tsc_SDP_WithoutPreconditions);                   /* @sic R5s220336: tsc_SDP_WithoutPreconditions sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    // @siclog "Step 14 - 16" siclog@           MMI (Release Call), BYE, 200 OK
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite, v_ContactSipUrlSS);                                              /* @sic R5s220593 change 1 sic@ */
+    
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.24.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_24_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call / Forking / UE receives CANCEL request for a forked MT voice call / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 8" siclog@
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 9 - 18" siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10();        // @sic R5-231494: A.5.1a sic@
+
+    // @siclog "Step 19 - 21" siclog@
+    f_IMS_MTCallSetup_CancelCall(v_InviteRequestWithSdp.Invite, cs_Reason(200, "Call completed elsewhere"));
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 20");
+
+    f_IMS_TestBody_Set(false);
+    
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.24a.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_24a_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / Forking / UE receives two preliminary responses and one early dialog termination / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader;
+    var template (value) SDP_Message v_SdpAnswer;
+    var template (present) SDP_Message v_SdpOffer;
+    var SipUrl v_ContactUrlUE;
+    var charstring v_ToTag2 := f_IMS_GenerateTag("TC_7_24a-Dialog-2");
+    var boolean v_RadioBearersEstablished := true;
+
+    timer t_Timer;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 8" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();           // @sic R5-226704: A_4_1 -> A_4_1a sic@
+    if (not match(v_InviteRequestWithSdp.Invite.msgHeader.supported, cr_Supported( { "199" } ))) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Supported header field does not contain '199' option tag");
+    }
+
+    // @siclog "Step 9 - 20" siclog@
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp);            // @sic R5-226704: A_4_1 -> A_4_1a sic@
+
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX("11111112");                                      // @sic R5-220221 sic@
+    f_IMS_PTC_ImsInfo_DialogInit(dialogRemote, v_InviteRequestWithSdp.Invite.msgHeader);  // second dialog
+    f_IMS_PTC_ImsInfo_DialogSetLocalTag(v_ToTag2);                                        // second dialog: different To-tag
+
+    // @siclog "Step 21" siclog@                183 Session progress (dialog 2)
+    v_MessageHeader := f_IMS_InviteResponse_183_MessageHeaderTX(v_InviteRequestWithSdp.Invite, px_IMS_CalleeContactUri2);
+    v_SdpAnswer := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_InviteRequestWithSdp.SdpOffer, -, EVS_16000, EVS_A2, 65);     /* @sic R5-226704: EVS_A2 sic@ */
+    IMS_Server.send(cas_IMS_DATA_RSP(v_InviteRequestWithSdp.RoutingInfo, cs_Response(c_statusLine183, v_MessageHeader, cs_MessageBody_SDP(v_SdpAnswer))));
+
+    // @siclog "Step 22 - 23B" siclog@
+    v_SdpOffer := f_IMS_BuildSDP_UpdatedOfferAudio_RX(v_InviteRequestWithSdp.SdpOffer, -, EVS_16000, EVS_A2);           /* Updated offer for 2nd remote UE  @sic R5-226704: EVS_A2 sic@ */
+    f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, v_MessageHeader, v_SdpOffer, -, v_RadioBearersEstablished);   /* @sic R5s220385 Change 1.1 + R5-222101 sic@
+                                                                                                                                                                    @sic R5-231508/RP-230602: optional UPDATE / 200 OK sic@ */
+    // @siclog "Step 24 - 26" siclog@
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp, px_IMS_CalleeContactUri2);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 25");
+
+    // @siclog "Step 27" siclog@                199 Early Dialog Terminated
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog);                                        // @sic R5s220237 change 2 sic@
+    v_MessageHeader := f_IMS_BaseResponse_MessageHeaderTX(v_InviteRequestWithSdp.Invite.msgHeader);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_InviteRequestWithSdp.RoutingInfo, cs_Response(c_statusLine199, v_MessageHeader)));
+
+    // @siclog "Step 28 - 29" siclog@
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);                                       // @sic R5s220237 change 3 sic@
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp, px_IMS_CalleeContactUri2);           // @sic R5s240396: px_IMS_CalleeContactUri2 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 29");
+
+    // @siclog "Step 30" siclog@
+    t_Timer.start(5.0);
+    alt {
+      [] IMS_Server.receive(car_IMS_Bye_Request(cr_REGISTER_Request)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected BYE");
+      }
+      [] t_Timer.timeout {}
+    }
+
+    // @siclog "Step 31 - 32" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+    
+    f_IMS_TestBody_Set(false);
+    
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 7.24b.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_24b_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MO Voice Call / Forking / UE receives two preliminary responses and one final response / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader;
+    var template (value) SDP_Message v_SdpAnswer;
+    var template (present) SDP_Message v_SdpOffer;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var charstring v_ToTag2 := f_IMS_GenerateTag("TC_7_24b-Dialog-2");
+    var template (value) MessageHeader v_MessageHeader200;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) MessageHeader v_MessageHeaderACK;
+    var template (present) MessageHeader v_MessageHeaderBYE;
+    var IMS_DATA_REQ v_IMS_DATA_REQ_Dummy;
+    var boolean v_WaitForACK := true;
+    var boolean v_WaitForBYE := true;
+    var boolean v_RadioBearersEstablished := true;
+ 
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 9" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();           // @sic R5-225929: A_4_1 -> A_4_1a sic@
+    if (not match(v_InviteRequestWithSdp.Invite.msgHeader.supported, cr_Supported( { "199" } ))) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Supported header field does not contain '199' option tag");
+    }
+
+    // @siclog "Step 9 - 20" siclog@
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp);            // @sic R5-225929: A_4_1 -> A_4_1a sic@
+
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX("11111112");                                      // @sic R5-221475 sic@
+    f_IMS_PTC_ImsInfo_DialogInit(dialogRemote, v_InviteRequestWithSdp.Invite.msgHeader);  // second dialog
+    f_IMS_PTC_ImsInfo_DialogSetLocalTag(v_ToTag2);                                        // second dialog: different To-tag
+
+    // @siclog "Step 21" siclog@                183 Session progress (dialog 2)
+    v_MessageHeader := f_IMS_InviteResponse_183_MessageHeaderTX(v_InviteRequestWithSdp.Invite, px_IMS_CalleeContactUri2);
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_MessageHeader);
+    v_SdpAnswer := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_InviteRequestWithSdp.SdpOffer, -, EVS_16000, EVS_A2, 65);     // @sic R5-225929: EVS_A2 sic@
+    IMS_Server.send(cas_IMS_DATA_RSP(v_InviteRequestWithSdp.RoutingInfo, cs_Response(c_statusLine183, v_MessageHeader, cs_MessageBody_SDP(v_SdpAnswer))));
+
+    // @siclog "Step 22 - 23B siclog@
+    v_SdpOffer := f_IMS_BuildSDP_UpdatedOfferAudio_RX(v_InviteRequestWithSdp.SdpOffer, -, EVS_16000, EVS_A2);           // @sic R5-225929: EVS_A2 sic@
+    f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, v_MessageHeader, v_SdpOffer, -, v_RadioBearersEstablished);   /* @sic R5s220385 Change 1.1 + R5-222101 sic@
+                                                                                                                                                                    @sic R5-231508/RP-230602: optional UPDATE / 200 OK sic@ */
+    // @siclog "Step 24 - 26" siclog@
+    f_IMS_MOCallSetup_Send180_Reliable(v_InviteRequestWithSdp, px_IMS_CalleeContactUri2);
+
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog);
+
+    // @siclog "Step 27 - 28" siclog@
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 28");
+
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+
+    // @siclog "Step 29" siclog@
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    v_MessageHeader200 := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequestWithSdp.Invite.msgHeader, -, -, px_IMS_CalleeContactUri2); /* @sic R5s220385: px_IMS_CalleeContactUri2 sic@ */
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader200)));
+
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequestWithSdp.Invite, c_statusLine200);
+    v_MessageHeaderBYE := f_IMS_ByeRequest_MessageHeaderRX(v_InviteRequestWithSdp.Invite);
+    while (v_WaitForACK or v_WaitForBYE) {
+      alt {     /* @sic R5s220385, R5-222101 sic@ */
+        // @siclog "Step 30" siclog@
+        [v_WaitForACK] a_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUrlSS, v_MessageHeaderACK)), v_IMS_DATA_REQ_Dummy) {
+          f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 30");
+          v_WaitForACK := false;
+        }
+        // @siclog "Step 31 - 32" siclog@
+        [v_WaitForBYE] a_IMS_ReceiveByeSendOK(-, v_ContactUrlSS, v_MessageHeaderBYE) {
+          f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 31");
+          v_WaitForBYE := false;
+        }
+      }
+    }
+
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog);
+
+    // @siclog "Step 33" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+    
+    f_IMS_TestBody_Set(false);
+    
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.25.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_25_NR5GC_IMS1() runs on IMS_PTC
+  { // MTSI MT Voice Call  without SDP offer in INVITE / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var SDP_Message v_InitialSdpOffer;
+    var template (value) SDP_Message v_SdpOffer;
+    var template (value) SDP_attribute_list v_PreconditionAttributes;
+    var template (present) SDP_Message v_SdpAnswer;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1" siclog@                 Steps 1-8 of generic procedure specified in Table 4.9.16.2.2-1 of TS 38.508-1
+    
+    // @siclog "Step 2 - 6" siclog@             INVITE, 100 Trying, 183 Session Progress, PRACK, 200 OK
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NoSdpInINVITE_Step1_6(tsc_SDP_WithPreconditions);               /* v_InviteRequestWithSdp contains the INVITE and the SDP offer send by the UE at step 4
+                                                                                                                   @sic R5-231495: EVS_A2 sic@ */
+    v_InitialSdpOffer := v_InviteRequestWithSdp.SdpOffer;
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    
+    // @siclog "Step 7 - 8" siclog@             UPDATE, 200 OK
+    v_SdpOffer := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_InitialSdpOffer, false, EVS_16000, EVS_A2, 65);        /* the SDP offer for the UPDATE is the same as the answer at step 5 but with the session version being incremented and updated preconditions
+                                                                                                                   @sic R5-231495: EVS_A2 sic@ */
+    v_PreconditionAttributes := cs_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, c_mandatory);
+    v_SdpOffer.media_list[0].attributes := f_SDP_Attributes_Concat_TX(v_SdpOffer.media_list[0].attributes, v_PreconditionAttributes);
+    v_SdpOffer := f_IMS_MTCallSetup_NoSdpInINVITE_SdpAddVideoIfNeeded_TX(v_InitialSdpOffer, v_SdpOffer);        /* @sic R5-220230: sic@
+                                                                                                                   if the initial SDP offer sent by the UE has had a video stream, it needs to be kept in all subsequent offers and answers (-> RFC 3264 clause 8) */
+    v_SdpAnswer := f_IMS_BuildSDP_FinalAnswerAudio_RX(EVS_16000);
+    v_SdpAnswer := f_IMS_MTCallSetup_NoSdpInINVITE_SdpAddVideoIfNeeded_RX(v_InitialSdpOffer, v_SdpAnswer);      /* @sic R5-223460: if initial SDP offer contains video sic@ */
+
+    f_IMS_MTCallSetup_NR5GC_SendUPDATE_Receive200OK(v_InviteRequestWithSdp, v_SdpOffer, v_SdpAnswer);
+
+    // @siclog "Step 9 - 11" siclog@            180 Ringing, PRACK (conditional), 200 OK (conditional)
+    f_IMS_MTCallSetup_Receive180Ringing(v_InviteRequestWithSdp, tsc_OptionTagList_100rel);                      /* @sic R5-242754: tsc_OptionTagList_100rel sic@ */
+
+    // @siclog "Step 12 - 15" siclog@           Accept call, 200 OK, ACK
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+
+    f_IMS_TestBody_Set(false);
+
+    // Call release and postamble:
+    f_IMS_CC_PostambleWithCallReleaseMT(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.26.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_26_NR5GC_IMS1() runs on IMS_PTC
+  { // Mobile Originating CAT / Forking Model / MO Voice Call / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader183;
+    var template (present) SDP_Message v_SdpOffer;
+    var boolean v_RemoteResourcesEstablished := true;
+    var boolean v_RadioBearersEstablished := true;
+    
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2 - 8" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1_5();         // @sic R5-225930: A_4_1 -> A_4_1a sic@
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);             // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(v_InviteRequestWithSdp);             // @sic R5-225930: A_4_1 -> A_4_1a sic@
+    
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX("11111112");      // @sic R5-220244 sic@
+    f_IMS_PTC_ImsInfo_DialogInit(dialogRemote, v_InviteRequestWithSdp.Invite.msgHeader);
+    f_IMS_PTC_ImsInfo_CseqSet(dialogRemote, v_InviteRequestWithSdp.Invite.msgHeader.cSeq.seqNumber);
+
+    // @siclog "Step 9" siclog@
+    v_MessageHeader183 := f_IMS_CAT_Send183SessionProgress(v_InviteRequestWithSdp, EVS_16000, EVS_A2);  /* @sic R5s210788 sic@ @sic R5-225930: EVS_A2 sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+
+    // @siclog "Step 10 - 11B" siclog@
+    v_SdpOffer := f_IMS_BuildSDP_UpdatedOfferAudio_RX(v_InviteRequestWithSdp.SdpOffer, v_RemoteResourcesEstablished, EVS_16000, EVS_A2);  /* @sic R5s210788 sic@ @sic R5-225930: EVS_A2 sic@ */
+    f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, v_MessageHeader183, v_SdpOffer, -, v_RadioBearersEstablished);   /* @sic R5-231508/RP-230602: optional UPDATE / 200 OK sic@ */
+
+    // @siclog "Step 12 - 13" Void siclog@
+
+    // @siclog "Step 14 - 15" siclog@
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog); // Signalling continues on first dialog
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+
+    // @siclog "Step 16 - 18" siclog@
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+    
+    f_IMS_TestBody_Set(false);
+    
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.27.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_27_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MO Voice Call / UE is able to refresh the session / 5GS
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) Allow v_Allow := cs_Allow(v_MethodList);
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var MessageHeader v_MessageHeaderUpdate;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+    var boolean v_CheckMinSE := true;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2 - 7" IPCAN siclog@
+
+    // @siclog "Step 8" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();           // @sic R5-225931: A_4_1 -> A_4_1a sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (not ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      v_DeltaSec := 1920;
+    } else {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+
+      // @siclog "Steps 9a0 - 9a7" siclog@
+      for (i := 0; i < 2; i := i + 1) {
+        v_DeltaSec := v_DeltaSec + 60;
+        f_IMS_CallWithSessionTimer_Send100Send422ReceiveACK(v_InviteRequest, v_RoutingInfo_DL, v_DeltaSec);
+        f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9a2/9a6");
+
+        v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();       // @sic R5-225931: A_4_1 -> A_4_1a sic@
+        f_IMS_CallWithSessionTimer_CheckInviteAfter422(v_InviteRequestWithSdp, v_DeltaSec);
+        f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 9a3/9a7");
+
+        v_InviteRequest := v_InviteRequestWithSdp.Invite;
+        v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+      }
+    }
+    // @siclog "Steps 10 - 18" siclog@
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp, v_Allow);     // @sic R5-225931: A_4_1 -> A_4_1a sic@
+    v_ContactUrlSS := fl_IMS_CC_MO_CallInfo_GetContactUrlSS(v_CallInfo);
+
+    // @siclog "Step 19" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, v_Allow, cs_Require_timer, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uac"), cs_MinSE(v_DeltaSec));
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 20");
+
+    // @siclog "Step 20" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+
+    // @siclog "Step 21 - 24" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac", v_CheckMinSE);
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);   // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+      v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 21/23");
+      f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL, -, -, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uac"), cs_MinSE(v_DeltaSec));
+    }
+
+    // @siclog "Step 25 - 26" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.28.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_28_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MO Voice Call / Remote end is refresher / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var InternetProtocol_Type v_Protocol;
+    var template (omit) Contact v_ContactSS;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var integer v_DeltaSec := 1800;
+    var template charstring v_Refressher := omit;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+
+    // @siclog "Step 2 - 7" IPCAN siclog@
+
+    // @siclog "Step 8" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();                           // @sic R5-225932: A_4_1 -> A_4_1a sic@
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, v_Refressher);
+    }
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Steps 9 - 17" siclog@
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp);              // @sic R5-225932: A_4_1 -> A_4_1a sic@
+    v_ContactSS := v_CallInfo.MessageHeader183.contact;
+    v_ContactUrlSS := fl_IMS_CC_MO_CallInfo_GetContactUrlSS(v_CallInfo);
+
+    // @siclog "Step 18" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, -, cs_Require_timer, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uas"));
+
+    // @siclog "Step 19" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Step 20" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    v_RoutingInfo_DL := cs_IMS_RoutingInfo(v_Protocol);     /* @sic R5s200206 change 2.2.1 sic@ */
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequest, v_RoutingInfo_DL, v_ContactSS, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 21" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_Protocol, v_MessageHeaderUpdate, cr_Require_timer, -, v_DeltaSec, "uac");
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 21");
+
+    // @siclog "Steps 22 - 23" siclog@
+    f_IMS_CallWithSessionTimer_MOCallRelease(v_InviteRequest, v_ContactUrlSS, v_DeltaSec);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.29.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_29_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MO Voice Call / Remote end does not support Session Timer / 5GS
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) Allow v_Allow := cs_Allow(v_MethodList);
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var MessageHeader v_MessageHeaderUpdate;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2 - 7" IPCAN siclog@
+
+    // @siclog "Step 8" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();                           // @sic R5-225933: A_4_1 -> A_4_1a sic@
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+    }
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Steps 9 - 17" siclog@
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp, v_Allow);     // @sic R5-225933: A_4_1 -> A_4_1a; v_Allow added sic@
+    v_ContactUrlSS := fl_IMS_CC_MO_CallInfo_GetContactUrlSS(v_CallInfo);
+
+    // @siclog "Step 18" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, v_Allow);
+
+    // @siclog "Step 19" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Steps 20 - 23" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac");
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);                 // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+      v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 20/22");
+      f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL);
+    }
+
+    // @siclog "Step 24 - 25" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.30.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_30_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MO Voice Call / Remote end supports but does not use Session Timer / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2 - 7" IPCAN siclog@
+
+    // @siclog "Step 8" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();                           // @sic R5-225934: A_4_1 -> A_4_1a sic@
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+    }
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    // @siclog "Steps 9 - 17" siclog@
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(v_InviteRequestWithSdp);              // @sic R5-225934: A_4_1 -> A_4_1a sic@
+    v_ContactUrlSS := fl_IMS_CC_MO_CallInfo_GetContactUrlSS(v_CallInfo);
+
+    // @siclog "Step 18" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, -, -, cs_Supported_timer);
+
+    // @siclog "Step 19" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Step 20 - 21" siclog@
+    f_Delay(int2float(1860));
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 21");
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.31.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_31_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MT Voice Call / Remote end supports but does not send Session-Expires / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" IPCAN siclog@
+
+    // @siclog "Step 9 - 18A" IPCAN siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A();                        // @sic R5-231496: steps 1 - 10 of A.5.1a; R5s230345: steps 1 - 10A sic@
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequest.msgHeader);
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_RoutingInfo_DL := v_InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 19 - 20" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_InviteRequestWithSdp, cr_Require_timer, -, v_DeltaSec, "uac");
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Step 21" siclog@
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequest, v_RoutingInfo_DL, -, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 22" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_RoutingInfo_DL.Protocol, v_MessageHeaderUpdate, cr_Require_timer, -, v_DeltaSec, "uac");  // @sic R5s210450: cr_Supported_timer removed sic@ @sic R5-213533: cr_Require_timer added sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+
+    // @siclog "Steps 23 - 24" siclog@
+    f_IMS_CallWithSessionTimer_MOCallRelease(v_InviteRequest, v_ContactUrlSS, v_DeltaSec);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 23");
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.32.NR5GC
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_7_32_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MT Voice Call / Remote end sends Session-Expires but does not choose refresher / 5GS
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var SipUrl v_ContactUrlUE;
+    var IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" IPCAN siclog@
+
+    // @siclog "Step 9 - 18A" IPCAN siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A(cs_SessionExpires(v_DeltaSec));   // @sic R5-231497: steps 1 - 10 of A.5.1a; R5s230345: steps 1 - 10A sic@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_RoutingInfo_DL := v_InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 19 - 20" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_InviteRequestWithSdp, cr_Require_timer, -, v_DeltaSec, "uac");
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Step 21" siclog@
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequestWithSdp.Invite, v_RoutingInfo_DL, -, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 22" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_RoutingInfo_DL.Protocol, v_MessageHeaderUpdate, cr_Require_timer, -, v_DeltaSec, "uac");  // @sic R5s210467: cr_Supported_timer removed sic@  @sic R5-213533: cr_Require_timer added sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+
+    // @siclog "Step 23 - 24" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.33.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_33_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MT Voice Call / Remote end chooses UE as refresher / 5GS
+    var Method_List v_MethodList := {"INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var template (value) IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var integer v_DeltaSec := 1800;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" IPCAN siclog@
+
+    // @siclog "Step 9" siclog@  @sic R5-213545: A.5.2 instead of A.5.1 sic@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSdp(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, EVS_A2, tsc_SDP_WithoutPreconditions);   /* @sic R5-236899: EVS_A2 instead of EVS_B0_A1 sic@ */
+    v_InviteRequestWithSdp.Invite.msgHeader.sessionExpires := cs_SessionExpires(v_DeltaSec, "uas");
+    v_InviteRequestWithSdp.Invite.msgHeader.allow := cs_Allow(v_MethodList);
+    IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequestWithSdp.Invite.msgHeader);
+
+    // @siclog "Step 10 - 16" IPCAN siclog@
+    f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_8(valueof(v_InviteRequestWithSdp));    // @sic R5-213545: A.5.2 instead of A.5.1 sic@ @sic R5-236899: EVS_A2 instead of EVS_B0_A1 sic@
+
+    // @siclog "Steps 17" siclog@
+    f_UT_AnswerCall(MMI);
+
+    // @siclog "Steps 18" Void siclog@
+
+    // @siclog "Steps 19 - 20" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(valueof(v_InviteRequestWithSdp), -, -, v_DeltaSec, "uas");   /* @sic R5s210678 change 1: cr_Supported_timer instead of cr_Require_timer sic@
+                                                                                                                           @sic R5-214450: cr_Supported_timer removed sic@ */
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Steps 21 - 26" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      f_IMS_CallWithSessionTimer_MORefresh(v_ContactUrlSS, cs_Require_timer, -, v_DeltaSec, "uac");  /* @sic R5-210124: common function sic@
+                                                                                                        @sic R5s210678 change 2: cs_Require_timer as parameter sic@ */
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 21/24");
+    }
+
+    // @siclog "Step 27 - 28" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-5 clause 7.34.NR5GC
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_7_34_NR5GC_IMS1() runs on IMS_PTC
+  { // Session Timer / MT Voice Call / Remote end does not support Session Timer / 5GS
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var OptionTag_List v_OptionTagsForSupported := tsc_OptionTagList_100rel & tsc_OptionTagList_precondition;   // no 'timer'
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Step 1 - 8" IPCAN siclog@
+
+    // @siclog "Step 9 - 18" IPCAN siclog@
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_10A(-, cs_Allow(v_MethodList), v_OptionTagsForSupported);    // @sic R5-231498: steps 1 - 10A of A.5.1a sic@
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequest.msgHeader);
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_RoutingInfo_DL := v_InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 19 - 20" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_InviteRequestWithSdp, -, -, v_DeltaSec, "uas");
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    // @siclog "Step 21" siclog@
+    v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac");
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);   // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+    v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Step 21");
+
+    // @siclog "Step 22" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL, -, -, -, -, -, f_SIP_SipUrl2Str(v_ContactUrlSS));   /* @sic R5s240677: f_SIP_SipUrl2Str(v_ContactUrlSS) sic@ */
+
+    // @siclog "Step 16 - 19" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+}

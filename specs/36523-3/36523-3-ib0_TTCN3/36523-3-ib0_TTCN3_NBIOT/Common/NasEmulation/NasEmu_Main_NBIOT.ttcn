@@ -1,0 +1,381 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2024-12-09 15:14:38 +0100 (Mon, 09 Dec 2024) $
+// $Rev: 40197 $
+/******************************************************************************/
+
+module NasEmu_Main_NBIOT {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EUTRA_NB_CommonDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_CommonDefs all;
+  import from NasEmu_AspTypes_NBIOT all;
+  import from NasEmu_Common all;
+  import from NasEmu_Common4G5G all;
+  import from NasEmu_Component_NBIOT all;
+  import from NasEmu_L2Test_NBIOT all;
+
+  template (present) NB_SRB_COMMON_REQ car_NBIOT_SignallingAspFromTC :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := ?,
+    Signalling := {
+      Rrc := *,
+      Nas := *
+    }
+  };
+
+  template (value) NB_SRB_COMMON_IND cas_NBIOT_SignallingAspToTC_Init(template (value) NB_IndAspCommonPart_Type p_Common) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := p_Common,
+    Signalling := {
+      Rrc := omit,
+      Nas := omit
+    }
+  };
+
+  template (present) NBIOT_RRC_PDU_IND car_NBIOT_PduFromSYS  :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := ?,
+    RrcPdu := ?
+  };
+
+  template (value) NBIOT_RRC_PDU_REQ cas_NBIOT_PduToSYS(template (value) NB_ReqAspCommonPart_Type p_Common,
+                                                        template (value) NB_RRC_MSG_Request_Type  p_RRC_MSG_Request) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := p_Common,
+    RrcPdu := p_RRC_MSG_Request
+  };
+
+  template (value) NB_RRC_MSG_Request_Type cs_NBIOT_RRC_MSG_RequestDCCH(template (value) DL_DCCH_Message_NB p_DcchRrcPdu) :=
+  { /* @status    APPROVED (NBIOT) */
+    Dcch := p_DcchRrcPdu
+  };
+
+  template (present) NASEMU_NBIOT_NB_L2SDU_MSG cr_NBIOT_L2SDU_MSG := ?; /* @status    APPROVED (NBIOT) */
+
+  template (value) NB_IndAspCommonPart_Type cs_IndAspCommonPart_L2SDU :=
+  { /* @status    APPROVED (NBIOT) */
+    CellId := nbiot_Cell_NonSpecific,
+    RoutingInfo := { L2Test := true },
+    TimingInfo := cs_TimingInfo_None,
+    Status := cs_IndicationStatus_NoError
+  };
+
+  template (value) DL_DCCH_Message_NB cs_DLInformationTransfer_NB(RRC_TransactionIdentifier p_RRC_TI,
+                                                                  template (value) DedicatedInfoNAS  p_NAS_DedicatedInformation)  :=
+  { /* @status    APPROVED (NBIOT) */
+    message_ := {
+      c1 := {
+        dlInformationTransfer_r13 := {
+          rrc_TransactionIdentifier := p_RRC_TI,
+          criticalExtensions := {
+            c1 := {
+              dlInformationTransfer_r13 := {
+                dedicatedInfoNAS_r13 := p_NAS_DedicatedInformation,
+                lateNonCriticalExtension := omit,
+                nonCriticalExtension := omit
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  /*
+   * @desc      Handling of ASPs coming from the test cases;
+   *            if the ASP contains a NAS PDU this will be encoded, ciphered
+   *            and either added to the given RRC PDU (piggybacking)
+   *            or packed into a DLInformationTransfer PDU
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (NBIOT)
+   */
+  altstep a_AspFromTestcaseHandler_NBIOT(inout NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_NBIOT_PTC
+  {
+    var NB_SRB_COMMON_REQ v_AspFromTC;
+    var NB_ReqAspCommonPart_Type v_ReqAspCommonPart;
+    var NAS_MSG_Request_Type v_NasPduFromTC;
+    var template (value) NB_RRC_MSG_Request_Type v_RrcPduToSYS;
+    var template (value) DL_DCCH_Message_NB v_DL_DCCH_Message;
+    var DedicatedInfoNAS v_NAS_DedicatedInformation[maxDRB_NB_r13];
+    var integer v_NoOfNasPdus := 0;
+    var boolean v_RrcPduIsPresent;
+    var boolean v_NasPduIsPresent;
+    var NASEMU_NBIOT_NB_L2SDU_MSG v_L2SDU_MSG;
+    var integer I;
+
+    [] TC_SRB.receive(car_NBIOT_SignallingAspFromTC) -> value v_AspFromTC {
+
+      v_ReqAspCommonPart := v_AspFromTC.Common;
+      v_RrcPduIsPresent := ispresent(v_AspFromTC.Signalling.Rrc);
+      v_NasPduIsPresent := ispresent(v_AspFromTC.Signalling.Nas);
+
+      if (v_NasPduIsPresent) {
+        // Note: in case of RRCConnectionReconfiguration there may be more than one NAS PDUs
+        v_NoOfNasPdus := lengthof(v_AspFromTC.Signalling.Nas);       // Note: per ASN.1 definition length is restricted to maxDRB
+        for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+          v_NasPduFromTC := v_AspFromTC.Signalling.Nas[I];
+          v_NAS_DedicatedInformation[I] := f_EncodeAndCipherNasPdu(p_NasSecurityByRef, v_NasPduFromTC);   // encode NAS PDU; apply NAS security (if reqired)
+        }
+      }
+
+      if (v_RrcPduIsPresent) {
+        // ******* RRC PDU (containing RRC control information)
+
+        v_RrcPduToSYS := v_AspFromTC.Signalling.Rrc;
+
+        if (v_NasPduIsPresent) {
+          // ***** NAS PDU BEING PIGGY BACKED
+          if (ischosen(v_RrcPduToSYS.Ccch)) {
+            // ***** SRB0
+            if (ischosen(v_RrcPduToSYS.Ccch.message_.c1.rrcConnectionSetup_r13)) {    // @sic R5-245486 sic@
+              // *** RRC CONNECTION SETUP:
+              if (v_NoOfNasPdus > 1) {
+                f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for RRCConnectionSetup)");
+                return;     /* don't send anything */
+              } else {
+                v_RrcPduToSYS.Ccch.message_.c1.rrcConnectionSetup_r13.criticalExtensions.c1.rrcConnectionSetup_r13.nonCriticalExtension.dedicatedInfoNAS_r16 :=
+                  v_NAS_DedicatedInformation[0];
+              }
+            } else if (ischosen(v_RrcPduToSYS.Ccch.message_.c1.rrcEarlyDataComplete_r15)) {     // @sic R5-245647 sic@
+              // *** RRC EARLY DATA COMPLETE:
+              if (v_NoOfNasPdus > 1) {
+                f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for RRCConnectionSetup)");
+                return;     /* don't send anything */
+              } else {
+                v_RrcPduToSYS.Ccch.message_.c1.rrcEarlyDataComplete_r15.criticalExtensions.rrcEarlyDataComplete_r15.dedicatedInfoNAS_r15 :=
+                  v_NAS_DedicatedInformation[0];
+              }
+            }
+          } else {
+            // ***** SRB1/2
+            v_DL_DCCH_Message := v_RrcPduToSYS.Dcch;  /* extract RRC message;
+                                                         Note: since v_RrcPduToSYS is a union v_RrcPduToSYS.Dcch is never omit */
+
+            if (ischosen(v_DL_DCCH_Message.message_.c1.rrcConnectionReconfiguration_r13)) {     /* RRC message is RRCConnectionReconfiguration */
+              // *** RRC CONNECTION RECONFIGURATION:
+              for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+                v_DL_DCCH_Message.message_.c1.rrcConnectionReconfiguration_r13.criticalExtensions.c1.rrcConnectionReconfiguration_r13.dedicatedInfoNASList_r13[I] :=
+                  v_NAS_DedicatedInformation[I];
+              }
+
+            } else if (ischosen(v_DL_DCCH_Message.message_.c1.dlInformationTransfer_r13)) {     /* RRC message is DLInformationTransfer */
+              // *** DL INFORMATION TRANSFER:
+              if (v_NoOfNasPdus > 1) {
+                f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+                return;     /* don't send anything */
+              } else {
+                v_DL_DCCH_Message.message_.c1.dlInformationTransfer_r13.criticalExtensions.c1.dlInformationTransfer_r13.dedicatedInfoNAS_r13 :=
+                  v_NAS_DedicatedInformation[0];
+              }
+
+            } else {
+              // *** OTHER RRC PDU:
+              f_NasEmulationError(__FILE__, __LINE__, "RRC message can not carry piggy-backed NAS PDU");
+              return;    /* don't do anything else */
+            }
+            v_RrcPduToSYS := cs_NBIOT_RRC_MSG_RequestDCCH(v_DL_DCCH_Message);
+          }
+        }
+      } else {
+        // ******* NAS PDU only:
+        if (not v_NasPduIsPresent) {
+          f_NasEmulationError(__FILE__, __LINE__, "neither RRC nor NAS PDU to be sent");
+          return;     /* don't send anything */
+        } else {
+          if (v_NoOfNasPdus > 1) {
+            f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+            return;     /* don't send anything */
+          } else {
+            v_RrcPduToSYS := cs_NBIOT_RRC_MSG_RequestDCCH(cs_DLInformationTransfer_NB(tsc_RRC_TI_Def, v_NAS_DedicatedInformation[0]));
+          }
+        }
+      }
+
+      if (ischosen(v_ReqAspCommonPart.RoutingInfo.L2Test)) {
+        if (ischosen(v_RrcPduToSYS.Dcch)) {
+          v_L2SDU_MSG.Dcch := encvalue(v_RrcPduToSYS.Dcch);   /* @sic R5s170235 change 2: Dcch instead of Ccch sic@ */
+        } else {
+          v_L2SDU_MSG.Ccch := encvalue(v_RrcPduToSYS.Ccch);
+        }
+        L2TEST.send(v_L2SDU_MSG);
+      } else {
+        SYS_SRB.send(cas_NBIOT_PduToSYS(v_ReqAspCommonPart, v_RrcPduToSYS));
+      }
+    }
+  }
+
+  /*
+   * @desc      handling of ASPs containing an RRC PDU from the system adaptor:
+   *            if the RRC PDU contains a piggybacked NAS PDU or is an ULInformationTransfer PDU,
+   *            the NAS PDU is extracted, deciphered (if necessary) and decoded
+   * @param     p_NasSecurityByRef  (by reference)
+   * @param     p_IndAspCommonPart
+   * @param     p_RrcIndication
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NASEMU_UL_Handler_NBIOT(inout NasSecurity_Type p_NasSecurityByRef,
+                                      template (value) NB_IndAspCommonPart_Type p_IndAspCommonPart,
+                                      NB_RRC_MSG_Indication_Type p_RrcIndication) runs on NASEMU_NBIOT_PTC
+  {
+    var UL_DCCH_Message_NB v_RrcPdu;
+    var ULInformationTransfer_NB_r13_IEs v_ULInformationTransfer;
+    var template (value) NB_SRB_COMMON_IND v_SRB_COMMON_IND;
+    var template (value) NasEmu_DecodingInfo_Type v_DecodingInfo;
+    var DedicatedInfoNAS v_NAS_DedicatedInformation[maxDRB_NB_r13];   // even though currently (DEC08) there is always only one DedicatedInfoNAS we use an array
+    var integer v_NoOfNasPdus := 0;
+    var boolean v_RrcPduPresent;
+    var boolean v_IntegrityError := false;
+    var integer I;
+
+    v_SRB_COMMON_IND := cas_NBIOT_SignallingAspToTC_Init(p_IndAspCommonPart);   // RRC and NAS both are initialised as omit
+
+    if (ischosen(p_RrcIndication.Ccch)) {                                     /* CCCH -> SRB0 */
+      v_RrcPduPresent := true;
+      if (ischosen(p_RrcIndication.Ccch.message_.c1.rrcEarlyDataRequest_r15)) {  // @sic R5-245647 sic@
+        // RRC EARLY DATA REQUEST
+        if (ischosen(p_RrcIndication.Ccch.message_.c1.rrcEarlyDataRequest_r15.criticalExtensions.rrcEarlyDataRequest_r15)) {
+          v_NAS_DedicatedInformation[0] := p_RrcIndication.Ccch.message_.c1.rrcEarlyDataRequest_r15.criticalExtensions.rrcEarlyDataRequest_r15.dedicatedInfoNAS_r15;
+          v_NoOfNasPdus := 1;
+        }
+        if (ischosen(p_RrcIndication.Ccch.message_.c1.rrcEarlyDataRequest_r15.criticalExtensions.later.rrcEarlyDataRequest_r16)) {
+          v_NAS_DedicatedInformation[0] := p_RrcIndication.Ccch.message_.c1.rrcEarlyDataRequest_r15.criticalExtensions.later.rrcEarlyDataRequest_r16.dedicatedInfoNAS_r16;
+          v_NoOfNasPdus := v_NoOfNasPdus + 1;
+        }
+      }
+      else {
+        // OTHER CCCH MESSAGE
+      }
+
+    } else {                                                                  /* DCCH -> SRB1/2 */
+
+      v_RrcPdu := p_RrcIndication.Dcch;
+      v_RrcPduPresent := true;
+
+      if (ischosen(v_RrcPdu.message_.c1)) {
+
+        if (ischosen(v_RrcPdu.message_.c1.rrcConnectionSetupComplete_r13)) {
+          // RRC CONNECTION SETUP COMPLETE
+          if (ischosen(v_RrcPdu.message_.c1.rrcConnectionSetupComplete_r13.criticalExtensions.rrcConnectionSetupComplete_r13)) {
+            v_NAS_DedicatedInformation[0] := v_RrcPdu.message_.c1.rrcConnectionSetupComplete_r13.criticalExtensions.rrcConnectionSetupComplete_r13.dedicatedInfoNAS_r13;
+            if (v_NAS_DedicatedInformation[0] == ''O) {     // @sic R5-247532 sic@ This field, although mandatory, can be zero length - for EDT
+              // in this case, don't try decoding it so that it'll be reported that it's omitted
+            } else {
+              v_NoOfNasPdus := 1;
+            }
+          }
+        }
+        else if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer_r13)) {
+          // UL INFORMATION TRANSFER
+          if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer_r13.criticalExtensions.ulInformationTransfer_r13)) {
+            v_ULInformationTransfer := v_RrcPdu.message_.c1.ulInformationTransfer_r13.criticalExtensions.ulInformationTransfer_r13;
+            v_NAS_DedicatedInformation[0] := v_ULInformationTransfer.dedicatedInfoNAS_r13;
+            v_RrcPduPresent := false;
+            v_NoOfNasPdus := 1;
+          }
+        }
+        else if (ischosen(v_RrcPdu.message_.c1.rrcConnectionResumeComplete_r13)) {
+          if (ispresent(v_RrcPdu.message_.c1.rrcConnectionResumeComplete_r13.criticalExtensions.rrcConnectionResumeComplete_r13.dedicatedInfoNAS_r13)) {   // @sic R5s170515 change 2 sic@
+            v_NAS_DedicatedInformation[0] := v_RrcPdu.message_.c1.rrcConnectionResumeComplete_r13.criticalExtensions.rrcConnectionResumeComplete_r13.dedicatedInfoNAS_r13;
+            v_NoOfNasPdus := 1;
+          }
+        }
+        else {
+          // OTHER RRC PDU
+        }
+      }
+    }
+    if (v_RrcPduPresent) {
+      v_SRB_COMMON_IND.Signalling.Rrc := p_RrcIndication;
+    }
+    if (v_NoOfNasPdus > 0) {
+      for (I := 0; I < v_NoOfNasPdus; I := I + 1) {
+        v_DecodingInfo := f_DecipherAndDecodeNasPdu(p_NasSecurityByRef, v_NAS_DedicatedInformation[I]);
+        v_SRB_COMMON_IND.Signalling.Nas[I] := v_DecodingInfo.NasIndication;         // omit if message cannot be decoded => shall lead to a test case error
+        v_IntegrityError := v_IntegrityError or valueof(v_DecodingInfo.IntegrityError);    // valueof cannot be avoided here
+      }
+      if (v_IntegrityError) {                                                       // set Error choice of common part only if there is an error
+        if (ischosen(v_SRB_COMMON_IND.Common.Status.Error)) {     /* there is already an error flagged by the SA */
+          v_SRB_COMMON_IND.Common.Status.Error.Integrity.Nas := true;
+        } else {                                                  /* the error needs to be set */
+          v_SRB_COMMON_IND.Common.Status := cs_IndicationStatus_NasIntegrityError;
+        }
+      }
+    }
+    TC_SRB.send(v_SRB_COMMON_IND);
+
+  }
+
+  /*
+   * @desc      handling of ASPs containing an RRC PDU from the system adaptor:
+   *            if the RRC PDU contains a piggybacked NAS PDU or is an ULInformationTransfer PDU,
+   *            the NAS PDU is extracted, deciphered (if necessary) and decoded
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (NBIOT)
+   */
+  altstep a_AspFromSystemAdaptorHandler_NBIOT(inout NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_NBIOT_PTC
+  {
+    var NBIOT_RRC_PDU_IND v_AspFromSYS;
+
+    [] SYS_SRB.receive(car_NBIOT_PduFromSYS) -> value v_AspFromSYS {
+      fl_NASEMU_UL_Handler_NBIOT(p_NasSecurityByRef, v_AspFromSYS.Common, v_AspFromSYS.RrcPdu);
+    }
+  }
+
+  /*
+   * @desc      L2 test mode: receive L2 SDU from the test case to be handled in UL
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (NBIOT)
+   */
+  altstep a_L2SduFromTestcaseHandler_NBIOT(inout NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_NBIOT_PTC
+  {
+    var NASEMU_NBIOT_NB_L2SDU_MSG v_L2SDU_MSG;
+    var NB_RRC_MSG_Indication_Type v_RrcPdu;
+    var integer v_DecvalueResult;
+
+    [] L2TEST.receive(cr_NBIOT_L2SDU_MSG) -> value v_L2SDU_MSG {
+      if (ischosen(v_L2SDU_MSG.Dcch)) {
+        v_DecvalueResult := decvalue(v_L2SDU_MSG.Dcch, v_RrcPdu.Dcch);
+      } else {
+        v_DecvalueResult := decvalue(v_L2SDU_MSG.Ccch, v_RrcPdu.Ccch);
+      }
+      if (v_DecvalueResult != 0) {
+        f_NasEmulationError(__FILE__, __LINE__, "RRC message cannot be decoded");
+      } else {
+        fl_NASEMU_UL_Handler_NBIOT(p_NasSecurityByRef, cs_IndAspCommonPart_L2SDU, v_RrcPdu);
+      }
+    }
+  }
+
+  /*
+   * @desc      NAS emulation main loop (started by the MTC)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NASEMU_MainLoop_NBIOT() runs on NASEMU_NBIOT_PTC
+  {
+    var NasSecurity_Type v_NasSecurityByRef := f_NasEmu_NasSecurity_Init();
+
+    while (true) {
+      alt {
+        [] a_NasEmu_ConfigurationHandler(CTRL, v_NasSecurityByRef);
+        [] a_AspFromTestcaseHandler_NBIOT(v_NasSecurityByRef);
+        [] a_AspFromSystemAdaptorHandler_NBIOT(v_NasSecurityByRef);
+        [] a_L2SduFromTestcaseHandler_NBIOT(v_NasSecurityByRef);
+        [] any port.receive {
+          f_NasEmulationError(__FILE__, __LINE__, "unexpected message (skipped)");
+          repeat;
+        }
+      }
+    }
+  }
+
+}

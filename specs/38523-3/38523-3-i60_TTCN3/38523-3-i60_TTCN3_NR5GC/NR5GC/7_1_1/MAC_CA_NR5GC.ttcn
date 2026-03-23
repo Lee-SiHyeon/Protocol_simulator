@@ -1,0 +1,420 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2023-12-06 17:01:38 +0100 (mi., 06 dic. 2023) $
+// $Rev: 37699 $
+/******************************************************************************/
+module MAC_CA_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_LoopBack all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from MAC_TC_Common_NR all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_CommonFunctions_CA all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps_NRDC all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_CommonFunctions_CA all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_FrequencyCommon all;
+  import from NR_L2_Common all;
+  import from NR_RLC_Common all;
+  import from NR_RRC_Templates all;
+  import from NR_ResourceAllocation all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.3.8
+   * @param     p_PCell
+   * @param     p_SCell
+   * @param     p_NR_CA_Tested
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_3_8_NR_Common (NR_CellId_Type    p_PCell,
+                                      NR_CellId_Type    p_SCell,
+                                       NR_CA_Tested_Type p_NR_CA_Tested
+                                       ) runs on NR5GC_PTC
+  {//UE power headroom reporting / SCell activation / DL pathloss change reporting
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig;
+    var boolean v_RRC_MsgRcvd;
+    var boolean v_PHR_Rcvd;
+    var template (omit) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var NR_ResourceAllocation_Type v_NR_ResourceAllocation;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP ;
+    //@sic R5s220848 sic@
+    var SubcarrierSpacing v_SCS;//
+
+
+    // Multi PR initialisation is taken care in Test body.
+    f_NR5GC_Init_CA(NR_4, {p_PCell, p_SCell}, p_NR_CA_Tested); //@sic R5s211385 sic@
+    f_NR_CellInfo_SetMAC_CellGroupConfigL2(p_SCell);  //@sic R5s210315 sic@
+    
+    // Create and configure cells
+    f_NR_CellConfig_PCell_Def(p_PCell);
+    f_NR_CellConfig_SCell(p_SCell,Scell_Active);
+    
+
+    // Preamble: If pc_IP_Ping is set to TRUE then, the UE is in 5GS state 3N-A according to TS 38.508-1 [4], clause 4.4A.2 Table 4.4A.2-3.
+    //           Else, the UE is in 5GS state 3N-A and Test Loop Function (On) with UE test loop mode B on NR Cell 1 according to 38.508-1[4], clause 4.4A.2 Table 4.4A.2-3.
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR5GC_Preamble (p_PCell, STATE_IDLE_1A, TESTMode_OFF);//@sic R5s211385 sic@
+    //Set null cipher Algorithm
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+   
+    //Configure on SS the DRB in No MAC header manipulation in DL and RLC and PDCP in transparent mode
+    f_NR5GC_RRC_ConnectedState3N_Def(p_PCell,
+                                       -,//@sic R5s211385 sic@
+                                       -,
+                                       -,  //p_IpPduDelayTime
+                                       -,
+                                       -,  //MAC_CellGroupConfig
+                                       -,
+                                       -
+                                       );
+    
+    f_NR_TestBody_Set(true);
+    f_NR_SetCellPower(p_SCell, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+   //@siclog Steps 1-2 siclog@
+    //The SS transmits an RRCReconfiguration message including a sCellToAddModList to add NR Cell 3 as a SCell.
+    //The UE transmits the RRCReconfigurationComplete message?
+    //@sic R5-215675 sic@
+    f_NR5GC_AddMod_1SCell(p_PCell, p_SCell,-, true,-, false); // NR Cell1, NR Cell3/10
+
+
+    v_RRC_MsgRcvd:= false;
+    v_PHR_Rcvd := false;
+    v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP(p_PCell, tsc_NR_BWP_Id);
+    v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(4224, v_NR_UplinkBWP);
+
+    //@siclog "Steps 4 preconfig" siclog@
+    v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(p_PCell);
+    v_MAC_CellGroupConfig.phr_Config := cs_38508_PHR_Config_Setup(cs_PHR_Config_71138);
+    f_NR_CellInfo_SetMAC_CellGroupConfig(nr_Cell1, v_MAC_CellGroupConfig);
+    v_SCGConfig := cs_38508_CellGroupConfig (tsc_NR_CellGroupId_MCG,
+                                            omit,
+                                             omit,
+                                             v_MAC_CellGroupConfig);
+     v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_SCGConfig)));
+    
+      //@siclog "Steps 3" siclog@
+     //The SS transmits UL grant to the UE at every 10ms in PDCCH occasion.
+     //@sic R5s220848 sic@
+     v_SCS := f_NR_CellInfo_GetSCS(p_PCell);//
+     if (v_SCS == kHz30)
+      {
+        f_NR_ULGrantConfiguration_StartPeriodicGrant(p_PCell, cs_TimingInfo_SubFrame(2), v_NR_ResourceAllocation, 10);
+      } else {
+      f_NR_ULGrantConfiguration_StartPeriodicGrant(p_PCell, cs_TimingInfo_SubFrame(5), v_NR_ResourceAllocation, 10);
+        }
+
+    
+     //@siclog "Steps 4" siclog@
+     f_NR_SS_SystemIndCtrlConfig(p_PCell, cds_NR_SystemIndCtrl_MAC_PHR(enable));
+     f_NR_SendRRCReconfiguration (p_PCell, -,-, v_V1530Ext,-,-,-,false,-,crs_MacBearerRouting(p_PCell)); //@sic R5s220848 R5s211257 sic@
+    //@siclog "Steps 5" siclog@
+    alt {
+        [not v_RRC_MsgRcvd] SRB.receive(car_NR_SRB_RrcPdu_IND(p_PCell, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete,-,crs_MacBearerRouting(p_PCell)))//@sic R5s211257 sic@
+        {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+            v_RRC_MsgRcvd := true;
+            if(not v_PHR_Rcvd){ repeat;}
+        }
+        [not v_PHR_Rcvd] SYSIND.receive(car_NR_SYSTEM_MultiEntryPHR_IND(p_PCell, cr_NR_MAC_CE_MultiEntryPHR_1Entry(?)))
+        {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5 Parallel Behaviour");
+            v_PHR_Rcvd := true;
+            if(not v_RRC_MsgRcvd){ repeat;}
+        }
+    };
+   
+    //@siclog "Steps 6-20" siclog@
+    f_TC_7_1_1_3_8_NR_TestBody(p_PCell, p_SCell,cr_NR_MAC_CE_MultiEntryPHR(?),tsc_NR_SCellIndex_1);
+
+    //@siclog "Steps 21-22" siclog@
+   v_MAC_CellGroupConfig.phr_Config := { release := NULL };
+    f_NR_CellInfo_SetMAC_CellGroupConfig(p_PCell, v_MAC_CellGroupConfig);
+    v_SCGConfig := cs_38508_CellGroupConfig (tsc_NR_CellGroupId_MCG, //@sic R5s200094 sic@
+                                            omit,
+                                             omit,
+                                             v_MAC_CellGroupConfig);
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_SCGConfig)));
+
+    f_NR_SendRRCReconfiguration (p_PCell, -,-, v_V1530Ext,-,-,-,-,-,crs_MacBearerRouting(p_PCell));//@sic R5s211257 sic@
+    
+
+    f_NR_TestBody_Set(false);
+    
+    //Postamble
+    f_NR_ULGrantConfiguration_Start(p_PCell); // Def UL Grant Config
+    //@sic R5s210953 R5s211257 sic@
+    f_NR5GC_Rel_1SCell(p_PCell, p_SCell);
+    f_NR_Postamble(p_PCell, STATE_CONNECTED_3A);
+  } //end of f_TC_7_1_1_3_8_NR_Common
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.3.8.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_3_8_1_NR5GC() runs on NR5GC_PTC
+  { //UE power headroom reporting / SCell activation / DL pathloss change reporting/  Intra-band Contiguous CA
+      f_TC_7_1_1_3_8_NR_Common(nr_Cell1, nr_Cell3,CA_IntraBandContiguous);
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.3.8.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_3_8_2_NR5GC() runs on NR5GC_PTC
+  { //UE power headroom reporting / SCell activation / DL pathloss change reporting/  Inter-band CA
+      f_TC_7_1_1_3_8_NR_Common(nr_Cell1, nr_Cell10,CA_InterBand);
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.7.1
+   * @param     p_PCell
+   * @param     p_SCell
+   * @param     p_NR_CA_Tested
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_7_1_NR_Common (NR_CellId_Type    p_PCell,
+                                      NR_CellId_Type    p_SCell,
+                                       NR_CA_Tested_Type p_NR_CA_Tested
+                                       ) runs on NR5GC_PTC
+  {//Activation/Deactivation of SCells / Activation/Deactivation MAC control element reception / sCellDeactivationTimer /
+    var boolean v_UL_CA := f_NR5GC_Get_UL_CA(p_NR_CA_Tested) ; //@sic R5-226021 sic@
+    var DRB_Identity v_DRBId;
+    var template (value)  NR_RadioBearerList_Type v_SS_Drb_ConfigList;
+    //@sic R5s210855 R5-214587 sic@
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerConfigList;
+    var T_PollRetransmit v_T_PollRetransmit := ms80;
+    var DL_t_Reassembly_Type v_T_Reassembly;
+
+    f_NR5GC_Init_CA(NR_4, {p_PCell, p_SCell}, p_NR_CA_Tested, v_UL_CA);
+    f_NR_CellInfo_SetMAC_CellGroupConfigL2(p_SCell);  //@sic R5s210315 sic@
+    v_T_Reassembly := f_NR_DL_AM_T_Reassembly(f_NR_CellInfo_GetIsFR1(p_PCell));
+    v_RLC_BearerConfigList := f_NR_ReconfigureRLC_AM(tsc_NR_DRB2, -, v_T_PollRetransmit, -, -, -, -, v_T_Reassembly);
+
+    // Create and configure cells
+    f_NR_CellConfig_PCell_Def(p_PCell);
+    f_NR_CellConfig_SCell(p_SCell,Scell_Active);
+
+    // Preamble: If pc_IP_Ping is set to TRUE then, the UE is in 5GS state 3N-A according to TS 38.508-1 [4], clause 4.4A.2 Table 4.4A.2-3.
+    //           Else, the UE is in 5GS state 3N-A and Test Loop Function (On) with UE test loop mode B on NR Cell 1 according to 38.508-1[4], clause 4.4A.2 Table 4.4A.2-3.
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR5GC_Preamble (p_PCell, STATE_IDLE_1A, TESTModeA_ON);
+    //Set null cipher Algorithm
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+    //Retrieve DRB Id of the first PDU session
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    v_SS_Drb_ConfigList  := { cs_NR_SS_RadioBearer_MAC_TestMode(v_DRBId, cs_NR_MAC_TestModeInfo_NormalMode) };
+   
+    //Configure on SS the DRB in Normal MAC header and RLC and PDCP in transparent mode
+    f_NR5GC_RRC_ConnectedState3N_Def(p_PCell,
+                                       TEST_LOOPModeA_ON,
+                                       cs_UE_TestLoopModeA_NR_LB_Setup_NoScaling,
+                                       -,  //p_IpPduDelayTime
+                                       v_RLC_BearerConfigList,
+                                       -,  //MAC_CellGroupConfig
+                                       -,
+                                       v_SS_Drb_ConfigList
+                                       );
+    
+    f_NR_TestBody_Set(true);
+    f_NR_SetCellPower(p_SCell, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+   //@siclog Steps 1-2 siclog@
+    //The SS transmits an RRCReconfiguration message including a sCellToAddModList to add NR Cell 3 as a SCell.
+    //The UE transmits the RRCReconfigurationComplete message?
+    //@sic R5-214764 sic@
+    f_NR5GC_AddMod_1SCell(p_PCell, p_SCell,-, v_UL_CA, ms320,false); // NR Cell1, NR Cell3/10
+    //Configure SS in No header manipulation
+    v_SS_Drb_ConfigList := {cs_NR_SS_RadioBearer_MAC_TestMode(v_DRBId, cs_NR_MAC_TestModeInfo_NoHeaderManipulationDL_UL)};
+    f_NR_SS_CommonRadioBearerConfig(p_PCell, v_SS_Drb_ConfigList);
+   
+    //@siclog "Steps 3-20" siclog@
+    f_TC_7_1_1_7_1_NR_TestBody(p_PCell, p_SCell, tsc_NR_SCellIndex_1,v_DRBId,v_UL_CA);
+
+    f_NR_TestBody_Set(false);
+    
+    //Postamble
+    //@sic R5s210727 sic@
+    v_SS_Drb_ConfigList := {cs_NR_SS_RadioBearer_MAC_TestMode(v_DRBId, cs_NR_MAC_TestModeInfo_NormalMode)};//KS R5s21xxx
+    f_NR_SS_CommonRadioBearerConfig(p_PCell, v_SS_Drb_ConfigList);//KS R5s21xxx
+    //@sic R5s211654 sic@
+    f_NR_ULGrantConfiguration_Start(p_PCell); // Def UL Grant Config
+    f_NR5GC_Rel_1SCell(p_PCell, p_SCell);
+    //@sic R5s230130 sic@
+    //f_NR5GC_OpenUE_TestLoopMode_Deactivate_TestMode(p_PCell);
+
+    f_NR_Postamble(p_PCell, STATE_CONNECTED_3A);
+  } //end of f_TC_7_1_1_7_1_NR_Common
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.7.1.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_7_1_1_NR5GC() runs on NR5GC_PTC
+  { //Activation/Deactivation of SCells / Activation/Deactivation MAC control element reception / sCellDeactivationTimer / Intra-band Contiguous CA
+      f_TC_7_1_1_7_1_NR_Common(nr_Cell1, nr_Cell3,CA_IntraBandContiguous);
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.7.1.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_7_1_2_NR5GC() runs on NR5GC_PTC
+  { //Activation/Deactivation of SCells / Activation/Deactivation MAC control element reception / sCellDeactivationTimer /Inter-band CA
+      f_TC_7_1_1_7_1_NR_Common(nr_Cell1, nr_Cell10,CA_InterBand);
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.7.1.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_1_7_1_3_NR5GC() runs on NR5GC_PTC
+  { //Activation/Deactivation of SCells / Activation/Deactivation MAC control element reception / sCellDeactivationTimer / Intra-band non Contiguous CA
+      f_TC_7_1_1_7_1_NR_Common(nr_Cell1, nr_Cell3,CA_IntraBandNonContiguous);
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.1.11.1
+   * @status    APPROVED (NR5GC)
+   */
+   function f_TC_7_1_1_11_1_NR5GC() runs on NR5GC_PTC
+  { //DC power headroom reporting / PSCell activation and DL pathloss change reporting
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig;
+    var boolean v_RRC_MsgRcvd;
+    var boolean v_PHR_Rcvd;
+    var template (omit) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var NR_ResourceAllocation_Type v_NR_ResourceAllocation;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP ;
+    var NR_SYSTEM_IND v_NR_SYSTEM_IND;
+    var SubFrameTiming_Type v_TimingInfo;
+    //@sic R5s211698 R5-217806 sic@
+    var template (value) CellGroupConfig v_MCGConfig;
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig_SCG;
+    var boolean v_PHR_PSCell_Rcvd;
+    var SubFrameTiming_Type v_TimingInfo_PSCell;
+    var NR_ResourceAllocation_Type v_NR_ResourceAllocation_SCG;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP_SCG;
+
+    f_NR5GC_Init_NRDC(NR_1, {nr_Cell1, nr_Cell10});
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -82, -82); //@sic R5s211698 R5-217806 R5s220063 sic@
+    
+    //Create and configure NR cell1 and NR cell 10.
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10, -, tsc_NRDC_SCG_Cell);
+
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);//
+    f_NR_SetCellPower (nr_Cell1, -82, -82); //@sic R5s211698 R5-217806 sic@
+    f_NR_SetCellPower (nr_Cell10, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    //@sic R5s211698 R5-217806 sic@
+    f_NR_CellInfo_SetMAC_CellGroupConfigL2(nr_Cell1);
+    f_NR_CellInfo_SetMAC_CellGroupConfigL2(nr_Cell10);
+    f_NR_RRCReconfig_AddSCG_DRBs_NRDC(nr_Cell1, nr_Cell10, MCG_SCG);//
+
+    f_NR_TestBody_Set(true);
+
+    v_RRC_MsgRcvd:= false;
+    v_PHR_Rcvd := false;
+    v_PHR_PSCell_Rcvd :=false;
+    v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP(nr_Cell1, tsc_NR_BWP_Id);
+    v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(4224, v_NR_UplinkBWP);
+    v_NR_UplinkBWP_SCG := f_NR_CellInfo_GetUplinkBWP(nr_Cell10, tsc_NR_BWP_Id);
+    v_NR_ResourceAllocation_SCG := f_NR_ResourceAllocation_UplinkGrant(4224, v_NR_UplinkBWP_SCG);
+    //@siclog "Steps 2 preconfig" siclog@
+    v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(nr_Cell1);
+    v_MAC_CellGroupConfig.phr_Config := cs_38508_PHR_Config_Setup(cs_PHR_Config_711111);
+    f_NR_CellInfo_SetMAC_CellGroupConfig(nr_Cell1, v_MAC_CellGroupConfig);
+    //@sic R5s211698 R5-217806 sic@
+    v_MAC_CellGroupConfig_SCG := f_NR_CellInfo_GetMAC_CellGroupConfig(nr_Cell1);
+    v_MAC_CellGroupConfig_SCG.phr_Config := cs_38508_PHR_Config_Setup(cs_PHR_Config_711111);
+    f_NR_CellInfo_SetMAC_CellGroupConfig(nr_Cell10, v_MAC_CellGroupConfig_SCG);
+
+    //@sic R5s211698 R5-217806 sic@
+    v_MCGConfig := cs_38508_CellGroupConfig (tsc_NR_CellGroupId_MCG,
+                                            omit,
+                                             omit,
+                                             v_MAC_CellGroupConfig);
+    v_SCGConfig := cs_38508_CellGroupConfig (tsc_NR_CellGroupId_SCG,  //
+                                            omit,
+                                             omit,
+                                             v_MAC_CellGroupConfig_SCG);
+     
+    v_V1530Ext := f_NRDC_BuildRRCReconfiguration_v1530( v_SCGConfig, v_MCGConfig);
+
+    //@siclog "Steps 1" siclog@
+    //The SS transmits UL grant to the UE at every 10ms in PDCCH occasion.
+    //@sic R5s211698 R5-217806 sic@
+    f_NR_ULGrantConfiguration_StartPeriodicGrant(nr_Cell1, cs_TimingInfo_SubFrame(2), v_NR_ResourceAllocation, 10);
+    f_NR_ULGrantConfiguration_StartPeriodicGrant(nr_Cell10, cs_TimingInfo_SubFrame(5), v_NR_ResourceAllocation_SCG, 10);
+    //@siclog "Steps 2" siclog@
+     f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_MAC_PHR(enable));
+     f_NR_SS_SystemIndCtrlConfig(nr_Cell10, cds_NR_SystemIndCtrl_MAC_PHR(enable));
+     f_NR_SendRRCReconfiguration (nr_Cell1, -,-, v_V1530Ext,-,-,-,false);
+    //@siclog "Steps 3" siclog@
+    alt {
+        [not v_RRC_MsgRcvd] SRB.receive(car_NR_SRB_RrcPdu_IND(nr_Cell1, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete))
+        {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+            v_RRC_MsgRcvd := true;
+            if((not v_PHR_Rcvd)or (not v_PHR_PSCell_Rcvd)){ repeat;}
+        }
+        [not v_PHR_Rcvd] SYSIND.receive(car_NR_SYSTEM_MultiEntryPHR_IND(nr_Cell1, cr_NR_MAC_CE_MultiEntryPHR_1Entry(?)))-> value v_NR_SYSTEM_IND
+        {
+            v_TimingInfo := v_NR_SYSTEM_IND.Common.TimingInfo.SubFrame;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5 Parallel PCell PHR Received");
+            v_PHR_Rcvd := true;
+            if((not v_RRC_MsgRcvd)or (not v_PHR_PSCell_Rcvd)){ repeat;}
+        }
+        [not v_PHR_PSCell_Rcvd] SYSIND.receive(car_NR_SYSTEM_MultiEntryPHR_IND(nr_Cell10, cr_NR_MAC_CE_MultiEntryPHR(?)))-> value v_NR_SYSTEM_IND
+        {
+            v_TimingInfo_PSCell := v_NR_SYSTEM_IND.Common.TimingInfo.SubFrame;
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5 Parallel Behaviour PSCell PHR received");
+            v_PHR_PSCell_Rcvd := true;
+            if((not v_RRC_MsgRcvd) or (not v_PHR_Rcvd)){ repeat;}
+        }
+    };
+   
+   //@siclog "Steps 5-18" siclog@
+    f_TC_7_1_1_11_1_NR_TestBody(nr_Cell1, nr_Cell10, cr_NR_MAC_CE_MultiEntryPHR_1Entry(?),v_TimingInfo, v_TimingInfo_PSCell);
+    //@siclog "Steps 19-20" siclog@
+    f_NR_ULGrantConfiguration_Start(nr_Cell1); // Def UL Grant Config
+    v_MAC_CellGroupConfig.phr_Config := { release := NULL };
+    f_NR_CellInfo_SetMAC_CellGroupConfig(nr_Cell1, v_MAC_CellGroupConfig);
+    v_SCGConfig := cs_38508_CellGroupConfig (tsc_NR_CellGroupId_MCG,
+                                            omit,
+                                             omit,
+                                             v_MAC_CellGroupConfig);
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_SCGConfig)));
+
+    f_NR_SendRRCReconfiguration (nr_Cell1, -,-, v_V1530Ext);
+    
+
+    f_NR_TestBody_Set(false);
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_MAC_PHR(disable));
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell10, cds_NR_SystemIndCtrl_MAC_PHR(disable));
+    
+   
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  };
+
+}

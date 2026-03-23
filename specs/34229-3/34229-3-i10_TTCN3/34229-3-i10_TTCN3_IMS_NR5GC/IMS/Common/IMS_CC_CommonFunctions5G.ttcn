@@ -1,0 +1,335 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-11-26 17:09:28 +0100 (Tue, 26 Nov 2024) $
+// $Rev: 39937 $
+/******************************************************************************/
+
+module IMS_CC_CommonFunctions5G {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_5G all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_Common all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      34.229-5 A.4/15.1 MO Call establishment with preconditions - step 4 - 7
+   * @param     p_TestProcedure
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader183
+   * @param     p_UpdatedSdpOffer
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_RadioBearersEstablished (default value: false)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7(IMS_TestProcedure_Type p_TestProcedure,
+                                                             IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                             template (value) MessageHeader p_MessageHeader183,
+                                                             template (present) SDP_Message p_UpdatedSdpOffer,
+                                                             IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                             boolean p_RadioBearersEstablished := false) runs on IMS_PTC return SDP_Message
+  { // @sic R5s220849 change 2/3: p_EarlyQosConfirmation removed sic@
+    // @sic R5s230867 - MCC160 implementation: p_CalleeContactUri removed sic@
+    var template SDP_Message v_SdpOfferPRACK := omit;
+    var template ContentType v_ContentTypePRACK := omit;
+    var template (omit) SDP_Message v_LatestSdpOffer := omit;
+    var SipUrl v_ContactUrl;
+    var charstring v_ContactUrlStr;
+
+    // step 4 - 5                       PRACK, 200 OK
+    if (not p_RadioBearersEstablished) {
+      f_IMS_MOCallSetup_ReceivePRACK_Send200OK(p_InviteRequestWithSdp, p_MessageHeader183, -, -, p_CallType);
+      f_IMS_CC_TriggerDedicatedBearerActivation(p_TestProcedure);       // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+    } else {
+      v_ContentTypePRACK := cr_ContentTypeSDP ifpresent;                // @sic R5-223463 sic@ @sic R5s220849 change 2: ifpresent sic@
+      v_SdpOfferPRACK := p_UpdatedSdpOffer ifpresent;                   // @sic R5-223463 sic@ @sic R5s220849 change 2: ifpresent sic@
+      v_LatestSdpOffer := f_IMS_MOCallSetup_ReceivePRACK_Send200OK(p_InviteRequestWithSdp, p_MessageHeader183, v_ContentTypePRACK, v_SdpOfferPRACK, p_CallType);
+    }
+
+    if (not isvalue(v_LatestSdpOffer)) {                                // @sic R5-223463 sic@
+      // step 6 - 7                     UPDATE, 200 OK
+      v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_MessageHeader183);
+      v_ContactUrlStr := f_SIP_SipUrl2Str(v_ContactUrl);
+      v_LatestSdpOffer := f_IMS_MOCallSetup_ReceiveUpdateSend200OK(p_InviteRequestWithSdp.Invite, v_ContactUrlStr, p_UpdatedSdpOffer, -, p_CallType);  // @sic R5s230867 - MCC160 implementation: v_ContactUrlStr instead of p_CalleeContactUri sic@
+    }
+
+    return valueof(v_LatestSdpOffer);
+  }
+
+  /*
+   * @desc      34.229-5 A.4/15.1 MO Call establishment with preconditions - step 2 - 7
+   * @param     p_TestProcedure
+   * @param     p_InviteRequestWithSdp
+   * @param     p_CalleeContactUri
+   * @param     p_AditionalContactParams (default value: omit)
+   * @param     p_InitialSdpAnswer
+   * @param     p_UpdatedSdpOffer
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_RadioBearersEstablished (default value: false)
+   * @return    IMS_CC_MO_CallInfo_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step2_7(IMS_TestProcedure_Type p_TestProcedure,
+                                                             IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                             charstring p_CalleeContactUri,
+                                                             template (omit) SemicolonParam_List p_AditionalContactParams := omit,
+                                                             template (value) SDP_Message p_InitialSdpAnswer,
+                                                             template (present) SDP_Message p_UpdatedSdpOffer,
+                                                             IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                             boolean p_RadioBearersEstablished := false) runs on IMS_PTC return IMS_CC_MO_CallInfo_Type
+  { // @sic R5s220849 change 2/3: p_EarlyQosConfirmation removed sic@
+    // @sic R5-231508/RP-230602: use of f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7 sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var template (value) MessageHeader v_MessageHeader183;
+    var SDP_Message v_LatestSdpOffer;
+
+    // step 2                           100 Trying
+    f_IMS_MOCallSetup_Send100Trying(p_InviteRequestWithSdp);
+
+    // step 3                           183 Session Progress
+    v_MessageHeader183 := f_IMS_InviteResponse_183_MessageHeaderTX(p_InviteRequestWithSdp.Invite, p_CalleeContactUri, p_AditionalContactParams, -, p_CallType);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine183, v_MessageHeader183, cs_MessageBody_SDP(p_InitialSdpAnswer))));
+
+    // step 4 - 5                       PRACK, 200 OK, UPDATE, 200 OK
+    v_LatestSdpOffer := f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step4_7(p_TestProcedure,
+                                                                          p_InviteRequestWithSdp,
+                                                                          v_MessageHeader183,
+                                                                          p_UpdatedSdpOffer,
+                                                                          p_CallType,
+                                                                          p_RadioBearersEstablished);
+    return f_IMS_CC_MO_CallInfo_Init(p_InviteRequestWithSdp, v_MessageHeader183, v_LatestSdpOffer);
+  }
+
+  /*
+   * @desc      34.229-5 A.4.1a MO Call establishment with preconditions
+   * @param     p_CalleeUri         (default value: px_IMS_CalleeUri)
+   * @param     p_CalleeContactUri  (default value: px_IMS_CalleeContactUri)
+   * @param     p_RadioBearersEstablished   (default value: false)
+   * @return    IMS_CC_MO_CallInfo_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_A_4_1a(charstring p_CalleeUri := px_IMS_CalleeUri,
+                                          charstring p_CalleeContactUri := px_IMS_CalleeContactUri,
+                                          boolean p_RadioBearersEstablished := false) runs on IMS_PTC return IMS_CC_MO_CallInfo_Type
+  { /* @sic R5-231492, R5-231493, R5-231502, R5-231504: p_EvsConfiguration sic@ */
+    /* @sic R5-246478: removal of f_IMS_MOCallSetup_NR5GC_A_4_1, p_EvsConfiguration sic@ */
+    var template (present) SipUrl v_CalleeSipUrl:= f_SIP_BuildSipUri_RX(p_CalleeUri);
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+    var template (value) SDP_Message v_InitialSdpAnswer;
+    var template (present) SDP_Message v_UpdatedSdpOffer;
+
+    // step 1                           INVITE
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_X_Step1(tsc_SDP_WithPreconditions, v_CalleeSipUrl);
+
+    // step 2 - 7
+    v_InitialSdpAnswer := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_InviteRequestWithSdp.SdpOffer, tsc_SDP_WithPreconditions, EVS_16000, EVS_A2, 65);
+    v_UpdatedSdpOffer := f_IMS_BuildSDP_UpdatedOfferAudio_RX(v_InviteRequestWithSdp.SdpOffer, -, EVS_16000, EVS_A2);
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_WithPreconditions_Step2_7(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, p_CalleeContactUri, -, v_InitialSdpAnswer, v_UpdatedSdpOffer, -, p_RadioBearersEstablished);
+
+    // step 8 - 12                      180 Ringing, PRACK, 200 OK for PRACK, 200 OK for INVITE, ACK
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step8_12(v_InviteRequestWithSdp, p_CalleeContactUri);
+
+    return v_CallInfo;
+  }
+
+  /*
+   * @desc      34.229-5 A.4.1a Step 1 - 5 of MO Call establishment with preconditions
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1_5() runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step1();
+    f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_5(v_InviteRequestWithSdp);
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.4.1a Step 2 - 10: MO call estiblishment after INVITE (with preconditions)
+   *            returns contact address of the SS side (as used in the 183 response's Contact header)
+   * @param     p_InviteRequestWithSdp
+   * @param     p_Allow             (default value: omit)
+   * @return    IMS_CC_MO_CallInfo_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                   template (omit) Allow p_Allow := omit) runs on IMS_PTC return IMS_CC_MO_CallInfo_Type
+  { /* @sic R5s220760: return template (omit) Contact sic@ */
+    /* @sic R5-231492: return IMS_CC_MO_CallInfo_Type instead of Contact sic@ */
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var SDP_Message v_LatestSdpOffer;
+
+    v_ResponseWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_5(p_InviteRequestWithSdp, -, p_Allow);
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);     // to trigger step 13 of 38.508-1 Table 4.9.15.2.2-1
+
+    v_LatestSdpOffer := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step6_7(p_InviteRequestWithSdp);
+    f_IMS_MOCallSetup_Send180_Reliable(p_InviteRequestWithSdp);
+
+    return f_IMS_CC_MO_CallInfo_Init(p_InviteRequestWithSdp, v_ResponseWithSdp.Response.msgHeader, v_LatestSdpOffer);
+  }
+
+  /*
+   * @desc      34.229-5 A.4.1 Step 2 - 12: MO call estiblishment after INVITE (with preconditions)
+   *            returns contact address of the SS side (as used in the 183 response's Contact header)
+   * @param     p_InviteRequestWithSdp
+   * @return    IMS_CC_MO_CallInfo_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_12(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC return IMS_CC_MO_CallInfo_Type
+  {
+    var IMS_CC_MO_CallInfo_Type v_CallInfo;
+
+    v_CallInfo := f_IMS_MOCallSetup_NR5GC_A_4_1a_Step2_10(p_InviteRequestWithSdp);
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(p_InviteRequestWithSdp);
+
+    return v_CallInfo;
+  }
+
+  /*
+   * @desc      34.229-5 A.4.2a Step 2 - 8 of MO Call establishment without preconditions
+   * @param     p_InviteRequestWithSdp
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_8(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  {
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    v_ResponseWithSdp := f_IMS_MOCallSetup_NR5GC_A_4_2a_Step2_5(p_InviteRequestWithSdp);
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);
+    f_IMS_MOCallSetup_NR5GC_A_4_2a_Step6_8(p_InviteRequestWithSdp, tsc_OptionTagList_100rel);   // @sic R5-236894: 100rel sic@
+
+    return v_ResponseWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.5.1a Step 2 - 7: MT call establishment with preconditions
+   * @param     p_InviteRequestWithSdp
+   * @param     p_AudioCodec        (default value: EVS_16000)
+   * @param     p_DialogIndex       (default value: firstDialog)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_1a_Step2_7(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                  IMS_SDP_AudioCodec_Type p_AudioCodec := EVS_16000,
+                                                  IMS_PTC_DialogIndex_Type p_DialogIndex := firstDialog) runs on IMS_PTC
+  { /* @sic R5s210505: p_DialogIndex sic@ */
+    /* @sic R5-231489: p_AudioCodec, p_EvsConfiguration sic@ */
+    /* @sic R5-246480: p_EvsConfiguration removed sic@ */
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    // Step 2 - 5:              100, 183, PRACK, 200 OK
+    v_ResponseWithSdp := f_IMS_MTCallSetup_NR5GC_A_5_X_Step2_5(p_InviteRequestWithSdp, tsc_SDP_WithPreconditions, p_AudioCodec);
+
+    if (p_DialogIndex == firstDialog) {            /* @sic R5s210505 sic@ */
+      // Establish Dedicated EPS bearer
+      f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer*/
+    }
+
+    // Step 6 - 7:              UPDATE, 200 OK
+    f_IMS_MTCallSetup_NR5GC_A_5_1a_Step6_7(p_InviteRequestWithSdp, v_ResponseWithSdp);
+  }
+
+  /*
+   * @desc      34.229-5 A.5.1a Step 1 - 7: MT call esteblishment with preconditions
+   * @param     p_DialogIndex       (default value: firstDialog)
+   * @param     p_SessionExpires    (default value: omit)
+   * @param     p_Allow             (default value: omit)
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_Invite_C11)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_1a_Step1_7(IMS_PTC_DialogIndex_Type p_DialogIndex := firstDialog,
+                                                  template (omit) SessionExpires p_SessionExpires := omit,
+                                                  template (omit) Allow p_Allow := omit,
+                                                  OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_Invite_C11) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-231489: use of f_IMS_MTCallSetup_BuildInviteRequestWithSpecificSdp, f_IMS_MTCallSetup_NR5GC_A_5_1x_Step2_7 sic@ */
+    /* @sic R5-232767: p_DialogIndex sic@ */
+    var template (value) SDP_Message v_SdpOffer;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    // step 1:                  INVITE
+    v_SdpOffer := f_IMS_BuildSDP_InitialOfferAudio_TX(tsc_IMS_SDP_AudioCodecList_EVS_WBAMR_AMR, EVS_A2, tsc_SDP_WithPreconditions);
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSpecificSdp(v_SdpOffer, p_SessionExpires, p_Allow, p_OptionTagsForSupported);
+    IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+
+    // step 2 - 7:              100 Trying, 183 Session Progress, PRACK, 200 OK, UPDATE, 200 OK
+    f_IMS_MTCallSetup_NR5GC_A_5_1a_Step2_7(v_InviteRequestWithSdp, EVS_16000, p_DialogIndex);
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.5.2a Step 2 - 8: MT call establishment without preconditions and without the initial INVITE
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_8(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  { /* @sic R5-235322: p_EvsConfiguration sic@ */
+    /* @sic R5-246481: p_EvsConfiguration removed sic@ */
+    var boolean v_PreconditionsRequired := tsc_SDP_WithoutPreconditions;
+
+    f_IMS_MTCallSetup_NR5GC_A_5_X_Step2_5(p_InviteRequestWithSdp, v_PreconditionsRequired);
+
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall, v_PreconditionsRequired);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer
+                                                                                                 @sic R5s210423: v_PreconditionsRequired sic@ */
+    f_IMS_MTCallSetup_Receive180Ringing(p_InviteRequestWithSdp, -, v_PreconditionsRequired);  /* @sic R5s210423: v_PreconditionsRequired sic@ */
+  }
+
+  /*
+   * @desc      34.229-5 A.5.2a Step 2 - 10: MT call establishment without preconditions and without the initial INVITE
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_10(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  { /* @sic R5-235322: p_EvsConfiguration sic@ */
+    /* @sic R5-246481: p_EvsConfiguration removed sic@ */
+    f_IMS_MTCallSetup_NR5GC_A_5_2a_Step2_8(p_InviteRequestWithSdp);
+    f_IMS_MTCallSetup_AcceptAndAcknowledge(p_InviteRequestWithSdp);
+  }
+
+  /*
+   * @desc      Common postamble for IMS over NR5GC call control test cases:
+   *            Release of the call followed by generic postamble procedure
+   * @param     p_TestProcedure
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_PostambleWithCallReleaseMT(IMS_TestProcedure_Type p_TestProcedure) runs on IMS_PTC
+  {
+    var SipUrl v_ContactUrlUE;                                  /* @sic R5s240273, R5s240232 sic@ */
+
+    if (f_IMS_PTC_ImsInfo_DialogIsEstablished()) {              /* @sic R5s240232: call release only if the call has been established sic@ */
+
+      v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+
+      f_Delay(2.0);      // keep the call for some time
+
+      f_IMS_CallReleaseMT(v_ContactUrlUE);
+    }
+    f_IMS_CC_Postamble(p_TestProcedure);
+  }
+
+}

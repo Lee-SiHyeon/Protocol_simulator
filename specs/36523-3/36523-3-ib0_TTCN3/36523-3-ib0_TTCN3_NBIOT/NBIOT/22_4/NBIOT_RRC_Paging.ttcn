@@ -1,0 +1,1345 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-12 15:37:11 +0200 (Thu, 12 Jun 2025) $
+// $Rev: 41486 $
+/******************************************************************************/
+
+module NBIOT_RRC_Paging {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from LoopbackIP all;
+  import from NAS_CommonTemplates all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_LoopBack all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Paging all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SysInfo_Templates all;
+  import from NBIOT_Timing all;
+  import from UpperTesterFunctions all;
+
+  template (value) PagingRecordList_NB_r13 cs_NB_Paging_ThreeRecords(template (value) EUTRA_ASN1_PagingUE_Identity_Type p_PagingUE_Identity1,
+                                                                     template (value) EUTRA_ASN1_PagingUE_Identity_Type p_PagingUE_Identity2,
+                                                                     template (value) EUTRA_ASN1_PagingUE_Identity_Type p_PagingUE_Identity3) :=
+  { /* @status    APPROVED (NBIOT) */
+    cs_NB_PagingRecord(p_PagingUE_Identity1),
+    cs_NB_PagingRecord(p_PagingUE_Identity2),
+    cs_NB_PagingRecord(p_PagingUE_Identity3)
+  };
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.1
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_1_NBIOT() runs on NBIOT_PTC
+  { // NB-IoT / Paging for notification of BCCH modification in idle mode / eDRX cycle longer than the modification period @sic R5-170708 R5s170460 sic@
+    var template (value) SystemInformationBlockType2_NB_r13 v_SIB2;
+    var NB_DefaultPagingCycle_Type v_PagingCycle := rf256;
+    var SystemInformationBlockType2_NB_r13.radioResourceConfigCommon_r13.bcch_Config_r13.modificationPeriodCoeff_r13 v_ModificationPeriod := n16;
+    var NB_SYSTEM_IND v_NB_SYSTEM_IND;
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var GutiParameters_Type v_GutiParams;
+    var EPS_BearerIdentity v_EpsDefaultBearerId := tsc_EpsDefaultBearerId;
+    var float v_WaitForNext_eDRX_Acquisition;
+    var SubFrameTiming_Type v_CurrentTime;
+    var integer v_HSFN_Gap;
+    var NB_Paging_SystemInfoModification_eDRX_Type v_SystemInfoModification_eDRX_r13 := true_;
+    
+    var template (value) NPRACH_ParametersList_NB_r13 v_NPRACH_ParametersList_NB := {
+      cs_NPRACH_Parameters_Default(-, -, n24) // Table 22.4.1.3.3-7: nprach-SubcarrierOffset-r13=24
+    };
+    var template (value) NPRACH_ConfigSIB_NB_r13 v_NPRACH_ConfigSIB := cs_508_NPRACH_ConfigSIB_NB(-, v_NPRACH_ParametersList_NB);
+    
+    var template (value) NPRACH_ParametersList_NB_r13 v_NPRACH_ParametersList_NB_Step15 := {
+      cs_NPRACH_Parameters_Default(-, -, n12) // Table 22.4.1.3.3-9: nprach-SubcarrierOffset-r13=12
+    };
+    
+    f_NBIOT_Init(c1); /* @sic R5-237126/R5-236913 sic@ */
+    
+    // Get SIB2 to modify system information on Preamble and set acc. to Table 22.4.1.3.3-2
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(nbiot_Cell1);
+    v_SIB2.radioResourceConfigCommon_r13.bcch_Config_r13.modificationPeriodCoeff_r13 := v_ModificationPeriod;
+    v_SIB2.radioResourceConfigCommon_r13.pcch_Config_r13.defaultPagingCycle_r13 := v_PagingCycle;
+    f_NBIOT_CellInfo_SetSIB2(nbiot_Cell1, v_SIB2);
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    f_UT_SwitchOnUE(UT, false, CNF_REQUIRED); // @sic R5s180153 sic@
+    f_UT_ConfigureEDRX(UT, true, -, CNF_REQUIRED); // @sic R5-176154 sic@
+    f_UT_SwitchOffUE(UT, false, CNF_REQUIRED); // @sic R5s180153 sic@
+
+    //Bring UE to initial state
+    // First switch cell back on
+    f_NBIOT_SetCellPower(nbiot_Cell1, tsc_ServingCellRS_EPRE);
+    // Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+      
+    if(pc_NB_ntn_only_Connectivity_EPC)
+    {//@sic R5s240281, R5w240103 sic@
+      //The preconfigured UE location is defined in TS 36.508 [18] Clause 4.13.
+      f_NBIOT_PreconfigureNTN_UE();
+    }
+
+    // Now continue with steps 1-12 of UE Registration acc. to 36.508 cl. 8.1.5.2 handling Attach Accept parameters for eDRX
+    v_NAS_Ind := f_NBIOT_InitialRegistration_Step2_4(nbiot_Cell1, CONTROL_PLANE, PREAMBLE);
+    f_NBIOT_InitialRegistration_Step5_12(nbiot_Cell1, CONTROL_PLANE, STATE3_NB_IDLEUPDATED, v_NAS_Ind);
+    
+    //Step 13 of UE Registration acc. to 36.508 cl. 8.1.5.2
+    f_NBIOT_InitialRegistration_Step13(nbiot_Cell1,
+                                       CONTROL_PLANE,
+                                       v_NAS_Ind,
+                                       -,
+                                       omit,
+                                       omit,
+                                       omit,
+                                       omit,
+                                       cs_GprsTimer_v_deact,
+                                       omit,
+                                       omit,
+                                       omit,
+                                       omit,
+                                       omit,
+                                       cs_EDRXParams('0001'B, '0101'B)); // @sic R5s170597 sic@
+    
+    //36.508 cl. 8.1.5.2 Step14 - NAS ATTACH COMPLETE Rx
+    f_NBIOT_NAS_AttachComplete_CP(nbiot_Cell1, v_EpsDefaultBearerId); // @sic R5s170597 sic@
+    
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1);
+    f_NBIOT_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, enable);
+    // The SS changes nprach-SubcarrierOffset-r13 in SystemInformationBlockType2-NB
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(nbiot_Cell1);
+    v_SIB2.radioResourceConfigCommon_r13.nprach_Config_r13 := v_NPRACH_ConfigSIB;
+    f_NBIOT_CellInfo_SetSIB2(nbiot_Cell1, v_SIB2);
+    f_NBIOT_SS_CommonCellConfig(nbiot_Cell1, cas_NB_CellConfig_UpdatePRACH_Info_REQ(nbiot_Cell1, cs_TimingInfo_Now, -, v_NPRACH_ConfigSIB));
+    
+    //@siclog "Step 2" siclog@
+    //The SS transmits a Paging message including IE systemInfoModification-eDRX-r13 in a valid PO within the PTW of the next upcoming UE's PH as per Idle eDRX.
+    f_NBIOT_ModifySysinfo_eDRX(nbiot_Cell1,
+                               5,  // eDRX index value
+                               v_SystemInfoModification_eDRX_r13); //set true acc. to TS36.523-1 Table 22.4.1.3.3-4
+    
+    //@siclog "Step 3" siclog@
+    //Wait till the beginning of next eDRX acquisition time (next H-SFN for which H-SFN mod 1024 =0)
+    v_CurrentTime := f_NBIOT_GetCurrentTiming(nbiot_Cell1);
+    v_HSFN_Gap := 1024 - (v_CurrentTime.HSFN.Number mod 1024); // calculate HSFNs left to reach HSFN mod 1024
+    v_WaitForNext_eDRX_Acquisition := (int2float(v_HSFN_Gap) * 10.24) - (int2float(v_CurrentTime.SFN.Number + 1) * 0.01); // reduce by SFNs already elapsed + 1
+    f_Delay(v_WaitForNext_eDRX_Acquisition);
+    
+    //@siclog "Step 4" siclog@
+    //After Step 3, wait for 10s for the UE to acquire the new system information
+    f_Delay(10.0);
+    
+    v_GutiParams := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+    //@siclog "Step 5" siclog@
+    //The SS transmits a Paging-NB message including a matched identity in a valid PO within the PTW of the next upcoming UE's PH as per Idle eDRX
+    f_NBIOT_UE_Page_eDRX(nbiot_Cell1,
+                         cs_NB_Paging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_GutiParams.MME_Code, v_GutiParams.M_TMSI)),
+                         5);  // eDRX index value
+    
+    //@siclog "Step 6" siclog@
+    // Check: Does the UE transmit a random access using nprach-SubcarrierOffset-r13 given in step 1?
+    SYSIND.receive(car_NB_RachPreamble_IND(nbiot_Cell1)) -> value v_NB_SYSTEM_IND;
+    if ((v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID mod 64) < 24 or (v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID mod 64) >(24 +12)) {
+      //acc. to 36.321 clause 6.2.2 "For NB-IoT, the Random Access Preamble IDentifier field corresponds to the start subcarrier index"
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 6: No RACH according to nprach-SubcarrierOffset-r13 given in step 1");
+    }
+    else {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    }
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, disable);
+    
+    //@siclog "Step 7-10" siclog@
+    //Steps 2-5 of the generic procedure 8.1.5A.2 specified in TS 36.508 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess_Step2_5(nbiot_Cell1);
+    
+    //@siclog "Step 11" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message.
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 12" siclog@
+    //Wait for 5 seconds
+    f_Delay(5.0);
+    
+    //@siclog "Step 13" siclog@
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, enable);
+    // The SS changes nprach-SubcarrierOffset-r13 in SystemInformationBlockType2-NB
+    v_NPRACH_ConfigSIB := cs_508_NPRACH_ConfigSIB_NB(-, v_NPRACH_ParametersList_NB_Step15);
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(nbiot_Cell1);
+    v_SIB2.radioResourceConfigCommon_r13.nprach_Config_r13 := v_NPRACH_ConfigSIB;
+    f_NBIOT_CellInfo_SetSIB2(nbiot_Cell1, v_SIB2);
+    f_NBIOT_SS_CommonCellConfig(nbiot_Cell1, cas_NB_CellConfig_UpdatePRACH_Info_REQ(nbiot_Cell1, cs_TimingInfo_Now, -, v_NPRACH_ConfigSIB));
+    
+    //@siclog "Step 14" siclog@
+    // The SS indicates a systemInfoModification using Direct Indication Information with bit 2 set as 1
+    v_CurrentTime := f_NBIOT_ModifySysinfo(nbiot_Cell1, false); // Send Paging message in next step
+    f_NBIOT_UE_PageSysinfoMod(nbiot_Cell1,  // @sic R5s170949 Ch. 3 sic@
+                              v_CurrentTime,
+                              omit,
+                              true_,
+                              '00000010'B,
+                              5); // Direct Indication SystemInfoModification see TS36.331 Table 6.7.5-1: Direct Indication information
+    
+    //@siclog "Step 15" siclog@
+    //Wait till the beginning of next eDRX acquisition time (next H-SFN for which H-SFN mod 1024 =0).
+    v_CurrentTime := f_NBIOT_GetCurrentTiming(nbiot_Cell1);
+    v_HSFN_Gap := 1024 - (v_CurrentTime.HSFN.Number mod 1024); // calculate HSFNs left to reach HSFN mod 1024
+    v_WaitForNext_eDRX_Acquisition := (int2float(v_HSFN_Gap) * 10.24) - (int2float(v_CurrentTime.SFN.Number + 1) * 0.01); // reduce by SFNs already elapsed + 1
+    f_Delay(v_WaitForNext_eDRX_Acquisition);
+    
+    //@siclog "Step 16" siclog@
+    //After Step 15, wait for 10s for the UE to acquire the new system information
+    f_Delay(10.0); // @sic R5-174311 sic@
+    
+    //@siclog "Step 17" siclog@
+    //The SS transmits a Paging-NB message including a matched identity in a valid PO within the PTW of the next upcoming UE's PH as per Idle eDRX
+    f_NBIOT_UE_Page_eDRX(nbiot_Cell1,
+                         cs_NB_Paging_OneRecord(cs_PagingUE_Identity_S_TMSI(v_GutiParams.MME_Code, v_GutiParams.M_TMSI)),
+                         5);  // eDRX index value
+    
+    
+    //@siclog "Step 18" siclog@
+    //Check: Does the UE transmit a random access using nprach-SubcarrierOffset-r13 given in step 13?
+    SYSIND.receive(car_NB_RachPreamble_IND(nbiot_Cell1)) -> value v_NB_SYSTEM_IND;
+    if ((v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID mod 64) < 12 or (v_NB_SYSTEM_IND.Indication.RachPreamble.RAPID mod 64) >(12 +12)) {
+      //acc. to 36.321 clause 6.2.2 "For NB-IoT, the Random Access Preamble IDentifier field corresponds to the start subcarrier index"
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 18: No RACH according to nprach-SubcarrierOffset-r13 given in step 13");
+    }
+    else {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 18");
+    }
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, disable);
+    
+    //@siclog "Step 19-22" siclog@
+    //Steps 2-5 of the generic procedure 8.1.5A.2 specified in TS 36.508 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess_Step2_5(nbiot_Cell1);
+    
+    //@siclog "Step 23" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message.
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.2
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_2_NBIOT() runs on NBIOT_PTC
+  {
+    var float v_WaitForConnection;
+    var boolean v_Rxd_RRCConnReq := false;
+    var GutiParameters_Type v_GutiParameters;
+    var EUTRA_ASN1_S_TMSI_Type v_S_TmsiDiff;
+    
+    f_NBIOT_Init(c1);
+    
+    // This updates SIB1 as per specific message contents
+    // Want to page the UE with GUTI of HPLMN
+    f_NBIOT_CellInfo_SetPLMN_2Entries (nbiot_Cell1, cs_HPLMN_001_02, cs_HPLMN_Def, 1); // @sic R5-171408 sic@
+    f_NBIOT_CellInfo_SetSelectedPlmnIndex (nbiot_Cell1, 2); //  This value is checked in the RRC Conn Setup Complete message @sic R5-171408, R5s170287 sic@
+    
+    v_GutiParameters := f_NBIOT_CellInfo_GetGuti(nbiot_Cell1);
+
+    v_S_TmsiDiff := f_CreateNewS_Tmsi({v_GutiParameters.MME_Code, v_GutiParameters.M_TMSI});
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    //@siclog "Step 1-2" siclog@
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);  // @sic R5-171408 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    //@siclog "Step 3" siclog@
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 4" siclog@
+    f_NBIOT_UE_Page(nbiot_Cell1, cs_NB_Paging_ThreeRecords(cs_PagingUE_Identity_S_TMSI(v_S_TmsiDiff.mmec, v_S_TmsiDiff.m_TMSI),
+                                                           cs_PagingUE_Identity_S_TMSI(v_S_TmsiDiff.mmec, v_S_TmsiDiff.m_TMSI),
+                                                           cs_PagingUE_Identity_S_TMSI(v_S_TmsiDiff.mmec, v_S_TmsiDiff.m_TMSI)));
+    
+    //@siclog "Step 5" siclog@
+    v_WaitForConnection := f_NBIOT_SetTimerToleranceMax(rrcTimer, 10.0);
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell1, v_WaitForConnection);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+    }
+    
+    //@siclog "Step 6" siclog@
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1, cs_NB_Paging_ThreeRecords(cs_PagingUE_Identity_S_TMSI(v_S_TmsiDiff.mmec, v_S_TmsiDiff.m_TMSI),
+                                                                                            cs_PagingUE_Identity_S_TMSI(v_S_TmsiDiff.mmec, v_S_TmsiDiff.m_TMSI),
+                                                                                            cs_PagingUE_Identity_S_TMSI(v_GutiParameters.MME_Code, v_GutiParameters.M_TMSI)));
+    
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    
+    //@siclog "Step 7" siclog@
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.4
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_4_NBIOT() runs on NBIOT_PTC
+  { //NB-IoT / RRC connection establishment / Paging / Access Barring for UE with AC 0 to 9 / ab-Category a, b and c
+    
+    var integer v_WaitTime := 30;
+    var integer v_DelayLoopbackDataTime := 15; // @sic R5-177052 sic@
+    var float v_WaitForConnection := f_NBIOT_SetTimerToleranceMax(rrcTimer, int2float(v_WaitTime));
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell1;
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell12;
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell13;
+    var boolean v_Rxd_RRCConnReq := false;
+    var octetstring v_UserData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT1 := { // @sic R5s170462, R5-174644 sic@
+      cs_NB_CellPower(nbiot_Cell1, tsc_NonSuitableOffNBIOTCellRS_EPRE),
+      cs_NB_CellPower(nbiot_Cell12, -85),
+      cs_NB_CellPower(nbiot_Cell13, -120)
+    };
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT2 := { // @sic R5s170462, R5-174644 sic@
+      cs_NB_CellPower(nbiot_Cell1, -85),
+      cs_NB_CellPower(nbiot_Cell12, -120),
+      cs_NB_CellPower(nbiot_Cell13, tsc_NonSuitableOffNBIOTCellRS_EPRE)
+    };
+    var float v_ModificationPeriod_s; // @sic R5-206438 sic@
+    timer t_Wait;
+
+    f_NBIOT_Init(c4, -, -, -, {nbiot_Cell12, nbiot_Cell13}); //@sic R5-235333, R5-237126, R5-236913 sic@
+
+    //Get ModificationPeriod
+    v_ModificationPeriod_s := int2float(f_NB_CalculateModificationPeriod (nbiot_Cell1))/100.0; // @sic R5-206438 sic@
+
+    //Set Sys info and cell info for Ncell 1, 12 & 13 to be used
+    f_NBIOT_CellInfo_SetPLMN_1Entry(nbiot_Cell12, cs_HPLMN_001_11);  //PLMN1
+    f_NBIOT_CellInfo_SetPLMN_1Entry(nbiot_Cell13, cs_HPLMN_001_21);  //PLMN2
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell12, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell13, CONTROL_PLANE);
+    
+    //Equip UE with a USIM containing default values except for those shown in Table 22.4.4.3.1-2.
+    f_UT_USIM_Insert(UT, "36.523-1 Table 22.4.4.3.1-2. USIM must be configured for Access Class 0");
+
+    //Make sure the UE is in automatic PLMN selection mode
+    f_UT_AutomaticPLMN_Select_WithSwitchOnOff (UT);    //@sic R5s180214 sic@
+
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell13, CONTROL_PLANE, STATE2A_NB_TESTLOOP_ModeG);
+
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell13, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+
+    f_NBIOT_TestBody_Set(true);
+
+    //@siclog "Step 1" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell13);
+
+    //@siclog "Step 2" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 13 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 13 with ab-Category set to 'c'?
+    v_SIB14_Cell13 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell13);
+    v_SIB14_Cell13.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(c, '1000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell13, v_SIB14_Cell13);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell13, true);
+
+    //@siclog "Step 3" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell13, true, false);
+
+    //@siclog "Step 4" siclog@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    f_Delay(2.1 * v_ModificationPeriod_s); // @sic R5-206438 sic@
+
+    //@siclog "Step 5" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell13);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    //@siclog "Step 6" siclog@
+    //The SS transmits one IP packet to the UE embedded in a ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell13,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170462 sic@
+
+    //@siclog "Step 7" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+
+    //@siclog "Step 8" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell13);
+
+    //@siclog "Step 9" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 13 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell13, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 9");
+    }
+
+    //@siclog "Step 10" siclog@
+    //SS adjusts cell levels according to row T1 of table 22.4.4.3.2-1
+    f_NBIOT_SetCellPowerList(v_CellPowerList_AtT1);  // @sic R5s170462, R5-174644 sic@
+    
+    //@siclog "Step 11" siclog@
+    //Steps 1 to 5 of Generic test procedure in TS 36.508 subclause 8.1.5A.5 takes place on Ncell 12.
+    //NOTE: The UE performs a TAU procedure.
+    f_NBIOT_TrackingAreaUpdate_Step1_5(nbiot_Cell12, CONTROL_PLANE);
+
+    //@siclog "Step 12" siclog@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+
+    //EXCEPTION: Steps 13a1 to 13b1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens
+    //Note 2: A UE may send the pending data sent at step 6
+    alt {
+      //@siclog "Step 13a1" siclog@
+      //The UE transmits one IP packet embedded in a ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell12,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 13b1" siclog@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 14" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 15" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 12 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 12 with ab-Category set to 'c'?
+    v_SIB14_Cell12 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell12);
+    v_SIB14_Cell12.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(c, '1000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell12, v_SIB14_Cell12);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell12, true);
+    
+    //@siclog "Step 16" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell12, true, false);
+    
+    //@siclog "Step 17" siclog@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    f_Delay(2.1 * v_ModificationPeriod_s); // @sic R5-206438 sic@
+    
+    //@siclog "Step 18" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell12);
+    
+    //@siclog "Step 18A - 18B" siclog@
+    //@sic R5-174644 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell12, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 19" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell12,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170462 sic@
+    
+    //@siclog "Step 20" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 21" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 22" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 12 with establishmentCause-r13 set to mo-Data?
+    //@siclog "Step 23 - 25" siclog@
+    //Steps 2 to 4 of the 'Generic Test Procedure NB-IoT Control Plan CIoT MO user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3.3  are performed
+    //NOTE: The UE will transmit one ESM DATA TRANSPORT message containing loopback data received in step 19.
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer(nbiot_Cell12, cr_UserDataContainer, mo_Data);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 22 - 25");
+
+    //@siclog "Step 26" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 27" siclog@
+    //SS adjusts SystemInformationBlockType14-NB of Ncell 12 with ab-Category set to 'b'
+    v_SIB14_Cell12.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(b, '1000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell12, v_SIB14_Cell12);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell12, false);
+    
+    //@siclog "Step 27A" siclog@
+    //Wait for 1.28 seconds (Note 5) to allow the new system information to take effect.
+    f_Delay(1.28);  // @sic R5-194248, R5s190174, R5-206438 sic@
+
+    //@siclog "Step 28" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell12);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 28");
+
+    //@siclog "Step 28A - 28B" siclog@
+    //@sic R5-174644 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell12, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+
+    //@siclog "Step 29" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell12,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170462 sic@
+    
+    //@siclog "Step 30" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+
+    //@siclog "Step 31" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 32" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 12 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell12, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 32");
+    }
+    
+    //@siclog "Step 33" siclog@
+    //SS adjusts cell levels according to row T2 of table 22.4.4.3.2-1
+    f_NBIOT_SetCellPowerList(v_CellPowerList_AtT2);
+    
+    //@siclog "Step 34" siclog@
+    //Generic test procedure in TS 36.508 subclause 8.1.5A.5 to take place on Ncell 1.
+    //NOTE: The UE performs a TAU procedure
+    f_NBIOT_TrackingAreaUpdate_Step1_5(nbiot_Cell1, CONTROL_PLANE);
+    
+    //@siclog "Step 35" siclog@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+    
+    //EXCEPTION: Steps 36a1 to 36b1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens
+    //Note 3: A UE may send the pending data sent at step 29
+    alt {
+      //@siclog "Step 36a1" siclog@
+      //The UE transmits one IP packet embedded in a  ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 36b1" siclog@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 37" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 38" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 1 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 1 with ab-Category set to 'b'?
+    v_SIB14_Cell1 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell1);
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(b, '1000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell1, true);
+    
+    //@siclog "Step 39" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell1, true, false); // @sic R5s170462 sic@
+    
+    //@siclog "Step 40" siclog@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    f_Delay(2.1 * v_ModificationPeriod_s); // @sic R5-206438 sic@
+    
+    //@siclog "Step 41" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3  are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+
+    //@siclog "Step 41A - 41B" siclog@
+    //@sic R5-174644 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 42" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170462 sic@
+    
+    //@siclog "Step 43" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 44" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 45" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 1 with establishmentCause-r13 set to mo-Data?
+    //@siclog "Step 46 - 48" siclog@
+    //Steps 2 to 4 of the 'Generic Test Procedure NB-IoT Control Plan CIoT MO user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3.3  are performed
+    //NOTE: The UE will transmit one ESM DATA TRANSPORT message containing loopback data received in step 43.
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer(nbiot_Cell1, cr_UserDataContainer, mo_Data);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 45 - 48");
+    
+    //@siclog "Step 49" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+
+    //@siclog "Step 50" siclog@
+    //SS adjusts SystemInformationBlockType14-NB of Ncell 1 with ab-Category set to 'a'
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(a, '1000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell1, false);
+
+    //@siclog "Step 50A" siclog@
+    //Wait for 1.28 seconds (Note 5) to allow the new system information to take effect.
+    f_Delay(1.28);  // @sic R5-194248, R5s190174, R5-206438 sic@
+
+    //@siclog "Step 51" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 51");
+
+    //@siclog "Step 51A - 51B" siclog@
+    //@sic R5-174644 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+
+    //@siclog "Step 52" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170462 sic@
+    
+    //@siclog "Step 53" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+
+    //@siclog "Step 54" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+
+    //@siclog "Step 55" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 1 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell1, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 55");
+    }
+
+    //@siclog "Step 56" siclog@
+    //@sic R5-174644 sic@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed (Note 4)
+    //Note 4: A UE may send the pending data sent at step 52
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+
+    //@siclog "Step 56A" siclog@
+    //@sic R5-185017 sic@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+
+    //@sic R5-185017 sic@
+    //EXCEPTION: Steps 56Ba1 to 56Bb1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens (Note 4)
+    //Note 4: A UE may send the pending data sent at step 52
+    alt {
+      //@siclog "Step 56Ba1" siclog@
+      //The UE transmits one IP packet embedded in a  ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 56Bb1" siclog@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+
+    //@siclog "Step 57" siclog@
+    //@sic R5-174644 sic@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+
+    f_NBIOT_TestBody_Set(false);
+    
+    // Now change SIB14 to allow UE to detach on this cell @sic R5s170462 sic@
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(a, '0000000000'B, omit, '00000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell1, false);
+
+    //Wait for 1.28 seconds for UE to read updated SIB14
+    f_Delay(1.28); //@sic R5s191060 sic@
+
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.5
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_5_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT / RRC connection establishment / Paging / Access Barring for UE with AC 11 to 15 / ab-Category a, b and c */
+    var integer v_WaitTime := 30;
+    var integer v_DelayLoopbackDataTime := 15; // @sic R5-177055 sic@
+    var float v_WaitForConnection := f_NBIOT_SetTimerToleranceMax(rrcTimer, int2float(v_WaitTime));
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell1;
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell12;
+    var template (value) SystemInformationBlockType14_NB_r13 v_SIB14_Cell13;
+    var boolean v_Rxd_RRCConnReq := false;
+    var octetstring v_UserData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT1 := { // @sic R5s170488, R5-174645 sic@
+      cs_NB_CellPower(nbiot_Cell1, tsc_NonSuitableOffNBIOTCellRS_EPRE),
+      cs_NB_CellPower(nbiot_Cell12, -85),
+      cs_NB_CellPower(nbiot_Cell13, -120)
+    };
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT2 := { // @sic R5s170488, R5-174645 sic@
+      cs_NB_CellPower(nbiot_Cell1, -85),
+      cs_NB_CellPower(nbiot_Cell12, -120),
+      cs_NB_CellPower(nbiot_Cell13, tsc_NonSuitableOffNBIOTCellRS_EPRE)
+    };
+    var float v_ModificationPeriod_s; // @sic R5-204527 sic@
+    timer t_Wait;
+
+    f_NBIOT_Init(c4, -, -, -, {nbiot_Cell12, nbiot_Cell13}); //@sic R5-235333, R5-237126, R5-236913 sic@
+
+    //Get ModificationPeriod
+    v_ModificationPeriod_s := int2float(f_NB_CalculateModificationPeriod (nbiot_Cell1))/100.0; // @sic R5-204527 sic@
+    
+    //Set Sys info and cell info for Ncell 1, 12 & 13 to be used
+    f_NBIOT_CellInfo_SetPLMN_1Entry(nbiot_Cell12, cs_HPLMN_001_11);  //PLMN1
+    f_NBIOT_CellInfo_SetPLMN_1Entry(nbiot_Cell13, cs_HPLMN_001_21);  //PLMN2
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell12, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell13, CONTROL_PLANE);
+    
+    //Equip UE with a USIM containing default values except for those shown in Table 22.4.5.3.1-2.
+    f_UT_USIM_Insert(UT, "36.523-1 Table 22.4.5.3.1-2. USIM must be configured for Access Class 0, special access class 11 and 15"); // @sic R5-206438 sic@
+
+    //Make sure the UE is in automatic PLMN selection mode
+    f_UT_AutomaticPLMN_Select_WithSwitchOnOff (UT);    //@sic R5s180214 sic@
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell13, CONTROL_PLANE, STATE2A_NB_TESTLOOP_ModeG);
+    
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell13, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell13);
+    
+    //@siclog "Step 2" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 13 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 13 with ab-Category set to 'c'?
+    v_SIB14_Cell13 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell13);
+    v_SIB14_Cell13.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(c, '1000000000'B, omit, '10001'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell13, v_SIB14_Cell13);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell13, true);
+    
+    //@siclog "Step 3" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell13, true, false);
+    
+    //@siclog "Step 4" siclog@
+    //@sic R5-204527 sic@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    //The wait time of 2.1* modification period in is to allow for the network to paging the system information change during the next modification period, and update the system information at the subsequent modification period. UE should acquire the updated system information within 90ms of the start of modification period
+    f_Delay(2.1 * v_ModificationPeriod_s);
+    
+    //@siclog "Step 5" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell13);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    //@siclog "Step 6" siclog@
+    //The SS transmits one IP packet to the UE embedded in a ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell13,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 7" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 8" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell13);
+    
+    //@siclog "Step 9" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 13 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell13, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 9");
+    }
+    
+    //@siclog "Step 10" siclog@
+    //SS adjusts cell levels according to row T1 of table 22.4.5.3.2-1.
+    f_NBIOT_SetCellPowerList(v_CellPowerList_AtT1); // @sic R5s170488, R5-174645 sic@
+    
+    //@siclog "Step 11" siclog@
+    //Steps 1 to 5 of Generic test procedure in TS 36.508 subclause 8.1.5A.5 takes place on Ncell 12.
+    //NOTE: The UE performs a TAU procedure.
+    f_NBIOT_TrackingAreaUpdate_Step1_5(nbiot_Cell12, CONTROL_PLANE);
+    
+    //@siclog "Step 12" siclog@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+    
+    //EXCEPTION: Steps 13a1 to 13b1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens
+    //Note 2: A UE may send the pending data sent at step 6
+    alt {
+      //@siclog "Step 13a1" siclog@
+      //The UE transmits one IP packet embedded in a ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell12,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 13b1" siclog@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 14" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 15" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 12 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 12 with ab-Category set to 'c'?
+    v_SIB14_Cell12 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell12);
+    v_SIB14_Cell12.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(c, '1000000000'B, omit, '10001'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell12, v_SIB14_Cell12);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell12, true);
+    
+    //@siclog "Step 16" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell12, true, false);
+    
+    //@siclog "Step 17" siclog@
+    //@sic R5-204527 sic@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    //The wait time of 2.1* modification period in is to allow for the network to paging the system information change during the next modification period, and update the system information at the subsequent modification period. UE should acquire the updated system information within 90ms of the start of modification period
+    f_Delay(2.1 * v_ModificationPeriod_s);
+    
+    //@siclog "Step 18" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell12);
+
+    //@siclog "Step 18A - 18B" siclog@
+    //@sic R5-174645 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell12, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 19" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell12,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 20" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 21" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 22" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 12 with establishmentCause-r13 set to mo-Data?
+    //@siclog "Step 23 - 25" siclog@
+    //Steps 2 to 4 of the 'Generic Test Procedure NB-IoT Control Plan CIoT MO user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3.3  are performed
+    //NOTE: The UE will transmit one ESM DATA TRANSPORT message containing loopback data received in step 19.
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer(nbiot_Cell12, cr_UserDataContainer, mo_Data);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 22 - 25");
+    
+    //@siclog "Step 26" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 27" siclog@
+    //SS adjusts SystemInformationBlockType14-NB of Ncell 12 with ab-Category set to 'b'
+    v_SIB14_Cell12.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(b, '1000000000'B, omit, '10001'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell12, v_SIB14_Cell12);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell12, false);
+    
+    //@siclog "Step 27A" siclog@
+    //@sic R5-194249, R5s190175, R5-204527 sic@
+    //Wait for 1.28 seconds (Note 5) to allow the new system information to take effect
+    //The 1.28 seconds (2* SIB14 schedule periodicity) delay is used to ensure that updated SIB 14 is transmitted.
+    f_Delay(1.28);
+
+    //@siclog "Step 28" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell12);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 28");
+
+    //@siclog "Step 28A - 28B" siclog@
+    //@sic R5-174645 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell12, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+
+    //@siclog "Step 29" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell12,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 30" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 31" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell12);
+    
+    //@siclog "Step 32" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 12 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell12, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 32");
+    }
+    
+    //@siclog "Step 33" siclog@
+    //SS adjusts cell levels according to row T2 of table 22.4.5.3.2-1
+    f_NBIOT_SetCellPowerList(v_CellPowerList_AtT2);
+
+    //@siclog "Step 34" siclog@
+    //Steps 1 to 5 of Generic test procedure in TS 36.508 subclause 8.1.5A.5 to takes place on Ncell 1.
+    //NOTE: The UE performs a TAU procedure
+    f_NBIOT_TrackingAreaUpdate_Step1_5(nbiot_Cell1, CONTROL_PLANE);
+    
+    //@siclog "Step 35" siclog@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+    
+    //EXCEPTION: Steps 36a1 to 36b1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens
+    //Note 3: A UE may send the pending data sent at step 29
+    alt {
+      //@siclog "Step 36a1" siclog@
+      //The UE transmits one IP packet embedded in a  ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 36b1" siclog@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 37" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 38" siclog@
+    //SS adjusts MasterInformationBlock-NB of Ncell 1 with ab-Enabled-r13 set to TRUE and SystemInformationBlockType14-NB of Ncell 1 with ab-Category set to 'b'?
+    v_SIB14_Cell1 := f_NBIOT_CellInfo_GetSIB14(nbiot_Cell1);
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(b, '1000000000'B, omit, '10001'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_CellInfo_SetAB_Enabled(nbiot_Cell1, true);
+    
+    //@siclog "Step 39" siclog@
+    //The SS notifies the UE of change of System Information
+    f_NBIOT_ModifySysinfo(nbiot_Cell1, true, false); // @sic R5s170488 sic@
+    
+    //@siclog "Step 40" siclog@
+    //@sic R5-204527 sic@
+    //Wait for 2.1* modification period (Note 6) to allow the new system information to take effect.
+    //The wait time of 2.1* modification period in is to allow for the network to paging the system information change during the next modification period, and update the system information at the subsequent modification period. UE should acquire the updated system information within 90ms of the start of modification period
+    f_Delay(2.1 * v_ModificationPeriod_s);
+    
+    //@siclog "Step 41" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3  are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+
+    //@siclog "Step 41A - 41B" siclog@
+    //@sic R5-174645 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 42" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 43" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 44" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 45" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 1 with establishmentCause-r13 set to mo-Data?
+    //@siclog "Step 46 - 48" siclog@
+    //Steps 2 to 4 of the 'Generic Test Procedure NB-IoT Control Plan CIoT MO user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3.3  are performed
+    //NOTE: The UE will transmit one ESM DATA TRANSPORT message containing loopback data received in step 43.
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer(nbiot_Cell1, cr_UserDataContainer, mo_Data);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 45 - 48");
+    
+    //@siclog "Step 49" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 50" siclog@
+    //SS adjusts SystemInformationBlockType14-NB of Ncell 1 with ab-Category set to 'a'
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(a, '1000000000'B, omit, '10001'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell1, false);
+
+    //@siclog "Step 50A" siclog@
+    //@sic R5-194249, R5s190175, R5-204527 sic@
+    //Wait for 1.28 seconds (Note 5) to allow the new system information to take effect
+    //The 1.28 seconds (2* SIB14 schedule periodicity) delay is used to ensure that updated SIB 14 is transmitted.
+    f_Delay(1.28);
+    
+    //@siclog "Step 51" siclog@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 51");
+
+    //@siclog "Step 51A - 51B" siclog@
+    //@sic R5-174645 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 52" siclog@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 53" siclog@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 54" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 55" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 1 within 30s?
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell1, v_WaitForConnection, mo_Data);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 55");
+    }
+    
+    //@siclog "Step 56" siclog@
+    //@sic R5-172163 sic@
+    //SS adjusts SystemInformationBlockType14-NB of Ncell 1 with a special access class bitmap different from the special access class bitmap set in USIM.
+    v_SIB14_Cell1.ab_Param_r13.ab_Common_r13 := cs_AB_Config_NB(a, '1000000000'B, omit, '10000'B);
+    f_NBIOT_CellInfo_SetSIB14(nbiot_Cell1, v_SIB14_Cell1);
+    f_NBIOT_SS_ConfigureSysinfo(nbiot_Cell1, false);
+    
+    //@siclog "Step 56A" siclog@
+    //@sic R5-196209, R5s190525, R5-203066, R5-204527 sic@
+    //Wait for 1.28 seconds (Note 5) to allow the new system information to take effect
+    //The 1.28 seconds (2* SIB14 schedule periodicity) delay is used to ensure that updated SIB 14 is transmitted.
+    f_Delay(1.28);
+
+    //@siclog "Step 57" siclog@
+    //@sic R5-172163 sic@
+    //'Generic Test Procedure NB-IoT Control Plane CIoT MT user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.2.3 are performed
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+    
+    //@siclog "Step 58" siclog@
+    //@sic R5-172163 sic@
+    //The SS starts timer Timer_1 = 8 s
+    t_Wait.start(8.0);
+    
+    //EXCEPTION: Steps 59a1 to 59b1 describe a transaction that depends on the UE behaviour;
+    //the "lower case letter" identifies a test sequence that takes place if a specific behaviour happens
+    //Note 4: A UE may send the pending data sent at step 52
+    alt {
+      //@siclog "Step 59a1" siclog@
+      //@sic R5-172163 sic@
+      //The UE transmits one IP packet embedded in a  ESM DATA TRANSPORT and  ULInformationTransfer-NB
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell1,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer)))){
+        t_Wait.stop;
+      }
+      //@siclog "Step 59b1" siclog@
+      //@sic R5-172163 sic@
+      //The SS waits for Timer_1 expiry
+      [] t_Wait.timeout{}
+    }
+
+    //@siclog "Step 59A - 59B" siclog@
+    //@sic R5-174645 sic@
+    //The SS transmits a CLOSE UE TEST LOOP message to close the UE test loop mode for user data transfer (15 sec delay).
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback is activated.
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1, tsc_UE_TestLoopMode_TypeG, tsc_TestLoopModeGH_UplinkMode_NAS, 1, v_DelayLoopbackDataTime);
+    
+    //@siclog "Step 60" siclog@
+    //@sic R5-172163 sic@
+    //The SS transmits one IP packet to the UE embedded in a  ESM DATA TRANSPORT and  DLInformationTransfer-NB
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell1,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_ESM_DATA_TRANSPORT(tsc_EpsDefaultBearerId, tsc_PTI_Unassigned, cs_UserDataContainer(v_UserData))))); // @sic R5s170488 sic@
+    
+    //@siclog "Step 61" siclog@
+    //@sic R5-172163 sic@
+    //Wait for 1 s after the IP packet has been transmitted.
+    //Note 1: The 1 second delay is used to secure that the UE have received and forwarded the IP Packet transmitted by the SS to the UE test loop function before the RRCConnectionRelease-NB message is sent by the SS.
+    f_Delay(1.0);
+    
+    //@siclog "Step 62" siclog@
+    //@sic R5-172163 sic@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 63" siclog@
+    //@sic R5-172163 sic@
+    //Check: Does the UE transmit an RRCConnectionRequest-NB message on Ncell 1 with establishmentCause-r13 set to mo-Data?
+    //@siclog "Step 64 - 66" siclog@
+    //@sic R5-172163 sic@
+    //Steps 2 to 4 of the 'Generic Test Procedure NB-IoT Control Plan CIoT MO user data transfer non-SMS transport' as described in TS 36.508 [18], clause 8.1.5A.3.3  are performed
+    //NOTE: The UE will transmit one ESM DATA TRANSPORT message containing loopback data received in step 60.
+    f_NBIOT_508Check_CP_MONonSMSDataTransfer(nbiot_Cell1, cr_UserDataContainer, mo_Data);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 63 - 66");
+    
+    //@siclog "Step 67" siclog@
+    //@sic R5-172163 sic@
+    //The SS transmits an RRCConnectionRelease-NB message
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.6
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_6_NBIOT() runs on NBIOT_PTC
+  {
+    var  SystemInformationBlockType1_NB v_SIB1;
+    var SystemInformationBlockType2_NB_r13 v_SIB2;
+    var SubFrameTiming_Type v_TimeOfPaging;
+    var NPRACH_ConfigSIB_NB_r13 v_NPRACH_Config;
+    var float v_ModificationPeriod_s; // @sic R5-206438 sic@
+    
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1);
+
+    //Get ModificationPeriod
+    v_ModificationPeriod_s := int2float(f_NB_CalculateModificationPeriod (nbiot_Cell1))/100.0; // @sic R5-206438 sic@
+
+    // set systemInfoValueTag in SIB1 to start at 0
+    v_SIB1 := f_NBIOT_CellInfo_GetSIB1(nbiot_Cell1);
+    v_SIB1.systemInfoValueTagList_r13[0] := 0; // @sic R5-170571 sic@
+    f_NBIOT_CellInfo_SetSIB1(nbiot_Cell1, v_SIB1);
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    f_Delay(5.0);
+    
+    //@siclog "Step 2" siclog@
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(nbiot_Cell1);
+    
+    v_SIB1.systemInfoValueTagList_r13[0] := v_SIB1.systemInfoValueTagList_r13[0] + 1;
+    v_NPRACH_Config := v_SIB2.radioResourceConfigCommon_r13.nprach_Config_r13;
+    v_NPRACH_Config.nprach_CP_Length_r13  := us266dot7; // change value
+    v_SIB2.radioResourceConfigCommon_r13.nprach_Config_r13 := v_NPRACH_Config; // update global variable
+    
+    // re-configure SS with new value
+    f_NBIOT_SS_CommonCellConfig(nbiot_Cell1,
+                                cas_NB_CellConfig_UpdatePRACH_Info_REQ(nbiot_Cell1,
+                                                                       cs_TimingInfo_Now,
+                                                                       -,
+                                                                       v_NPRACH_Config));
+    // Store new values of SIBs
+    f_NBIOT_CellInfo_SetSIB1(nbiot_Cell1, v_SIB1);
+    f_NBIOT_CellInfo_SetSIB2(nbiot_Cell1, v_SIB2);
+    
+    // Send modified SIBs
+    v_TimeOfPaging := f_NBIOT_ModifySysinfo(nbiot_Cell1, false); // Send Paging message in next step
+    
+    //@siclog "Step 3" siclog@
+    // Send Paging message with Direct Indication
+    f_NBIOT_UE_PageSysinfoMod(nbiot_Cell1, v_TimeOfPaging, omit, omit, '00000001'B); // Direct Indication SystemInfoModification
+    
+    //@siclog "Step 4" siclog@
+    //Wait for 2.1* modification period (Note 2) to allow the new system information to take effect.
+     f_Delay(2.1 * v_ModificationPeriod_s); // @sic R5-206438 sic@;
+    
+    //@siclog "Step 5" siclog@
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess(nbiot_Cell1);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    //@siclog "Step 6" siclog@
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.4.24
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_4_24_NBIOT() runs on NBIOT_PTC
+  {// NB-IoT / RRC / Paging for connection in idle mode / Non-anchor carrier
+    var float v_WaitForConnection := f_NBIOT_SetTimerToleranceMax(rrcTimer, 10.0);
+    var boolean v_Rxd_RRCConnReq := false;
+    var template (value) SystemInformationBlockType22_NB_r14 v_SIB22;
+    var NB_CarrierFreq_Type v_NB_CarrierFreq;
+    var template (value) NB_NonAnchorCarrierCommonDL_List_Type v_NB_NonAnchorCarrierCommonDL_List;
+    var template (value) DL_ConfigCommon_NB_r14 v_DL_ConfigCommon;
+    var integer v_NonAnchorCarrierId := 1;
+    var integer v_AnchorCarrierId := 0;  //@sic R5s230349 sic@
+    
+    f_NBIOT_Init(c6);//@sic R5-235333, R5s240234 sic@
+
+    v_NB_CarrierFreq := f_NBIOT_CellInfo_GetEARFCN(nbiot_Cell1);
+
+    v_SIB22 := f_NBIOT_CellInfo_GetSIB22(nbiot_Cell1);
+    v_DL_ConfigCommon := cs_DL_ConfigCommon_NB_r14(cs_DL_CarrierConfigCommon_NB_r14(v_NB_CarrierFreq.DL.carrierFreq_r13 + 2, v_0dot5), cs_PCCH_Config_NB_r14(omit, w1)); // @sic R5-196211, R5s190286 sic@
+    v_SIB22.dl_ConfigList_r14 := { v_DL_ConfigCommon };
+    v_SIB22.ul_ConfigList_r14 := omit; // @sic R5-196211, R5s190286 sic@
+    f_NBIOT_CellInfo_SetSIB22(nbiot_Cell1, v_SIB22);
+
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+    v_NB_NonAnchorCarrierCommonDL_List := { cs_NB_NonAnchorCarrierCommonDL(v_NonAnchorCarrierId, v_DL_ConfigCommon) };
+    f_NBIOT_SS_ConfigActiveCellInfo(nbiot_Cell1, cs_TimingInfo_Now, cds_NB_ActiveCellConfig_CarrierConfigCommonDL_Config(v_NB_NonAnchorCarrierCommonDL_List));
+    
+    //Bring UE to initial state
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE, STATE3_NB_IDLEUPDATED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //The SS transmits a Paging-NB message including a matched identity on non-anchor carrier.
+    f_NBIOT_UE_Page(nbiot_Cell1, -, v_NonAnchorCarrierId); // Non-anchor carrier index = 1
+
+    //@siclog "Step 2-5" siclog@
+    //Check: Does the test result of steps 2 to 5 of generic test procedure in TS 36.508 subclause 8.1.5A.2 indicate that the UE successfully responds to Paging for control plane CIoT MT access?
+    f_NBIOT_508Check_CP_ResponseToPagingForMTAccess_Step2_5(nbiot_Cell1);
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    //@siclog "Step 6" siclog@
+    //The SS transmits an RRCConnectionRelease-NB message.
+    f_NBIOT_RRC_ConnectionRelease(nbiot_Cell1);
+    
+    //@siclog "Step 7" siclog@
+    //The SS transmits a Paging-NB message including a matched identity on the anchor carrier.
+    f_NBIOT_UE_Page(nbiot_Cell1, -, v_AnchorCarrierId); //@sic R5s230349 sic@
+    
+    //@siclog "Step 8" siclog@
+    v_Rxd_RRCConnReq := f_NBIOT_RRC_RRCConnectionRequest_Check(nbiot_Cell1, v_WaitForConnection);
+    if (v_Rxd_RRCConnReq) {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 8");
+    }
+        
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N1_IDLE);
+  }
+
+}

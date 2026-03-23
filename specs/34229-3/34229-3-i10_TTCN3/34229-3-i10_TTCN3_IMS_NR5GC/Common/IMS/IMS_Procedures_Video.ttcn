@@ -1,0 +1,325 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-11-25 16:27:20 +0100 (Mon, 25 Nov 2024) $
+// $Rev: 39889 $
+/******************************************************************************/
+
+module IMS_Procedures_Video {
+
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_MessagesVideo all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_Common all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      Check whether media description contains valid attributes for tcap and pcfg
+   * @param     p_SDP_Media_Desc
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_SDP_CheckMediaDescr_TcapPcfg(SDP_media_desc p_SDP_Media_Desc) runs on IMS_PTC
+  {
+    var template (omit) SDP_attribute v_Attribute;
+    if (f_IMS_Video_TcapPcfgRequired(p_SDP_Media_Desc)) {
+      v_Attribute := f_SDP_AttributeList_GetAttribute(p_SDP_Media_Desc.attributes, cr_SDP_Attribute_tcap(1, c_rtpAvpf));
+      if (not isvalue (v_Attribute)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing tcap attribute");
+      }
+      v_Attribute := f_SDP_AttributeList_GetAttribute (p_SDP_Media_Desc.attributes, cr_SDP_Attribute_pcfg(1, "t=1"));
+      if (not isvalue (v_Attribute)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing pcfg attribute");
+      }
+    }
+  }
+
+  /*
+   * @desc      Step 2 of C.25 or test case 17.1
+   * @param     p_VideoCallType
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @param     p_VideoCodecList    (default value: tsc_IMS_SDP_VideoCodecList_H264_only)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_MOCallSetup_Video_Step2(VideoCallTypeMO_Type p_VideoCallType,
+                                         template SipUrl p_OtherCalleeUri := omit,
+                                         IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR,
+                                         IMS_SDP_VideoCodecList_Type p_VideoCodecList := tsc_IMS_SDP_VideoCodecList_H264_only,
+                                         SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                         boolean p_WithPreconditions := true) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5w140112: return type changed to IMS_InviteRequestWithSdp_Type to carry decoded SDP offer */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+    /* @sic R5-211433: p_AudioCodecList, p_VideoCodecList sic@ */
+    /* @sic R5-213070: p_WithPreconditions sic@ */
+    /* @sic R5-231490: p_EvsConfiguration sic@ */
+    /* @sic R5-243984: NO_EVS instead of EVS_A2 as default for p_EvsConfiguration sic@ */
+    var template (present) SDP_Message v_SDP_Message_Step2;
+    var INVITE_A_2_1_Context_Type v_Context;
+    var IMS_DATA_REQ v_IMS_INVITE_REQ;
+    var SDP_Message v_SDP_Message;
+    var boolean v_A11 := true;                                  /* @sic R5-176371: INVITE for creating a video call sic@ */
+    var boolean v_CheckForbiddenCodecParameters := f_IMS_PTC_RanTypeIsNR5GC();
+    var boolean v_PreconditionsSupported := p_WithPreconditions;        /* @sic R5-214386: no precondition tag needed in Supported header field in A.15.2 sic@ */
+    var boolean v_PreconditionsForbidden := not p_WithPreconditions;
+    var OptionTag_List v_OptionTagsForSupported := f_IMS_Invite_OptionTagsSupported(v_PreconditionsSupported);
+    var IMS_SDP_AudioCodec_Type v_AudioCodec;
+    var SDP_media_desc v_MediaDescAudio;
+    
+    select (p_VideoCallType) {
+      case (SetupVideoCall) {
+        v_SDP_Message_Step2 := f_IMS_BuildSDP_InitialOfferAudioVideo_RX(p_AudioCodecList, p_VideoCodecList, p_WithPreconditions);
+        v_Context := A_2_1_A4;
+      }
+      case (AddVideo) {
+        v_AudioCodec := p_AudioCodecList[0];                    /* @sic R5-213073 sic@ */
+        v_SDP_Message_Step2 := f_IMS_BuildSDP_InitialOfferAddVideo_RX(v_AudioCodec, p_VideoCodecList, p_WithPreconditions);
+        v_Context := A_2_1_A5;
+        v_A11 := false;                                         /* @sic R5s220336 change 2.1 sic@ */
+      }
+    }
+
+    // Step 2. Receive INVITE Request
+    v_IMS_INVITE_REQ := f_IMS_INVITE_ReceiveRequest(v_Context, v_OptionTagsForSupported, p_OtherCalleeUri, -, -, v_A11);  /* @sic R5s150180: p_A10 removed sic@ @sic R5-176209: v_A12 removed sic@ */
+    v_SDP_Message := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_IMS_INVITE_REQ.Request.Invite.messageBody, v_SDP_Message_Step2);
+
+    // check media description:
+    if (p_VideoCallType == SetupVideoCall) {                    /* @sic R5-172931: no check of voice codecs for 17.1 sic@ */
+      v_MediaDescAudio := v_SDP_Message.media_list[0];
+      f_IMS_SDP_CheckMediaDescr_AudioCodecs(v_MediaDescAudio, p_AudioCodecList, v_CheckForbiddenCodecParameters);       /* @sic R5-151968: f_IMS_SDP_CheckMediaDescr_AMR_8000_1 replaced by f_IMS_SDP_CheckMediaDescr_AudioCodec sic@
+                                                                                                                           @sic R5-168032, R5-168141: AMR_16000 sic@
+                                                                                                                           @sic R5-172931 sic@ */
+      if (f_IMS_PTC_RanTypeIsNR5GC() and (p_AudioCodecList[0] == EVS_16000)) {
+        f_IMS_SDP_CheckMediaDescr_EVS_Configuration(v_MediaDescAudio, p_EvsConfiguration);                              /* @sic R5-231490: new function sic@ */
+      }
+    }
+    /* @sic R5-211433: f_IMS_SDP_CheckMediaDescr_H264_90000 removed as codecs are specified in f_SDP_MediaAttributesVideoCodecListRX sic@ */
+    f_IMS_SDP_CheckMediaDescr_TcapPcfg(v_SDP_Message.media_list[1]);
+
+    f_IMS_CheckNoPreconditions(v_PreconditionsForbidden, v_IMS_INVITE_REQ.Request.Invite.msgHeader, v_SDP_Message);             /* @sic R5-222076, R5s220787 sic@ */
+
+    return f_IMS_InviteRequestWithSdpMO(v_IMS_INVITE_REQ, v_SDP_Message);
+  }
+
+  /*
+   * @desc      Steps 3..4 of C.25 or test case 17.1
+   * @param     p_VideoCallType
+   * @param     p_InviteRequestWithSdp
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_AditionalContactParams (default value: omit)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_MOCallSetup_Video_Step3_4(VideoCallTypeMO_Type p_VideoCallType,
+                                           IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                           IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                           IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                           SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                           charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                           template (omit) SemicolonParam_List p_AditionalContactParams := omit,
+                                           IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  { /* return MessageHeader of the 183 response */
+    /* @sic R5-155179: p_CallType sic@ */
+    /* @sic R5-211433: p_AudioCodec, p_VideoCodec sic@ */
+    /* @sic R5-231490: p_EvsConfiguration sic@ */
+    /* @sic R5-243984: NO_EVS instead of EVS_A2 as default for p_EvsConfiguration sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var SDP_Message v_SdpOffer := p_InviteRequestWithSdp.SdpOffer;
+    var template (value) SDP_Message v_SdpAnswer := f_IMS_BuildSDP_InitialAnswerAudioVideo_TX(p_VideoCallType, v_SdpOffer, p_AudioCodec, p_VideoCodec, p_EvsConfiguration);
+    var OptionTag_List v_OptionTagsForRequire := tsc_OptionTagList_100rel;
+    var template (value) MessageHeader v_MessageHeader_Response183;
+    var template (value) IMS_Response_Type v_Response183;
+
+    if (f_SDP_MediaDescr_CheckWithPreconditions(v_SdpAnswer.media_list[0])) {                   /* @sic R5-214386: no precondition tag in case of A.15.2 sic@ */
+      v_OptionTagsForRequire := v_OptionTagsForRequire & tsc_OptionTagList_precondition;
+    }
+
+    // Step 3. SS sends a 100 Trying provisional response.
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+                    
+    // Step 4. Send 183 Session In Progress.
+    v_MessageHeader_Response183 := f_IMS_InviteResponse_183_MessageHeaderTX(v_InviteRequest, p_ContactUri, p_AditionalContactParams, v_OptionTagsForRequire, p_CallType); /* @sic R5-142951 sic@
+                                                                                                                                                                             @sic R5s160604: 183 response is the same for SetupVideoCall and AddVideo sic@ */
+    v_Response183 := cs_Response(c_statusLine183, v_MessageHeader_Response183, cs_MessageBody_SDP(v_SdpAnswer));
+    
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, v_Response183));
+    
+    return valueof(cs_IMS_ResponseWithSdp(v_Response183, v_SdpAnswer));
+  }
+
+  /*
+   * @desc      Receive INVITE for MO release of video from ongiong video/audio session
+   * @param     p_PreviousSdpOffer
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_VideoCall_ReleaseVideoMO_Invite(SDP_Message p_PreviousSdpOffer,
+                                                 IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                                 IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                                 boolean p_WithPreconditions := true) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-213073, R5-213074: p_AudioCodec, p_VideoCodec, p_WithPreconditions sic@ */
+    var IMS_DATA_REQ v_IMS_INVITE_REQ;
+    var SDP_Message v_SDP_Message;
+    var boolean v_A11 := false;                                                                                         /* @sic R5-176371: A11 - INVITE for creating a video call => false in case of call release sic@ */
+
+    var OptionTag_List v_OptionTagsForSupported := f_IMS_Invite_OptionTagsSupported(p_WithPreconditions);
+    var template (present) SDP_Message v_SdpOffer := f_IMS_BuildSDP_ReleaseVideoOffer_RX(p_PreviousSdpOffer, p_AudioCodec, p_VideoCodec, p_WithPreconditions);
+
+    v_IMS_INVITE_REQ := f_IMS_INVITE_ReceiveRequest(A_2_1_A5, v_OptionTagsForSupported, -, -, -, v_A11);      /* @sic R5-176209: v_A12 removed sic@ */
+    v_SDP_Message := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_IMS_INVITE_REQ.Request.Invite.messageBody, v_SdpOffer);
+
+    return f_IMS_InviteRequestWithSdpMO(v_IMS_INVITE_REQ, v_SDP_Message);
+  }
+
+  /*
+   * @desc      send INVITE for MT video call
+   * @param     p_VideoCallType
+   * @param     p_SdpOffer
+   * @param     p_ContactUrl        (default value: omit)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_Video_SendInvite(VideoCallTypeMT_Type p_VideoCallType,
+                                              template (value) SDP_Message p_SdpOffer,
+                                              template (omit) SipUrl p_ContactUrl := omit) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-172930: p_FmtAudio, p_FmtVideo removed sic@ */
+    /* @sic R5-213524, R5-213538, R5-213539, R5-213541: p_SdpOffer instead of p_MessageType sic@ */
+    var SipUrl v_ContactUrl;
+    var template (value) MessageHeader v_MessageHeader_Invite;
+    var template (value) INVITE_Request v_InviteRequest;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var INVITE_A_2_1_Context_Type v_Context;
+    var IMS_ContactUriType_Type v_ContactUriType;
+    var OptionTag_List v_OptionTagsForSupported := tsc_OptionTagList_Invite_A_2_9;
+    var boolean v_A8_CreatingVideo := true;
+
+    select (p_VideoCallType) {
+      case (SetupVideoCall) {
+        v_Context := A_2_1_A4;          /* @sic R5-170782; R5-172930: SetupVideoCall sic@ */
+        v_ContactUriType := registration;
+      }
+      case else {
+        v_Context := A_2_1_A5;
+        v_ContactUriType := dialog;     /* @sic R5-233376: dialog sic@ */
+      }
+    }
+    if (isvalue(p_ContactUrl)) {
+      v_ContactUrl := valueof(p_ContactUrl);
+    } else {
+      v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE(v_ContactUriType);      /* @sic R5-233376: v_ContactUriType sic@ */
+    }
+    
+    if (f_SDP_MediaDescr_CheckWithPreconditions(p_SdpOffer.media_list[0])) {    /* @sic R5-216215: no precondition tag in case of A.16.2 sic@ */
+      v_OptionTagsForSupported := v_OptionTagsForSupported & tsc_OptionTagList_precondition;
+    }
+
+    v_MessageHeader_Invite  := f_IMS_InviteRequest_MessageHeaderTX(v_OptionTagsForSupported, v_Context, v_A8_CreatingVideo);        /* @sic R5-176209: p_SrvccAlertingSupported := pc_IMS_SRVCCAlert for video too (i.e. v_SrvccAlerting removed) sic@
+                                                                                                                                       @sic R5s220336 change 2.2: v_OptionTagsForSupported sic@
+                                                                                                                                       @sic R5s240677: v_A8_CreatingVideo sic@ */
+    v_InviteRequest := cs_INVITE_Request(v_ContactUrl, v_MessageHeader_Invite, cs_MessageBody_SDP(p_SdpOffer));
+    v_InviteRequestWithSdp := f_IMS_InviteRequestWithSdpMT(v_InviteRequest, p_SdpOffer);
+
+    // Step 1 - Send INVITE
+    IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequest));
+
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      return SessionInProgress183 and its SDP message received in step 4 (C.26) or step 3 (17.2)
+   * @param     p_VideoCallType
+   * @param     p_InviteRequestWithSdp
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallSetup_Video_Receive183(VideoCallTypeMT_Type p_VideoCallType,
+                                              IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                              IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                              IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                              SDP_EVS_Configuration_MTCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                              boolean p_WithPreconditions := true) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  { /* @sic R5-172930: p_FmtAudio, p_FmtVideo removed sic@ */
+    /* @sic R5-213524, R5-213538, R5-213539, R5-213541: p_AudioCodec, p_VideoCodec, p_WithPreconditions sic@ */
+    /* @sic R5-232153: p_EvsConfiguration sic@ */
+    /* @sic R5-243985: NO_EVS instead of EVS_A2 as default for p_EvsConfiguration sic@ */
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (present) SemicolonParam_List v_Fmtparameters;
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParams_Audio := ?;
+    var template (present) SDP_Message v_SDP_Message183;
+
+    if (p_AudioCodec == EVS_16000) {
+      select (p_EvsConfiguration) {                         // @sic R5-232153 sic@
+        case (EVS_A2) {                                     // EVS default configuration
+          v_Fmtparameters := cr_EVS_Fmtp_AudioParamsBrBwMaxRed("5.9-24.4", "nb-swb");
+        }
+        case (EVS_B0_A1) {
+          v_Fmtparameters := cr_EVS_Fmtp_AudioParamsBrBwModeSetMaxRed("13.2", "swb"); // @sic R5-221471: cr_EVS_Fmtp_AudioParamsBrBwModeSetMaxRed instead of cr_EVS_Fmtp_AudioParamsBrBwMaxRed sic@
+        }
+      }
+      v_FmtpParams_Audio := cr_Fmtp_ParamList(v_Fmtparameters);
+    }
+    v_SDP_Message183 := f_IMS_BuildSDP_MTCallAudioVideo_RX(p_VideoCallType, InitialAnswer, p_AudioCodec, -, v_FmtpParams_Audio, p_VideoCodec, p_WithPreconditions);
+
+    return f_IMS_MTCallSetup_Receive100Trying_Receive183SessionProgress(v_InviteRequest,
+                                                                        v_SDP_Message183,
+                                                                        p_InviteRequestWithSdp.RoutingInfo.Protocol,
+                                                                        p_WithPreconditions);  /* @sic R5-216215 sic@ */
+  }
+
+  /*
+   * @desc      34.229-5 A.15.1 Step 6 - 7: Receive UPDATE, send 200 OK for video call
+   *            returns the SDP offer sent by the UE in the UPDATE
+   * @param     p_VideoCallType
+   * @param     p_InviteRequestWithSdp
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_IMS_MOCallSetup_NR5GC_Video_Step6_7(VideoCallTypeMO_Type p_VideoCallType,
+                                                 IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                 charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                 IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return SDP_Message
+  {
+    var IMS_PreconditionIndication_Type v_PreconditionIndication;
+    var template (present) SDP_Message v_UpdatedSdpOffer;
+
+    if (p_VideoCallType == AddVideo) {
+      v_PreconditionIndication := PreconditionSupported;
+    } else {
+      v_PreconditionIndication := PreconditionRequired;
+    }
+    v_UpdatedSdpOffer := f_IMS_BuildSDP_UpdatedOfferAudioVideo_RX(p_VideoCallType, p_InviteRequestWithSdp.SdpOffer, EVS_16000, H265_90000);
+    return f_IMS_MOCallSetup_ReceiveUpdateSend200OK(p_InviteRequestWithSdp.Invite, p_ContactUri, v_UpdatedSdpOffer, -, p_CallType, v_PreconditionIndication);
+  }
+
+}

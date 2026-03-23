@@ -1,0 +1,408 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2022-06-15 13:04:40 +0200 (Wed, 15 Jun 2022) $
+// $Rev: 33645 $
+/******************************************************************************/
+
+module IP_PTC_Routing {
+
+  import from CommonDefs all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+
+  group RoutingTableManagement {
+
+  template (value) IP_RoutingInfo_Type cs_IP_RoutingInfo(template (value) IP_Connection_Type p_IpInfo,
+                                                         IP_DrbInfo_Type p_DrbInfo,
+                                                         template (omit) IP_DataMode_Type p_DataMode := omit) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    /* @sic R5-153746: "Null_Type p_Discard" changed to "IP_DataMode_Type p_DataMode" sic@ */
+    IpInfo := p_IpInfo,
+    DRB := p_DrbInfo,
+    DataMode := p_DataMode
+  };
+
+  /*
+   * @desc      converts the given information into a template which can be matched
+   * @param     p_SocketInfo
+   * @return    template IP_Socket_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IpInfo2MatchingInfo(template (omit) IP_Socket_Type p_SocketInfo) return template IP_Socket_Type
+  {
+    var template IP_Socket_Type v_SocketInfo := p_SocketInfo;
+
+    if (not isvalue(v_SocketInfo)) {   // @sic R5s110603 change 1 sic@
+      v_SocketInfo := *;        // omit it means that the addr is "don't care"
+    } else {
+      if (not ispresent(v_SocketInfo.IpAddr)) {
+        v_SocketInfo.IpAddr := *;
+      }
+      if (not ispresent(v_SocketInfo.Port)) {
+        v_SocketInfo.Port := *;
+      }
+    }
+    return v_SocketInfo;
+  }
+
+  /*
+   * @desc      checks whether p_IpInfoValue matches against p_IpInfoToMatch taking into accoun that in IP_Connection_Type
+   *            fields may be omit what means don't care
+   * @param     p_IpInfoValue
+   * @param     p_IpInfoToMatch
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IpInfoMatch(template (value) IP_Connection_Type p_IpInfoValue,
+                          template (value) IP_Connection_Type p_IpInfoToMatch) return boolean
+  {
+    var template IP_Connection_Type v_IpInfoToMatch := p_IpInfoToMatch;
+
+    v_IpInfoToMatch.Local  := fl_IpInfo2MatchingInfo(p_IpInfoToMatch.Local);
+    v_IpInfoToMatch.Remote := fl_IpInfo2MatchingInfo(p_IpInfoToMatch.Remote);
+
+    return match(valueof(p_IpInfoValue), v_IpInfoToMatch);
+  }
+
+  /*
+   * @desc      local function to check the given IP info against the routing table
+   *            Note: in general the IP_Connection is not fully specified; if a field in IP_Connection is omit this means it is "don't care";
+   *                  therefore a IpInfo may be subset of another IpInfo and vice versa
+   *            return
+   *              false, when for any entry of the RoutingTable IpInfo is equal to the given IpInfo or is a superset or is a subset
+   *              true else
+   * @param     p_RoutingTable
+   * @param     p_IpInfo
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_RoutingTable_CheckIpInfoForConflict(IP_RoutingTable_Type p_RoutingTable,
+                                                  template (value) IP_Connection_Type p_IpInfo) return boolean
+  {
+    var IP_Connection_Type v_TableEntryIpInfo;
+    var integer i;
+    for (i := 0; i < lengthof(p_RoutingTable); i := i+1) {
+      v_TableEntryIpInfo := p_RoutingTable[i].IpInfo;
+      if (fl_IpInfoMatch(v_TableEntryIpInfo, p_IpInfo) or fl_IpInfoMatch(p_IpInfo, v_TableEntryIpInfo)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /*
+   * @desc      add a new entry to the routing table;
+   *            firstly the new RoutingInfo is checked whether there is any conflict with existing entries
+   *            in which case it would not be added; => RoutingTable is assumed to be free of conflicts
+   * @param     p_RoutingTable
+   * @param     p_IpInfo
+   * @param     p_DrbInfo
+   * @param     p_DataMode          (default value: omit)
+   * @return    IP_RoutingTable_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_RoutingTable_AddEntry(IP_RoutingTable_Type p_RoutingTable,
+                                    template (value) IP_Connection_Type p_IpInfo,
+                                    IP_DrbInfo_Type p_DrbInfo,
+                                    template (omit) IP_DataMode_Type p_DataMode := omit) return IP_RoutingTable_Type
+  { /* @sic R5-150356, R5w150008: p_Discard sic@ */
+    /* @sic R5-153746: "Null_Type p_Discard" changed to "IP_DataMode_Type p_DataMode" sic@ */
+    var IP_RoutingTable_Type v_RoutingTable := p_RoutingTable;
+    var integer v_Index;
+
+    v_Index := fl_RoutingTable_FindEntry(p_RoutingTable, p_IpInfo);
+    if (v_Index < 0) {    /* @sic R5s150855 change 2 sic@ */
+      if (not fl_RoutingTable_CheckIpInfoForConflict(p_RoutingTable, p_IpInfo)) {
+        FatalError(__FILE__, __LINE__, "conflict for routing table");
+      } else {
+        v_Index := lengthof(p_RoutingTable);   // => new entry
+      }
+    }
+    else {
+      /* there is an entry already with exactly the same IpInfo => just overwrite DrbInfo and DataMode */
+    }
+    v_RoutingTable[v_Index] := valueof(cs_IP_RoutingInfo(p_IpInfo, p_DrbInfo, p_DataMode)); // @sic R5-150356, R5w150008 sic@
+    return v_RoutingTable;
+  }
+
+  /*
+   * @desc      return index of the entry in the routing table or -1 if no entry has been found;
+     *          Note: the IP_Connection info does not need to be fully specified;
+     *                nevertheless when refering to an entry in the routing table the IP_Connection shall be exactly the same
+   * @param     p_RoutingTable
+   * @param     p_IpInfo
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_RoutingTable_FindEntry(IP_RoutingTable_Type p_RoutingTable,
+                                     template (value) IP_Connection_Type p_IpInfo) return integer
+  {
+    var IP_RoutingInfo_Type v_CurrentEntry;
+    var integer v_TableSize := lengthof(p_RoutingTable);
+    var integer i;
+
+    for (i := 0; i < v_TableSize; i := i+1) {
+      v_CurrentEntry := p_RoutingTable[i];
+      if (match(v_CurrentEntry.IpInfo, p_IpInfo)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /*
+   * @desc      remove an enry from the routing table
+   * @param     p_RoutingTable
+   * @param     p_IpInfo
+   * @return    IP_RoutingTable_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_RoutingTable_RemoveEntry(IP_RoutingTable_Type p_RoutingTable,
+                                       template (value) IP_Connection_Type p_IpInfo) return IP_RoutingTable_Type
+  {
+    var integer v_TableSize := lengthof(p_RoutingTable);
+    var integer v_Index := fl_RoutingTable_FindEntry(p_RoutingTable, p_IpInfo);
+    var IP_RoutingTable_Type v_RoutingTable := {};
+    var integer i;
+    var integer k;
+
+    if (v_Index < 0) {
+      return p_RoutingTable;
+    }
+    k := 0;
+    for (i := 0; i < v_TableSize; i := i+1) {
+      if (i != v_Index) {
+        v_RoutingTable[k] := p_RoutingTable[i];
+        k := k + 1;
+      }
+    }
+    return v_RoutingTable;
+  }
+
+  /*
+   * @desc      returns true when both DrbInfo parameters refer to the same DrbId or QoS flow;
+   *            this implies that the DRB belongs to the same RAT; the CellId is not checked
+   * @param     p_DrbInfo1
+   * @param     p_DrbInfo2
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_DrbInfo_DrbIdMatch(IP_DrbInfo_Type p_DrbInfo1,
+                                   IP_DrbInfo_Type p_DrbInfo2) return boolean
+  {
+    if (ischosen(p_DrbInfo1.Eutra) and ischosen(p_DrbInfo2.Eutra)) {
+      if (p_DrbInfo1.Eutra.DrbId == p_DrbInfo2.Eutra.DrbId) {
+        return true;
+      }
+    }
+    else if (ischosen(p_DrbInfo1.Eutra5GC) and ischosen(p_DrbInfo2.Eutra5GC)) {   /* @sic R5s190284 sic@ */
+      if (p_DrbInfo1.Eutra5GC.QosFlow == p_DrbInfo2.Eutra5GC.QosFlow) {
+        return true;
+      }
+    }
+    else if (ischosen(p_DrbInfo1.Utran) and ischosen(p_DrbInfo2.Utran)) {
+      if (p_DrbInfo1.Utran.DrbId == p_DrbInfo2.Utran.DrbId) {
+        return true;
+      }
+    }
+    else if (ischosen(p_DrbInfo1.Geran) and ischosen(p_DrbInfo2.Geran)) {
+      if (p_DrbInfo1.Geran.DrbId == p_DrbInfo2.Geran.DrbId) {
+        return true;
+      }
+    }
+    else if (ischosen(p_DrbInfo1.Nr5GC) and ischosen(p_DrbInfo2.Nr5GC)) {         /* @sic R5s190284 sic@ */
+      if (p_DrbInfo1.Nr5GC.QosFlow == p_DrbInfo2.Nr5GC.QosFlow) {
+        return true;
+      }
+    }
+    else if (ischosen(p_DrbInfo1.NrEPC) and ischosen(p_DrbInfo2.NrEPC)) {         /* @sic R5s190284 sic@ */
+      if (p_DrbInfo1.NrEPC.DrbId == p_DrbInfo2.NrEPC.DrbId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      for all entries: if DrbInfo matches p_DrbInfoOld => DrbInfo gets changed to p_DrbInfoNew;
+   *            returns true when at least one entry has been changed
+   * @param     p_DrbInfoOld
+   * @param     p_DrbInfoNew
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_RoutingTable_ChangeDrbInfo(IP_DrbInfo_Type p_DrbInfoOld,
+                                        IP_DrbInfo_Type p_DrbInfoNew) runs on IP_PTC return boolean
+  {
+    var IP_RoutingTable_Type v_RoutingTable := vc_IP_PTC_DRB_RoutingInfo.Table;
+    var boolean v_TableIsChanged := false;
+    var integer i;
+    
+    for (i := 0; i < lengthof(v_RoutingTable); i := i+1) {
+      if (f_IP_DrbInfo_DrbIdMatch(v_RoutingTable[i].DRB, p_DrbInfoOld)) {
+        v_RoutingTable[i].DRB := p_DrbInfoNew;
+        v_TableIsChanged := true;
+      }
+    }
+    fl_RoutingInfo_ReplaceRoutingTable(v_RoutingTable, v_TableIsChanged);
+    return v_TableIsChanged;
+  }
+
+  /*
+   * @desc      for given DrbInfo: if the DrbInfo refers to the RAT of the given cell, the cellId gets modified;
+   *            returns true when p_DrbInfo has been changed
+   * @param     p_DrbInfo           (by reference)
+   * @param     p_Cell
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_DrbInfo_ChangeCell(inout IP_DrbInfo_Type p_DrbInfo,
+                                   AnyCellId_Type p_Cell) return boolean
+  { /* @sic R5s210603: extension of f_IP_DrbInfo_ChangeEutraCell sic@ */
+    var IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+    var boolean v_IsChanged;
+
+    select union (p_Cell) {
+      case (Eutra) {
+        select union (p_DrbInfo) {
+          case (Eutra)    { p_DrbInfo.Eutra.CellId := p_Cell.Eutra; }
+          case (Eutra5GC) { p_DrbInfo.Eutra5GC.CellId := p_Cell.Eutra; }
+        }
+      }
+      case (Nr) {
+        select union (p_DrbInfo) {
+          case (Nr5GC)    { p_DrbInfo.Nr5GC.CellId := p_Cell.Nr; }
+          case (NrEPC)    { p_DrbInfo.NrEPC.CellId := p_Cell.Nr; }
+        }
+      }
+    }
+    v_IsChanged := (v_DrbInfo != p_DrbInfo);
+    return v_IsChanged;
+  }
+
+  /*
+   * @desc      for all entries: modify cellId if DrbInfo refers to the RAT of the given cell;
+   *            returns true when at least one entry has been changed
+   * @param     p_Cell
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_RoutingTable_ChangeCell(AnyCellId_Type p_Cell) runs on IP_PTC return boolean
+  { /* @sic R5s210603: extension of f_RoutingTable_ChangeEutraCell sic@ */
+    var IP_RoutingTable_Type v_RoutingTable := vc_IP_PTC_DRB_RoutingInfo.Table;
+    var boolean v_TableIsChanged := false;
+    var boolean v_EntryIsChanged;
+    var integer i;
+    
+    for (i := 0; i < lengthof(v_RoutingTable); i := i+1) {
+      v_EntryIsChanged := f_IP_DrbInfo_ChangeCell(v_RoutingTable[i].DRB, p_Cell);  // @sic R5s150648 MCC160Comments sic@
+      v_TableIsChanged := v_TableIsChanged or v_EntryIsChanged;
+    }
+    fl_RoutingInfo_ReplaceRoutingTable(v_RoutingTable, v_TableIsChanged);
+    return v_TableIsChanged;
+  }
+
+  /*
+   * @desc      Change from/to RawMode and send routing table to the SS accordingly
+   * @param     p_RawMode
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_RoutingInfo_ChangeMode(boolean p_RawMode) runs on IP_PTC
+  {
+    var IP_RoutingTable_Type v_RoutingTable;
+
+    if (vc_IP_PTC_DRB_RoutingInfo.RawMode != p_RawMode) {
+      vc_IP_PTC_DRB_RoutingInfo.RawMode := p_RawMode;
+      if (p_RawMode) {
+        v_RoutingTable := {};
+      } else {
+        v_RoutingTable := vc_IP_PTC_DRB_RoutingInfo.Table;
+      }
+      fl_IP_PTC_SendRoutingTable(v_RoutingTable);
+    }
+  }
+
+  /*
+   * @desc      Replace global routing table in TTCN and - if needed and appropriate - at the SS
+   * @param     p_RoutingTable
+   * @param     p_ChangeFlag        (default value: true)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_RoutingInfo_ReplaceRoutingTable(IP_RoutingTable_Type p_RoutingTable,
+                                              boolean p_ChangeFlag := true) runs on IP_PTC
+  {
+    vc_IP_PTC_DRB_RoutingInfo.Table := p_RoutingTable;
+    
+    if (not vc_IP_PTC_DRB_RoutingInfo.RawMode) {    // @sic R5s200490: change routing table at the SS only in case of IP mode sic@
+      if (p_ChangeFlag) {                           // we only change the routing at the SS when really needed
+        fl_IP_PTC_SendRoutingTable(p_RoutingTable);
+      }
+    }
+  }
+
+  } // end of group RoutingTableManagement
+
+  group DRBMUX_CONFIG {
+
+  template (value) DRBMUX_CONFIG_REQ cs_DRBMUX_CONFIG_REQ(IP_RoutingTable_Type p_RoutingTable) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    RoutingInfo := p_RoutingTable
+  };
+
+  template (present) DRBMUX_COMMON_IND_CNF cr_DRBMUX_COMMON_IND_CNF :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN) */
+    Confirm := true
+  };
+
+  /*
+   * @desc      Send complete routing table to the SS
+   *            Note: there is no default behaviour activated for the IP_PTC
+   *                  => waiting for the SA's response is blocking (what helps to avoid enexpected behaviour)
+   * @param     p_RoutingTable
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_IP_PTC_SendRoutingTable(IP_RoutingTable_Type p_RoutingTable) runs on IP_PTC
+  {
+    IP_CTRL.send(cs_DRBMUX_CONFIG_REQ(p_RoutingTable));
+    IP_CTRL.receive(cr_DRBMUX_COMMON_IND_CNF);
+  }
+
+  } // end of group DRBMUX_CONFIG
+
+  group RoutingTable_CommonProcedures {
+
+  /*
+   * @desc      add entry to routing table and configure SS
+   * @param     p_IpInfo
+   * @param     p_DrbInfo
+   * @param     p_DataMode          (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_PTC_RoutingTable_AddEntry(template (value) IP_Connection_Type p_IpInfo,
+                                          IP_DrbInfo_Type p_DrbInfo,
+                                          template (omit) IP_DataMode_Type p_DataMode := omit) runs on IP_PTC
+  { /* @sic R5-150356, R5w150008: p_Discard sic@ */
+    /* @sic R5-153746: "Null_Type p_Discard" changed to "IP_DataMode_Type p_DataMode" sic@ */
+    var IP_RoutingTable_Type v_RoutingTable := fl_RoutingTable_AddEntry(vc_IP_PTC_DRB_RoutingInfo.Table, p_IpInfo, p_DrbInfo, p_DataMode);
+    fl_RoutingInfo_ReplaceRoutingTable(v_RoutingTable);   // @sic R5s200490 sic@
+  }
+
+  /*
+   * @desc      remove entry from routing table and configure SS
+   * @param     p_IpInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_IP_PTC_RoutingTable_RemoveEntry(template (value) IP_Connection_Type p_IpInfo) runs on IP_PTC
+  {
+    var IP_RoutingTable_Type v_RoutingTable := fl_RoutingTable_RemoveEntry(vc_IP_PTC_DRB_RoutingInfo.Table, p_IpInfo);
+    fl_RoutingInfo_ReplaceRoutingTable(v_RoutingTable);   // @sic R5s200490 sic@
+  }
+
+  } // end of group RoutingTable_CommonProcedures
+
+}

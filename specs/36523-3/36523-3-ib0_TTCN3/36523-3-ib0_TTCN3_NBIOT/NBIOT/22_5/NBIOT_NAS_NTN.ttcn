@@ -1,0 +1,109 @@
+// ***************************************************************************
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// * $Date: 2026-03-04 11:31:11 +0100 (Wed, 04 Mar 2026) $
+// * $Rev: 43188 $
+// ***************************************************************************
+module NBIOT_NAS_NTN {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from NAS_CommonTemplates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.5.23
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_5_23_NBIOT() runs on NBIOT_PTC
+  { // NB-IoT / NTN / GNSS position reporting / reject cause #78 "PLMN not allowed to operate at the present UE location"
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) NB_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (present) NAS_UL_Message_Type v_ESMMessage;
+    var template (present) B3_Type v_PDNType := (f_GetPdnType(), '101'B);
+    var NAS_MSG_Indication_Type v_NasInd;
+    
+    v_CellPowerList_AtT0 := {
+      cs_NB_CellPower(nbiot_Cell50, tsc_ServingCellRS_EPRE),
+      cs_NB_CellPower(nbiot_Cell62, tsc_NonSuitableOffNBIOTCellRS_EPRE)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_NB_CellPower(nbiot_Cell50, tsc_ServingCellRS_EPRE),
+      cs_NB_CellPower(nbiot_Cell62, -73)
+    };
+
+    //Initialise all cell, security and mobile parameters
+    f_NBIOT_Init(c9,-,LTE_CellsOnDifferentPLMN,-,{nbiot_Cell62});  //@sic R5s230707 sic@
+
+    f_NBIOT_CellInfo_InitMaxReferencePower(nbiot_Cell62, -73);
+
+    //Create and configure NCell 50 and Ncell 62
+    f_NBIOT_CellConfig_Def(nbiot_Cell50, CONTROL_PLANE);
+    f_NBIOT_CellConfig_Def(nbiot_Cell62, CONTROL_PLANE);
+
+    //UE is Switched ON to configure Automatic PLMN selection mode
+    f_UT_SwitchOnUE(UT, false);
+    //@sic R5-243479 sic@
+    //Make sure that No UE location is pre-configured
+    f_NBIOT_PreconfigureNTN_UE(); //@sic R5w240103 sic@
+    //Now bring up the cell to serving cell power for premable
+    f_NBIOT_SetCellPower(nbiot_Cell50, tsc_ServingCellRS_EPRE);
+
+    //Preamble to ensure UE is in State 1-NB switched off
+    f_NBIOT_InitialRegistration(nbiot_Cell50, CONTROL_PLANE, PREAMBLE, STATE2_NB_CONNECTED_UPDATED, -, omit);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell50, CONTROL_PLANE, RRC_CONNECTED);
+
+    f_NBIOT_TestBody_Set(true);
+
+    //SS re-adjusts cell-specific reference signal levels according to rows "T0" in table 22.2.13.3.2-1
+    f_NBIOT_SetCellPowerList (v_CellPowerList_AtT0);
+    //@siclog "Steps 1 - 4" siclog@
+    f_NBIOT_AttachReject(nbiot_Cell50, tsc_Cause_PLMN_NotAllowedToOperateAtPresentUELocation);
+    //@siclog "Step 5" siclog@
+    f_NBIOT_SetCellPowerList (v_CellPowerList_AtT1);
+    
+    if (px_DoAttachWithoutPDN) {
+      v_ESMMessage := cr_ESM_DUMMY_MESSAGE;
+    } else {
+      v_ESMMessage := cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach, v_PDNType);
+    }
+    
+    //@siclog "Step 6" siclog@
+    v_NasInd := f_NBIOT_RRC_ConnEst_DefWithNas(nbiot_Cell62,
+                                                cr_EstablishmentCause_NB_Any,
+                                                cr_NAS_IndicationWithPiggybacking(tsc_SHT_NoSecurityProtection,
+                                                                                  cdr_CIOT_ATTACH_REQUEST_WithIMSINoTai(cr_AdditionalUpdateType_CIOT),
+                                                                                  v_ESMMessage));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    //@siclog "Step 7" siclog@
+    f_NBIOT_InitialRegistration_Step5_14(nbiot_Cell62, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED, v_NasInd);
+    //@siclog "Step 8" siclog@
+    // The SS transmits an RRCConnectionRelease-NB message to release RRC connection and move to RRC_IDLE
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell62);
+    //@siclog "Step 9" siclog@
+    f_UT_DeleteNTN_PLMNsNotAllowed(UT);
+    f_NBIOT_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_NBIOT_Postamble (nbiot_Cell62, CONTROL_PLANE, N1_IDLE);
+  }
+
+}

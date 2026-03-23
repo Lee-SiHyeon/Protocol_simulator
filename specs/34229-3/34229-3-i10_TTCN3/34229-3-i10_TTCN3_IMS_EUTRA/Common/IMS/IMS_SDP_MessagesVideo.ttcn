@@ -1,0 +1,848 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-11-26 11:47:27 +0100 (Tue, 26 Nov 2024) $
+// $Rev: 39922 $
+/******************************************************************************/
+
+module IMS_SDP_MessagesVideo {
+
+  import from IMS_CommonDefs all;
+  import from IMS_Component all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from LibSip_Common all;
+  import from LibSip_SDPTypes all;
+
+  type enumerated VideoCallTypeMO_Type {SetupVideoCall, AddVideo, CallHold};            /* @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+                                                                                           @sic R5-172930: C25, C25a, C25c, C25b replaced by SetupVideoCall sic@ */
+
+  type enumerated VideoCallTypeMT_Type {SetupVideoCall, AddVideo, RemoveVideo};         /* @status    APPROVED (IMS)
+                                                                                           @sic R5-170782, R5-171478 sic@
+                                                                                           @sic R5-172930: C26, C26a, C26b replaced by SetupVideoCall; new value RemoveVideo sic@ */
+
+  const charstring tsc_SDP_FmtVideo := "101";                                           /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      returns true if media attributes for tcap and pcfg are needed in DL
+   * @param     p_SDP_Media_Desc
+   * @return    boolean
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_Video_TcapPcfgRequired(SDP_media_desc p_SDP_Media_Desc) return boolean
+  {
+    return (p_SDP_Media_Desc.media_field.transport == c_rtpAvp);
+  }
+
+  /*
+   * @desc      Common function for video SDP messges in UL
+   * @param     p_TimeDescription   (default value: cr_SDP_Time_0_0)
+   * @param     p_SDP_Media_Field_Audio
+   * @param     p_SDP_MediaAttributes_Audio
+   * @param     p_SDP_PreconditionAttributes_Audio
+   * @param     p_SDP_Media_Field_Video
+   * @param     p_SDP_MediaAttributes_Video
+   * @param     p_SDP_PreconditionAttributes_Video
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_AudioVideo_RX(template (present) SDP_time p_TimeDescription := cr_SDP_Time_0_0,
+                                        template (present) SDP_media_field p_SDP_Media_Field_Audio,
+                                        template (present) SDP_attribute_list p_SDP_MediaAttributes_Audio,
+                                        template (present) SDP_attribute_list p_SDP_PreconditionAttributes_Audio,
+                                        template (present) SDP_media_field p_SDP_Media_Field_Video,
+                                        template (present) SDP_attribute_list p_SDP_MediaAttributes_Video,
+                                        template (present) SDP_attribute_list p_SDP_PreconditionAttributes_Video) runs on IMS_PTC return template (present) SDP_Message
+  {
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var template (present) charstring v_IPAddrOrigin := ?;
+    var template (present) charstring v_IPAddrAudio := ?;
+    var template (present) charstring v_IPAddrVideo := ?;
+    var template SDP_connection v_SDP_Connection_Audio := cr_SDP_Connection(v_AddrType, v_IPAddrAudio);
+    var template SDP_connection v_SDP_Connection_Video := cr_SDP_Connection(v_AddrType, v_IPAddrVideo);
+    var template (present) integer v_BandwidthAudioRR := ?;
+    var template (present) SDP_attribute_list v_MandatoryAttributes_Audio := f_SDP_Attributes_Concat_RX(p_SDP_MediaAttributes_Audio, p_SDP_PreconditionAttributes_Audio);
+    var template (present) SDP_attribute_list v_MandatoryAttributes_Video := f_SDP_Attributes_Concat_RX(p_SDP_MediaAttributes_Video, p_SDP_PreconditionAttributes_Video);
+    var template SDP_attribute_list v_Attribute_List_Audio;
+    var template SDP_attribute_list v_Attribute_List_Video;
+    var template (present) SDP_media_desc v_Media_Desc_Audio;
+    var template (present) SDP_media_desc v_Media_Desc_Video;
+    var template SDP_bandwidth_list v_BandwidthList_Audio;
+    var template SDP_bandwidth_list v_BandwidthList_Video;
+    var template (present) SDP_media_desc_list v_Media_Desc_List;
+
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {    // @sic R5-211433 sic@
+      v_BandwidthAudioRR := (1..infinity);                                                                              // not specified in 34.229-1 C.25
+    }
+
+    v_BandwidthList_Audio := cr_SDP_Bandwidth_List_Media(-, -, v_BandwidthAudioRR);
+    v_BandwidthList_Video := cr_SDP_Bandwidth_List_Media;
+
+    v_Attribute_List_Audio := f_SDP_Attributes_Superset(v_MandatoryAttributes_Audio);   // @sic R5-221481, R5-221482, R5s220396: f_SDP_Attributes_Superset sic@
+    v_Attribute_List_Video := f_SDP_Attributes_Superset(v_MandatoryAttributes_Video);   // @sic R5-221481, R5-221482, R5s220396: f_SDP_Attributes_Superset sic@
+
+    v_Media_Desc_Audio := cr_SDP_Media_Desc(p_SDP_Media_Field_Audio,
+                                            v_SDP_Connection_Audio,
+                                            v_BandwidthList_Audio,
+                                            v_Attribute_List_Audio);
+
+    if (f_SDP_SDP_Media_Field_IsForMediaRelease(p_SDP_Media_Field_Video)) {             // @sic R5-247609: There are no requirements on b-, c- or a-lines on the video stream sic@
+      v_BandwidthList_Video := *;
+      if (not f_IMS_PTC_RanTypeIsWLAN()) {                                              // In G.17.1 INVITE (Step 7) still specifies the c= line and attributes
+        v_SDP_Connection_Video := *;
+        v_Attribute_List_Video := *;
+      }
+    }
+
+    v_Media_Desc_Video := cr_SDP_Media_Desc(p_SDP_Media_Field_Video,
+                                            v_SDP_Connection_Video,
+                                            v_BandwidthList_Video,
+                                            v_Attribute_List_Video);
+    
+    v_Media_Desc_List := { v_Media_Desc_Audio, v_Media_Desc_Video };
+    
+    return cr_SDP_Message_Common(-, v_AddrType, v_IPAddrOrigin, ?, -, p_TimeDescription, v_Media_Desc_List);
+  }
+
+  /*
+   * @desc      Common function for video SDP messges in DL
+   * @param     p_SessionBandwidthAS  (default value: 30)
+   * @param     p_MediaAudio
+   * @param     p_Bandwidth_List_Audio
+   * @param     p_SDP_MediaAttributes_Audio
+   * @param     p_SDP_PreconditionAttributes_Audio
+   * @param     p_MediaVideo
+   * @param     p_Bandwidth_List_Video
+   * @param     p_SDP_MediaAttributes_Video
+   * @param     p_SDP_PreconditionAttributes_Video
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_AudioVideo_TX(integer p_SessionBandwidthAS := 30,
+                                        template (value) SDP_media_field p_MediaAudio,
+                                        template (value) SDP_bandwidth_list p_Bandwidth_List_Audio,
+                                        template (omit) SDP_attribute_list p_SDP_MediaAttributes_Audio,
+                                        template (omit) SDP_attribute_list p_SDP_PreconditionAttributes_Audio,
+                                        template (value) SDP_media_field p_MediaVideo,
+                                        template (value) SDP_bandwidth_list p_Bandwidth_List_Video,
+                                        template (omit) SDP_attribute_list p_SDP_MediaAttributes_Video,
+                                        template (omit) SDP_attribute_list p_SDP_PreconditionAttributes_Video)
+    runs on IMS_PTC
+    return template (value) SDP_Message
+  {
+    var charstring v_SessionId := f_IMS_PTC_ImsInfo_DialogGetSessIdTX();   /* @sic R5-150707 sic@ */
+    var charstring v_SessionVersion := f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX();
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var charstring v_IPAddrConnection := f_IMS_PTC_RemoteAddress_GetAddrStr();
+    var charstring v_IPAddrOrigin := v_IPAddrConnection;
+    var template (omit) SDP_attribute_list v_Attribute_List_Audio := f_SDP_Attributes_Concat_TX(p_SDP_MediaAttributes_Audio, p_SDP_PreconditionAttributes_Audio);
+    var template (omit) SDP_attribute_list v_Attribute_List_Video := f_SDP_Attributes_Concat_TX(p_SDP_MediaAttributes_Video, p_SDP_PreconditionAttributes_Video);
+    var template (value) SDP_media_desc v_Media_Desc_AudioTx;
+    var template (value) SDP_media_desc v_Media_Desc_VideoTx;
+    var template (value) SDP_media_desc_list v_Media_Desc_List;
+    var template (value) SDP_Message v_SDP_Message;
+
+    v_Media_Desc_AudioTx := cs_SDP_Media_Desc(p_MediaAudio,
+                                              p_Bandwidth_List_Audio,
+                                              v_Attribute_List_Audio);
+    v_Media_Desc_VideoTx := cs_SDP_Media_Desc(p_MediaVideo,
+                                              p_Bandwidth_List_Video,
+                                              v_Attribute_List_Video);
+    
+    v_Media_Desc_List := { v_Media_Desc_AudioTx, v_Media_Desc_VideoTx };
+    
+    v_SDP_Message := cs_SDP_Message_Common(cs_SDP_Origin(-, v_SessionId, v_SessionVersion, v_AddrType, v_IPAddrOrigin),
+                                           -,
+                                           cs_SDP_Connection(v_AddrType, v_IPAddrConnection),
+                                           cs_SDP_Bandwidth_List_AS(p_SessionBandwidthAS),
+                                           -,
+                                           v_Media_Desc_List);
+
+    f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageTX(v_SDP_Message);                                                         /* @sic R5-225427, R5-225258 sic@ */
+
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      return media attributes for given list of codecs
+   * @param     p_VideoCodecList
+   * @return    template (present) SDP_attribute_list
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_SDP_MediaAttributesVideoCodecListRX(IMS_SDP_VideoCodecList_Type p_VideoCodecList) return template (present) SDP_attribute_list
+  {
+    var template (present) SDP_attribute_list v_MediaAttributes := {};
+    var template (present) SDP_attribute_rtpmap_codec v_RtpmapCodecInfo;
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParameters;
+    var integer i;
+    
+    for (i:=0; i<lengthof(p_VideoCodecList); i:=i+1) {
+      // The tcap/pcfg attributes need to be checked later when we know whether we have RTP/AVP or RTP/AVPF
+      select (p_VideoCodecList[i]) {
+        case (H264_90000) {
+          v_RtpmapCodecInfo := cr_RTPMAP_H264_90000;
+          v_FmtpParameters := cr_SDP_FmtpParamsH264_MO;  /* @sic R5-150734, R5-150736: same parameters for C.25 and 17.1 sic@ */
+        }
+        case (H265_90000) {
+          v_RtpmapCodecInfo := cr_RTPMAP_H265_90000;
+          v_FmtpParameters := cr_SDP_FmtpParamsH265;
+        }
+      }
+      v_MediaAttributes := f_SDP_Attributes_Add_RX(v_MediaAttributes, cr_SDP_Attribute_rtpmap(-, v_RtpmapCodecInfo));
+      v_MediaAttributes := f_SDP_Attributes_Add_RX(v_MediaAttributes, cr_SDP_Attribute_fmtp(-, v_FmtpParameters));
+    }
+    return v_MediaAttributes;
+  }
+
+  /*
+   * @desc      Build SDP record to be received from the UE at step 2 according to 34.229-1 Annex C.25, C.25a, C.25b
+   * @param     p_AudioCodecList
+   * @param     p_VideoCodecList
+   * @param     p_PreconditionRequired  (default value: true)
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_InitialOfferAudioVideo_RX(IMS_SDP_AudioCodecList_Type p_AudioCodecList,
+                                                    IMS_SDP_VideoCodecList_Type p_VideoCodecList,
+                                                    boolean p_PreconditionRequired := true) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5-151796: "a=inactive" removed from media attributes for audio and video sic@ */
+    /* @sic R5-172931: p_AudioCodecList sic@ */
+    /* @sic R5-170782/R5-171478: function restructured to support WLAN (step 4 of C.25, C.25a) sic@ */
+    /* @sic R5-211433: p_VideoCodecList sic@ */
+    /* @sic R5-213070: p_PreconditionRequired sic@ */
+    var template (present) SDP_attribute_list v_MediaAttributes_Audio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Video;
+    var template (present) SDP_attribute_list v_PreconditionAttributes := {};
+
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();  /* @sic R5-171478 sic@ */
+
+    if (p_PreconditionRequired) {        // @sic R5-213070 sic@
+      if (v_IsWLAN) {                    // C.25a
+        v_PreconditionAttributes := cr_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, c_optional);
+      } else {                           // C.25
+        v_PreconditionAttributes := cr_SDP_PreconditionAttributes(c_none, c_none, c_mandatory, c_optional);
+      }
+    }
+    v_MediaAttributes_Audio := f_SDP_MediaAttributesAudioCodecListRX(p_AudioCodecList); // @sic R5-168032, R5-172931 sic@
+    v_MediaAttributes_Video := f_SDP_MediaAttributesVideoCodecListRX(p_VideoCodecList); // @sic R5-211433 sic@
+    
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {    // @sic R5-211433 sic@
+      v_MediaAttributes_Audio := f_IMS_SDP_MediaAttributes_AddMediaSecurityAttributesRX(v_MediaAttributes_Audio); // not specified in 34.229-1 C.25
+    }
+
+    return f_IMS_BuildSDP_AudioVideo_RX(cr_SDP_Time_Any,
+                                        cr_SDP_Media_Audio,
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes,
+                                        cr_SDP_Media_Video(-, -, (c_rtpAvp, c_rtpAvpf)),
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes);
+  }
+
+  /*
+   * @desc      Build SDP record to be received from the UE at step 2 according to 34.229-1 test case 17.1
+   * @param     p_AudioCodec
+   * @param     p_VideoCodecList
+   * @param     p_WithPreconditions (default value: true)
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_InitialOfferAddVideo_RX(IMS_SDP_AudioCodec_Type p_AudioCodec,
+                                                  IMS_SDP_VideoCodecList_Type p_VideoCodecList,
+                                                  boolean p_WithPreconditions := true) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5-213073: p_AudioCodec, p_VideoCodecList, p_WithPreconditions sic@ */
+    var template (present) SDP_attribute_rtpmap_codec v_RtpmapAudio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Audio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Video;
+    var template (present) charstring v_StrengthRemote;
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Audio := {};
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Video := {};
+
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+
+    if (p_WithPreconditions) {
+      v_StrengthRemote := (c_optional, c_mandatory);  /* @sic R5-165081: (c_optional, c_mandatory) sic@ */
+      v_PreconditionAttributes_Audio := cr_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, v_StrengthRemote);
+      if (v_IsWLAN) {
+        v_PreconditionAttributes_Video := cr_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, v_StrengthRemote);
+      } else {
+        v_PreconditionAttributes_Video := cr_SDP_PreconditionAttributes(c_none, c_none, c_mandatory, v_StrengthRemote);
+      }
+    }
+    
+    v_RtpmapAudio := f_SDP_AttributeRtpmapAudioRX(p_AudioCodec);  /* @sic R5-213073 sic@ */
+    v_MediaAttributes_Audio := {
+      cr_SDP_Attribute_rtpmap(-, v_RtpmapAudio), /* @sic R5-168141 sic@ */
+      cr_SDP_Attribute_fmtp                      /* => any parameters for audio */
+    };
+
+    v_MediaAttributes_Video := f_SDP_MediaAttributesVideoCodecListRX(p_VideoCodecList); /* @sic R5-213073: f_SDP_MediaAttributesVideoCodecListRX sic@ */
+
+    return f_IMS_BuildSDP_AudioVideo_RX(cr_SDP_Time_Any,
+                                        cr_SDP_Media_Audio,
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes_Audio,
+                                        cr_SDP_Media_Video(-, -, (c_rtpAvp, c_rtpAvpf)),
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build SDP record to be sent to the UE at step 4 according to 34.229-1 Annex C.25, C.25a, C.25b or test case 17.1
+   * @param     p_VideoCallType
+   * @param     p_SdpOffer
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_InitialAnswerAudioVideo_TX(VideoCallTypeMO_Type p_VideoCallType,
+                                                     SDP_Message p_SdpOffer,
+                                                     IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                                     IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                                     SDP_EVS_Configuration_MOCallSetup_Type p_EvsConfiguration := NO_EVS)
+    runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-144402: p_IPAddrOrigin removed sic@ */
+    /* @sic R5-170782/R5-171478: function restructured to support WLAN (step 4 of C.25, C.25a) sic@ */
+    /* @sic R5-211433: p_AudioCodec, p_VideoCodec sic@ */
+    /* @sic R5-231490: p_EvsConfiguration sic@ */
+    /* @sic R5-243984: NO_EVS instead of EVS_A2 as default for p_EvsConfiguration sic@ */
+    var SDP_media_desc v_Media_AudioRx := p_SdpOffer.media_list[0];
+    var SDP_media_desc v_Media_VideoRx := p_SdpOffer.media_list[1];
+    var template (value) SDP_bandwidth_list v_Bandwidth_List_Audio := v_Media_AudioRx.bandwidth;
+    var template (value) SDP_bandwidth_list v_Bandwidth_List_Video := v_Media_VideoRx.bandwidth;
+    var template (value) SDP_attribute_rtpmap_codec v_RtpmapCodecInfo;
+    var template (omit) SDP_attribute v_FmtpAttributeVideo;
+    var template (value) SemicolonParam_List v_FmtpParamListVideo := {};
+    var template (omit) SDP_attribute_list v_MediaAttributes_Audio := {};
+    var template (omit) SDP_attribute_list v_MediaAttributes_Video := {};
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Audio := omit;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Video := omit;
+    var charstring v_FmtAudio := f_SDP_MediaDescr_GetAudioCodec(v_Media_AudioRx, p_AudioCodec);    // @sic R5-211433: video call over NR5GC sic@
+    var charstring v_FmtVideo := f_SDP_MediaDescr_GetVideoCodec(v_Media_VideoRx, p_VideoCodec);    // @sic R5-211433: video call over NR5GC sic@
+    var boolean v_TcapPcfg;
+    var integer v_SessionBandwidthAS;
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+    var boolean v_IsNR5GC := f_IMS_PTC_RanTypeIsNR5GC();
+    var boolean v_WithPreconditions := f_SDP_MediaDescr_CheckWithPreconditions(v_Media_AudioRx);    /* NOTE: it is assumed that audio/video either both use precondition or both don't use precondition */
+
+    /***** media attributes for audio *****/
+    if (v_IsNR5GC) {             // @sic R5-211433, R5-213125: video call over NR5GC sic@
+      select (p_VideoCallType) {
+        case (SetupVideoCall) {  // A.15.X
+          v_MediaAttributes_Audio := f_IMS_SDP_AudioMediaAttributes_InitialAnswer_TX(v_Media_AudioRx, p_AudioCodec, p_EvsConfiguration, v_FmtAudio);
+          v_MediaAttributes_Audio := f_IMS_SDP_MediaAttributes_CopyEcnCapabilityAttributesTX(v_Media_AudioRx, v_MediaAttributes_Audio);
+          v_MediaAttributes_Audio := f_IMS_SDP_MediaAttributes_AddMediaSecurityAttributesTX(v_MediaAttributes_Audio);
+          v_Bandwidth_List_Audio := cs_SDP_Bandwidth_List_Media(65, f_SDP_BandwidthList_GetBandwidth(v_Media_AudioRx.bandwidth, "RS"), f_SDP_BandwidthList_GetBandwidth(v_Media_AudioRx.bandwidth, "RR"));  // !!!! WHY is b=AS hard-coded to 65 ?? !!!!
+        }
+        case (AddVideo) {        // test case 7.20
+          v_MediaAttributes_Audio := v_Media_AudioRx.attributes;   // same audio attributes as in the offer
+        }
+      }
+    } else {
+      v_MediaAttributes_Audio := f_IMS_SDP_AudioMediaAttributes_InitialAnswer_TX(v_Media_AudioRx, p_AudioCodec, p_EvsConfiguration, v_FmtAudio);
+    }
+
+    // @sic R5-213523, R5-212240: "a=inactive" removed sic@
+
+    /***** media attributes for video *****/
+    v_TcapPcfg := f_IMS_Video_TcapPcfgRequired(v_Media_VideoRx);
+    v_FmtpAttributeVideo := f_SDP_AttributeList_GetAttribute(v_Media_VideoRx.attributes, cr_SDP_Attribute_fmtp(v_FmtVideo));   // @sic R5s141336 change 2.2 - MCC160 implementation sic@ */
+    if (isvalue(v_FmtpAttributeVideo)) {
+      v_FmtpParamListVideo := valueof(v_FmtpAttributeVideo.fmtp.params.paramList);      /* @sic R5-150734, R5-150736 sic@ */
+    }
+
+    v_RtpmapCodecInfo := f_SDP_AttributeRtpmapVideoTX(p_VideoCodec);                    // @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+    v_MediaAttributes_Video := f_SDP_Attributes_Add_TX(v_MediaAttributes_Video, cs_SDP_Attribute_rtpmap(v_FmtVideo, v_RtpmapCodecInfo));
+    v_MediaAttributes_Video := f_SDP_Attributes_Add_TX(v_MediaAttributes_Video, cs_SDP_Attribute_fmtp(v_FmtVideo, cs_Fmtp_ParamList(v_FmtpParamListVideo)));
+    v_MediaAttributes_Video := f_SDP_Attributes_Add_TX(v_MediaAttributes_Video, cs_SDP_Attribute_acfg(1, "t=1"), v_TcapPcfg);
+
+    // @sic R5-213523, R5-212240: "a=inactive" removed sic@
+    
+    /***** precondition attributes *****/
+    if (v_WithPreconditions) {       /* @sic R5-213070 sic@ */
+      if (v_IsWLAN) {                // C.25a: all resource are available
+        v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);
+        v_PreconditionAttributes_Video := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);
+      } else {                       // C.25 or 17.1
+        v_PreconditionAttributes_Video := cs_SDP_PreconditionAttributesWithConf(c_none, c_none, c_mandatory, c_mandatory);
+        select (p_VideoCallType) {
+          case (SetupVideoCall) {    // C.25
+            v_PreconditionAttributes_Audio := v_PreconditionAttributes_Video;   // same preconditions for audio and video
+          }
+          case (AddVideo) {          // 17.1
+            v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);
+          }
+        }
+      }
+    }
+    if (v_IsWLAN and (p_VideoCallType == SetupVideoCall)) {
+      v_SessionBandwidthAS := f_SDP_BandwidthList_GetBandwidth(p_SdpOffer.bandwidth, "AS");    /* C.25a: "b=AS: (bandwidth-value) [Note 1]" */
+    } else if (v_IsNR5GC) {    /* @sic R5-211433 sic@ */
+      v_SessionBandwidthAS := 65;
+    } else {                                    /* @sic R5-174556: b=AS:30 for C.25b (same as for C.25) sic@ */
+      v_SessionBandwidthAS := 30;
+    }
+
+    return f_IMS_BuildSDP_AudioVideo_TX(v_SessionBandwidthAS,
+                                        cs_SDP_Media_Audio(v_FmtAudio),
+                                        v_Bandwidth_List_Audio,
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes_Audio,
+                                        cs_SDP_Media_Video(v_FmtVideo),
+                                        v_Bandwidth_List_Video,
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      to receive 2nd SDP answer sent by the UE in C.25 step 5/7
+   * @param     p_VideoCallType
+   * @param     p_SDP_MessageInvite
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_BuildSDP_UpdatedOfferAudioVideo_RX(VideoCallTypeMO_Type p_VideoCallType,
+                                                    SDP_Message p_SDP_MessageInvite,
+                                                    IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                                    IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5-153610: p_SDP_MessageInvite instead of p_FmtAudio, p_FmtVideo sic@ */
+    /* @sic R5-211433: p_AudioCodec, p_VideoCodec sic@ */
+   
+    var SDP_media_desc v_Media_InviteAudio := p_SDP_MessageInvite.media_list[0];
+    var SDP_media_desc v_Media_InviteVideo := p_SDP_MessageInvite.media_list[1];
+    var charstring v_FmtAudio := f_SDP_MediaDescr_GetAudioCodec(v_Media_InviteAudio, p_AudioCodec); // @sic R5-153610, R5-168032, R5-168141 sic@ @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+    var charstring v_FmtVideo := f_SDP_MediaDescr_GetVideoCodec(v_Media_InviteVideo, p_VideoCodec); // @sic R5-153610 sic@                       @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+    var template (present) SDP_attribute_rtpmap_codec v_RtpmapAttr := f_SDP_AttributeRtpmapAudioRX(p_AudioCodec);                             // @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+    var IMS_SDP_VideoCodecList_Type v_SingleVideoCodec := { p_VideoCodec };                                                                   // @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+    var template (present) SDP_attribute_list v_MediaAttributes_Audio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Video;
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Audio;
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Video;
+    var template (present) charstring v_DirectionRemote_Audio;
+    var template (present) charstring v_DirectionRemote_Video;
+    var template (present) charstring v_StrengthRemote := (c_optional, c_mandatory);  /* @sic R5s141221 change 4.1; R5s150236 sic@ @sic R5s150755 sic@ @sic R5s160604: strength is the same for all call types sic@ */
+
+    v_MediaAttributes_Audio := {
+      cr_SDP_Attribute_rtpmap(v_FmtAudio, v_RtpmapAttr),     /* @sic R5s130681 change 2 sic@ @sic R5-168032, R5-168119, R5-168141 sic@ @sic R5-211433 sic@ */
+      cr_SDP_Attribute_fmtp(v_FmtAudio)
+    };
+
+    v_MediaAttributes_Video := f_SDP_MediaAttributesVideoCodecListRX(v_SingleVideoCodec);     // @sic R5-211433: MO Video Call / with preconditions / 5GS sic@
+
+    select (p_VideoCallType) {
+      case (SetupVideoCall) {
+        // @sic R5-182188, R5-212240: a=sendrecv removed from Attributes for media sic@
+        v_DirectionRemote_Audio := c_none;
+        v_DirectionRemote_Video := c_none;
+      }
+      case (AddVideo) {
+        v_DirectionRemote_Audio := c_sendrecv;
+        v_DirectionRemote_Video := c_none;
+      }
+      case (CallHold) {
+        v_DirectionRemote_Audio := c_sendrecv;
+        v_DirectionRemote_Video := c_sendrecv;
+      }
+    }
+    v_PreconditionAttributes_Audio := cr_SDP_PreconditionAttributes(c_sendrecv, v_DirectionRemote_Audio, c_mandatory, v_StrengthRemote);    // @sic R5s160604: video <-> audio sic@
+    v_PreconditionAttributes_Video := cr_SDP_PreconditionAttributes(c_sendrecv, v_DirectionRemote_Video, c_mandatory, v_StrengthRemote);    // @sic R5s160604: video <-> audio sic@
+
+    return f_IMS_BuildSDP_AudioVideo_RX(-,
+                                        cr_SDP_Media_Audio(v_FmtAudio),
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes_Audio,
+                                        cr_SDP_Media_Video(v_FmtVideo),
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build up SDP message for MO release of video from a video/audio session
+   * @param     p_PreviousSdpOffer
+   * @return    template (present) SDP_Message
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_WithPreconditions (default value: true)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildSDP_ReleaseVideoOffer_RX(SDP_Message p_PreviousSdpOffer,
+                                               IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                               IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                               boolean p_WithPreconditions := true) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5-213073, R5-213074: p_AudioCodec, p_VideoCodec, p_WithPreconditions sic@ */
+    var charstring v_FmtAudio := f_SDP_MediaDescr_GetAudioCodec(p_PreviousSdpOffer.media_list[0], p_AudioCodec);        // @sic R5-213073: NR5GC sic@
+    var charstring v_FmtVideo := f_SDP_MediaDescr_GetVideoCodec(p_PreviousSdpOffer.media_list[1], p_VideoCodec);        // @sic R5-213073: NR5GC sic@
+    var template (present) SDP_attribute_rtpmap_codec v_RtpmapCodecAudio := f_SDP_AttributeRtpmapAudioRX(p_AudioCodec); // @sic R5-213073: NR5GC sic@
+    var template (present) SDP_attribute_rtpmap_codec v_RtpmapCodecVideo := f_SDP_AttributeRtpmapVideoRX(p_VideoCodec); // @sic R5-213073: NR5GC sic@
+    var template (present) SDP_attribute_list v_MediaAttributes_Audio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Video := {};
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Audio := {};
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Video := {};                                     // @sic R5-223459 sic@
+
+    if (p_WithPreconditions) {  // @sic R5-213073, R5-213074: NR5GC sic@
+      v_PreconditionAttributes_Audio := cr_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, (c_optional, c_mandatory)); /* @sic R5s160604 change 3 sic@ */
+    }
+
+    v_MediaAttributes_Audio := {
+      cr_SDP_Attribute_rtpmap(v_FmtAudio, v_RtpmapCodecAudio),
+      cr_SDP_Attribute_fmtp(v_FmtAudio)
+    };
+
+    if (not f_IMS_PTC_RanTypeIsNR5GC()) {    // @sic R5-221481, R5-221482 are changing NR5GC test cases only; there are no such CRs for 4G yet sic@
+      v_MediaAttributes_Video := {
+        cr_SDP_Attribute_rtpmap(v_FmtVideo, v_RtpmapCodecVideo),
+        cr_SDP_Attribute_fmtp(v_FmtVideo)
+      };
+      v_PreconditionAttributes_Video := v_PreconditionAttributes_Audio;         // @sic R5-223459: precondition attributes are still checked for 4G but not for 5G sic@
+    }
+
+    return f_IMS_BuildSDP_AudioVideo_RX(cr_SDP_Time_Any,
+                                        cr_SDP_Media_Audio,
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes_Audio,
+                                        cr_SDP_Media(c_video, 0, c_rtpAvpf, cr_SDP_FmtList_AtLeastOne(v_FmtVideo)),  /* port number == 0 => release video stream
+                                                                                                                        @sic R5s160604: RTP/AVPF sic@ */
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build Media attributes for video stream
+   * @param     p_VideoCodec
+   * @param     p_Fmt               (default value: tsc_SDP_FmtVideo)
+   * @param     p_IsNotRemoveVideo  (default value: true)
+   * @return    template (value) IMS_SDP_MediaDescriptionRtpList_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_SDP_MediaAttributesVideoCodecTX(IMS_SDP_VideoCodec_Type p_VideoCodec,
+                                              charstring p_Fmt := tsc_SDP_FmtVideo,
+                                              boolean p_IsNotRemoveVideo := true) return template (value) IMS_SDP_MediaDescriptionRtpList_Type
+  { /* @sic R5-213524, R5-213538, R5-213539, R5-213541: new common function sic@ */
+    var template (omit) SDP_attribute_list v_MediaAttributes := {};
+
+    select (p_VideoCodec) {
+      case (H264_90000) {
+        v_MediaAttributes := {
+          cs_SDP_Attribute_rtpmap(p_Fmt, cs_RTPMAP_H264_90000),
+          cs_SDP_Attribute_fmtp(p_Fmt, cs_Fmtp_ParamList(cs_Fmtp_VideoParamsH264))
+        };
+      }
+      case (H265_90000) {
+        v_MediaAttributes := {
+          cs_SDP_Attribute_rtpmap(p_Fmt, cs_RTPMAP_H265_90000),
+          cs_SDP_Attribute_fmtp(p_Fmt, cs_Fmtp_ParamList(cs_Fmtp_VideoParamsH265))
+        };
+        v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_tcap(1, "RTP/AVPF"));
+        v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_pcfg(1, "t=1"));
+        v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_extmap(4, "urn:3gpp:video-orientation"));
+        v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_imageattr(p_Fmt, "[x=848,y=480]", "[x=848,y=480]"));
+      }
+    }
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_rtcp_fb("*", "trr-int 5000"), p_IsNotRemoveVideo);  /* @sic R5s141329 change 2.2: attribute is for video sic@ */
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_rtcp_fb("*", "nack"),         p_IsNotRemoveVideo);  /* @sic R5s141329 change 2.2: attribute is for video sic@ */
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_rtcp_fb("*", "nack pli"),     p_IsNotRemoveVideo);  /* @sic R5s141329 change 2.2: attribute is for video sic@ */
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_rtcp_fb("*", "ccm fir"),      p_IsNotRemoveVideo);  /* @sic R5s141329 change 2.2: attribute is for video sic@ */
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_rtcp_fb("*", "ccm tmmbr"),    p_IsNotRemoveVideo);  /* @sic R5s141329 change 2.2: attribute is for video sic@ */
+
+    return cs_IMS_SDP_MediaDescriptionRtpList({p_Fmt}, v_MediaAttributes);
+  }
+
+  /*
+   * @desc      Build SDP message to be sent to the UE in MT video calls
+   * @param     p_VideoCallType
+   * @param     p_MediaDescriptionRtpList_Audio
+   * @param     p_MediaDescriptionRtpList_Video
+   * @param     p_PreconditionAttributes_Audio (default value: omit)
+   * @param     p_PreconditionAttributes_Video (default value: omit)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_BuildSDP_CommonOfferAudioVideo_TX(VideoCallTypeMT_Type p_VideoCallType,
+                                                    template (value) IMS_SDP_MediaDescriptionRtpList_Type p_MediaDescriptionRtpList_Audio,
+                                                    template (value) IMS_SDP_MediaDescriptionRtpList_Type p_MediaDescriptionRtpList_Video,
+                                                    template (omit) SDP_attribute_list p_PreconditionAttributes_Audio := omit,
+                                                    template (omit) SDP_attribute_list p_PreconditionAttributes_Video := omit) runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-213524, R5-213538, R5-213539, R5-213541: new common function replacing f_IMS_BuildSDP_MTCallAudioVideo_TX sic@ */
+    var template (value) charstring v_FmtVideo := p_MediaDescriptionRtpList_Video.FmtList[0];   // so far there is onyl one video codec in MT video call test cases
+    var template (value) SDP_media_field v_MediaVideo := cs_SDP_Media_Video(v_FmtVideo);
+    var template (value) SDP_bandwidth_list v_Bandwidth_List_Audio;
+    var template (value) SDP_bandwidth_list v_Bandwidth_List_Video;
+    var integer v_SessionBandwidthAS;
+
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {
+      v_Bandwidth_List_Audio := cs_SDP_Bandwidth_List_Media(65, 0, 2000);
+      v_Bandwidth_List_Video := cs_SDP_Bandwidth_List_Media(540, 0, 5000);
+      v_SessionBandwidthAS := 540;
+    } else {
+      v_Bandwidth_List_Audio := cs_SDP_Bandwidth_List_Media(37, 0, 2000);    // @sic R5-151956, R5s170056/R5-171489: 37 instead of 30 sic@
+      v_Bandwidth_List_Video := cs_SDP_Bandwidth_List_Media(315, 0, 2500);
+      v_SessionBandwidthAS := 352;
+    }
+
+    if (p_VideoCallType == RemoveVideo) {
+      v_SessionBandwidthAS := f_SDP_BandwidthList_GetBandwidth(valueof(v_Bandwidth_List_Audio), "AS");
+      v_MediaVideo.ports.port_number := 0;
+    }
+    return f_IMS_BuildSDP_AudioVideo_TX(v_SessionBandwidthAS,
+                                        cs_SDP_Media_MultiAudio(p_MediaDescriptionRtpList_Audio.FmtList),
+                                        v_Bandwidth_List_Audio,
+                                        p_MediaDescriptionRtpList_Audio.AttributeList,
+                                        p_PreconditionAttributes_Audio,
+                                        v_MediaVideo,
+                                        v_Bandwidth_List_Video,
+                                        p_MediaDescriptionRtpList_Video.AttributeList,
+                                        p_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build SDP message to be sent to the UE as initial offer for MT video call
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @param     p_VideoCodecList    (default value: tsc_IMS_SDP_VideoCodecList_H264_only)
+   * @param     p_EvsConfiguration  (default value: NO_EVS)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildSDP_InitialOfferAudioVideo_TX(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR,
+                                                    IMS_SDP_VideoCodecList_Type p_VideoCodecList := tsc_IMS_SDP_VideoCodecList_H264_only,
+                                                    SDP_EVS_Configuration_MTCallSetup_Type p_EvsConfiguration := NO_EVS,
+                                                    boolean p_WithPreconditions := true) runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-213524, R5-213538, R5-213539, R5-213541: new common function replacing f_IMS_BuildSDP_MTCallAudioVideo_TX sic@ */
+    /* @sic R5-231489: p_EvsConfiguration sic@ */
+    /* @sic R5-243985: NO_EVS instead of EVS_A2 as default for p_EvsConfiguration sic@ */
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpList_Audio;
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpList_Video;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Audio := omit;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Video := omit;
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+
+    if (p_WithPreconditions) {
+      if (v_IsWLAN) {               /* C.21a INVITE (Step 1) */
+        v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, c_optional);
+      } else {                      /* C.21 INVITE (Step 1) */
+        v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_none, c_none, c_mandatory, c_optional);
+      }
+      v_PreconditionAttributes_Video := v_PreconditionAttributes_Audio;
+    }
+
+    // ***** Media description audio *****
+    v_MediaDescriptionRtpList_Audio := f_SDP_MediaDescriptionInitialOfferAudioTX(p_AudioCodecList, p_EvsConfiguration); /* @sic R5-172930 sic@ */
+
+    // ***** Media description video *****
+    v_MediaDescriptionRtpList_Video := fl_SDP_MediaAttributesVideoCodecTX(p_VideoCodecList[0]);   /* @sic R5-213524, R5-213538, R5-213539, R5-213541: fl_SDP_MediaAttributesVideoCodecTX sic@
+                                                                                                     so far there is only one video codec used in MT video call test cases */
+    return fl_IMS_BuildSDP_CommonOfferAudioVideo_TX(SetupVideoCall,
+                                                    v_MediaDescriptionRtpList_Audio,
+                                                    v_MediaDescriptionRtpList_Video,
+                                                    v_PreconditionAttributes_Audio,
+                                                    v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build SDP message to be sent to the UE as initial offer to add video to a voice call
+   * @param     p_MediaDescriptionRtpList_Audio
+   * @param     p_VideoCodecList    (default value: tsc_IMS_SDP_VideoCodecList_H264_only)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildSDP_InitialOfferAddVideo_TX(template (value) IMS_SDP_MediaDescriptionRtpList_Type p_MediaDescriptionRtpList_Audio,
+                                                  IMS_SDP_VideoCodecList_Type p_VideoCodecList := tsc_IMS_SDP_VideoCodecList_H264_only,
+                                                  boolean p_WithPreconditions := true) runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-213524, R5-213538, R5-213539, R5-213541: new common function replacing f_IMS_BuildSDP_MTCallAudioVideo_TX sic@ */
+    /* @sic R5s220939, R5-225423: p_PrevSdpFromUE removed sic@ */
+    /* @sic R5s221127: p_MediaDescriptionRtpList_Audio instead of p_AudioCodec sic@ */
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpList_Video;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Audio := omit;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Video := omit;
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+
+    if (p_WithPreconditions) {
+      v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_optional);
+      if (v_IsWLAN) {                   /* G.17.2.4 INVITE (Step 1) */
+        v_PreconditionAttributes_Video := cs_SDP_PreconditionAttributes(c_sendrecv, c_none, c_mandatory, c_optional);  /* @sic R5s230006: c_sendrecv instead of c_none sic@ */
+      } else {                          /* 17.2.4 INVITE (Step 1) */
+        v_PreconditionAttributes_Video := cs_SDP_PreconditionAttributes(c_none, c_none, c_mandatory, c_optional);
+      }
+    }
+
+    // ***** Media description video *****
+    v_MediaDescriptionRtpList_Video := fl_SDP_MediaAttributesVideoCodecTX(p_VideoCodecList[0]);   /* @sic R5-213524, R5-213538, R5-213539, R5-213541: fl_SDP_MediaAttributesVideoCodecTX sic@
+                                                                                                     so far there is only one video codec used in MT video call test cases */
+    return fl_IMS_BuildSDP_CommonOfferAudioVideo_TX(AddVideo,
+                                                    p_MediaDescriptionRtpList_Audio,
+                                                    v_MediaDescriptionRtpList_Video,
+                                                    v_PreconditionAttributes_Audio,
+                                                    v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      Build SDP message to be sent to the UE as update or to remove video
+   * @param     p_VideoCallType
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_PrevSdpFromUE     (default value: omit)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildSDP_UpdatedOfferAudioVideo_TX(VideoCallTypeMT_Type p_VideoCallType,
+                                                    IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                                    IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                                    template (omit) SDP_Message p_PrevSdpFromUE := omit,
+                                                    boolean p_WithPreconditions := true) runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-213524, R5-213538, R5-213539, R5-213541: new common function replacing f_IMS_BuildSDP_MTCallAudioVideo_TX sic@ */
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpList_Audio;
+    var template (value) IMS_SDP_MediaDescriptionRtpList_Type v_MediaDescriptionRtpList_Video;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Audio := omit;
+    var template (omit) SDP_attribute_list v_PreconditionAttributes_Video := omit;
+    var template (omit) SDP_attribute_list v_PtimeMaxptime := cs_SDP_MediaAttributes_ptime_maxptime;
+    var charstring v_DirectionRemote := c_none;
+    var boolean v_IsNotRemoveVideo := (p_VideoCallType != RemoveVideo);
+    var SDP_Message v_PrevSdpFromUE;
+    var SDP_media_desc v_MediaDesc_Video;
+    var template (omit) SDP_attribute v_SDP_Attribute;
+
+    if (isvalue(p_PrevSdpFromUE)) {
+      v_PrevSdpFromUE := valueof(p_PrevSdpFromUE);
+      v_MediaDesc_Video := valueof(f_IMS_SDP_MediaList_GetMediaStream(v_PrevSdpFromUE.media_list, c_video));         /* @sic R5s180304: f_IMS_SDP_MediaList_GetMediaStream sic@ */
+      v_SDP_Attribute := f_SDP_AttributeList_GetAttribute(v_MediaDesc_Video.attributes, cr_SDP_Attribute_curr_qos(c_local, ?));
+      if (isvalue(v_SDP_Attribute)) {
+        v_DirectionRemote := valueof(v_SDP_Attribute.curr.direction);
+      }
+    }
+
+    select (p_VideoCallType) {
+      case (SetupVideoCall) {         /* C.26 UPDATE (Step 7) */
+        v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, v_DirectionRemote, c_mandatory, c_mandatory);
+        v_PreconditionAttributes_Video := v_PreconditionAttributes_Audio;
+      }
+      case (AddVideo) {               /* 17.2 UPDATE (Step 6) */
+        v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);
+        v_PreconditionAttributes_Video := cs_SDP_PreconditionAttributes(c_sendrecv, v_DirectionRemote, c_mandatory, c_mandatory);
+        if (not f_IMS_PTC_RanTypeIsNR5GC()) {
+          v_PtimeMaxptime := omit;   // @sic R5-151956: there are no ptime, maxptime for UPDATE of 17.2 sic@
+        }
+      }
+      case (RemoveVideo) {
+        if (p_WithPreconditions) {
+          v_PreconditionAttributes_Audio := cs_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_optional);
+          v_PreconditionAttributes_Video := v_PreconditionAttributes_Audio;
+        }
+      }
+    }
+
+    // ***** Media description audio *****
+    v_MediaDescriptionRtpList_Audio := f_SDP_MediaDescriptionSubsequentOfferAudioTX(p_AudioCodec, p_PrevSdpFromUE, v_PtimeMaxptime);
+
+    // ***** Media description video *****
+    v_MediaDescriptionRtpList_Video := fl_SDP_MediaAttributesVideoCodecTX(p_VideoCodec, -, v_IsNotRemoveVideo);   /* @sic R5-213524, R5-213538, R5-213539, R5-213541: fl_SDP_MediaAttributesVideoCodecTX sic@ */
+
+    return fl_IMS_BuildSDP_CommonOfferAudioVideo_TX(p_VideoCallType,
+                                                    v_MediaDescriptionRtpList_Audio,
+                                                    v_MediaDescriptionRtpList_Video,
+                                                    v_PreconditionAttributes_Audio,
+                                                    v_PreconditionAttributes_Video);
+  }
+
+  /*
+   * @desc      SDP message received in step 4 (C.26) or step 3 (17.2)
+   * @param     p_VideoCallType
+   * @param     p_KindOfAnswer      (default value: omit)
+   * @param     p_AudioCodec        (default value: AMR_16000)
+   * @param     p_FmtAudio          (default value: "")
+   * @param     p_FmtpParams_Audio  (default value: ?)
+   * @param     p_VideoCodec        (default value: H264_90000)
+   * @param     p_WithPreconditions (default value: true)
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildSDP_MTCallAudioVideo_RX(VideoCallTypeMT_Type p_VideoCallType,
+                                              template (omit) SDP_KindOfAnswer_Type p_KindOfAnswer := omit,
+                                              IMS_SDP_AudioCodec_Type p_AudioCodec := AMR_16000,
+                                              charstring p_FmtAudio := "",
+                                              template (present) SDP_attribute_fmtp_format_specific_params p_FmtpParams_Audio := ?,
+                                              IMS_SDP_VideoCodec_Type p_VideoCodec := H264_90000,
+                                              boolean p_WithPreconditions := true)
+    runs on IMS_PTC
+    return template (present) SDP_Message
+  { /* @sic R5-172930: function restructured to cope with different flavours ('normal' IMS, WLAN; Setup video call, add video, remove video; INVITE, UPDATE) sic@ */
+    /* @sic R5-172930: p_FmtAudio, p_FmtVideo removed sic@ */
+    /* @sic R5-213524: p_AudioCodec, p_VideoCodec, p_WithPreconditions sic@ */
+    /* @sic R5s220939, R5-225423: p_FmtAudio, p_FmtpParams_Audio sic@ */
+    var template (present) SDP_attribute_rtpmap_codec v_AudioCodec;
+    var template (present) SDP_attribute_rtpmap_codec v_VideoCodec;
+    var template (present) SDP_attribute_list v_MediaAttributes_Audio;
+    var template (present) SDP_attribute_list v_MediaAttributes_Video;
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Audio := {}; // @sic R5-170782 sic@
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Video := {}; // @sic R5-170782 sic@
+    var template (present) SDP_attribute_list v_PreconditionAttributes_Final := cr_SDP_PreconditionAttributes(c_sendrecv, c_sendrecv, c_mandatory, c_mandatory);  /* preconditions when resources are fully available */
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParams_Video := ?;
+    var charstring v_FmtAudio;
+    var charstring v_FmtVideo := tsc_SDP_FmtVideo;               /* @sic R5-197050: tsc_SDP_FmtVideo instead of fl_IMS_BuildSDP_FmtVideo sic@ */
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+    var boolean v_IsInitialAnswer := match(InitialAnswer, p_KindOfAnswer);
+
+    v_AudioCodec := f_SDP_AttributeRtpmapAudioRX(p_AudioCodec);  // @sic R5-168058; R5-168142 sic@
+    if (p_FmtAudio == "") {
+      v_FmtAudio := f_SDP_AudioCodec_GetFmt(p_AudioCodec);       /* @sic R5-197050: fix mapping of fmt values sic@ */
+    } else {
+      v_FmtAudio := p_FmtAudio;                                  /* @sic R5s220939, R5-225423: fmt in case of MO call establishment sic@ */
+    }
+    if (p_WithPreconditions) {
+      if (not v_IsWLAN and v_IsInitialAnswer) {  // i.e. 183 Session Progress (C.26 step 4 or 17.2 step 3)
+        v_PreconditionAttributes_Video := cr_SDP_PreconditionAttributesWithConf((c_none, c_sendrecv), c_none, c_mandatory, c_mandatory);    // @sic R5-216443: NR5GC sic@
+        
+        if (p_VideoCallType == SetupVideoCall) {                 // C.26 step 4: same preconditions for video and audio
+          v_PreconditionAttributes_Audio := v_PreconditionAttributes_Video;
+        } else {                                                 // 17.2 step 3: audio is there already
+          v_PreconditionAttributes_Audio := v_PreconditionAttributes_Final;
+        }
+      } else {  // WLAN or 200 OK
+        v_PreconditionAttributes_Audio := v_PreconditionAttributes_Final;
+        v_PreconditionAttributes_Video := v_PreconditionAttributes_Final;
+      }
+    }
+    
+    select (p_VideoCodec) {                                    /* @sic R5-213524 sic@ */
+      case (H264_90000) {
+        v_VideoCodec := cr_RTPMAP_H264_90000;
+        v_FmtpParams_Video := cr_SDP_FmtpParamsH264_MT;
+      }
+      case (H265_90000) {
+        v_VideoCodec := cr_RTPMAP_H265_90000;    // @sic R5s220235 sic@
+        v_FmtpParams_Video := cr_SDP_FmtpParamsH265("1", "93");
+      }
+    }
+
+    v_MediaAttributes_Audio := {
+      cr_SDP_Attribute_rtpmap(v_FmtAudio, v_AudioCodec),
+      cr_SDP_Attribute_fmtp(v_FmtAudio, p_FmtpParams_Audio)
+    };
+    v_MediaAttributes_Video := {
+      cr_SDP_Attribute_rtpmap(v_FmtVideo, v_VideoCodec),
+      cr_SDP_Attribute_fmtp(v_FmtVideo, v_FmtpParams_Video)  /* @sic R5s141329 - MCC160 implementation sic@
+                                                                @sic R5-150703: same parameters for C.26 and 17.2 sic@ */
+    };
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {    // @sic R5-216215 sic@
+      v_MediaAttributes_Video := f_SDP_Attributes_Add_RX(v_MediaAttributes_Video, cr_SDP_Attribute_acfg(1, "t=1"));
+    }
+
+    return f_IMS_BuildSDP_AudioVideo_RX(-,
+                                        cr_SDP_Media_Audio(v_FmtAudio),
+                                        v_MediaAttributes_Audio,
+                                        v_PreconditionAttributes_Audio,
+                                        cr_SDP_Media_Video(v_FmtVideo),
+                                        v_MediaAttributes_Video,
+                                        v_PreconditionAttributes_Video);
+  }
+
+}

@@ -1,0 +1,444 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-11-12 11:44:25 +0100 (Sun, 12 Nov 2023) $
+// $Rev: 37276 $
+/******************************************************************************/
+
+module MCPTT_MediaControl_Procedures {
+
+  import from CommonDefs all;
+  import from IMS_Component all;
+  import from MCPTT_MediaControl_Templates all;
+  import from MCPTT_MediaControl_TypeDefs all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MediaControl_Common all;
+  import from MCX_Parameters all;
+  import from RTCP_APP_Common all;
+
+  type enumerated MCPTT_PreestablishedSession_FloorControl_Type { WITH_FLOORCONTROL, WITHOUT_FLOORCONTROL };            /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      Encode and send Floor Control message
+   * @param     p_FloorControlMsg
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendMsg(template (value) FloorControlMsg_Type p_FloorControlMsg) runs on MCX_IMS_PTC
+  {
+    var octetstring v_Datagram := bit2oct(encvalue(p_FloorControlMsg));
+    f_MCX_MediaControl_SendMsg(v_Datagram);
+  }
+
+  /*
+   * @desc      Send the given Floor Control message to the client
+   * @param     p_FloorCtrlMsg
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendRequest(template (value) FloorControlMsg_Type p_FloorCtrlMsg) runs on MCX_IMS_PTC
+  {
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var FloorControlMsg_Type v_FloorCtrlMsg := valueof(p_FloorCtrlMsg);
+    var B5_Type v_Subtype;
+    var O1_Type v_MsgType;
+
+    f_MCPTT_FloorControl_SendMsg(p_FloorCtrlMsg);
+
+    select union (v_FloorCtrlMsg) {
+      case (grantedMessage)           { v_Subtype := v_FloorCtrlMsg.grantedMessage.commonHdr.subtype; }
+      case (denyMessage)              { v_Subtype := v_FloorCtrlMsg.denyMessage.commonHdr.subtype; }
+      case (idleMessage)              { v_Subtype := v_FloorCtrlMsg.idleMessage.commonHdr.subtype; }
+      case (takenMessage)             { v_Subtype := v_FloorCtrlMsg.takenMessage.commonHdr.subtype; }
+      case (queuePositionInfoMessage) { v_Subtype := v_FloorCtrlMsg.queuePositionInfoMessage.commonHdr.subtype; }
+      case else                       { return; } // no ACK
+    }
+    
+    if (f_MCX_MediaControl_AckRequested(v_Subtype)) {
+      v_MsgType := f_MCX_MediaControl_AckMsgType(v_Subtype);  // @sic R5-223947: f_MCX_MediaControl_AckMsgType sic@
+      f_MCPTT_FloorControl_ReceiveDecodeAndMatchMsg(cr_FloorCtrlMsg_Ack(v_RTCP_SSRC_UE, v_MsgType));
+    }
+  }
+
+  /*
+   * @desc      Receive, decode and match floor control message
+   *            In addition the UE's SSRC is checked against the value stored for the current session if any, or the SSRC is stored otherwise
+   * @param     p_FloorCtrlMsg_Request
+   * @return    FloorControlMsg_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_ReceiveDecodeAndMatchMsg(template (present) FloorControlMsg_Type p_FloorCtrlMsg_Request) runs on MCX_IMS_PTC return FloorControlMsg_Type
+  {
+    var octetstring v_Datagram := f_MCX_MediaControl_ReceiveMsg();
+    var bitstring v_Bitstring := oct2bit(v_Datagram);
+    var FloorControlMsg_Type v_FloorControlMsg;
+    var charstring v_VerdictString := "";
+
+    if (decvalue(v_Bitstring, v_FloorControlMsg) != 0) {
+      FatalError(__FILE__, __LINE__, "Can not decode FloorControlMsg");
+    }
+    if (not match(v_FloorControlMsg, p_FloorCtrlMsg_Request)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Floorcontrol message does not match");
+    } else {
+      select union (v_FloorControlMsg) {
+        case (requestMessage)              { v_VerdictString := "Floor Request"; }
+        case (releaseMessage)              { v_VerdictString := "Floor Release"; }
+        case (queuePositionRequestMessage) { v_VerdictString := "Floor Position Request"; }
+        case (ackMessage)                  { v_VerdictString := "Floor Ack"; }
+      }
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, v_VerdictString);
+    }
+    /* @sic R5-236323: The UE's RTCP SSRC is not explicitly checked anymore and does not need to be stored sic@ */
+    return v_FloorControlMsg;
+  }
+
+  /*
+   * @desc      Receive, decode and match floor control message and send ACK if required
+   * @param     p_FloorCtrlMsg_Request
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_ReceiveRequest(template (present) FloorControlMsg_Type p_FloorCtrlMsg_Request) runs on MCX_IMS_PTC
+  {
+    var FloorControlMsg_Type v_FloorControlMsg := f_MCPTT_FloorControl_ReceiveDecodeAndMatchMsg(p_FloorCtrlMsg_Request);
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var B5_Type v_Subtype := '00000'B;
+    var O1_Type v_MsgType;
+    
+    select union (v_FloorControlMsg) {
+      case (requestMessage)              { v_Subtype := v_FloorControlMsg.requestMessage.commonHdr.subtype; }
+      case (releaseMessage)              { v_Subtype := v_FloorControlMsg.releaseMessage.commonHdr.subtype; }
+      case (queuePositionRequestMessage) { v_Subtype := v_FloorControlMsg.queuePositionRequestMessage.commonHdr.subtype; }
+    }
+    if (f_MCX_MediaControl_AckRequested(v_Subtype)) {
+      v_MsgType := f_MCX_MediaControl_AckMsgType(v_Subtype);    // @sic R5-223947: f_MCX_MediaControl_AckMsgType sic@
+      f_MCPTT_FloorControl_SendMsg(cs_FloorCtrlMsg_Ack(v_RTCP_SSRC_SS, v_MsgType));
+    }
+  }
+
+  /*
+   * @desc      Send Floor Granted
+   * @param     p_PriorityCallType
+   * @param     p_AckRequest        (default value: ACK_NOT_REQUIRED)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendFloorGranted(MCX_PriorityCallType_Type p_PriorityCallType,
+                                                 MCX_MediaControl_AckRequest_Type p_AckRequest := ACK_NOT_REQUIRED) runs on MCX_IMS_PTC
+  {
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var RTP_SSRC v_MediaSSRC_UE := tsc_MCX_MediaSSRC_ClientA;           // @sic R5-236323: tsc_MCX_MediaSSRC_ClientA sic@
+
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_Granted(v_RTCP_SSRC_SS, v_MediaSSRC_UE, v_FloorInd, p_AckRequest));
+  }
+
+  /*
+   * @desc      Send Floor Taken
+   * @param     p_PriorityCallType
+   * @param     p_PermissionToRequest (default value: '0001'O)
+   * @param     p_AckRequest        (default value: ACK_NOT_REQUIRED)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendFloorTaken(MCX_PriorityCallType_Type p_PriorityCallType,
+                                               O2_Type p_PermissionToRequest := '0001'O,
+                                               MCX_MediaControl_AckRequest_Type p_AckRequest := ACK_NOT_REQUIRED) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    var integer v_SeqNum := f_MCX_IMS_PTC_MediaControl_IncrAndGetSeqNum(FloorTaken);
+ 
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_Taken(v_RTCP_SSRC_SS, v_SeqNum, v_FloorInd, p_PermissionToRequest, p_AckRequest));
+  }
+
+  /*
+   * @desc      Send Floor Taken (condition Multi-Talker)
+   * @param     p_PermissionToRequest (default value: '0001'O)
+   * @param     p_AckRequest        (default value: ACK_NOT_REQUIRED)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendFloorTaken_MultiTalker(O2_Type p_PermissionToRequest := '0001'O,
+                                                           MCX_MediaControl_AckRequest_Type p_AckRequest := ACK_NOT_REQUIRED) runs on MCX_IMS_PTC
+  {
+    var B16_Type v_FloorInd := '1000010010000000'B;
+    var integer v_SeqNum := f_MCX_IMS_PTC_MediaControl_IncrAndGetSeqNum(FloorTaken);
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();                            // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+ 
+    f_MCPTT_FloorControl_SendRequest(cds_FloorCtrlMsg_Taken_MultiTalker(v_RTCP_SSRC_SS, v_SeqNum, v_FloorInd, p_PermissionToRequest, p_AckRequest));
+  }
+
+  /*
+   * @desc      Send Floor Idle
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendFloorIdle(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    var integer v_SeqNum := f_MCX_IMS_PTC_MediaControl_IncrAndGetSeqNum(FloorIdle);
+
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_Idle(v_RTCP_SSRC_SS, v_SeqNum, v_FloorInd));
+  }
+
+  /*
+   * @desc      Send Floor Revoke
+   * @param     p_PriorityCallType
+   * @param     p_RejectCause       (default value: '0004'O)
+   * @param     p_RejectPhrase      (default value: "Media Burst pre-empted")
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorControl_SendFloorRevoke(MCX_PriorityCallType_Type p_PriorityCallType,
+                                                O2_Type p_RejectCause := '0004'O,
+                                                charstring p_RejectPhrase := "Media Burst pre-empted") runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_Revoke(v_RTCP_SSRC_SS, p_RejectCause, p_RejectPhrase, v_FloorInd));
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.11: MCPTT Floor Request - Floor Granted
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorRequestGranted(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var template (present) B16_Type v_FloorInd_RX := f_FloorControl_FloorIndicatorValueRX(p_PriorityCallType);
+
+    // Step 1
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_Request(v_RTCP_SSRC_UE, v_FloorInd_RX));
+    
+    // Step 2 - 3
+    f_MCPTT_FloorControl_SendFloorGranted(p_PriorityCallType, ACK_REQUIRED);
+
+    // Step 4
+    f_MCX_UserCheckPassFail(__FILE__, __LINE__, "Does the UE (MCPTT Client) provide floor granted notification to the user?", "36.579-1 Table 5.3A.11.3-1 Step 4");   // @sic R5-212289 sic@
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.12: MCPTT Floor Request - Floor Queue Position Info
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorRequestQueued(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var template (present) B16_Type v_FloorInd_RX := f_FloorControl_FloorIndicatorValueRX(p_PriorityCallType);
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_Request(v_RTCP_SSRC_UE, v_FloorInd_RX));
+
+    // The SS sends a Floor Queue Position Info message indicating that the Floor Request was queued
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_QueuePositionInfo(v_RTCP_SSRC_SS, v_FloorInd));
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.13: MCPTT Queuing Position Request
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorQueuePosRequest(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var B16_Type v_FloorInd := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_QueuePositionRequest(v_RTCP_SSRC_UE));
+
+    // The SS sends a Floor Queue Position Info indicating the current queue position
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_QueuePositionInfo(v_RTCP_SSRC_SS, v_FloorInd));
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.14: MCPTT Floor Request - Floor Deny
+   * @param     p_PriorityCallType
+   * @param     p_RejectCause       (default value: '0001'O)
+   * @param     p_Reason            (default value: "Another MCPTT client has permission")
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorRequestDenied(MCX_PriorityCallType_Type p_PriorityCallType,
+                                      O2_Type p_RejectCause := '0001'O,
+                                      charstring p_Reason := "Another MCPTT client has permission") runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var template (present) B16_Type v_FloorInd_RX := f_FloorControl_FloorIndicatorValueRX(p_PriorityCallType);
+    var B16_Type v_FloorInd_TX := f_FloorControl_FloorIndicatorValueTX(p_PriorityCallType);
+    
+    // Step 1
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_Request(v_RTCP_SSRC_UE, v_FloorInd_RX));
+
+    // Step 2: The SS sends a Floor Deny message with no acknowledgement required and Cause Code #255
+    f_MCPTT_FloorControl_SendRequest(cs_FloorCtrlMsg_Deny(v_RTCP_SSRC_SS, v_FloorInd_TX, p_RejectCause, p_Reason));
+
+    // Step 3
+    f_MCX_UserCheckFailOnly(__FILE__, __LINE__, "Does the UE (MCPTT Client) provide floor deny notification to the user?", "36.579-1 Table 5.3A.14.3-1 Step 3");   // @sic R5-212290 sic@
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.15: MCPTT Floor Release - Floor Idle
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorReleaseIdle(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var template (present) B16_Type v_FloorInd_RX := f_FloorControl_FloorIndicatorValueRX(p_PriorityCallType);
+    
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_Release(v_RTCP_SSRC_UE, v_FloorInd_RX));
+   
+    f_MCPTT_FloorControl_SendFloorIdle(p_PriorityCallType);
+  }
+
+  /*
+   * @desc      36.579-1 clause 5.3A.16: MCPTT Floor Release - Floor Taken
+   * @param     p_PriorityCallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_FloorReleaseTaken(MCX_PriorityCallType_Type p_PriorityCallType) runs on MCX_IMS_PTC
+  {
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var template (present) B16_Type v_FloorInd_RX := f_FloorControl_FloorIndicatorValueRX(p_PriorityCallType);
+    
+    f_MCPTT_FloorControl_ReceiveRequest(cr_FloorCtrlMsg_Release(v_RTCP_SSRC_UE, v_FloorInd_RX));
+
+    f_MCPTT_FloorControl_SendFloorTaken(p_PriorityCallType);
+  }
+
+  /*
+   * @desc      Send preestablished session control message
+   * @param     p_PreestablishedSessionControlMsg
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PreestablishedSessionControl_SendMsg(template (value) PreestablishedSessionControlMsg_Type p_PreestablishedSessionControlMsg) runs on MCX_IMS_PTC
+  {
+    var octetstring v_Datagram := bit2oct(encvalue(p_PreestablishedSessionControlMsg));
+    f_MCX_MediaControl_SendMsg(v_Datagram);
+  }
+
+  /*
+   * @desc      Send preestablished session control message and receive Acknowledge if requested
+   * @param     p_PreestablishedSessionCtrlMsg
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PreestablishedSessionControl_SendRequest(template (value) PreestablishedSessionControlMsg_Type p_PreestablishedSessionCtrlMsg) runs on MCX_IMS_PTC
+  {
+    var template (present) RTP_SSRC v_RTCP_SSRC_UE := f_MCX_IMS_PTC_RTCP_SSRC_UE_Get();
+    var PreestablishedSessionControlMsg_Type v_PreestablishedSessionCtrlMsg := valueof(p_PreestablishedSessionCtrlMsg);
+    var B5_Type v_Subtype;
+
+    f_MCPTT_PreestablishedSessionControl_SendMsg(p_PreestablishedSessionCtrlMsg);
+
+    select union (v_PreestablishedSessionCtrlMsg) {
+      case (connectMessage)    { v_Subtype := v_PreestablishedSessionCtrlMsg.connectMessage.commonHdr.subtype; }
+      case (disconnectMessage) { v_Subtype := v_PreestablishedSessionCtrlMsg.disconnectMessage.commonHdr.subtype; }
+      case else                { return; } // no ACK
+    }
+    
+    if (f_MCX_MediaControl_AckRequested(v_Subtype)) {
+      f_MCPTT_PreestablishedSessionControl_ReceiveDecodeAndMatchMsg(cr_PreestablishedSessionControl_Acknowledge(v_RTCP_SSRC_UE), "PreestablishedSessionAcknowledge");
+    }
+  }
+
+  /*
+   * @desc      36.579-1 Table 5.3A.8.3-1: MCPTT CT Call establishment automatic commencement using a pre-established session
+   *            36.579-1 Table 5.5.6.12-1: Connect
+   * @param     p_CallType
+   * @param     p_AnswerStateValue  (default value: tsc_MCPTT_PreestablishedSessionControl_AnswerState_Confirmed)
+   * @param     p_InvitingUserIdentityValue  (default value: px_MCPTT_ID_User_B)
+   * @param     p_FloorControl      (default value: omit)
+   * @param     p_AckRequest        (default value: ACK_REQUIRED)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PreestablishedSession_Connect(MCX_CallType_Type p_CallType,
+                                                 O2_Type p_AnswerStateValue := tsc_MCPTT_PreestablishedSessionControl_AnswerState_Confirmed,
+                                                 charstring p_InvitingUserIdentityValue := px_MCPTT_ID_User_B,
+                                                 template (omit) MCPTT_PreestablishedSession_FloorControl_Type p_FloorControl := omit,
+                                                 MCX_MediaControl_AckRequest_Type p_AckRequest := ACK_REQUIRED) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var MCPTT_PreestablishedSession_FloorControl_Type v_FloorControl;
+    var integer v_ControlStreamValue;
+    var template (value) PreestablishedSessionControl_SessionIdentity v_SessionIdentity;
+    var template (omit)  PreestablishedSessionControl_GroupIdentity v_GroupIdentity;
+    var template (value) PreestablishedSessionControl_MediaStreams v_MediaStreams;
+    var template (value) PreestablishedSessionControl_AnswerState v_AnswerState;
+    var template (value) PreestablishedSessionControl_InvitingUserIdentity v_InvitingUserIdentity;
+
+    var template (value) PreestablishedSessionControlMsg_Type v_Connect;
+
+    select (p_CallType) {
+      case (PRIVATE_CALL, FIRST_TO_ANSWER) {
+        v_GroupIdentity := omit;
+        v_FloorControl := WITHOUT_FLOORCONTROL;         // no floor control: in general there is no floor control for private call preestablish session test cases
+      }
+      case (GROUP_CALL, CHAT_GROUP_CALL) {
+        v_GroupIdentity := f_PreestablishedSessionControl_GroupIdentity(px_MCPTT_Group_A_ID);
+        v_FloorControl := WITH_FLOORCONTROL;            // floor control: in general there is floor control for group call preestablish session test cases
+      }
+      case else { FatalError(__FILE__, __LINE__, ""); }
+    }
+    
+    if (isvalue(p_FloorControl)) {
+      v_FloorControl := valueof(p_FloorControl);
+    }
+    select (v_FloorControl) {
+      case (WITHOUT_FLOORCONTROL) { v_ControlStreamValue := 0; }
+      case (WITH_FLOORCONTROL)    { v_ControlStreamValue := 2; }
+    }
+
+    v_SessionIdentity := f_PreestablishedSessionControl_SessionIdentity(p_CallType, tsc_MCX_SessionID_B);
+    v_MediaStreams := cs_PreestablishedSessionControl_MediaStreams(-, v_ControlStreamValue);
+    v_AnswerState := cs_PreestablishedSessionControl_AnswerState(p_AnswerStateValue);
+    v_InvitingUserIdentity := f_PreestablishedSessionControl_InvitingUserIdentity(p_InvitingUserIdentityValue);
+    v_Connect := cs_PreestablishedSessionControl_Connect(v_RTCP_SSRC_SS, v_SessionIdentity, v_GroupIdentity, v_MediaStreams, v_AnswerState, v_InvitingUserIdentity, p_AckRequest);
+    
+    f_MCPTT_PreestablishedSessionControl_SendRequest(v_Connect);
+  }
+
+  /*
+   * @desc      36.579-1 Table 5.3A.5.3-1 (MCPTT CT call release keeping the pre-established session), without RRC connection release
+   * @param     p_CallType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PreestablishedSession_Disconnect(MCX_CallType_Type p_CallType) runs on MCX_IMS_PTC
+  {
+    var RTP_SSRC v_RTCP_SSRC_SS := f_MCX_IMS_PTC_RTCP_SSRC_SS_Get();    // @sic R5-236323: f_MCX_IMS_PTC_RTCP_SSRC_UE_Get sic@
+    var template (value) PreestablishedSessionControl_SessionIdentity v_SessionIdentity;
+    var template (value) PreestablishedSessionControlMsg_Type v_Disconnect;
+
+    v_SessionIdentity := f_PreestablishedSessionControl_SessionIdentity(p_CallType, tsc_MCX_SessionID_B);  // Same MCPTT Session Identity as used in the connect message at call establishment
+    v_Disconnect := cs_PreestablishedSessionControl_Disconnect(v_RTCP_SSRC_SS, v_SessionIdentity, ACK_REQUIRED);
+
+    f_MCPTT_PreestablishedSessionControl_SendRequest(v_Disconnect);
+  }
+
+  /*
+   * @desc      Receive, decode and match preestablished session control message
+   * @param     p_PreestablishedSessionControlMsg
+   * @param     p_VerdictString     (default value: "")
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PreestablishedSessionControl_ReceiveDecodeAndMatchMsg(template (present) PreestablishedSessionControlMsg_Type p_PreestablishedSessionControlMsg,
+                                                                         charstring p_VerdictString := "") runs on MCX_IMS_PTC
+  {
+    var octetstring v_Datagram := f_MCX_MediaControl_ReceiveMsg();
+    var bitstring v_Bitstring := oct2bit(v_Datagram);
+    var PreestablishedSessionControlMsg_Type v_PreestablishedSessionControlMsg;
+
+    if (decvalue(v_Bitstring, v_PreestablishedSessionControlMsg) != 0) {
+      FatalError(__FILE__, __LINE__, "Can not decode PreestablishedSessionControlMsg");
+    }
+    if (not match(v_PreestablishedSessionControlMsg, p_PreestablishedSessionControlMsg)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "PreestablishedSessionControl message does not match");
+    } else {
+      f_IMS_PreliminaryPass(__FILE__, __LINE__, p_VerdictString);
+    }
+  }
+
+}

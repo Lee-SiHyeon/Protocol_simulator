@@ -1,0 +1,632 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-08-04 20:26:19 +0200 (Sun, 04 Aug 2024) $
+// $Rev: 39172 $
+/******************************************************************************/
+
+module IMS_Procedures_Conferencing {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_ConferenceEventPackage all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from UpperTesterFunctions all;
+
+  const float tsc_WaitForConferenceSubscription := 3.0; /* @status    APPROVED (IMS) */
+
+  type enumerated IMS_ConferenceUri_Type {conferenceFactoryUri, temporaryConferenceUri, finalConferenceUri};   /* @status    APPROVED (IMS) */
+
+  type enumerated InviteUserToConference_State_Type { waitForREFER, waitFor200OK_Step4, waitFor200OK_Step6, waitFor200OK_Step8, finished }; /* @status    APPROVED (IMS) */
+
+  type record ThreeWaySession_SessionInfo_Type {            /* @status    APPROVED (IMS) */
+    IMS_InviteRequestWithSdp_Type InviteRequestWithSdp,     // INVITE sent by the UE to create the session
+    MessageHeader MessageHeader_PrevResponse,               // earlier response sent to the UE within the same dialog
+    SDP_Message LatestSdpOffer,                             // latest SDP offer sent by the UE during session establishment
+    SipUrl ContactUrl
+  };
+
+  type record InviteUserToConference_StateInfo_Type {       /* state info for procedures C.19 and C.37 (34.229-1); the identical procedures are used for 5G
+                                                               @status    APPROVED (IMS) */
+    InviteUserToConference_State_Type State,
+    charstring CalleeUri,               // URI of the remote user to be invited
+    charstring CalleeContactUri,        // Contact URI of the remote user to be invited
+    SipUrl ContactUriUE optional,       // UE's Contact URI
+    MessageHeader NotifyHeader optional,
+    integer CSeqREFER                   /* @sic R5-230997 change 2: CSeqREFER sic@ */
+  };
+
+  template (value) InviteUserToConference_StateInfo_Type cs_InviteUserToConference_StateInfo_Init(charstring p_CalleeUri,
+                                                                                                  charstring p_CalleeContactUri) :=
+  { /* @status    APPROVED (IMS) */
+    State := waitForREFER,
+    CalleeUri := p_CalleeUri,
+    CalleeContactUri := p_CalleeContactUri,
+    ContactUriUE := omit,
+    NotifyHeader := omit,
+    CSeqREFER := -1
+  };
+
+  /*
+   * @desc      Build URI used cor conference calls
+   * @param     p_UriType
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_BuildConferenceUri(IMS_ConferenceUri_Type p_UriType) runs on IMS_PTC return charstring
+  { /* @sic new function being introduced in the original assumption that R5-155999 has been agreed; nevertheless finally R5-155999 has been withdrawn sic@ */
+    /* @sic R5-162721: px_IMS_ConferenceFactoryUri, px_IMS_FinalConferenceUri and px_IMS_TemporaryConferenceUri removed sic@ */
+    var charstring v_HomeDomainName := f_IMS_PTC_ImsInfo_GetHomeDomainName();
+    var charstring v_Username;
+
+    select (p_UriType) {
+      case (conferenceFactoryUri) {
+        v_Username := "mmtel";
+      }
+      case (temporaryConferenceUri) {
+        v_Username := "temporary";
+      }
+      case (finalConferenceUri) {
+        v_Username := "final";
+      }
+    }
+    return "sip:" & v_Username & "@conf-factory." & v_HomeDomainName;          // @sic R5-162721 sic@
+  }
+
+  /*
+   * @desc      Common function to complete creation of a conference call (e.g. 34.229-1 C.10/C.10a)
+   * @param     p_InviteRequestWithSdp
+   * @param     p_FinalConferenceUri
+   * @param     p_ContactParams
+   * @param     p_SDP_Message_200OK  (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Conferencing_Send200OK_ReceiveACK(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                   charstring p_FinalConferenceUri,
+                                                   template (value) SemicolonParam_List p_ContactParams,
+                                                   template (omit) SDP_Message p_SDP_Message_200OK := omit) runs on IMS_PTC
+  {
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var template (value) SipUrl v_ContactUrl := f_SIP_BuildSipUri_TX(p_FinalConferenceUri);
+    var boolean v_PreconditionsRequired200OK := false;
+    var template (omit)  ContentType v_ContentType_200OK := omit;
+    var template (omit)  MessageBody v_MessageBody_200OK := omit;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+
+    if (isvalue(p_SDP_Message_200OK)) {  /* 200 OK carries SDP message as for WLAN (34.229-1 C.10a) */
+      v_ContentType_200OK := cs_ContentTypeSDP;
+      v_MessageBody_200OK := cs_MessageBody_SDP(valueof(p_SDP_Message_200OK));
+      v_PreconditionsRequired200OK := true;
+    }
+
+    v_MessageHeader_200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, v_ContentType_200OK, -, -, v_PreconditionsRequired200OK, CONFERENCE_CALL);  /* @sic R5s180183: v_ContentType_200OK sic@ */
+    v_MessageHeader_200OK.contact := cs_Contact(v_ContactUrl, p_ContactParams);   /* @sic R5-151681 sic@ */
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_200OK, v_MessageBody_200OK)));
+
+    // Step 10                  Receive ACK
+    v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200, CONFERENCE_CALL);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUrl, v_MessageHeader_Ack)));
+  }
+
+  /*
+   * @desc      steps 10 - 13 of C.10 or C.38 (video); identical for 5G
+   * @param     p_FinalConferenceUri
+   * @return    template (omit) SUBSCRIBE_Request
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Conferencing_OptionalSubscription(charstring p_FinalConferenceUri) runs on IMS_PTC return template (omit) SUBSCRIBE_Request
+  {
+    var ConferenceEventPackage_SubscribeInfo_Type v_ConferenceEventPackage_SubscribeInfo_ByRef := valueof(cs_ConferenceEventPackage_SubscribeInfo_Init);
+    timer t_Timer;
+
+    // @siclog "Step 10 - 13" siclog@
+    t_Timer.start(tsc_WaitForConferenceSubscription);   // @sic R5-151681: 3s timer sic@
+    alt {
+      [] a_ConferenceEventPackage_Subscribe(v_ConferenceEventPackage_SubscribeInfo_ByRef, p_FinalConferenceUri)  // C.10 step 10 - 13
+        {
+          t_Timer.stop;   /* stop timer when the UE comes up with a SUBSCRIBE for the conference event package */
+          if (v_ConferenceEventPackage_SubscribeInfo_ByRef.State != subscribed) {
+            repeat;
+          }
+        }
+      [] t_Timer.timeout {}
+    }
+    return v_ConferenceEventPackage_SubscribeInfo_ByRef.SubscribeRequest;
+  }
+
+  /*
+   * @desc      MO REFER (see TS 34.229, A.2.10, C.19)
+   * @param     p_RequestUri
+   * @param     p_ReferToUri
+   * @param     p_ReferCreatingDialog
+   * @param     p_CSeqValue          (default value: ?)
+   * @param     p_CallType           (default value: CONFERENCE_CALL)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ReferRequest_MessageHeaderRX(template (present) SipUrl p_RequestUri,
+                                              template (present) SipUrl p_ReferToUri,
+                                              boolean p_ReferCreatingDialog,
+                                              template (present) integer p_CSeqValue := ?,
+                                              IMS_CallType_Type p_CallType := CONFERENCE_CALL) runs on IMS_PTC return template (present) MessageHeader
+  { /* @sic R5s150086 - p_SessionIdSupported: pc_IMS_SessionIdSupported per default (only relevant in case of dialog creating REFER) sic@ */
+    /* @sic R5s160011, R5-160796 - p_CallType sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    
+    var boolean v_IsGiba := f_IMS_PTC_SecurityScheme_IsGiba();  // => A1/A2
+    var template (present) MessageHeader v_MessageHeader_Refer := cr_MessageHeader_Dummy;
+    var template (present) RouteBody_List v_RouteBodyList;
+    var template (present) SipUrl v_SipUrlFrom := ?;
+    var template (present) From v_From;
+    var template (present) To v_To;
+    var template (present) CallId v_CallId;
+    var IMS_ProtectedPorts_Type v_Protected;
+    var template integer v_Port_us := ?;   // Acc. A.2.10 mandatory even for GIBA
+    var template integer v_Port_ps := *;
+    
+    if (not v_IsGiba) {
+      v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+      v_Port_us := v_Protected.Port_us;
+      v_Port_ps := v_Protected.Port_ps;
+    }
+
+    if (p_ReferCreatingDialog) {
+      // FFS: currently not used (p_ReferCreatingDialog is always false)
+      v_RouteBodyList := {                    // same as in INVITE
+        cr_RouteBody(*, cr_SipUri_HostPort_lr(f_IMS_PTC_Pcscf_Get(), v_Port_ps)),
+        cr_RouteBody(*, cr_SipUri_HostPort_lr(tsc_IMS_Scscf))
+      };
+      v_From := cr_From(*, v_SipUrlFrom);
+      v_To := cr_ToDef(p_RequestUri);
+      v_CallId := cr_CallId(?);
+
+    } else {
+      v_RouteBodyList := f_IMS_Request_RouteSet_RouteBodyList_RX(p_CallType);       /* @sic R5s160011: p_CallType sic@ */
+      v_From := f_IMS_RequestInDialog_FromHeaderRX();
+      v_To := f_IMS_RequestInDialog_ToHeaderRX();
+      v_CallId := f_IMS_PTC_ImsInfo_DialogGetCallId();                      /* @sic R5-151954 sic@ */
+    }
+    v_MessageHeader_Refer.via          := f_IMS_SipRequest_ViaRX(?);  // same as for INVITE; but p_Port_us is mandatory
+    v_MessageHeader_Refer.route        := cr_Route(v_RouteBodyList);
+    v_MessageHeader_Refer.toField      := v_To;
+    v_MessageHeader_Refer.fromField    := v_From;
+    v_MessageHeader_Refer.callId       := v_CallId;
+    v_MessageHeader_Refer.cSeq         := cr_CseqDef(p_CSeqValue, "REFER");
+
+    v_MessageHeader_Refer.maxForwards  := cr_MaxForwardsDef;
+    v_MessageHeader_Refer.contact      := cr_Contact(f_Contact_SipUri_HostPortRX(?, v_Port_us));     /* additional checks required after message has been received
+                                                                                                        @sic R5s150721, R5-153760: cr_SipUri_HostPort replaced by f_Contact_SipUri_HostPortRX sic@ */
+    v_MessageHeader_Refer.referTo      := cr_ReferTo(p_ReferToUri);
+
+    if (not v_IsGiba) {
+      v_MessageHeader_Refer.require         := cr_RequireSecAgree;
+      v_MessageHeader_Refer.proxyRequire    := cr_ProxyRequireSecAgree;
+      v_MessageHeader_Refer.securityVerify  := f_IMS_PTC_BuildSecurityVerifyHeader();
+      v_MessageHeader_Refer.pAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    } else {
+      v_MessageHeader_Refer.securityVerify  := omit;
+    }
+
+    return v_MessageHeader_Refer;
+  }
+
+  /*
+   * @desc      Common checks for REFER
+   * @param     p_IMS_REFER_REQ
+   * @param     p_ReferCreatingDialog (default value: true)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_A_2_10_Refer_CommonChecks(IMS_DATA_REQ p_IMS_REFER_REQ,
+                                           boolean p_ReferCreatingDialog := true) runs on IMS_PTC
+  {
+    var MessageHeader v_MessageHeader := p_IMS_REFER_REQ.Request.Refer.msgHeader;
+    var InternetProtocol_Type v_Protocol := p_IMS_REFER_REQ.RoutingInfo.Protocol;
+    var SipUrl v_SipUrlFrom := f_Addr_Union_GetSipUrl(v_MessageHeader.fromField.addressField);
+
+    f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol);   // check whether via contains "SIP URI with IP address or FQDN" (see @sic R5s120727 sic@)
+    f_IMS_MessageHeader_CheckContactAddr(v_MessageHeader);               // check whether contact contains "SIP URI with IP address or FQDN" (see @sic R5s120727 sic@)
+
+    if (p_ReferCreatingDialog) {
+      f_IMS_MessageHeader_CheckTo(v_MessageHeader, noToTag);     // check that there is no To tag
+
+      // Additional checks regarding SIP URI in the From header @sic R5-130750 change 3 sic@
+      if (not f_IMS_PublicUserId_Match(f_IMS_PTC_ImsInfo_GetAllIMPUs(), v_SipUrlFrom)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid 'From'");
+      }
+      // Check Call-Id
+      if (match(v_MessageHeader.callId, f_IMS_PTC_ImsInfo_DialogGetCallId())) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid 'CallId' in REFER (has to be different than in previous INVITE)");
+      }
+    }
+  }
+
+  /*
+   * @desc      Build URI used for conference calls in the Refer-To header of the REFER message;
+   *            if the given URI is a tel URI and a "Replaces" header shall be included in the Refer-To URI,
+   *            then a tel URI to SIP URI conversion is done acc. to RFC 3261 clause 19.1.6
+   * @param     p_ReferToUriString
+   * @param     p_ReplacesHeaderIsRequired
+   * @return    template (present) SipUrl
+   * @status    APPROVED (IMS)
+   */
+  function fl_SIP_BuildReferToUri_RX(charstring p_ReferToUriString,
+                                     boolean p_ReplacesHeaderIsRequired) return template (present) SipUrl
+  { // @sic R5s220849: p_RequireHeaderIsRequired removed sic@
+    var template (present) SipUrl v_ReferToUri := f_SIP_BuildSipUri_RX(p_ReferToUriString);
+    var template (present) UserInfo v_UserInfo;
+    var template (present) UriComponents v_UriComponents;
+    var template SemicolonParam_List v_Params;
+    var template (present) AmpersandParam_List v_AllowedHeaders;
+    var charstring v_TelephoneSubscriber;
+
+    if (p_ReplacesHeaderIsRequired) {
+      if (ischosen(v_ReferToUri.components.tel)) {
+        /* convert tel URI to SIP URI acc. to RFC 3261 clause 19.1.6: */
+        v_TelephoneSubscriber := substr(p_ReferToUriString, 4, lengthof(p_ReferToUriString)-4); /* RFC 3261 clause 19.1.6:
+                                                                                                   "When a tel URL (RFC 2806 [9]) is converted to a SIP or SIPS URI, the entire telephone-subscriber portion of the tel URL,
+                                                                                                   including any parameters, is placed into the userinfo part of the SIP or SIPS URI"
+                                                                                                   => telephone-subscriber is the tel URL without the "tel" scheme and colon */
+        v_UserInfo := cr_UserInfo(v_TelephoneSubscriber, omit);                                 // @sic R5s230648: v_TelephoneSubscriber instead of v_ReferToUri.components.tel.subscriber sic@
+        v_Params := superset(cr_GenericParam_Common("user", cr_GenValueToken("phone")));        // @sic R5s160295; NOTE: per default f_SIP_BuildSipUri_RX initialises urlParameters with * sic@
+        v_UriComponents := cr_SipUriComponent(v_UserInfo, *, *);
+        v_ReferToUri := cr_SipUrl_Common(c_sipScheme, v_UriComponents, v_Params);
+      }
+      v_AllowedHeaders := { cr_GenericParam_Common("Replaces", cr_GenValueToken(?)), cr_GenericParam("Require", "replaces") };
+      v_ReferToUri.headers := subset(all from v_AllowedHeaders); /* @sic R5s220849 change 4: whether a respective header is there, is checked explicitly in a_IMS_REFER_ReceiveRequest sic@ */
+    }
+    return v_ReferToUri;
+  }
+
+  /*
+   * @desc      Recieve and check REFER
+   * @param     p_IMS_REFER_REQ     (by reference)
+   * @param     p_RequestUriString
+   * @param     p_ReferToUriString
+   * @param     p_ActiveSessionToBeReplaced
+   * @param     p_ReferCreatingDialog (default value: false)
+   * @param     p_CallType (default value: CONFERENCE_CALL)
+   * @status    APPROVED (IMS)
+   */
+  altstep a_IMS_REFER_ReceiveRequest(out IMS_DATA_REQ p_IMS_REFER_REQ,
+                                     charstring p_RequestUriString,
+                                     charstring p_ReferToUriString,
+                                     template (omit) IMS_PTC_DialogIndex_Type p_ActiveSessionToBeReplaced,
+                                     boolean p_ReferCreatingDialog := false,
+                                     IMS_CallType_Type p_CallType := CONFERENCE_CALL) runs on IMS_PTC
+  { /* @sic R5s141343 change 3.1: p_ReferCreatingDialog := false sic@ */
+    /* @sic R5-153765: new parameter p_ActiveSessionToBeReplaced sic@
+     * @sic R5s150909: p_ActiveSessionToBeReplaced changed to "template (omit) IMS_PTC_DialogIndex_Type" sic@
+     * NOTE: ispresent(p_ActiveSessionToBeReplaced) => there is an active session between the UE and a remote user which shall be replaced (e.g. Three way session creation; 15.121a);
+     *                                                 (the remote user is referenced by p_ReferToUriString)
+     *       p_ActiveSessionToBeReplaced==omit      => there is no active session with the remote user but the REFER is just to invite the remote user */
+    /* @sic R5s160045 p_CSeqValue removed sic@ */
+    /* @sic R5s180548: p_CallType added sic@ */
+    var IMS_DATA_REQ v_IMS_REFER_REQ_ByRef;
+    var template (present) SipUrl v_RequestUriRefer := f_SIP_BuildSipUri_RX(p_RequestUriString);
+    var boolean v_ReplacesHeaderIsRequired := ispresent(p_ActiveSessionToBeReplaced);
+    var boolean v_RequireHeaderIsRequired := v_ReplacesHeaderIsRequired and (p_CallType == NORMAL_CALL);
+    var template (present) SipUrl v_ReferToUri := fl_SIP_BuildReferToUri_RX(p_ReferToUriString, v_ReplacesHeaderIsRequired);  /* @sic R5s150382 change 3; R5s160043, R5-160796 MCC160 implementation sic@ */
+    var template (present) MessageHeader v_MessageHeader_Refer := f_IMS_ReferRequest_MessageHeaderRX(v_RequestUriRefer, v_ReferToUri, p_ReferCreatingDialog, -, p_CallType);
+    var SipUrl v_ReferToUrl;
+    var template (omit) GenericParam v_Replaces;
+    var template (value) CallId v_CallId;
+    var charstring v_FromTag;
+    var charstring v_ToTag;
+    var CharStringList_Type v_ReceivedDialogId;
+    var template (present) CharStringList_Type v_ExpectedDialogId;
+
+    [] a_IMS_ReceiveRequest(car_IMS_Refer_Request(cr_REFER_Request(v_RequestUriRefer, v_MessageHeader_Refer)), v_IMS_REFER_REQ_ByRef)
+      {
+        f_IMS_A_2_10_Refer_CommonChecks(v_IMS_REFER_REQ_ByRef, p_ReferCreatingDialog);
+        if (not p_ReferCreatingDialog) {    /* @sic R5s160045: CSeq value to be incremented and checked for in-dialog REFER sic@ */
+          f_IMS_RequestInDialog_IncrAndCheckCSeqValue(v_IMS_REFER_REQ_ByRef.Request.Refer.msgHeader);
+        }
+        v_ReferToUrl := v_IMS_REFER_REQ_ByRef.Request.Refer.msgHeader.referTo.nameAddr.addrSpec;
+        if (v_ReplacesHeaderIsRequired) {   /* @sic R5-153765, R5s150909 sic@ */
+          v_Replaces := f_SIP_AmpersandParamList_GetParam(v_ReferToUrl.headers, "Replaces");
+          if (not isvalue(v_Replaces)) {                                                                                        // @sic R5s220849 change 4 sic@
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'Replaces' header missing");
+          }
+          if (v_RequireHeaderIsRequired and not isvalue(f_SIP_AmpersandParamList_GetParam(v_ReferToUrl.headers, "Require"))) {  // @sic R5s220849 change 4 sic@
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'Require' header missing");
+          }
+          v_CallId   := f_IMS_PTC_ImsInfo_DialogGetCallId(p_ActiveSessionToBeReplaced);
+          v_FromTag  := valueof(f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_ActiveSessionToBeReplaced));   // @sic R5s150909 sic@
+          v_ToTag    := valueof(f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_ActiveSessionToBeReplaced));    // @sic R5s150909 sic@
+          v_ExpectedDialogId := {
+            v_CallId.callid,
+            permutation("to-tag=" & v_ToTag, "from-tag=" & v_FromTag, *)
+          };
+          v_ReceivedDialogId := f_StringSplit(f_URL_Decoding(valueof(v_Replaces.paramValue.tokenOrHost)), {";"}); // see RFC 3891 6.1
+          if (not match(v_ReceivedDialogId, v_ExpectedDialogId)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid dialog id in Replaces header of Refer-To's SipUri");
+          }
+        }
+        p_IMS_REFER_REQ := v_IMS_REFER_REQ_ByRef;  // return message by ref
+      }
+  }
+
+  /*
+   * @desc      Send NOTIFY acc. to 34.229-1 Annex A.2.11
+   * @param     p_DialogIndex       (default value: omit)
+   * @param     p_ContactUri
+   * @param     p_SubscriptionState
+   * @param     p_CSeqREFER
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NotifyRequest_MessageHeader_A_2_11(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit,
+                                                    template (value) SipUrl p_ContactUri,
+                                                    template (value) SubscriptionState p_SubscriptionState,
+                                                    integer p_CSeqREFER) runs on IMS_PTC return template (value) MessageHeader
+  { /* NOTE: this function requires a second "REFER" dialog being establisehed at the IMS PTC */
+    /* @sic R5-153756, R5-153986: use of f_IMS_NotifyRequest_MessageHeader_Common sic@ */
+    /* @sic R5-230997 change 2: p_CSeqREFER sic@ */
+
+    var template (value) Via v_Via := f_IMS_SipRequest_ViaTX();   // same as for INVITE
+    var template (value) ContentType v_ContentType := cs_ContentType(c_sipfragMessage);         /* @sic R5-153756 sic@ */
+    var template (value) MessageHeader v_MessageHeader := f_IMS_NotifyRequest_MessageHeader_Common(p_DialogIndex, v_Via, cs_Contact(p_ContactUri), "refer", p_SubscriptionState, v_ContentType);
+
+    v_MessageHeader.event.eventParams := { cs_GenericParam("id", int2str(p_CSeqREFER)) };       /* @sic R5-230997 change 2 sic@ */
+
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      Generic test procedure for Inviting user to conference by sending a REFER request to the conference focus procedure
+   *            acc. to 34.229-1 C.19 / C.37; 34.229-5 A.20 / A.26
+   * @param     p_StateInfo         (by reference)
+   * @param     p_FinalConferenceUri
+   * @param     p_ActiveSessionToBeReplaced
+   * @param     p_SubscribeRequest
+   * @param     p_MediaTypeList
+   * @param     p_ConferenceEventPackage_Version (default value: 1)
+   * @status    APPROVED (IMS)
+   */
+  altstep a_IMS_InviteUserToConference(inout InviteUserToConference_StateInfo_Type p_StateInfo,
+                                       charstring p_FinalConferenceUri,
+                                       template (omit) IMS_PTC_DialogIndex_Type p_ActiveSessionToBeReplaced,
+                                       template (omit) SUBSCRIBE_Request p_SubscribeRequest,
+                                       CharStringList_Type p_MediaTypeList,
+                                       integer p_ConferenceEventPackage_Version := 1) runs on IMS_PTC
+  { /* @sic R5-153765, R5s150909: new parameter p_ActiveSessionToBeReplaced sic@ */
+    /* @sic R5s160055: p_SubscriptionState_Step5 removed (v_SubscriptionState_Step5 is used instead) sic@ */
+    var IMS_DATA_REQ v_IMS_REFER_REQ_ByRef;
+    var InviteUserToConference_State_Type v_State := p_StateInfo.State;
+    var MessageHeader v_MessageHeader_Refer;
+    var template (value) MessageHeader v_MessageHeader_Response;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var SUBSCRIBE_Request v_SubscribeRequest;
+    var template (value) SipUrl v_ContactUrl;
+    var InternetProtocol_Type v_ProtocolForRequestInDL := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var template (value) SubscriptionState v_SubscriptionState_Step5 := cs_SubscriptionState("terminated", { cs_GenericParam("reason", "noresource") } );  /* @sic R5s141343 change 3.3 and 4; R5s160055 sic@ */
+
+    // Step 1. UE sends REFER to SS
+    [v_State == waitForREFER] a_IMS_REFER_ReceiveRequest(v_IMS_REFER_REQ_ByRef, p_FinalConferenceUri, p_StateInfo.CalleeUri, p_ActiveSessionToBeReplaced) {
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_REFER_REQ_ByRef.RoutingInfo);
+      v_MessageHeader_Refer := v_IMS_REFER_REQ_ByRef.Request.Refer.msgHeader;
+      p_StateInfo.CSeqREFER := v_MessageHeader_Refer.cSeq.seqNumber;                            /* @sic R5-230997 change 2 sic@ */
+
+      // Step 2. The SS responds with 202 Accepted
+      v_MessageHeader_Response := f_IMS_Accepted_202_MessageHeaderTX(v_MessageHeader_Refer);
+      IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine202, v_MessageHeader_Response)));
+
+      // Step 3. The SS sends initial NOTIFY for the implicit subscription created by the REFER request
+      p_StateInfo.ContactUriUE := f_MessageHeader_GetContactSipUrl(v_MessageHeader_Refer);      // UE's contact to be use in the request line of the NOTIFY messages
+      v_ContactUrl := f_SIP_BuildSipUri_TX(p_FinalConferenceUri);                               // contact uri of the conference focus  @sic R5s221272: f_IMS_PTC_GetPort_ps() removed sic@
+
+      p_StateInfo.NotifyHeader := valueof(f_IMS_NotifyRequest_MessageHeader_A_2_11(-, v_ContactUrl, cs_SubscriptionState_Active("300"), p_StateInfo.CSeqREFER));        /* @sic R5-230997 change 2: CSeqREFER sic@ */
+      IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(v_ProtocolForRequestInDL),
+                                             cs_NOTIFY_Request(p_StateInfo.ContactUriUE, p_StateInfo.NotifyHeader, cs_MessageBody_SipFrag("SIP/2.0 100 Trying"))));
+      p_StateInfo.State := waitFor200OK_Step4;
+    }
+    // Step 4. UE responds with 200 OK
+    [v_State == waitFor200OK_Step4] a_IMS_ReceiveResponse200OK(p_StateInfo.NotifyHeader, v_ProtocolForRequestInDL) {
+      // Step 5. The SS sends a NOTIFY related to REFER request to confirm that the invited user was able to join the conference
+      v_ContactUrl := f_SIP_BuildSipUri_TX(p_FinalConferenceUri);                               // contact uri of the conference focus  @sic R5s221272: f_IMS_PTC_GetPort_ps() removed sic@
+
+      p_StateInfo.NotifyHeader := valueof(f_IMS_NotifyRequest_MessageHeader_A_2_11(-, v_ContactUrl, v_SubscriptionState_Step5, p_StateInfo.CSeqREFER));         /* @sic R5s221176: v_ContactUrl instead of p_StateInfo.ContactUriUE sic@
+                                                                                                                                                                   @sic R5-230997 change 2: CSeqREFER sic@ */
+      IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(v_ProtocolForRequestInDL),
+                                             cs_NOTIFY_Request(p_StateInfo.ContactUriUE, p_StateInfo.NotifyHeader, cs_MessageBody_SipFrag("SIP/2.0 200 OK"))));
+      p_StateInfo.State := waitFor200OK_Step6;
+    }
+    // Step 6. UE responds with 200 OK
+    [v_State == waitFor200OK_Step6] a_IMS_ReceiveResponse200OK(p_StateInfo.NotifyHeader, v_ProtocolForRequestInDL) {
+      if (ispresent(p_SubscribeRequest)) {
+        v_SubscribeRequest := valueof(p_SubscribeRequest);
+
+        // Step 7. The SS sends a NOTIFY for conference event package to inform that the invited user was able to join the conference
+        p_StateInfo.NotifyHeader := valueof(f_IMS_ConferenceEventPackage_SendNotifySubscribe(v_SubscribeRequest,
+                                                                                             v_ProtocolForRequestInDL,
+                                                                                             p_FinalConferenceUri,
+                                                                                             p_StateInfo.CalleeUri,
+                                                                                             p_StateInfo.CalleeContactUri,
+                                                                                             p_MediaTypeList,
+                                                                                             p_ConferenceEventPackage_Version,
+                                                                                             partial));
+        p_StateInfo.State := waitFor200OK_Step8;
+      }
+      else {
+        p_StateInfo.State := finished;
+      }
+    }
+    // Step 8. UE responds with 200 OK
+    [v_State == waitFor200OK_Step8] a_IMS_ReceiveResponse200OK(p_StateInfo.NotifyHeader, v_ProtocolForRequestInDL) {
+      p_StateInfo.State := finished;
+    }
+  }
+
+  /*
+   * @desc      Wrapper function: procedure acc. to C.19 / C.37; identical procedure is used for 5G
+   * @param     p_FinalConferenceUri
+   * @param     p_SubscribeRequest
+   * @param     p_MediaTypeList
+   * @param     p_CalleeUri         (default value: px_IMS_CalleeUri)
+   * @param     p_CalleeContactUri  (default value: px_IMS_CalleeContactUri)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_InviteUserToConference(charstring p_FinalConferenceUri,
+                                        template (omit) SUBSCRIBE_Request p_SubscribeRequest,
+                                        CharStringList_Type p_MediaTypeList,
+                                        charstring p_CalleeUri := px_IMS_CalleeUri,
+                                        charstring p_CalleeContactUri := px_IMS_CalleeContactUri) runs on IMS_PTC
+  {
+    var template (omit) IMS_PTC_DialogIndex_Type v_ActiveSessionToBeReplaced := omit;   /* @sic R5-153765, R5s150909: there is no active session to any remote user sic@ */
+    var InviteUserToConference_StateInfo_Type v_StateInfo_ByRef := valueof(cs_InviteUserToConference_StateInfo_Init(p_CalleeUri, p_CalleeContactUri));
+
+    // Step 1 (C.19/C.37)
+    f_UT_InviteToConference(MMI, v_StateInfo_ByRef.CalleeUri);     // @sic R5-150745 sic@
+
+    while (v_StateInfo_ByRef.State != finished) {                  // @sic R5-150745 sic@
+      // @siclog "Step 2 - 9" siclog@
+      a_IMS_InviteUserToConference(v_StateInfo_ByRef, p_FinalConferenceUri, v_ActiveSessionToBeReplaced, p_SubscribeRequest, p_MediaTypeList);
+    }
+  }
+
+  /*
+   * @desc      wait for the BYE of the given dialog
+   * @param     p_StateInfo
+   * @return    boolean
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_ThreeWaySession_StateInfo_WaitForBYE(InviteUserToConference_StateInfo_Type p_StateInfo) return boolean
+  {
+    select (p_StateInfo.State) {
+      case (waitFor200OK_Step8, finished) {return true;}
+      case else {return false;}
+    }
+  }
+
+  /*
+   * @desc      Three way session creation (34.229-1 test case 15.21a, 34.229-5 test case 8.34):
+   *            - UE subscribes to conference event package (optional; 34.229-1 C.10 steps 10 - 13, 34.229-5 A.19 steps 10 - 13)
+   *            - UE invites user A to the Call (dialog 1; 34.229-1 C.19, 34.229-5 A.20)
+   *            - UE invites user B to the Call (dialog 2; 34.229-1 C.19, 34.229-5 A.20)
+   *            - UE terminates dialog 1
+   *            - UE terminates dialog 2
+   * @param     p_SessionInfo_Dialog1
+   * @param     p_SessionInfo_Dialog2
+   * @param     p_Dialog1_StateInfo
+   * @param     p_Dialog2_StateInfo
+   * @param     p_FinalConferenceUri
+   * @param     p_MediaTypeList
+   * @return    template (omit) SUBSCRIBE_Request
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ThreeWaySession_SubscribeInvite(ThreeWaySession_SessionInfo_Type p_SessionInfo_Dialog1,
+                                                 ThreeWaySession_SessionInfo_Type p_SessionInfo_Dialog2,
+                                                 InviteUserToConference_StateInfo_Type p_Dialog1_StateInfo,
+                                                 InviteUserToConference_StateInfo_Type p_Dialog2_StateInfo,
+                                                 charstring p_FinalConferenceUri,
+                                                 CharStringList_Type p_MediaTypeList) runs on IMS_PTC return template (omit) SUBSCRIBE_Request
+  { /* @sic R5-214877: p_MediaTypeList sic@ */
+    var ConferenceEventPackage_SubscribeInfo_Type v_ConferenceEventPackage_SubscribeInfo_ByRef := valueof(cs_ConferenceEventPackage_SubscribeInfo_Init);
+    var InviteUserToConference_StateInfo_Type v_Dialog1_StateInfo_ByRef := p_Dialog1_StateInfo;
+    var InviteUserToConference_StateInfo_Type v_Dialog2_StateInfo_ByRef := p_Dialog2_StateInfo;
+    
+    var template (present) MessageHeader v_MessageHeader_Bye_Dialog1 := f_IMS_ByeRequest_MessageHeaderRX(p_SessionInfo_Dialog1.InviteRequestWithSdp.Invite, -, firstDialog);
+    var template (present) MessageHeader v_MessageHeader_Bye_Dialog2 := f_IMS_ByeRequest_MessageHeaderRX(p_SessionInfo_Dialog2.InviteRequestWithSdp.Invite, -, secondDialog);
+    var template (omit) SUBSCRIBE_Request v_SubscribeRequest := omit;
+
+    var boolean v_WaitForBYE_Dialog1 := false;
+    var boolean v_WaitForBYE_Dialog2 := false;
+    var boolean v_Dialog1_Terminated := false;
+    var boolean v_Dialog2_Terminated := false;
+    var boolean v_Continue;
+
+    var integer v_ConferenceEventPackage_Version := 1;   // version used in notifications sent to the UE to inform about remote user has joined the conference
+
+    timer t_WaitForSubscribe := tsc_WaitForConferenceSubscription;     // @sic R5s221272: 3s according to 34.229-1 C.10, 34.229-5 A.19 sic@
+
+    t_WaitForSubscribe.start;
+
+    do {
+      alt {
+        // 34.229-1 C.10/38 Step 10 - 13, 34.229-5 A.19/25 Step 10 - 13         (UE subscribes the conference event)
+        [v_ConferenceEventPackage_SubscribeInfo_ByRef.State != subscribed] a_ConferenceEventPackage_Subscribe(v_ConferenceEventPackage_SubscribeInfo_ByRef, p_FinalConferenceUri)
+          {
+            v_SubscribeRequest := v_ConferenceEventPackage_SubscribeInfo_ByRef.SubscribeRequest;
+            t_WaitForSubscribe.stop;
+          }
+        // 34.229-1 C.19/37, 34.229-5 A.20/26                                   (Invite user A)
+        [v_Dialog1_StateInfo_ByRef.State != finished] a_IMS_InviteUserToConference(v_Dialog1_StateInfo_ByRef,
+                                                                                   p_FinalConferenceUri,
+                                                                                   firstDialog,       // @sic R5s150909: dialog index instead of boolean sic@
+                                                                                   v_SubscribeRequest,
+                                                                                   p_MediaTypeList,   // @sic R5-214877: p_MediaTypeList instead of tsc_MediaTypeList_Audio sic@
+                                                                                   v_ConferenceEventPackage_Version)
+          {
+            v_WaitForBYE_Dialog1 := fl_IMS_ThreeWaySession_StateInfo_WaitForBYE(v_Dialog1_StateInfo_ByRef) and not v_Dialog1_Terminated;   /* determine whether to wait for BYE for dialog 1; @sic R5s150910: v_Dialog1_Terminated sic@ */
+            if (v_Dialog1_StateInfo_ByRef.State == waitFor200OK_Step8) {                              /* => when then UE has subscribed to the conference event package it gets notify that user 1 has joined the conference ... */
+              v_ConferenceEventPackage_Version := v_ConferenceEventPackage_Version + 1;               /* ... and the version needs to incremented for next notification */
+            }
+          }
+        // 34.229-1 C.19/37, 34.229-5 A.20/26                                   (Invite user B)
+        [v_Dialog2_StateInfo_ByRef.State != finished] a_IMS_InviteUserToConference(v_Dialog2_StateInfo_ByRef,
+                                                                                   p_FinalConferenceUri,
+                                                                                   secondDialog,      // @sic R5s150909: dialog index instead of boolean sic@
+                                                                                   v_SubscribeRequest,
+                                                                                   p_MediaTypeList,   // @sic R5-214877: p_MediaTypeList instead of tsc_MediaTypeList_Audio sic@
+                                                                                   v_ConferenceEventPackage_Version)
+          {
+            v_WaitForBYE_Dialog2 := fl_IMS_ThreeWaySession_StateInfo_WaitForBYE(v_Dialog2_StateInfo_ByRef) and not v_Dialog2_Terminated;   /* determine whether to wait for BYE for dialog 2; @sic R5s150910: v_Dialog2_Terminated sic@ */
+            if (v_Dialog2_StateInfo_ByRef.State == waitFor200OK_Step8) {                              /* => when then UE has subscribed to the conference event package it gets notify that user 2 has joined the conference ... */
+              v_ConferenceEventPackage_Version := v_ConferenceEventPackage_Version + 1;               /* ... and the version needs to incremented for next notification */
+            }
+          }
+        //--------------------------------------------
+        // DIALOG 1
+        //--------------------------------------------
+        // Terminate dialog 1
+        [v_WaitForBYE_Dialog1] a_IMS_ReceiveByeSendOK(firstDialog, p_SessionInfo_Dialog1.ContactUrl, v_MessageHeader_Bye_Dialog1)
+          {
+            v_WaitForBYE_Dialog1 := false;
+            v_Dialog1_Terminated := true;   /* @sic R5s150910 sic@ */
+          }
+        
+        //--------------------------------------------
+        // DIALOG 2
+        //--------------------------------------------
+        // Terminate dialog 2
+        [v_WaitForBYE_Dialog2] a_IMS_ReceiveByeSendOK(secondDialog, p_SessionInfo_Dialog2.ContactUrl, v_MessageHeader_Bye_Dialog2)
+          {
+            v_WaitForBYE_Dialog2 := false;
+            v_Dialog2_Terminated := true;   /* @sic R5s150910 sic@ */
+          }
+        [] t_WaitForSubscribe.timeout {}    /* @sic R5s230598 sic@ */
+      }
+      v_Continue := v_WaitForBYE_Dialog1 or v_WaitForBYE_Dialog2
+        or (v_Dialog1_StateInfo_ByRef.State != finished) or (v_Dialog2_StateInfo_ByRef.State != finished)
+        or (isvalue(v_SubscribeRequest) and (v_ConferenceEventPackage_SubscribeInfo_ByRef.State != subscribed))  // isvalue(v_SubscribeRequest): UE has sent the (optional) SUBSCRIBE
+        or t_WaitForSubscribe.running;      // @sic R5s221272: t_WaitForSubscribe sic@
+      
+    } while (v_Continue);
+
+    return v_SubscribeRequest;
+  }
+
+}

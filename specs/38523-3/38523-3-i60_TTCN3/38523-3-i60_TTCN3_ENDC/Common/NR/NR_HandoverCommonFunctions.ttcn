@@ -1,0 +1,303 @@
+
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-01-22 11:02:09 +0100 (Thu, 22 Jan 2026) $
+// $Rev: 42701 $
+/******************************************************************************/
+
+module NR_HandoverCommonFunctions {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_ConfigurationSteps all;
+  import from NR_NTN_Configuration all;
+  import from NR_RRC_Templates all;
+  import from NR_SecuritySteps all;
+
+  template (present) NR_SYSTEM_CTRL_CNF car_NR_PdcpHandoverControl_CNF(NR_CellId_Type p_NR_CellId) :=
+  { /* @status    APPROVED (ENDC, NR5GC) */
+    Common := cr_NR_CnfAspCommonPart(p_NR_CellId),
+    Confirm := {
+      PdcpHandoverControl := true
+    }
+  };
+
+  template (value) NR_SYSTEM_CTRL_REQ cas_NR_PdcpHandoverInit_REQ(NR_CellId_Type                   p_SourceCellId,
+                                                                  NR_CellId_Type                   p_TargetCellId,
+                                                                  template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) :=
+  { /* @status    APPROVED (ENDC, NR5GC) */
+    Common := cs_NR_ReqAspCommonPart(p_TargetCellId, -, -, p_TimingInfo),
+    Request := {
+      PdcpHandoverControl := {
+        HandoverInit := {
+          SourceCellId := p_SourceCellId
+        }
+      }
+    }
+  };
+
+  template (value) NR_SYSTEM_CTRL_REQ cas_NR_PdcpHandoverComplete_REQ(NR_CellId_Type p_NR_CellId) :=
+  {  /* @status    APPROVED (ENDC, NR5GC) */
+    Common := cs_NR_ReqAspCommonPart(p_NR_CellId, -, -, cs_TimingInfo_Now, tsc_NoCnfReq),   // note: there shall be no CNF to avoid race conditions in case of UL data pending
+    Request := {
+      PdcpHandoverControl := {
+        HandoverComplete := true
+      }
+    }
+  };
+
+  /*
+   * @desc     To handover PDCP count of AM/SRB bearers from one cell to another
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RadioBearerList
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_IncrementSRB1     (default value: true)
+   * @return    NR_PdcpCountInfoList_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_SS_PdcpCount_Handover(NR_CellId_Type                              p_SourceCellId,
+                                      NR_CellId_Type                              p_TargetCellId,
+                                      template( value) NR_RadioBearerList_Type    p_RadioBearerList,
+                                      boolean                                     p_RBConfig_KeyChange := true,
+                                      template (value) TimingInfo_Type            p_TimingInfo := cs_TimingInfo_Now,
+                                      boolean                                     p_IncrementSRB1 := true //@sic R5-216260 sic@
+                                      ) runs on NR_BASE_PTC return NR_PdcpCountInfoList_Type //@sic R5s240414 sic@
+  {
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_SourceCellId, p_RadioBearerList, p_RBConfig_KeyChange, p_IncrementSRB1);
+    f_NR_SS_PdcpCount_Set(p_TargetCellId, v_NR_PdcpCountInfoList, p_TimingInfo);
+
+    return v_NR_PdcpCountInfoList; //@sic R5s240414 sic@
+  }
+
+  /*
+   * @desc     Retrieve PDCP counts for All DRBs and SRBs with the UL and DL SN values to be applied after HO is completed
+   * @param     p_SourceCellId
+   * @param     p_RadioBearerList
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_IncrementSRB1     (default value: true)
+   * @return    NR_PdcpCountInfoList_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+   function f_NR_GetPdcpCountInfoListIntraNR_HO(NR_CellId_Type                              p_SourceCellId,
+                                                template( value) NR_RadioBearerList_Type    p_RadioBearerList,
+                                                boolean                                     p_RBConfig_KeyChange := true,
+                                                boolean                                     p_IncrementSRB1 := true  //@sic R5-216260 sic@
+                                                ) runs on NR_BASE_PTC return NR_PdcpCountInfoList_Type
+   {//@sic R5s220123 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList:=f_NR_SS_PdcpCount_Get(p_SourceCellId);
+    var integer i;
+
+    // Acc to 38.300 cl 9.2.3.1:
+    // For DRBs using RLC AM mode, PDCP can either be re-established together with a security key change or initiate a data recovery procedure without a key change.
+    // For DRBs using RLC UM mode and for SRBs, PDCP can either be re-established together with a security key change or remain as it is without a key change
+    if (p_RBConfig_KeyChange) {
+        //No need to retrieve PDCP count for UM and SRBs because they are re-established in the target cell - PDCP SN reset to 0
+        //Retrieve PDCP count for AM DRBs only
+        for (i := 0; i < lengthof(v_NR_PdcpCountInfoList); i:= i + 1) {
+            if (not(fl_CheckAM_Drb(v_NR_PdcpCountInfoList[i], p_RadioBearerList ))) {
+                v_NR_PdcpCountInfoList[i].DL.Value := int2bit(0,32);
+                v_NR_PdcpCountInfoList[i].UL.Value := int2bit(0,32);
+            }
+        }
+    } else {
+        for (i := 0; i < lengthof(v_NR_PdcpCountInfoList); i:= i + 1) {
+            if (not(fl_CheckAM_Drb(v_NR_PdcpCountInfoList[i], p_RadioBearerList)) and not(fl_CheckSrb(v_NR_PdcpCountInfoList[i])) ) {
+                v_NR_PdcpCountInfoList[i].DL.Value := int2bit(0,32);
+                v_NR_PdcpCountInfoList[i].UL.Value := int2bit(0,32);
+            }
+        }
+        if (p_IncrementSRB1 and not(fl_CheckAM_Drb(v_NR_PdcpCountInfoList[0], p_RadioBearerList))) {//@sic R5-216260 R5s230131 change 2.3 sic@
+            // DL PDCP count value for SRB1 shall be incremented by 1 because RRCReconfiguration will be sent out on SRB1 of source Cell.
+            //@sic R5s201150 sic@
+            v_NR_PdcpCountInfoList[0].DL.Value := int2bit((bit2int(v_NR_PdcpCountInfoList[0].DL.Value) + 1), 32);
+        }
+    }
+    return v_NR_PdcpCountInfoList;
+   }
+
+  /*
+   * @desc      SS Handover configuration
+   * @param     p_NR_CellId
+   * @param     p_SYSTEM_CTRL_REQ
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_SS_PdcpHandoverCtrl(NR_CellId_Type                      p_NR_CellId,
+                                    template (value) NR_SYSTEM_CTRL_REQ p_SYSTEM_CTRL_REQ) runs on NR_BASE_PTC
+  {
+    SYS.send(p_SYSTEM_CTRL_REQ);
+    if (valueof(p_SYSTEM_CTRL_REQ.Common.ControlInfo.CnfFlag)) {
+      SYS.receive(car_NR_PdcpHandoverControl_CNF(p_NR_CellId));
+    }
+  }
+
+ /*
+  * @desc      Function to get CellGroupConfig with condition PCell_change as per 38.508-1 Table 4.6.3-19
+   * @param     p_TargetCellId
+   * @param     p_RLC_BearerToAddModList
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_SCellToAddModList (default value: omit)
+   * @param     p_SCellToReleaseList (default value: omit)
+   * @param     p_T304              (default value: ms1000)
+   * @param     p_ServingCellConfigCommon (default value: omit)
+   * @return    template
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_GetCellGroupConfigHO(NR_CellId_Type                                               p_TargetCellId,
+                                     template (value) NR_RLC_BearerToAddModList_Type              p_RLC_BearerToAddModList,
+                                     RNTI_Value                                                   p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                     template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                     template (omit) CellGroupConfig.sCellToAddModList p_SCellToAddModList := omit,
+                                     template (omit) CellGroupConfig.sCellToReleaseList p_SCellToReleaseList := omit,
+                                     ReconfigurationWithSync.t304 p_T304 := ms1000,
+                                     template (omit) ReconfigurationWithSync.spCellConfigCommon  p_ServingCellConfigCommon := omit
+                                     ) runs on NR_BASE_PTC return template (value) CellGroupConfig
+  { //@sic R5-195323 R5s230308: added p_T304 sic@
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) SpCellConfig v_SpCellConfig;
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(p_TargetCellId);
+    var template (value) PhysicalCellGroupConfig v_PhysicalCellGroupConfig := f_NR_CellInfo_GetPhysicalCellGroupConfig(p_TargetCellId);
+    var template (value) ServingCellConfigCommon v_ServingCellConfigCommon;
+    var CellGroupId v_CellGroupId := f_NR_CellInfo_Get_CellGroupId(p_TargetCellId); //@sic R5s201387 sic@
+    var template (value) ServingCellConfig v_ServingCellConfig := f_NR_GetServingCellConfig(p_TargetCellId);
+
+    //HO condition includes reconfigurationWithSync
+    v_SpCellConfig := f_NR_GetSpCellConfigDef(p_TargetCellId, v_ServingCellConfig);
+    if(isvalue(p_ServingCellConfigCommon))
+    {
+       v_ServingCellConfigCommon := p_ServingCellConfigCommon; //warning can be ignored due to isvalue check
+    }else{
+       v_ServingCellConfigCommon := f_NR_GetServingCellConfigCommon(p_TargetCellId)
+    }
+    v_SpCellConfig.reconfigurationWithSync := cs_NR_ReconfigurationWithSyncDef(v_ServingCellConfigCommon,
+                                                                               p_RNTI_Value,
+                                                                               p_T304, //  p_T304 := ms1000,
+                                                                               p_RACH_ConfigDedicated
+                                                                               );
+    v_CellGroupConfig := cs_38508_CellGroupConfig(v_CellGroupId,
+                                                  p_RLC_BearerToAddModList,
+                                                  omit,               // NR_RLC_BearerToReleaseList_Type
+                                                  v_MAC_CellGroupConfig,
+                                                  v_PhysicalCellGroupConfig,
+                                                  v_SpCellConfig,
+                                                  p_SCellToAddModList,
+                                                  p_SCellToReleaseList);
+    return v_CellGroupConfig;
+  }
+
+    /*
+   * @desc     Function to get CellGroupConfig with condition PSCell_change as per 38.508-1 Table 4.6.3-19 for ENDC
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_IsSrb3Configured  (default value: false)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_DrbId             (default value: tsc_NR_DRB2)
+   * @param     p_T304              (default value: ms1000)
+   * @return    template (value) CellGroupConfig
+   * @status    APPROVED (ENDC)
+   */
+  function f_NR_CellGroupConfig_PSCellChange(NR_CellId_Type            p_TargetCellId,
+                                             RNTI_Value                p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                             boolean                   p_IsSrb3Configured := false,
+                                             template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                             DRB_Identity p_DrbId := tsc_NR_DRB2,
+                                             ReconfigurationWithSync.t304 p_T304 := ms1000
+                                             ) runs on NR_BASE_PTC return template (value) CellGroupConfig
+  {
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_TargetCellId);
+    var template (value) UL_AM_RLC v_ParametersTX := f_NR_UL_AM_RLC(v_IsFR1);
+    var template (value) DL_AM_RLC v_ParametersRX := f_NR_DL_AM_RLC(v_IsFR1);
+    var template (value) RLC_BearerConfig v_RLC_BearerConfigDRB;
+    var template (value) RLC_BearerConfig v_RLC_BearerConfigSRB;
+    var template (value) NR_RLC_BearerToAddModList_Type v_BearerToAddModList;
+    var template (omit) RLC_Config_v1700 v_RLC_Config_v1700 := f_NR_RLC_Config_v1700(); //@sic R5-256933 sic@
+
+    //CellGroupConfig with condition HO
+    //AM DRB DRB2 with condition Condition Re-establish_RLC
+    v_RLC_BearerConfigDRB := cs_38508_RLC_BearerConfig_DRB(p_DrbId,
+                                                           cs_38508_RLC_Config_AM_DRB(v_ParametersTX, v_ParametersRX),
+                                                           cs_38508_LogicalChannelConfig_DRB,
+                                                           true_,   //Condition Re-establish_RLC @sic R5-195327 sic@
+                                                           v_RLC_Config_v1700);
+    if (p_IsSrb3Configured) {
+       //Condition Re-establish_RLC
+       v_RLC_BearerConfigSRB := cs_NR_BearerConfigDef(f_NR_LogicalChannelId_SRB(tsc_SRB3), cs_NR_ServedRadioBearerSRB(tsc_SRB3), omit, cs_38508_LogicalChannelConfig_SRB(tsc_SRB3), true_, v_RLC_Config_v1700);
+       v_BearerToAddModList := {v_RLC_BearerConfigSRB, v_RLC_BearerConfigDRB};
+    } else {
+       v_BearerToAddModList := {v_RLC_BearerConfigDRB};
+    }
+    v_CellGroupConfig := f_NR_GetCellGroupConfigHO( p_TargetCellId,
+                                                    v_BearerToAddModList,
+                                                    p_RNTI_Value,
+                                                    p_RACH_ConfigDedicated,
+                                                    -,
+                                                    -,
+                                                    p_T304
+                                                   );
+    return v_CellGroupConfig;
+   }
+
+  /*
+   * @desc      Configure RACH procedure and RACH-ConfigDedicated if present
+   * @param     p_NR_CellId
+   * @param     p_RachProcedureConfig
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (ENDC, NR5GC, NR5GC_IRAT)
+   */
+   function f_NR_SS_RachProcedureConfigHO ( NR_CellId_Type p_NR_CellId,
+                                           template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                           template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                           template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit
+                                          ) runs on NR_BASE_PTC
+   {
+     if (isvalue(p_RACH_ConfigDedicated.uplink)){
+       f_NR_CellInfo_SetRACH_ConfigDedicated(p_NR_CellId, p_RACH_ConfigDedicated.uplink); //compiler warning may be ignored due to check
+       //Reconfigure SS with RACH-ConfigDedicated
+       f_NR_SS_CommonCellConfig(p_NR_CellId,
+                                cads_NR_CellConfigPhysicalLayerUplink(p_NR_CellId, p_TimingInfo, cs_NR_CellConfigPhysicalLayerUplink_Def(f_ConvertRACH_ConfigDedicated(p_RACH_ConfigDedicated.uplink))));
+     }
+     f_NR_SS_RachProcedureConfig(p_NR_CellId, p_RachProcedureConfig, p_TimingInfo);
+   }
+
+  /*
+   * @desc      Get RACH procedure for PSCell change
+   * @param     p_NR_CellId
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_TempC_RNTI_Value  (default value: tsc_C_RNTI_Value2)
+   * @return    template
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_GetRACHProcedureConfigPSCell(NR_CellId_Type                       p_NR_CellId,
+                                             template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                             RNTI_Value_Type p_TempC_RNTI_Value := tsc_C_RNTI_Value2
+                                             ) runs on NR_BASE_PTC return template (value) NR_RachProcedureConfig_Type
+  { //@sic R5s240049: added p_TempC_RNTI_Value sic@
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig;
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_NR_CellId);
+
+    if (isvalue(p_RACH_ConfigDedicated.uplink)){
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CFRA(v_NR_PhysicalParameters);
+    } else { //Default CBRA procedure
+       // As per 38.523-3 Table 7.1.2.3.3-1: Default grants @sic R5-198994 sic@
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CBRA_CrntiBased(v_NR_PhysicalParameters, -, p_TempC_RNTI_Value, tsc_NR_ENDC_Msg3Grant_Def);
+    }
+    return v_RachProcedureConfig;
+  }
+
+}

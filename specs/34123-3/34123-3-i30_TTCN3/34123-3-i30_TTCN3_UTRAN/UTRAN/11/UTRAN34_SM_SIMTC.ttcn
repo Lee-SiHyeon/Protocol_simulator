@@ -1,0 +1,184 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2025-12-08 11:48:59 +0100 (Mon, 08 Dec 2025) $
+// $Rev: 42502 $
+/******************************************************************************/
+module UTRAN34_SM_SIMTC {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN34_CellInfo all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_ConfigurationSteps all;
+  import from UTRAN34_NAS_PDU_Templates all;
+  import from UTRAN34_NISPC_Functions all;
+  import from UTRAN34_NISPC_Templates all;
+  import from UTRAN34_PDP_Functions all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc  REFERENCE TS 34.123-1 clause 11.1.1.3
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_1_1_3_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_CellA);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_CellA);
+    
+    // Insert correct USIM
+    f_UT_USIM_Insert(UT, "34.123-1 / 11.1.1.3");
+    
+    //The UE is in GMM-state "GMM-REGISTERED, normal service" with valid P-TMSI and CKSN.
+    f_UTRAN34_Preamble(utran34_CellA, delayTolerantAccess);  //@sic R5s170020, R5-170714 sic@
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_1_1_3_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_CellA, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_1_1_3
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_1_1_3_Body() runs on UTRAN_IP_PTC
+  {
+    var template (value) QualityOfService v_QualityOfService := f_UTRAN_InitialiseQoS(utran34_CellA, cell_DCH_64kPS_RAB_SRB);
+    //var AccessStratumReleaseIndicator v_UE_ReleaseIndicator;  @sic R5s170936 sic@
+    var PDPContextParameters v_FirstPDPContextParameters;
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActivatePDPContextRequest;
+    var TI v_TI_R;
+    var TI v_TI_S;
+    var template (value) TrafficFlowTemplate v_TFT;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var float v_TimeLeft;
+    var boolean v_IPv4_Preferred := true;
+    
+    //Timer T_3396 is renamed to a Back-off timer since 24.008 v.13.1.0
+    timer t_T3396 := 120.0; //120 sec  @sic R5s170020 sic@
+    timer t_T3380 := tsc_T3380max;
+    
+    //@siclog "Step 1" siclog@
+    //Initiate a context activation
+    f_UT_ActivatePDPContextUG(UT, 1, f_ConvertQoS_ForATCommand(v_QualityOfService)); // @sic R5-192186 sic@
+    
+    // Activate DHCP and ICMPv6
+    f_UTRAN_IP_Handling_Start_Configuration(PDN_1, cell_DCH_64kPS_RAB_SRB);
+    
+    //UE establishes RRC connection
+    f_UTRAN34_RRC_ConnEst(utran34_CellA);
+    //v_UE_ReleaseIndicator:= f_UTRAN_MobileInfo_UE_Release_Get(); @sic R5s170936 sic@
+    
+    // The UE transmits the SERVICE REQUEST message
+    f_UTRAN_GMM_ServReq(tsc_SeviceTypeSignalling); // @sic R5s150838 sic@
+    
+    // The SS starts integrity protection
+    f_UTRAN_GMM_Authentication();
+    f_UTRAN34_RRC_Security(utran34_CellA, true, ps_domain);
+    
+    //@siclog "Step 2" siclog@
+    //The UE requests a PDP context activation. Device properties = "MS is configured for NAS signalling low priority"
+    v_ActivatePDPContextRequest := f_UTRAN_PS_SessionAct_ReceivePDP_Req();
+    
+    // Check Device properties
+    f_UTRAN34_DeviceProperties_CheckLowPriority(v_ActivatePDPContextRequest.deviceProperties, '1'B);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 2. MS is configured for NAS signalling low priority");
+
+    //@siclog "Step 3" siclog@
+    //SS rejects  the PDP context activation with SM cause value #26 "insufficient resources" and the T3396 timer
+    
+    v_TI_R := v_ActivatePDPContextRequest.ti;
+    //Set TI when a message is sent from the network as a response to a request from UE
+    v_TI_S.tiFlag :='1'B;
+    v_TI_S.tiVal :=v_TI_R.tiVal;
+
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_ActivatePDPContextReject(cs_ActPDPContextReject(v_TI_S,
+                                                                                  '1A'O, //  value #26 "insufficient resources"
+                                                                                  cs_GPRS_Timer2_3_IEI('37'O, tsc_Gprs3TimerUnit_1min, '00010'B))))); // Set to 1 min @sic R5s150329 Baseline Moving, R5s170020 sic@
+    
+    //Start timer T3396=1 min to ensure the second PDP content is activated before the timer expires
+    t_T3396.start;
+    
+    //@siclog "Step 4" siclog@
+    //Cause the UE to request the activation of the same context with the NAS signalling low priority override indicator.
+    //f_UT_ConfigureSIMTCParams(UT,v_RAB_Id, 0);  @sic R5s170020 sic@
+    //f_UT_RequestModifyPDPContext(UT, 1);    @sic R5s170020 sic@
+    f_UT_ActivatePDPContextUG(UT, 1, f_ConvertQoS_ForATCommand(v_QualityOfService), -, 1); //@sic R5s170020, R5-192186 sic@
+    
+    //@siclog "Step 5-7" siclog@
+    //The UE requests a PDP context activation, Device properties = "MS is not configured for NAS signalling low priority"
+    if (pc_IPv6 and not pc_IPv4) {
+      v_IPv4_Preferred := false;
+    }
+    v_TimeLeft := 120.0 - t_T3396.read; //PDP context activation request shall be sent before the expiry of timer T3396(120sec) @sic R5s170020 sic@
+    v_FirstPDPContextParameters:= f_UTRAN34_EstablishPDP_Context(utran34_CellA, v_QualityOfService,v_IPv4_Preferred, false, true, -,v_TimeLeft); //@sic R5s170936 sic@
+    //The SS accepts the PDP context activation and starts T3380
+    t_T3380.start;
+    
+    //@siclog "Step 8" siclog@
+    //The UE stops T3380 and  enters the state PDP-ACTIVE
+    //@siclog "Step 9" siclog@
+    //The SS waits for T3380 expiry to ensure no further activate request messages come from the UE
+    alt {
+      [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                                 tsc_RB3,
+                                                 cr_U_ActPDP_ContextReqMo()))
+        {
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 9, no further PDP context activation requests are expected");
+        }
+      [] t_T3380.timeout
+        {
+          f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+        }
+    }
+    
+    //@siclog "Step 10-11" siclog@
+    //The SS sends a modify request to UE for the activated context
+    //The UE accepts the modification request from the SS. This re-confirms that step 6 was correctly executed in the UE.
+
+    //Create an arbitrary packet filter for the PDP context modification
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, true, 1);
+    v_PacketFilterList[0] := v_PacketFilterByRef;
+    v_TFT := cs_TrafficFlowTemplate(v_PacketFilterLengthByref+1, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    
+    //Modify PDP context
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(v_FirstPDPContextParameters,v_TFT);
+    
+    //@siclog "Step 16" siclog@
+    //The SS releases the RRC connection due to inactivity (no user data transferred)
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+  }
+
+}

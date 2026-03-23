@@ -1,0 +1,833 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2024-04-04 08:12:21 +0200 (Thu, 04 Apr 2024) $
+// $Rev: 38369 $
+/******************************************************************************/
+
+module NBIOT_NASSteps {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_AuxiliaryFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_NB_Parameters all;
+  import from ICMPv6_Functions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_L2DataDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_Component all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_Paging all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+
+  /*
+   * @desc      return EPS_NetworkFeatureSupport to be used when there are no explict requirements by the test case
+   * @param     p_IOT_State
+   * @return    template (value) EPS_NetworkFeatureSupport
+   * @status    APPROVED (NBIOT)
+   */
+  function f_GetNBIOTNetworkFeatureSupport(IOT_STATE_Type p_IOT_State) return template (value) EPS_NetworkFeatureSupport
+  {
+    var template (value) EPS_NetworkFeatureSupport v_NtwkFeatSupport := cs_EPS_NwkFtSup_CP;
+    if (p_IOT_State == USER_PLANE) {
+      if (pc_NB_User_Plane_CIoT_Optimisation) { // @sic R5-203070 sic@
+        v_NtwkFeatSupport := cs_EPS_NwkFtSup_UP;
+      } else {
+        v_NtwkFeatSupport := cs_EPS_NwkFtSup_S1U; // @sic R5-174640 sic@
+      }
+    }
+    return v_NtwkFeatSupport;
+  }
+
+  /*
+   * @desc      Check PICS and return corresponding Additonal Update Result
+   * @param     p_RcvdAddUpdateType
+   * @return    template (omit) AdditionalUpdateResult
+   * @status    APPROVED (NBIOT)
+   */
+  function f_GetNBIOTAdditionalUpdateResult(template (omit) AdditionalUpdateType p_RcvdAddUpdateType) return template (omit) AdditionalUpdateResult
+  {
+    var template (omit) AdditionalUpdateResult v_AdditionalUpdateResult := omit; // @sic R5-172853 sic@
+    
+    if (isvalue(p_RcvdAddUpdateType)) { // @sic R5-185002 sic@
+      if (valueof(p_RcvdAddUpdateType.addUpdateTypeValue) == '1'B) {  // SMS Only
+        v_AdditionalUpdateResult := cs_AdditionalUpdateResult_SMSOnly; // @sic R5-172853 sic@
+      }
+    }
+    return v_AdditionalUpdateResult;
+  }
+
+  /*
+   * @desc      Process the received IPv6 Router Solicitation and return Router Advertisement
+   * @param     p_DataMsgRxd
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ProcessIPv6Address(octetstring p_DataMsgRxd) return octetstring
+  {
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(PDN_1);
+    var octetstring v_DataMsg := ''O;
+    var charstring v_ClientIpAddr;
+    var charstring v_ServerIpAddr;
+    var charstring v_LocalAddr;
+    var charstring v_RemoteAddr;
+    var octetstring v_ReqData;
+    var octetstring v_RespData;
+    var integer v_DataLen := lengthof(p_DataMsgRxd);
+    var UInt8_Type v_HopLimit := 255;  /* @sic R5s170286: hop limit = 255 according to RFC 4861 cl. 6.1.2 sic@ */
+
+    if (v_DataLen > 40) {
+      v_RemoteAddr := f_Convert_OctString2IPv6Addr(substr(p_DataMsgRxd, 8, 16));      /* source address in IPv6 packet sent by the UE */
+      v_LocalAddr := f_Convert_OctString2IPv6Addr(substr(p_DataMsgRxd, 24, 16));     /* dest address in IPv6 packet sent by the UE */
+      v_ReqData := substr(p_DataMsgRxd, 40, v_DataLen - 40);
+      v_ClientIpAddr := v_RemoteAddr;
+      v_ServerIpAddr := v_LocalAddr;
+      
+      if (f_IPv6AddrIsMulticast(v_ServerIpAddr)) {            /* deal with multicast (see a_ICMPv6_Handler)  */
+        v_ServerIpAddr := v_PDN_AddressInfo.ICMPv6_ServerAddress;
+        v_ClientIpAddr := v_PDN_AddressInfo.UE_IPAddressIPv6;
+        v_LocalAddr  := f_IPv6AddrGetLinkLocalAddr(v_ServerIpAddr);
+        if (v_RemoteAddr == "0000:0000:0000:0000:0000:0000:0000:0000") { /* check for unspecified IPv6 in RemoteSocket: acc. to RFC 4291, section 2.5.2,
+                                                                            the Unspecified Address must not be used as the destination address of IPv6 packets
+                                                                            => needs to replaced in the response by unspecified all-nodes multicast address  @sic R5s130378 sic@ */
+          v_RemoteAddr := "FF01:0000:0000:0000:0000:0000:0000:0001";
+        }
+      }
+      v_RespData := f_ICMPv6_GetEncodedResponse(v_ReqData, v_ClientIpAddr);           /* NOTE: only the address prefix is used for encoding of the RouterAdvertisement */
+
+      if (lengthof(v_RespData) > 0) {
+        v_RespData := f_ICMPv6_UpdateCRCChecksum(v_LocalAddr, v_RemoteAddr, v_RespData);
+        v_DataMsg := f_IPv6Packet_Create(-, -, tsc_IP_Protocol_ICMPv6, v_HopLimit, v_LocalAddr, v_RemoteAddr, v_RespData); /* @sic R5s170477: v_HopLimit <-> tsc_IP_Protocol_ICMPv6 sic@ */
+      }
+    }
+    return v_DataMsg;
+  }
+
+  /*
+   * @desc      1.2s delay acc. to 36.508 cl. 8.1.5A.1 to allow IP address allocation (Control Plane)
+   * @param     p_CellId
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_DelayForUserPlaneSignalling_CP(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC
+  {
+    var NB_SRB_COMMON_IND v_NB_SRB_COMMON_IND;
+    var template (value) UserDataContainer v_DataContainer;
+    var EPS_BearerIdentity v_BearerId;
+    var ProcedureTransactionIdentifier v_PTI;
+    var octetstring v_DataReply;
+    var boolean v_IsNTN := f_NBIOT_MobileInfo_GetNTNSatelliteType() != ntn_None; //@sic R5s240266 sic@
+    timer t_WaitForIPSignalling;
+
+    if (v_IsNTN)  //@sic R5s240246, R5-234501 sic@
+    {
+        t_WaitForIPSignalling.start(2.48);
+    }
+    else
+    {
+        t_WaitForIPSignalling.start(1.2);
+    }
+
+    alt {
+      [] t_WaitForIPSignalling.timeout {
+        // just continue
+      }
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                           tsc_SRB1bis,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_ESM_DATA_TRANSPORT(?, cr_UserDataContainer))))-> value v_NB_SRB_COMMON_IND {
+        v_BearerId := v_NB_SRB_COMMON_IND.Signalling.Nas[0].Pdu.Msg.eSM_DATA_TRANSPORT.epsBearerId;
+        v_PTI := v_NB_SRB_COMMON_IND.Signalling.Nas[0].Pdu.Msg.eSM_DATA_TRANSPORT.procedureTransactionIdentifier;
+        v_DataReply := f_NBIOT_ProcessIPv6Address(v_NB_SRB_COMMON_IND.Signalling.Nas[0].Pdu.Msg.eSM_DATA_TRANSPORT.userDatacontainer.dataContainer);
+        v_DataContainer := cs_UserDataContainer(v_DataReply);
+        SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                       tsc_SRB1bis,
+                                       cs_TimingInfo_Now,
+                                       cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cs_ESM_DATA_TRANSPORT(v_BearerId, v_PTI, v_DataContainer))));
+        repeat; // @sic R5s190423 sic@
+      }
+    }
+      
+    if (v_IsNTN)
+    {//@sic R5s240246 sic@
+        f_Delay(2.0); //delay to handle RLC ACK
+    }
+  }
+
+  /*
+   * @desc      1.2s delay acc. to 36.508 cl. 8.1.5A.1 to allow IP address allocation (User Plane)
+   * @param     p_CellId
+   * @param     p_NAS_MSG_Indication
+   * @param     p_DRB               (default value: tsc_NB_RbId_DRB1)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_DelayForUserPlaneSignalling_UP(NBIOT_CellId_Type p_CellId,
+                                                  template NAS_MSG_Indication_Type p_NAS_MSG_Indication,
+                                                  NB_RadioBearerId_Type p_DRB := tsc_NB_RbId_DRB1) runs on NBIOT_PTC
+  {
+    var NB_L2_DATA_IND v_NB_L2_DATA_IND;
+    var octetstring v_DataReply;
+    var boolean v_WaitingForUserPlaneSignalling := true;
+    var boolean v_WaitingForNasSignalling := ispresent(p_NAS_MSG_Indication);
+
+    timer t_WaitForIPSignalling;
+      
+    if (f_NBIOT_MobileInfo_GetNTNSatelliteType() == ntn_None)  //@sic R5-234501 sic@
+    {
+        t_WaitForIPSignalling.start(1.2);
+    }
+    else
+    {
+        t_WaitForIPSignalling.start(2.48);
+    }
+
+    alt {
+      [v_WaitingForUserPlaneSignalling] t_WaitForIPSignalling.timeout {
+        v_WaitingForUserPlaneSignalling := false;
+        if (v_WaitingForNasSignalling) {
+          repeat;
+        }
+      }
+      [v_WaitingForUserPlaneSignalling] L2DATA.receive(car_NB_L2_DATA_IND(cr_NB_IndAspCommonPart_RB(p_CellId, p_DRB), ?)) -> value v_NB_L2_DATA_IND { // @sic R5s180192 sic@
+        v_DataReply := f_NBIOT_ProcessIPv6Address(v_NB_L2_DATA_IND.L2Data.SubframeData.PduSduList.PdcpSdu[0]);
+        L2DATA.send(cas_NB_L2_DATA_REQ(cs_NB_ReqAspCommonPart_RB(p_CellId, p_DRB), cs_L2Data_Request_PdcpSdu(v_DataReply))); // @sic R5s180192 sic@
+        repeat; // @sic R5s170748 sic@
+      }
+      [v_WaitingForNasSignalling] SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId, tsc_SRB1, p_NAS_MSG_Indication)) {  // compiler warning cannot be avoided
+        v_WaitingForNasSignalling := false;
+        if (v_WaitingForUserPlaneSignalling) {
+          repeat;
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      receive ATTACH COMPLETE with piggybacked ACTIVATE DEFAULT EPS BEARER CONTEXT ACCEPT over SRB1
+   * @param     p_CellId
+   * @param     p_EpsBearerId
+   * @param     p_AttachComplete    (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_NAS_AttachComplete_UP(NBIOT_CellId_Type p_CellId,
+                                         HalfOctet_Type p_EpsBearerId,
+                                         template (omit) NAS_MSG_Indication_Type p_AttachComplete := omit) runs on NBIOT_PTC
+  {
+    var template NAS_MSG_Indication_Type v_NAS_MSG_Indication := omit;
+
+    if (not isvalue(p_AttachComplete)) {
+      v_NAS_MSG_Indication := cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                cr_508_ATTACH_COMPLETE,
+                                                                cdr_CIOT_ActivateDefEpsBearerContextAccept(p_EpsBearerId));
+    }
+    f_NBIOT_DelayForUserPlaneSignalling_UP(p_CellId, v_NAS_MSG_Indication);
+  }
+
+  /*
+   * @desc      receive ATTACH COMPLETE with/without piggybacked ACTIVATE DEFAULT EPS BEARER CONTEXT ACCEPT over SRB1bis
+   * @param     p_CellId
+   * @param     p_EpsBearerId
+   * @param     p_AttachComplete    (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_NAS_AttachComplete_CP(NBIOT_CellId_Type p_CellId,
+                                         HalfOctet_Type p_EpsBearerId,
+                                         template (omit) NAS_MSG_Indication_Type p_AttachComplete := omit) runs on NBIOT_PTC
+  {
+    var template (present) NAS_UL_Message_Type v_ESMMessage := cdr_CIOT_ActivateDefEpsBearerContextAccept(p_EpsBearerId);
+    var NBIOT_PDN_Type v_PDN;
+    
+    if (px_DoAttachWithoutPDN) {
+      v_ESMMessage := cr_ESM_DUMMY_MESSAGE;
+    }
+    if (not isvalue(p_AttachComplete)) {
+      SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                        tsc_SRB1bis,
+                                        cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                          cr_508_ATTACH_COMPLETE,
+                                                                          v_ESMMessage)));
+    }
+    if (f_NBIOT_MobileInfo_GetNoOfPDNsConfigured () > 0) {  // @sic R5s170597 sic@
+      v_PDN := f_NBIOT_MobileInfo_GetAssignedPdn (0);  // This is registration, so this is the first PDN
+      if (not px_DoAttachWithoutPDN and match(v_PDN.assignedPdnType, ('010'B, '011'B, '100'B))) {
+        f_NBIOT_DelayForUserPlaneSignalling_CP(p_CellId);
+      }
+    }
+  }
+
+  /*
+   * @desc      RRC connection setup procedure with optional check of
+   *            piggybacked NAS message in RRC Connection Setup Complete. To
+   *            perform the check, provide a receive constraint in
+   *            p_NasMsgIndication (NAS_MSG_Indication_Type). Using a '?'
+   *            here, just accepts any NAS message or even a RRC Connection
+   *            Setup Complete without a piggybacked NAS message.
+   * @param     p_CellId
+   * @param     p_EstablishmentCause   .. expected establishment cause (RRC Connection Request)
+   * @param     p_ExpectedNasMsg       .. expected NAS PDU (RRC Connection Setup Complete) or '?'
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnEst_DefWithNas(NBIOT_CellId_Type p_CellId,
+                                          template (present) EstablishmentCause_NB_r13 p_EstablishmentCause,
+                                          template (present) NAS_MSG_Indication_Type p_ExpectedNasMsg,
+                                          EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def) runs on NBIOT_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var integer v_SelectedPlmnIndex := f_NBIOT_CellInfo_GetSelectedPlmnIndex(p_CellId);
+
+    // receive RRC Connection Request on SRB0 (CCCH):
+    f_NBIOT_RRC_ConnectionRequest_Def(p_CellId, p_EstablishmentCause);
+    
+    // send RRC Connection Setup on SRB0 (CCCH)
+    f_NBIOT_RRC_ConnectionSetup_Def();
+    
+    // UE shall establish SRB1 acc. to 36.331 cl. 5.3.3.4 and 5.3.9
+    // UE enters RRC_CONNECTED state
+    
+    // receive RRC Connection Setup Complete with piggy-backed NAS message on SRB1 (DCCH):
+    v_NasInd := f_NBIOT_RRCConnectionSetupComplete_Def(p_CellId,
+                                                       cr_508_RRCConnectionSetupComplete_NB(p_RRC_TI, v_SelectedPlmnIndex),
+                                                       p_ExpectedNasMsg);
+    return v_NasInd;
+  };
+
+  /*
+   * @desc      Send the ESM Information_Request and receive the Response
+   * @param     p_CellId
+   * @return    ESM_INFORMATION_RESPONSE
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ESM_InformationTransfer(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return ESM_INFORMATION_RESPONSE
+  {
+    var NB_SRB_COMMON_IND v_ReceivedMsg;
+    var NBIOT_PDN_Type v_PDN := f_NBIOT_MobileInfo_GetAssignedPdn(0);
+    var ProcedureTransactionIdentifier v_PTI := v_PDN.pti;
+    
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                 tsc_SRB1bis,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_Esm_Information_Request(v_PTI))));
+    
+    SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cdr_CIOT_Esm_Information_Response(v_PTI))))
+      -> value v_ReceivedMsg;
+    return v_ReceivedMsg.Signalling.Nas[0].Pdu.Msg.eSM_INFORMATION_RESPONSE;
+  }
+
+  /*
+   * @desc      Send the ESM Information_Request and receive the Response
+   *            rather than f_ESM_InformationTransfer this function stores the AccessPointName and/or PCO
+   * @param     p_CellId
+   * @param     p_EIT_Flag
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ESM_InformationTransfer_GetAPNandPCOs(NBIOT_CellId_Type p_CellId,
+                                                         boolean p_EIT_Flag) runs on NBIOT_PTC
+  {
+    var AccessPointName v_APN;
+    var ESM_INFORMATION_RESPONSE v_ESM_INFORMATION_RESPONSE;
+
+    if (p_EIT_Flag) {
+      v_ESM_INFORMATION_RESPONSE := f_NBIOT_ESM_InformationTransfer(p_CellId);
+      if (ispresent(v_ESM_INFORMATION_RESPONSE.accessPointName)) {
+        v_APN := v_ESM_INFORMATION_RESPONSE.accessPointName;
+        v_APN.iei := omit;
+        f_NBIOT_MobileInfo_SetAPN (0, v_APN);
+      }
+      f_NBIOT_MobileInfo_SetExtPCO (0, v_ESM_INFORMATION_RESPONSE.extdProtocolConfigurationOptions);
+    }
+  }
+
+  /*
+   * @desc      Send RRCConnectionReconfiguration (with piggy-backed ATTACH_ACCEPT) and wait for RRCConnectionReconfigurationComplete
+   * @param     p_CellId
+   * @param     p_EpsBearerId
+   * @param     p_RRC_TI
+   * @param     p_EPS_TI
+   * @param     p_EpsAttachResultValue
+   * @param     p_PDN_Address
+   * @param     p_Guti
+   * @param     p_TaiList
+   * @param     p_LAI
+   * @param     p_MSId
+   * @param     p_Cause
+   * @param     p_APN
+   * @param     p_ExtdPco
+   * @param     p_AdditionalUpdateResult
+   * @param     p_T3412             (default value: cs_GprsTimer_v_deact)
+   * @param     p_T3402             (default value: omit)
+   * @param     p_T3423             (default value: omit)
+   * @param     p_EquivalentPlmnList (default value: omit)
+   * @param     p_NtwkFeatSupport   (default value: cs_EPS_NwkFtSup_UP)
+   * @param     p_T3412Extd         (default value: omit)
+   * @param     p_SecurityStatus    (default value: tsc_SHT_IntegrityProtected_Ciphered)
+   * @param     p_BearerContextNumber (default value: omit)
+   * @param     p_EMM_Cause         (default value: omit)
+   * @param     p_T3324             (default value: omit)
+   * @param     p_ExtdDRXParams     (default value: omit)
+   * @param     p_T3448             (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionReconfigurationWithAttachAcceptAllParams(NBIOT_CellId_Type p_CellId,
+                                                                         HalfOctet_Type p_EpsBearerId,
+                                                                         EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI,
+                                                                         ProcedureTransactionIdentifier p_EPS_TI,
+                                                                         NAS_AttDetValue_Type p_EpsAttachResultValue,
+                                                                         template (omit) PDN_Address p_PDN_Address,
+                                                                         template (omit) MobileIdentity p_Guti,
+                                                                         template (value) TrackingAreaIdList p_TaiList,
+                                                                         template (omit) LocAreaId p_LAI,
+                                                                         template (omit) MobileIdentity p_MSId,
+                                                                         template (omit) ESM_Cause p_Cause,
+                                                                         template (value) AccessPointName p_APN,
+                                                                         template (omit) ExtdProtocolConfigOptions p_ExtdPco,
+                                                                         template (omit) AdditionalUpdateResult p_AdditionalUpdateResult,
+                                                                         template (value) GPRS_Timer p_T3412 := cs_GprsTimer_v_deact,
+                                                                         template (omit) GPRS_Timer p_T3402 := omit,
+                                                                         template (omit) GPRS_Timer p_T3423 := omit,
+                                                                         template (omit) PLMN_List p_EquivalentPlmnList := omit,
+                                                                         template (omit) EPS_NetworkFeatureSupport p_NtwkFeatSupport := cs_EPS_NwkFtSup_UP,
+                                                                         template (omit) GPRS_Timer3 p_T3412Extd := omit,
+                                                                         SecurityHeaderType p_SecurityStatus := tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         template (omit) BEARER_CONTEXT_TYPE p_BearerContextNumber := omit,
+                                                                         template (omit) EMM_Cause p_EMM_Cause := omit,
+                                                                         template (omit) GPRS_Timer2 p_T3324 := omit,
+                                                                         template (omit) ExtdDRXParams p_ExtdDRXParams := omit,
+                                                                         template (omit) GPRS_Timer2 p_T3448 := omit)
+    runs on NBIOT_PTC
+  { /* RRC connection reconfiguration acc. to 36.331 cl. 5.3.5 */
+    var template (value) NAS_MSG_Request_Type v_NAS_MSG_Request;
+    var template (value) AccessPointName v_APN := p_APN;
+    var EUTRA_ASN1_DRB_Identity_Type v_DRB_Id := f_EUTRA_NB_EpsBearerAssociatedDRB(p_EpsBearerId);
+    
+    v_NAS_MSG_Request := cs_NAS_RequestWithPiggybacking(p_SecurityStatus,
+                                                        cs_ATTACH_ACCEPT_Common(p_EpsAttachResultValue,
+                                                                                p_T3412,
+                                                                                p_TaiList,
+                                                                                p_Guti,
+                                                                                p_LAI,
+                                                                                p_MSId,
+                                                                                p_EMM_Cause,
+                                                                                p_T3402,
+                                                                                p_T3423,
+                                                                                p_EquivalentPlmnList,
+                                                                                omit,
+                                                                                p_NtwkFeatSupport,
+                                                                                p_AdditionalUpdateResult,
+                                                                                p_T3412Extd,
+                                                                                p_T3324,
+                                                                                p_ExtdDRXParams,
+                                                                                -, -, -,
+                                                                                p_T3448), // @sic R5-183196 sic@
+                                                        cs_CIOT_ActivateDefEpsBearerContextRequest(p_EpsBearerId,
+                                                                                                   p_EPS_TI,
+                                                                                                   v_APN,
+                                                                                                   p_PDN_Address,
+                                                                                                   p_ExtdPco,
+                                                                                                   p_Cause,
+                                                                                                   p_BearerContextNumber));
+    f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Est(p_CellId,
+                                                       p_RRC_TI,
+                                                       v_NAS_MSG_Request,
+                                                       v_DRB_Id);
+  }
+
+  /*
+   * @desc      Transmit TRACKING AREA UPDATE ACCEPT message and receive TRACKING AREA UPDATE COMPLETE
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_SrbId
+   * @param     p_GutiParams
+   * @param     p_EPS_ContextStatus
+   * @param     p_AdditionalUpdateType
+   * @param     p_EPLMNlist         (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TrackingAreaUpdate_Accept_Complete(NBIOT_CellId_Type                       p_CellId,
+                                                      IOT_STATE_Type                          p_IOT_State,
+                                                      NB_SRB_Identity_Type                    p_SrbId,
+                                                      GutiParameters_Type                     p_GutiParams,
+                                                      template (omit) EPS_BearerContextStatus p_EPS_ContextStatus,
+                                                      template (omit) AdditionalUpdateType    p_AdditionalUpdateType, // @sic R5s170351 sic@
+                                                      template (omit) PLMN_List               p_EPLMNlist := omit) runs on NBIOT_PTC
+  { /* @sic R5s170515 change 4 - p_SrbId: even for user plane mode SRB1bis may be used if the UE does not have a security context yet sic@ */
+    var NAS_PlmnId v_PLMN := f_Asn2Nas_PlmnId(p_GutiParams.PLMN_Identity);
+    var EUTRA_ASN1_TrackingAreaCode_Type v_Tac := f_NBIOT_CellInfo_GetTAC(p_CellId);
+    var template (value) TrackingAreaIdList v_TaiList := cds_TAIListNonConsecutive_tlv(v_PLMN, { bit2oct(v_Tac) });
+    
+    /* Transmit TRACKING AREA UPDATE ACCEPT message */
+    /* In case MME has the cached security context it verifies the TAU Request message
+       and replies with TAU Accept message protected with the cached security context
+       ( 33.401 cl. 9.1.2 Idle mode procedures in E-UTRAN ) */
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                   p_SrbId,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_TAU_Accept_Common(tsc_EpsUpdate_TaUpdate,
+                                                                       f_GutiParameters2MobileIdentity (tsc_IEI_Guti, p_GutiParams),
+                                                                       v_TaiList,
+                                                                       p_EPS_ContextStatus,
+                                                                       omit,
+                                                                       omit,
+                                                                       f_GetNBIOTAdditionalUpdateResult(p_AdditionalUpdateType),
+                                                                       -,
+                                                                       -,
+                                                                       p_EPLMNlist,
+                                                                       f_GetNBIOTNetworkFeatureSupport(p_IOT_State)))));
+    
+    /* Receive TRACKING AREA UPDATE COMPLETE */
+    /* According to 24.301 cl: 5.5.3.2.4:
+       If the TRACKING AREA UPDATE ACCEPT message contained a GUTI,
+       the UE shall return a TRACKING AREA UPDATE COMPLETE message to
+       the MME to acknowledge the received GUTI */
+    SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                      p_SrbId,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_508_TAU_Complete)));
+  }
+
+  /*
+   * @desc      Step 1-5 of Tracking area update procedure according to 36.508 cl. 8.1.5A.5
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_EstablishmentCause (default value: ?)
+   * @param     p_EPLMNlist         (default value: omit)
+   * @status    APPROVED (NBIOT)
+
+   */
+  function f_NBIOT_TrackingAreaUpdate_Step1_5(NBIOT_CellId_Type p_CellId,
+                                              IOT_STATE_Type p_IOT_State,
+                                              template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := ?,
+                                              template (omit) PLMN_List p_EPLMNlist := omit)
+    runs on NBIOT_PTC
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var GutiParameters_Type v_GutiParams:= f_NBIOT_CellInfo_GetGuti(p_CellId);
+    var template (omit) EPS_BearerContextStatus v_EPS_ContextStatus;
+    
+    /* Step 1 - 3 */
+    /* The TAU Request shall be integrity-protected, but not confidentiality-protected.
+       UE uses the cached security context algorithms to protect the TAU Request message.
+       ( reuse of keys allocated during attach procedure )
+       ( 33.401 cl. 9.1.2 Idle mode procedures in E-UTRAN ) */
+    /* Check that TRACKING AREA UPDATE REQUEST message is present and conforms
+       with default message ( 36.508 Table 4.7.2-27: TRACKING AREA UPDATE REQUEST ) */
+    v_NasInd := f_NBIOT_TrackingAreaUpdate_Step1_3(p_CellId, p_EstablishmentCause);
+    v_EPS_ContextStatus := v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus; // Send this back in the Accept
+    
+    /* Step 4 - 5: send TAU ACCEPT and receive TAU COMPLETE */
+    f_NBIOT_TrackingAreaUpdate_Accept_Complete(p_CellId,
+                                               p_IOT_State,
+                                               tsc_SRB1bis,
+                                               v_GutiParams,
+                                               v_EPS_ContextStatus,
+                                               v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType,
+                                               p_EPLMNlist);
+  }
+
+  /*
+   * @desc      Test procedure to check that UE is camped on a new NBIOT cell, see TS 36.508 subclause 8.1.5A.5
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_EstablishmentCause (default value: ?)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_508CheckCampOnNewNBIOTCell(NBIOT_CellId_Type p_CellId,
+                                              IOT_STATE_Type p_IOT_State,
+                                              template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := ?) runs on NBIOT_PTC
+  { /* Checks whether the UE is camping on a new NBIOT cell with different TAI of a test case or not.
+       Procedure is defined in 36.508 subclause 8.1.5A.5 */
+    f_NBIOT_TrackingAreaUpdate(p_CellId, p_IOT_State, -, p_EstablishmentCause);
+
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "508Check CampOnNewNBIOTCell");
+  }
+
+  /*
+   * @desc      Tracking area update behaviour according to 36.508 cl. 8.1.5A.5
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_EstablishmentCause (default value: ?)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TrackingAreaUpdate(NBIOT_CellId_Type p_CellId,
+                                      IOT_STATE_Type p_IOT_State,
+                                      EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                      template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := ?)
+    runs on NBIOT_PTC
+  {
+    /* Step 1..5: */
+    f_NBIOT_TrackingAreaUpdate_Step1_5(p_CellId, p_IOT_State, p_EstablishmentCause);
+    
+    /* Step 6: Release RRC connection */
+    // Even if test case is in USER_PLANE, this message will be sent on SRB1bis as security has not been set up in this function
+    f_NBIOT_RRC_ConnectionRelease(p_CellId, p_IOT_State, p_RRC_TI, -, -, tsc_SRB1bis); // @sic R5s180217 sic@
+  }
+
+  /*
+   * @desc      Step 1-3 of Tracking area update procedure according to 36.508 cl. 4.5A.2.1
+   * @param     p_CellId
+   * @param     p_EstablishmentCause
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TrackingAreaUpdate_Step1_3(NBIOT_CellId_Type p_CellId,
+                                              template (present) EstablishmentCause_NB_r13 p_EstablishmentCause)
+    runs on NBIOT_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NAS_KsiValue v_KsiValue := f_NBIOT_SecurityKSIasme_Get();
+    
+    /* Step 1 - 3 */
+    /* The TAU Request shall be integrity-protected, but not confidentiality-protected.
+       UE uses the cached security context algorithms to protect the TAU Request message.
+       ( reuse of keys allocated during attach procedure )
+       ( 33.401 cl. 9.1.2 Idle mode procedures in E-UTRAN ) */
+    /* Check that TRACKING AREA UPDATE REQUEST message is present and conforms
+       with default message ( 36.508 Table 4.7.2-27: TRACKING AREA UPDATE REQUEST ) */
+    v_NasInd := f_NBIOT_RRC_ConnEst_DefWithNas(p_CellId,
+                                               p_EstablishmentCause,
+                                               cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                 cr_508_TAU_Request(tsc_EpsUpdate_TaUpdate,
+                                                                                    v_KsiValue,
+                                                                                    cr_DRXparameter_Any ('5C'O) ifpresent,
+                                                                                    cr_AdditionalUpdateType_CIOT ifpresent))); // @sic R5s170339 sic@
+    
+    return v_NasInd;
+  }
+
+  /*
+   * @desc      Generic Test Procedure for EPS Bearer Deactivation (TS 36.508 4.5A.15)
+   * @param     p_CellId
+   * @param     p_EpsBearerId       (default value: tsc_EpsDefaultBearerId)
+   * @param     p_PTId_UE           (default value: tsc_PTI_Unassigned)
+   * @param     p_EsmCauseValue     (default value: tsc_ESM_Cause36_RegularDeactivation)
+   * @param     p_T3396             (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_DeactivateEPS_BearerContext_CP(NBIOT_CellId_Type p_CellId,
+                                                  EPS_BearerIdentity p_EpsBearerId := tsc_EpsDefaultBearerId,
+                                                  ProcedureTransactionIdentifier p_PTId_UE := tsc_PTI_Unassigned,
+                                                  B8_Type p_EsmCauseValue := tsc_ESM_Cause36_RegularDeactivation,
+                                                  template (omit) GPRS_Timer3 p_T3396 := omit)
+    runs on NBIOT_PTC
+  {
+    var EPS_BearerIdentity v_EpsBearerId := p_EpsBearerId;
+    var template (value) ESM_Cause v_EsmCause := cs_ESM_Cause_v(p_EsmCauseValue);
+    
+    // The SS transmits a DEACTIVATE EPS BEARER CONTEXT REQUEST.
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_508_DeactivateEPSBearerCxtReq(v_EpsBearerId,
+                                                                                   p_PTId_UE,
+                                                                                   v_EsmCause,
+                                                                                   p_T3396))));
+    // The UE transmits a DEACTIVATE EPS BEARER CONTEXT ACCEPT message.
+    SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_508_DeactivateEPSBearerCxtAccept(v_EpsBearerId))));
+  }
+
+  /*
+   * @desc      Build up and send RRCConnectionReconfiguration message for NBIOT (UP mode)
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_Drb               (default value: tsc_DRB1)
+   * @param     p_DRB_ToAddMod      (default value: omit)
+   * @param     p_RLF_TimersAndConstants (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ActivateDRBs_RRCConnectionReconfig(NBIOT_CellId_Type p_CellId,
+                                                      EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                                      EUTRA_ASN1_DRB_Identity_Type p_Drb := tsc_DRB1,
+                                                      template (omit) DRB_ToAddMod_NB_r13 p_DRB_ToAddMod := omit,
+                                                      template (omit) RLF_TimersAndConstants_NB_r13 p_RLF_TimersAndConstants := omit) runs on NBIOT_PTC
+  {
+    var template (value) DRB_ToAddMod_NB_r13 v_DRB_ToAddMod;
+    var template (value) DRB_ToAddModList_NB_r13 v_DRB_ToAddModList;
+    var template (value) RadioResourceConfigDedicated_NB_r13 v_RadioResourceConfigDedicated;
+    var template (omit)  NAS_MSG_RequestList_Type v_NAS_MsgList := omit;
+
+    // -----------------------------------------------------
+    // initialise RRCConnectionReconfiguration
+    
+    if (isvalue(p_DRB_ToAddMod)) {
+      v_DRB_ToAddMod := valueof(p_DRB_ToAddMod);
+    } else {
+      v_DRB_ToAddMod := cs_508_NB_DRB_ToAddMod_DEFAULT(p_Drb);
+    }
+    v_DRB_ToAddModList := { v_DRB_ToAddMod };
+    v_RadioResourceConfigDedicated := cs_RadioResourceConfigDedicated_NB_DrbConfig(v_DRB_ToAddModList, -, p_RLF_TimersAndConstants); // @sic R5s170885 sic@
+
+    SRB.send(cas_NB_SRB1_RrcNasPduList_REQ(p_CellId,
+                                           cs_TimingInfo_Now,
+                                           cs_RRCConnectionReconfiguration_NB(p_RRC_TI, v_RadioResourceConfigDedicated),
+                                           v_NAS_MsgList));
+  }
+
+  /*
+   * @desc      receive RRCConnectionReconfigurationComplete and ACTIVATE_DEDICATED_EPS_BEARER_CONTEXT_ACCEPT for NBIOT (UP mode)
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ActivateDRBs_RRCConnectionReconfigComplete(NBIOT_CellId_Type p_CellId,
+                                                              EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def) runs on NBIOT_PTC
+  {
+    SRB.receive(car_NB_SRB_RrcPdu_IND(p_CellId, tsc_SRB1, cr_RRCConnectionReconfigurationComplete_NB(p_RRC_TI)));
+  }
+
+  /*
+   * @desc      Generic Radio Bearer Establishment for NBIOT (UP mode) according to 36.508 clause 8.1.5A.9
+   * @param     p_CellId
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_Drb               (default value: tsc_DRB1)
+   * @param     p_DRB_ToAddMod      (default value: omit)
+   * @param     p_RLF_TimersAndConstants (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GenericRbEst(NBIOT_CellId_Type p_CellId,
+                                template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                EUTRA_ASN1_DRB_Identity_Type p_Drb := tsc_DRB1,
+                                template (omit) DRB_ToAddMod_NB_r13 p_DRB_ToAddMod := omit,
+                                template (omit) RLF_TimersAndConstants_NB_r13 p_RLF_TimersAndConstants := omit) runs on NBIOT_PTC
+  {
+    var NBIOT_SecurityParams_Type v_SecurityParams;
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var NAS_KsiValue v_KsiValue;
+    var template (value) NB_RadioBearerList_Type v_DrbConfigList := { cs_NB_DRB_Config(p_Drb) };
+
+    // Step 1:
+    f_NBIOT_UE_Page(p_CellId);
+
+    // Step 2 - 4:
+    v_KsiValue := f_NBIOT_SecurityKSIasme_Get();
+    v_NAS_Ind := f_NBIOT_RRC_ConnEst_DefWithNas(p_CellId,
+                                                p_EstablishmentCause,
+                                                cr_NAS_Indication(tsc_SHT_IntegrityProtected, cr_CONTROL_PLANE_SERVICE_REQUEST(v_KsiValue)));
+    // Step 5 - 6
+    v_SecurityParams := f_NBIOT_Security_Get();
+    v_SecurityParams := f_NBIOT_RRC_ActivateSecurity(p_CellId, v_SecurityParams, v_NAS_Ind.SecurityProtection.NasCount, v_DrbConfigList);
+    f_NBIOT_Security_Set(v_SecurityParams);
+
+    // Step 7
+    f_NBIOT_ActivateDRBs_RRCConnectionReconfig(p_CellId, -, p_Drb, p_DRB_ToAddMod, p_RLF_TimersAndConstants); // @sic R5s170885 sic@
+
+    // Step 8
+    f_NBIOT_ActivateDRBs_RRCConnectionReconfigComplete(p_CellId);
+  }
+
+  /*
+   * @desc      Procedure according to 8.1.5A.6
+   * @param     p_CellId
+   * @param     p_ResumeIdentity    (default value: ?)
+   * @param     p_ShortMAC_I        (default value: ?)
+   * @param     p_ResumeCause       (default value: ?)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_508CheckRRCConnectionResumeOnNewCell(NBIOT_CellId_Type p_CellId,
+                                                        template (present) EUTRA_ASN1_ResumeIdentity_r13_Type p_ResumeIdentity := ?,
+                                                        template (present) EUTRA_ASN1_ShortMAC_I_Type p_ShortMAC_I := ?,
+                                                        template (present) EstablishmentCause_NB_r13 p_ResumeCause := ?) runs on NBIOT_PTC
+  {
+    var NAS_UL_Message_Type v_NasMsg;
+    var GutiParameters_Type v_GutiParams := f_NBIOT_CellInfo_GetGuti(p_CellId);
+    var NAS_KsiValue v_KsiValue := f_NBIOT_SecurityKSIasme_Get();
+    var template (present) NAS_UL_Message_Type v_ExpectedTAU_Request;
+    var template (omit) EPS_BearerContextStatus v_EPS_ContextStatus;
+    var template (omit) AdditionalUpdateType v_AdditionalUpdateType;  /* @sic R5s170515 change 5: template (omit) sic@ */
+
+    v_ExpectedTAU_Request := cr_508_TAU_Request(tsc_EpsUpdate_TaUpdate,
+                                                v_KsiValue,
+                                                cr_DRXparameter_Any ('5C'O) ifpresent,
+                                                cr_AdditionalUpdateType_CIOT ifpresent);
+    /* steps 1 - 3 */
+    v_NasMsg := valueof(f_NBIOT_RRCConnectionResume(p_CellId, p_ResumeIdentity, p_ShortMAC_I, p_ResumeCause, v_ExpectedTAU_Request));
+    v_EPS_ContextStatus := v_NasMsg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus; // Send this back in the Accept
+    v_AdditionalUpdateType := v_NasMsg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType;
+
+    /* steps 4 - 5 */
+    f_NBIOT_TrackingAreaUpdate_Accept_Complete(p_CellId, USER_PLANE, tsc_SRB1, v_GutiParams, v_EPS_ContextStatus, v_AdditionalUpdateType);
+    /* Step 6: Release RRC connection */
+    f_NBIOT_RRC_ConnectionRelease(p_CellId, USER_PLANE, tsc_RRC_TI_Def);
+  }
+
+  /*
+   * @desc      Check bits in UE Network Capability for CIOT
+   * @param     p_UE_NetworkCap
+   * @param     p_ToBeTested
+   * @return    boolean
+   * @status    APPROVED (NBIOT)
+   */
+  function f_Check_UE_NetworkCap_CIOT(UE_NetworkCap p_UE_NetworkCap,
+                                      UE_NetworkCap_ToBeTested p_ToBeTested)  runs on NBIOT_PTC return boolean
+  {
+    var boolean v_Result:= false;
+    var template (present) B8_Type v_Expected;
+    var template (present) B1_Type v_UP := ? length (1);
+    var template (present) B1_Type v_CP := ? length (1);
+
+    select (p_ToBeTested) {
+      case (CP_Backoff) { // @sic R5-183196 sic@
+        if (match(p_UE_NetworkCap.cIoT_V2X, '????1???'B)) {
+          v_Result := true;
+        } else {
+          f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "UE Network Cap failed CP Backoff bit check");
+        }
+      }
+      case (CIOT_CP) {
+        v_CP := '1'B;
+        v_Expected := '1'B & f_ConvertBoolToBit (pc_HCCPCIoT) & ? length (2) & v_UP & v_CP & ? length (2);
+        if (match (p_UE_NetworkCap.cIoT_proSeCap, v_Expected)) { // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+          v_Result := true;
+        } else {
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "UE Network Cap failed CIOT bit check");
+        }
+      }
+      case (CIOT_UP) {
+        v_UP := '1'B;
+        v_Expected := '1'B & f_ConvertBoolToBit (pc_HCCPCIoT) & ? length (2) & v_UP & v_CP & ? length (2);
+        if (match (p_UE_NetworkCap.cIoT_proSeCap, v_Expected)) { // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+          v_Result := true;
+        } else {
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "UE Network Cap failed CIOT bit check");
+        }
+      }
+    }
+    
+    return v_Result;
+  }
+
+}

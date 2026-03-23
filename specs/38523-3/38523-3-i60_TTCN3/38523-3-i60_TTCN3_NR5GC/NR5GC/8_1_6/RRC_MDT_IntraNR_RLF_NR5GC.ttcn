@@ -1,0 +1,778 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-11-01 08:32:18 +0100 (sá., 01 nov. 2025) $
+// $Rev: 42143 $
+/******************************************************************************/
+
+module RRC_MDT_IntraNR_RLF_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_Handover all;
+  import from NR5GC_MDT_Specific_Templates all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR5GC_UE_Location all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_HandoverCommonFunctions all;
+  import from NR_Measurement_Functions all;
+  import from NR_Measurement_Templates all;
+  import from NR_RRC_Templates all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+
+  template (present) NR_RLF_Report_previousPCellId cr_PreviousPCellId_r16(template PLMN_Identity p_Plmn_Identity_r16,
+                                                                   template CellIdentity p_CellIdentity_r16,
+                                                                   template TrackingAreaCode p_TrackingAreaCode_r16)  :=
+  { /* @status    APPROVED (NR5GC) */
+    nrPreviousCell_r16 := cr_CGI_Info_Logging_r16(p_Plmn_Identity_r16,p_CellIdentity_r16,p_TrackingAreaCode_r16)
+  };
+
+  /*
+   * @desc      Common procedure for TCs 8.1.6.1.3.1, 8.1.6.1.3.2 and 8.1.6.1.3.5
+   * @param     p_NeighbourCell
+   * @param     p_CheckLocationInfo (default value: false)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_Common(NR_CellId_Type p_NeighbourCell, boolean p_CheckLocationInfo := false) runs on NR5GC_PTC
+  {//@sic R5s211638, R5-217921 sic@
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var NR_AbsoluteCellPower_Type v_CellPower_A3_Entry_FR1;
+    
+    var RSRP_Range v_RsrpThres;
+    var template (value) MeasObjectParamsList_Type v_MeasuredObjectList;
+    var template (value) ReportConfigToAddModList v_ReportConfigList;
+    var template (value) MeasIdToAddModList v_MeasIdConfigList;
+    var template (value) MeasConfig v_MeasConfig;
+    var PhysCellId v_PhysCellIdServing;
+    var PhysCellId v_PhysCellIdServing_received;
+    var PhysCellId v_PhysCellIdNeighbour;
+    var ARFCN_ValueNR v_ARFCN_Neighbour;
+    var template (present) UL_DCCH_Message v_UEInformationResponse;
+    //var DeltaValues_Type v_Deltas := f_NR_MobileInfo_GetPrimaryDeltaValue();  //@sic R5-214550 R5-241309 sic@
+    var template (omit) MeasGapConfig v_MeasGapConfig := omit;
+    var CellIdentity v_CellIdentity_Serving;
+    var CellIdentity v_CellIdentity_Serving_received;
+    var CellIdentity v_CellIdentity_Neighbour;
+    var NR_SRB_COMMON_IND v_ReceivedMsg;
+    var RLF_Report_r16 v_ReceivedReport;
+    var template (omit) OtherConfig_v1610 v_OtherConfig_v1610 := omit; //@sic R5-231195 sic@
+      
+    //Table 8.1.6.1.3.1.3.2-1/2
+    v_CellPower_A3_Entry_FR1 := -82;
+    v_CellPowerList_AtT0 := {// @sic R5-232643 sic@
+        cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2),
+        cs_NR_CellPower(p_NeighbourCell, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2)};
+    v_CellPowerList_AtT1 := { //@sic R5-220053, R5-232643 sic@
+        cs_NR_CellPower(p_NeighbourCell, v_CellPower_A3_Entry_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)};
+    v_CellPowerList_AtT2 := {cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE)};
+    
+    f_NR_CellInfo_InitMaxReferencePower(p_NeighbourCell, v_CellPower_A3_Entry_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+       
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(p_NeighbourCell);
+    
+    //Preamble
+    //The UE is in state 3N-A as defined in TS 38.508-1, subclause 4.4A on NR Cell 1.
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+
+    if(p_CheckLocationInfo)
+    {/*The UE's positioning engine (e.g. standalone GNSS receiver) should be provided with any necessary stimulus to allow it to provide the position.
+      *This shall be done by use of the test function Update UE Location Information defined in TS 38.509 [6], if supported by the UE according to pc_UpdateUE_LocationInformation */
+        f_NR_ProvideUE_LocationInformation(nr_Cell1, RRC_CONNECTED);
+    }
+
+
+    f_NR_TestBody_Set(true);
+    
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    //Table 8.1.6.1.3.1.3.3-2|3|4
+    v_RsrpThres := 2;  //@sic R5-241309, R5-216289, R5-214550, R5-232643 sic@
+    if (p_NeighbourCell == nr_Cell3)  //@sic R5s211638 sic@
+    {
+        v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell1), cs_MeasObjectId2(p_NeighbourCell)};
+        v_MeasIdConfigList := {cs_NR_MeasId_Config_id1_obj2_conf1};
+        v_MeasGapConfig := cds_MeasGapConfig_UE(f_NR_GetGapConfig_InterFreqOdd(nr_Cell1, p_NeighbourCell));
+    }
+    else
+    {
+        v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell1)};
+        v_MeasIdConfigList := {cs_NR_MeasId_Config_id1_obj1_conf1};
+    }
+    v_ReportConfigList := {cs_NR_ReportConfigEventA3(tsc_NR_IdReportConfigId1, v_RsrpThres, r1, -, -, cs_NR_MeasReportQuantity_Rsrp)}; //@sic R5-217921 sic@
+   
+    v_MeasConfig :=f_NR_GenerateMeasurementConfigNR(v_MeasuredObjectList, v_ReportConfigList, v_MeasIdConfigList, v_MeasGapConfig); // @sic R5s211638 sic@
+
+    //@siclog "Steps 1-2" siclog@
+    // The SS transmits an RRCReconfiguration message including MeasConfig to setup NR measurement and reporting for intra-frequency event A3 (measId 1).
+    //The UE transmits an RRCReconfigurationComplete message.
+    if(p_CheckLocationInfo)
+    {//@sic R5-231195 sic@
+        v_OtherConfig_v1610 := cs_OtherConfig_v1610;
+        v_OtherConfig_v1610.obtainCommonLocation_r16 := true_;
+   
+    }
+    f_NR_SendRRCReconfiguration_MeasNR(nr_Cell1, v_MeasConfig,-,-,-,-,-,-,v_OtherConfig_v1610); //@sic R5-231195 sic@
+    
+    //@siclog "Step 3" siclog@
+    //The SS changes NR Cell 2 parameters according to the row "T1" in Table 8.1.6.1.3.1.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 4" siclog@
+    //The UE transmit a MeasurementReport message to report event A3 (measId 1) with the measured RSRP value for NR Cell 2.
+    v_PhysCellIdServing := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1);
+    v_PhysCellIdNeighbour := f_NR_CellInfo_GetPhysicalCellId(p_NeighbourCell);
+    f_NR_ReceiveMeasurementReports(nr_Cell1,
+                                  v_PhysCellIdServing,
+                                  tsc_NR_MeasId1,
+                                  -,
+                                  -,
+                                  cr_NR_MeasResults_MeasResultNeighCells_NR({cr_NR_MeasResultNR_CellResults(v_PhysCellIdNeighbour, cr_NR_MeasQuantityResults_Rsrp)}));
+    //@siclog "Step 5" siclog@
+    //The SS changes NR Cell 1 parameter according to the row "T2" in Table 8.1.6.1.3.1.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+      
+    //@siclog "Steps 6-10" siclog@
+    //The UE transmits an RRCReestablishmentRequest message on neighblur cell.
+    //The SS transmits an RRCReestablishment message.
+    //The UE transmits an RRCReestablishmentComplete message.
+    //The SS transmits an RRCReconfiguration message to establish SRB2 and DRB.
+    //The UE transmits an RRCReconfigurationtComplete message.
+    //The SS transmits an RRCReestablishment message.
+    //The UE transmits an RRCReestablishmentComplete message.
+    f_NR5GC_RRCReestablishment_SON_MDT(nr_Cell1, p_NeighbourCell, rlf_InfoAvailable); //@sic R5s211638 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test " & testcasename() & " Step 9: RRCReestablishmentComplete message with rlf-InfoAvailable included");
+       
+    //@siclog "Step 11" siclog@
+    //The SS transmits a UEInformationRequest message.
+    SRB.send(cas_NR_SRB_RrcPdu_REQ(p_NeighbourCell,
+                                  tsc_NR_RbId_SRB1,
+                                  -, //cs_TimingInfo_Now
+                                  cs_NR_UEInformationRequest_RLF)); // condition RLF
+      
+    //@siclog "Step 12" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on NR Cell 2?
+    v_ARFCN_Neighbour := f_NR_CellInfo_GetFrequencySSB(p_NeighbourCell);
+    v_CellIdentity_Serving := f_NR_CellInfo_GetCellIdentity(nr_Cell1);
+    v_CellIdentity_Neighbour := f_NR_CellInfo_GetCellIdentity(p_NeighbourCell);
+    v_UEInformationResponse := cr_UEInformationResponse_r16_RLF(v_PhysCellIdNeighbour, v_ARFCN_Neighbour, v_CellIdentity_Neighbour, f_NR_CellInfo_GetRNTI(nr_Cell1)); // @sic R5s211638 sic@
+   
+    if(p_CheckLocationInfo)
+    {
+        v_UEInformationResponse.message_.messageClassExtension.c2.ueInformationResponse_r16.criticalExtensions.ueInformationResponse_r16.rlf_Report_r16.nr_RLF_Report_r16.locationInfo_r16 := cr_NR_LocationInfo_Base(?); //@sic R5-217923, R5-235427 sic@
+    }
+    
+    SRB.receive(car_NR_SRB_RrcPdu_IND(p_NeighbourCell, tsc_NR_RbId_SRB1, v_UEInformationResponse))  -> value v_ReceivedMsg;  // @sic R5s211638 sic@
+    v_ReceivedReport := v_ReceivedMsg.Signalling.Rrc.Dcch.message_.messageClassExtension.c2.ueInformationResponse_r16.criticalExtensions.ueInformationResponse_r16.rlf_Report_r16;
+      
+      
+      
+    if( isvalue(v_ReceivedReport.nr_RLF_Report_r16.failedPCellId_r16.nrFailedPCellId_r16.cellGlobalId_r16.cellIdentity_r16)) //@sic R5s220712 sic@
+    {
+        v_CellIdentity_Serving_received := v_ReceivedReport.nr_RLF_Report_r16.failedPCellId_r16.nrFailedPCellId_r16.cellGlobalId_r16.cellIdentity_r16;
+    }
+    else if(isvalue(v_ReceivedReport.nr_RLF_Report_r16.failedPCellId_r16.nrFailedPCellId_r16.pci_arfcn_r16.physCellId_r16))
+    {
+        v_PhysCellIdServing_received := v_ReceivedReport.nr_RLF_Report_r16.failedPCellId_r16.nrFailedPCellId_r16.pci_arfcn_r16.physCellId_r16;
+    }
+    
+    
+    if( v_CellIdentity_Serving_received == v_CellIdentity_Serving or v_PhysCellIdServing_received == v_PhysCellIdServing)  //@sic R5-217921 sic@
+    {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Test " & testcasename() & " Step 12");
+    
+    }
+    else
+    {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test " & testcasename() & " Step 12:  wrong failed PCell ID ");
+    }
+      
+    //@siclog "Step 13" siclog@
+    //Void @sic R5-216289 sic@
+      
+    f_NR_TestBody_Set(false);
+    // Finish
+    f_NR_Postamble(p_NeighbourCell, STATE_CONNECTED_3A); // @sic R5-216289 sic@
+  } // end of f_TC_8_1_6_1_3_Common
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_1_NR5GC() runs on NR5GC_PTC
+  { /* Radio Link Failure / Reporting of Intra-frequency measurements */
+    
+    f_NR5GC_Init(NR_2);
+    f_TC_8_1_6_1_3_Common(nr_Cell2);
+      
+  }// End of f_TC_8_1_6_1_3_1_NR5GC()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_2_NR5GC() runs on NR5GC_PTC
+  { /* Radio Link Failure / Reporting of Inter-frequency measurements */
+  
+    f_NR5GC_Init(NR_4);
+    f_TC_8_1_6_1_3_Common(nr_Cell3);
+      
+  }// End of f_TC_8_1_6_1_3_2_NR5GC()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_3_NR5GC() runs on NR5GC_PTC
+  { //Radio Link Failure / Reporting at RRC connection establishment and reestablishment
+  
+    f_NR5GC_Init(NR_2); // @sic R5-221579 sic@
+
+    f_NR_CellInfo_SetTAC (nr_Cell2, int2bit(2,24)); // @sic R5-221579 sic@
+    f_NR_CellInfo_SetTAC (nr_Cell4, int2bit(2,24)); // @sic R5-221579 sic@
+
+    f_NR_CellInfo_SetRLF_TimersAndConstants(nr_Cell1,cs_NR_RLF_TimersAndConstantsDef( ms1000, n1, n1, ms10000)); // @sic R5-221579 sic@
+    f_NR_CellInfo_SetRLF_TimersAndConstants(nr_Cell2,cs_NR_RLF_TimersAndConstantsDef( ms1000, n1, n1, ms10000)); // @sic R5-221579 sic@
+   
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2); // @sic R5-221579 sic@
+    f_NR_CellConfig_Def(nr_Cell4); // @sic R5-221579 sic@
+
+    f_NR5GC_Preamble(nr_Cell1, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_6_1_3_3_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell4, STATE_CONNECTED_3A); // @sic R5-221579 sic@
+  }
+
+  /*
+   * @desc      test body of TC_8_1_6_1_3_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_6_1_3_3_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var RLF_Report_r16 v_Nr_Rlf_Report_r16;
+    var RNTI_Value v_RNTI_Value_Cell1; // @sic R5s220489 sic@
+    var RNTI_Value v_RNTI_Value_Cell2; // @sic R5-216290, R5-221579 sic@
+    var PhysCellId v_PhysCellId_Cell1 := f_NR_CellInfo_GetPhysicalCellId(nr_Cell1); // @sic R5s220489 sic@
+    var PhysCellId v_PhysCellId_Cell2 := f_NR_CellInfo_GetPhysicalCellId(nr_Cell2);
+    var ARFCN_ValueNR v_SSB_Freq_Cell2 := f_NR_CellInfo_GetFrequencySSB(nr_Cell2);
+    var CellIdentity v_CellIdentity_Cell2 := f_NR_CellInfo_GetCellIdentity(nr_Cell2); // @sic R5-217922, R5s211600, R5-221579 sic@
+    var PLMN_Identity v_PLMN_Identity_Cell2 := f_NR_CellInfo_GetPLMN (nr_Cell2); // @sic R5-217922, R5s211600, R5-221579 sic@
+    var TrackingAreaCode v_TAC_Cell2 := f_NR_CellInfo_GetTAC (nr_Cell2); // @sic R5-217922, R5s211600, R5-221579 sic@
+    var CellIdentity v_CellIdentity_Cell4 := f_NR_CellInfo_GetCellIdentity(nr_Cell4);
+    var PLMN_Identity v_PLMN_Identity_Cell4 := f_NR_CellInfo_GetPLMN (nr_Cell4);
+    var TrackingAreaCode v_TAC_Cell4 := f_NR_CellInfo_GetTAC (nr_Cell4);
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1 := {
+      cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2) // @sic R5-221579 sic@
+    };
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2 := {
+      cs_NR_CellPower(nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2) // @sic R5-221579 sic@
+    };
+    var ShortMAC_I v_ShortMAC_I; // @sic R5s220489 sic@
+    var integer v_WaitTime := 1;//T301 is ms1000 by default // @sic R5s211600 sic@
+    var float v_T301Min := f_NR_SetTimerToleranceMin(nr_Cell1, rrcTimer, int2float(v_WaitTime)); // @sic R5s211600 sic@
+
+    //@siclog "Step 1" siclog@
+    //The SS changes NR Cell 1 and Cell 3 parameters according to the row "T1" in Table 8.1.6.1.3.3.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //@siclog "Step 2" siclog@
+    //The UE transmits an RRCReestablishmentRequest message on NR Cell 3.
+    //@sic R5-221467, R5-221579, R5s220489 sic@
+    v_RNTI_Value_Cell1 := f_NR_CellInfo_GetRNTI(nr_Cell1);
+    v_ShortMAC_I:= f_NR_Calculate_ShortMAC(nr_Cell1, nr_Cell2);
+    SRB.receive(car_NR_SRB0_RrcPdu_IND(nr_Cell2, cr_38508_RRCReestablishmentRequest(cr_NR_ReestabUE_Identity (v_RNTI_Value_Cell1, v_PhysCellId_Cell1, v_ShortMAC_I), otherFailure)));
+    v_RNTI_Value_Cell2 := f_NR_CellInfo_GetRNTI(nr_Cell2); // @sic R5-216290, R5-221579 sic@
+
+    //@siclog "Step 3" siclog@
+    //The SS does not respond to any RRCReestablishmentRequest message and waits for 1s to ensure that T301 expires and the UE goes to NR RRC_IDLE state on NR Cell 3.
+    f_Delay(v_T301Min); // @sic R5s211600 sic@
+
+    //@siclog "Steps 4-5" siclog@
+    //Steps 1-2 of Table 4.9.5.2.2-1 of the generic procedure in TS 38.508-1 [4] are performed on NR Cell 3.
+    f_NR_RRC_SetupRequest_Def(nr_Cell2); // @sic R5-221579 sic@
+    f_NR_RRCSetup_Def(nr_Cell2);
+    
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit an RRCSetupComplete message with rlf-InfoAvailable included and a REGISTRATION REQUEST message indicating "mobility registration updating" is sent to update the registration of the actual tracking area?
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell2,
+                                               cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def, -, -, -,
+                                                                         cr_RRCSetupComplete_v1610_IEs(*,*,cr_UE_MeasurementsAvailable_r16(-, -, -, -, true_))));
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+
+    //@siclog "Step 6A - 6B" siclog@
+    //@sic R5-217922, R5s211600 sic@
+    //The SS transmits a SecurityModeCommand message.
+    //The UE transmits a SecurityModeComplete message.
+    f_NR_RRC_ActivateSecurity (nr_Cell2, v_ReceivedMsg.SecurityProtection.NasCount);
+
+    //@siclog "Steps 7-8" siclog@
+    //Steps 4-5 of Table 4.9.5.2.2-1 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell2, v_GMM_MobilityInfo, -, -, noRrcConnectionRelease);
+
+    //@siclog "Step 8A - 8B" siclog@
+    //@sic R5-217922, R5s211600 sic@
+    //The SS transmits an RRCReconfiguration message to establish SRB2 and DRB.
+    //The UE transmits an RRCReconfigurationtComplete message.
+    f_NR_RRCReconfigExistingDRBs (nr_Cell2, omit);
+
+    //@siclog "Step 9" siclog@
+    //The SS changes NR Cell 3 and Cell 6 parameters according to the row "T2" in Table 8.1.6.1.3.3.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    //@siclog "Steps 10-14" siclog@
+    //The UE transmits an RRCReestablishmentRequest message on NR Cell 6.
+    //The SS transmits an RRCReestablishment message.
+    //Check: Does the UE transmit an RRCReestablishmentComplete message with rlf-InfoAvailable included?
+    //The SS transmits an RRCReconfiguration message to establish SRB2 and DRB.
+    //The UE transmits an RRCReconfigurationtComplete message.
+    f_NR5GC_RRCReestablishment_SON_MDT(nr_Cell2, nr_Cell4, rlf_InfoAvailable); // @sic R5-221579 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+
+    //@siclog "Step 15" siclog@
+    //The SS transmits a UEInformationRequest message with rlf-ReportReq set to true.
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell4,
+                                    -,
+                                    cs_38508_UEInformationRequest(tsc_NR_RRC_TI_Def, -, -, -, -, true_)));
+
+    //@siclog "Step 16" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on Cell 6 with rlf-Report included?
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell4,
+                                       cr_38508_UEInformationResponse(tsc_NR_RRC_TI_Def,-,-,-,-,-,?))) -> value v_ReceivedAsp;
+    v_Nr_Rlf_Report_r16 := v_ReceivedAsp.Signalling.Rrc.Dcch.message_.messageClassExtension.c2.ueInformationResponse_r16.criticalExtensions.ueInformationResponse_r16.rlf_Report_r16;
+    
+    if (match(v_Nr_Rlf_Report_r16, cr_NR_Rlf_Report_Common(v_RNTI_Value_Cell2, // @sic R5-216290 sic@
+                                                    '1000000000000000000000000000000000000000000000000000000000000000'B,
+                                                    ?, ?,
+                                                    omit, omit,
+                                                    (cr_NR_RLF_Report_failedPCellId_PciArfcn_r16(v_PhysCellId_Cell2, v_SSB_Freq_Cell2),
+                                                     cr_NR_RLF_Report_failedPCellId_cellGlobalId_r16(cr_CGI_Info_Logging_r16(v_PLMN_Identity_Cell2, v_CellIdentity_Cell2, v_TAC_Cell2))), // @sic R5-217922, R5s211600 sic@
+                                                    omit, omit,
+                                                    cr_CGI_Info_Logging_r16(v_PLMN_Identity_Cell4, v_CellIdentity_Cell4, v_TAC_Cell4),
+                                                    omit, -,
+                                                    rlf,
+                                                    t310_Expiry,
+                                                    -, omit,
+                                                    f_NR_CellInfo_GetSSB_Index(nr_Cell2)))) // @sic R5-221579 sic@
+    {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    }
+    else {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 16");
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_4_NR5GC() runs on NR5GC_PTC
+  { // Radio Link Failure / Reporting at NR handover
+  
+    f_NR5GC_Init(NR_2);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-232643 sic@
+    f_NR_SetCellPower (nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2);//@sic R5-220054 R5s220421, R5-232643 sic@
+    f_NR_TestBody_Set(true);
+    f_TC_8_1_6_1_3_4_TestBody();
+    f_NR_TestBody_Set(false);
+      
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);//@sic R5-216291 sic@
+      
+  }// End of f_TC_8_1_6_1_3_4_NR5GC()
+
+  /*
+   * @desc      Test body function for TC 8.1.6.1.3.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_4_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) DL_DCCH_Message v_RRCReconfigurationHO;
+    var PLMN_Identity v_PlmnID_NRCell1 := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    var CellIdentity v_CellIdentity_NRCell1 := f_NR_CellInfo_GetCellIdentity(nr_Cell1);
+    var TrackingAreaCode v_TAC_NRCell1 := f_NR_CellInfo_GetTAC (nr_Cell1);
+    var template RRCReestablishmentComplete_v1610_IEs v_RRCReestablishmentComplete_v1610_IEs;// := cr_RRCReestablishmentComplete_v1610_IEs_RLF;
+    var RNTI_Value v_RNTI_Value:=f_NR_CellInfo_GetRNTI(nr_Cell1) ;//@sic R5s220421 sic@
+    var IntegerList_Type v_DrbIdList;//@sic R5s220421 sic@
+
+    // Reconfigure nr_Cell2 to no respond to any RA Preamble
+    // Table 8.1.4.1.5.3.2-4: The UE attempts to perform the handover using MAC Random Access Preamble on NR Cell 2. SS does not respond.
+    f_NR_SS_RachProcedureConfig(nr_Cell2, cs_NR_RachProcedureConfig_NoResponse);
+    //@siclog "Step 1" siclog@
+    // The SS transmits an RRCReconfiguration message on NR Cell 1 to order the UE to perform handover to NR Cell 2.
+    // Note: failure case UE doesn't go to nr_Cell2 => the standard function need not be used
+    v_RRCReconfigurationHO := f_NR5GC_RRCReconfiguration_IntraNR_HO(nr_Cell2);
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1, -, v_RRCReconfigurationHO));
+    //@siclog "Step 2" siclog@
+    //The SS changes the power level setting according to the row "T1".
+    f_NR_SetCellPower (nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);//@sic R5-220054 R5s220421 sic@
+    //@siclog "Step 3-6" siclog@
+    //Re-establishment procedure
+    v_DrbIdList := f_NR_GetActiveDRBs(nr_Cell1);//@sic R5s220421 sic@
+    f_NR_SS_SRBs_DRBs_Release(nr_Cell1, -, v_DrbIdList, tsc_NoCnfReq);//@sic R5s220421 sic@
+    f_NR_SS_SRBs_DRBs_Config(nr_Cell1, -, omit, true);//@sic R5s220421 sic@
+    v_RRCReestablishmentComplete_v1610_IEs := cr_RRCReestablishmentComplete_v1610_IEs_RLF;
+    f_NR5GC_RRCReestablishment_Steps0To2(nr_Cell1, nr_Cell1); //@sic R5s220421 sic@
+    f_NR5GC_RRCReestablishment_Steps3To7(nr_Cell1, 2, -, v_RRCReestablishmentComplete_v1610_IEs); //@sic R5s220421 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5"); //@sic R5-224192 sic@
+    f_NR5GC_RRCReestablishment_Steps8To10(nr_Cell1, nr_Cell1,-, -, false); //@sic R5s220421 sic@
+    //@siclog "Step 7" siclog@
+    //Re-establishment procedure
+    //Check: Does the UE transmit an RRCReconfigurationtComplete message with rlf-InfoAvailable included?
+    SRB.receive(car_NR_SRB_RrcPdu_IND(nr_Cell1, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete));//@sic R5-224192 R5S220846 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+    f_NR5GC_RRCReestablishment_Steps11To13(nr_Cell1, nr_Cell1); //@sic R5s220421 sic@
+    //@siclog "Step 8" siclog@
+    //The SS transmits a UEInformationRequest message.
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1,//@sic R5s220421 sic@
+                                   -,
+                                   cs_38508_UEInformationRequest(tsc_NR_RRC_TI_Def, -, -, -, -, true_)));
+    //@siclog "Steps 9" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on NR Cell 1?
+    
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1,//@sic R5s220421 sic@
+                                        cr_38508_UEInformationResponse(tsc_NR_RRC_TI_Def,-,-,-,-,-,
+                                                                                    cr_NR_Rlf_Report_Common(v_RNTI_Value,-,
+                                                                                                    (0..127), (0..127), // rsrp, rsrq
+                                                                                                    omit,// measResultNeighCells_r16
+                                                                                                    cr_PreviousPCellId_r16(v_PlmnID_NRCell1, v_CellIdentity_NRCell1, v_TAC_NRCell1),//PreviousPCellId_r16
+                                                                                                    -,// failedPCellId_r16//@sic R5-221580 R5s220421 sic@
+                                                                                                    omit,omit,
+                                                                                                    cr_NR_CGI_Info_Logging_r16_Def(v_CellIdentity_NRCell1),//@sic R5-221580 R5s220421 sic@
+                                                                                                    *,?,
+                                                                                                    hof,
+                                                                                                    -,*))));//rlf-Cause-r16 not checked//@sic R5-221580 R5s220421 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+    //@siclog "Steps 10" siclog@
+    //void @sic R5-216291 sic@
+      
+  }//End of f_TC_8_1_6_1_3_4_TestBody()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_5_NR5GC() runs on NR5GC_PTC
+  { /* Radio Link Failure / Location information */
+    
+    f_NR5GC_Init(NR_2);
+    f_TC_8_1_6_1_3_Common(nr_Cell2, true);
+      
+  }// End of f_TC_8_1_6_1_3_5_NR5GC()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.6
+   * @status    APPROVED (NR5GC)
+   */
+ function f_TC_8_1_6_1_3_6_NR5GC() runs on NR5GC_PTC
+  { // @sic R5-216292 R5-223274 R5-225390 sic@
+    //Radio Link Failure / Random access problem
+    
+    f_NR5GC_Init(NR_2); //System information combination NR-2 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR cells
+    
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    // Preamble: The UE is in state 3N-A according to TS 38.508-1, clause 4.4A.2 Table 4.4A.2-3
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_8_1_6_1_3_6_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  } //end of f_TC_8_1_6_1_3_6_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.6
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_6_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-223274 R5-225390 R5s221239 R5-227430 sic@ */
+   var NR_SRB_COMMON_IND v_ReceivedAsp;
+   var PLMN_Identity v_PlmnID_NRCell1 := f_NR_CellInfo_GetPLMN (nr_Cell1);
+   var CellIdentity v_CellIdentity_NRCell1 := f_NR_CellInfo_GetCellIdentity(nr_Cell1);
+   var TrackingAreaCode v_TAC_NRCell1 := f_NR_CellInfo_GetTAC (nr_Cell1);
+   var RNTI_Value v_RNTI_Value := f_NR_CellInfo_GetRNTI(nr_Cell1);
+   var RLF_Report_r16 v_Nr_Rlf_Report_r16;
+   
+   var template (value) NR_PDCCH_Order_Type v_PDCCH_Order;
+   var integer v_RA_PreambleIndex := 0;
+   var integer v_Repetitions := 0;
+   timer t_Watchdog := 5.0;              // Local wait Timer
+
+   //@siclog "Steps 1-11 - Void " siclog@
+   
+   //@siclog "Step 12" siclog@
+   // The SS is configured to ignore the preambles transmitted by the UE on PRACH
+   f_NR_SS_RachProcedureConfig(nr_Cell1, cs_NR_RachProcedureConfig_NoResponse);
+   
+   // Enable PRACH reception indication
+   f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_RachPreamble(enable));
+
+   //@siclog "Step 13" siclog@
+   // The SS sends a PDCCH order with ra-PreambleIndex = '000000'B.
+   v_PDCCH_Order := cs_NR_PDCCH_Order(f_NR_CellInfo_GetSSB_Index(nr_Cell1), v_RA_PreambleIndex);
+   f_NR_SS_CommonCellConfig(nr_Cell1, cads_NR_DciTriggerPDCCHOrder_REQ(nr_Cell1, -, v_PDCCH_Order));
+    
+   //@siclog "Step 14" siclog@
+   // The UE transmits Preamble on PRACH preambleTransMax times.
+   t_Watchdog.start;
+   alt {
+        [] SYSIND.receive(car_NR_PRACH_Preamble_IND(nr_Cell1, -, ?)) {
+          t_Watchdog.stop;
+             if (v_Repetitions==6) { //Acc. to 38.508-1, Table 4.6.3-130: RACH-ConfigGeneric, preambleTransMax = n7
+                  // do nothing and exit the statement to continue with step 15
+             } else {
+                  v_Repetitions := v_Repetitions + 1;
+                  t_Watchdog.start;
+                  repeat;
+             }
+        }
+        [] t_Watchdog.timeout {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 14");
+        }
+   }
+
+   f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_RachPreamble(disable));
+   
+   //@siclog "Step 15" siclog@
+   //The UE transmits an RRCReestablishmentRequest message
+   f_NR5GC_RRCReestablishment_Steps0To2(nr_Cell1, nr_Cell1, otherFailure);
+
+   //@siclog "Step 16-17" siclog@
+   //The SS transmits an RRCReestablishment message.
+   //The UE transmita an RRCReestablishmentComplete message.
+   f_NR5GC_RRCReestablishment_Steps3To7(nr_Cell1, -, -, cr_RRCReestablishmentComplete_v1610_IEs_RLF);
+
+   //@siclog "Step 18-19" siclog@
+   //The SS transmits an RRCReconfiguration message to establish SRB2 and DRB.
+   //The UE transmits an RRCReconfigurationtComplete message.
+   f_NR5GC_RRCReestablishment_Steps8To13(nr_Cell1, nr_Cell1);
+   
+   //@siclog "Step 20" siclog@
+   // The SS transmits a UEInformationRequest message with rlf-ReportReq set to true.
+   SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1,
+                                   -,
+                                   cs_NR_UEInformationRequest_RLF)); // rlf-report
+
+   //@siclog "Step 21" siclog@
+   // Check: Does the UE transmit a UEInformationResponse message with rlf-Report included?
+   SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1,
+                                      cr_38508_UEInformationResponse(tsc_NR_RRC_TI_Def,-,-,-,-,-,?))) -> value v_ReceivedAsp; // Table 8.1.6.1.3.6.3.3-3
+
+   v_Nr_Rlf_Report_r16 := v_ReceivedAsp.Signalling.Rrc.Dcch.message_.messageClassExtension.c2.ueInformationResponse_r16.criticalExtensions.ueInformationResponse_r16.rlf_Report_r16;
+
+   if (match(v_Nr_Rlf_Report_r16, cr_NR_Rlf_Report_Common(v_RNTI_Value, -,    // c_RNTI_r16, ssbRLMConfigBitmap_r16 := tsc_SsbRLMConfigBitmap_r16
+                                                   (0..127), (0..127), // rsrp, rsrq
+                                                   omit, omit,          // measResultNeighCells_r16, PreviousPCellId_r16
+                                                   cr_NR_RLF_Report_failedPCellId_cellGlobalId_r16(cr_CGI_Info_Logging_r16(v_PlmnID_NRCell1, v_CellIdentity_NRCell1, v_TAC_NRCell1)), // failedPCellId_r16.nrFailedPCellId_r16
+                                                   omit,omit,-,omit,-,
+                                                   rlf,                  // connectionFailureType_r16
+                                                   randomAccessProblem,  //rlf-Cause-r16
+                                                   -,
+                                                   cr_RA_InformationCommon_r16({cr_PerRAInfo_r16(cr_PerRAInfoList_r16_dlRSRPAboveThreshold)},(0..37949))))) // RA_InformationCommon_r16
+    {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 21");
+    }
+    else {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 21: condition not fulfilled with the received rlf-Report-r16 contents");
+    }
+
+ }//end of f_TC_8_1_6_1_3_6_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.6.1.3.7
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_7_NR5GC() runs on NR5GC_PTC
+  { //Radio Link Failure / Logging and reporting / Reporting at intra NR handover / PLMN list
+  
+    f_NR5GC_Init(NR_4);
+    f_NR_CellInfo_SetRLF_TimersAndConstants(nr_Cell1,cs_NR_RLF_TimersAndConstantsDef( ms1000, n1, n1, ms10000));//@sic R5-221574 R5s220275 sic@
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_11);//PLMN2
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell12,-73,-73);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);// set initial power level conditions for preamble
+
+    // The UE is registered on PLMN1 (NR Cell 1) using the procedure described in TS 38.508-1[4] clause 4.5.2.2-2 except that the REGISTRATION ACCEPT message indicates PLMN2 in the Equivalent PLMN list.
+    // The UE is in state 3N-A on NR Cell 1 according to TS 38.508-1 [4], clause 4.4A.
+    f_NR5GC_SwitchOnAndResetIMS();
+    f_NR5GC_Registration (nr_Cell1,
+                          -,Initial_NoSecurity,
+                          cs_PLMN_List_1PLMN(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell12)))  //PLMN2 as EPLMN
+                          );
+
+    f_NR5GC_RRC_Idle_Steps16_20(nr_Cell1);
+
+    f_NR_TestBody_Set(true);
+    f_TC_8_1_6_1_3_7_TestBody();
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell12, STATE_CONNECTED_3A);//@sic R5-216293 sic@
+      
+  }// End of f_TC_8_1_6_1_3_7_NR5GC()
+
+  /*
+   * @desc      Test body function for TC 8.1.6.1.3.7
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_6_1_3_7_TestBody() runs on NR5GC_PTC
+  {
+    var PLMN_Identity v_PlmnID_NRCell1 := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    var CellIdentity v_CellIdentity_NRCell1 := f_NR_CellInfo_GetCellIdentity(nr_Cell1);
+    var TrackingAreaCode v_TAC_NRCell1 := f_NR_CellInfo_GetTAC (nr_Cell1);
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template RRCReestablishmentComplete_v1610_IEs v_RRCReestablishmentComplete_v1610_IEs;// := cr_RRCReestablishmentComplete_v1610_IEs_RLF;
+    var NextHopChainingCount v_NCC;//@sic R5s220275 sic@
+    var template (value) MasterKeyUpdate v_MasterKeyUpdate;//@sic R5s220275 sic@
+    var RNTI_Value_Type v_RNTI_Value := f_NR_CellInfo_GetRNTI(nr_Cell1);
+
+
+    //@siclog "Step 1" siclog@
+    // The SS changes NR Cell 1 parameters according to the row "T1" in Table 8.1.6.1.3.7.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    //@siclog "Step 2" siclog@
+    //The SS waits for 3s to ensure that the UE detects T310 expiry.
+    f_Delay(3.0);
+    //@siclog "Step 3" siclog@
+    //The SS changes NR Cell 1 parameters according to the row "T2" in Table 8.1.6.1.3.7.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    //@siclog "Step 4-8" siclog@
+    //re-establishment procedure
+    v_RRCReestablishmentComplete_v1610_IEs := cr_RRCReestablishmentComplete_v1610_IEs_RLF;//@sic R5s220275 sic@
+    f_NR5GC_RRCReestablishment_Def(nr_Cell1, nr_Cell1, otherFailure,
+                                   -,v_RNTI_Value,
+                                   -,-,v_RRCReestablishmentComplete_v1610_IEs);//@sic R5s220275 sic@
+    //@siclog "Step 9" siclog@
+    //The SS changes NR Cell 12 parameters according to the row "T3" in Table 8.1.6.1.3.7.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell12, -82, -73);
+    //@siclog "Step 10-11" siclog@
+    //The SS transmits an RRCReconfiguration message on Cell 1 to order the UE to perform inter frequency handover to Cell 12.
+    v_MasterKeyUpdate := cs_MasterKeyUpdate(false, 0);//@sic R5s220275 sic@
+    v_NCC := valueof(v_MasterKeyUpdate.nextHopChainingCount);//@sic R5s220275 sic@
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO(nr_Cell12,
+                                                                  -,
+                                                                  -,
+                                                                  -,
+                                                                  -,
+                                                                  -,
+                                                                  v_MasterKeyUpdate);//@sic R5s220275 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_CommonSteps1_12(nr_Cell1,
+                                                        nr_Cell12,
+                                                        -,
+                                                        -,
+                                                        v_RRCReconfiguration,
+                                                        f_NR_GetRACHProcedureConfigPSCell(nr_Cell12),
+                                                        f_NR5GC_MobileInfo_GetDRBInfoList(),
+                                                        -,
+                                                        -,
+                                                        cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-,
+                                                                                                                          cr_RRCReconfigurationComplete_v1560(-,cr_RRCReconfigurationComplete_v1610_RLF))),
+                                                        v_NCC); //@sic R5s220275 sic@
+
+
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+    //@siclog "Step 12" siclog@//@sic R5-216293 sic@
+    //the UE transmit a REGISTRATION REQUEST message with registration type value set to "mobility registration updating"?
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)){// @sic R5-200208, R5-206426 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_16(nr_Cell1, nr_Cell12);//@sic R5s220275 sic@
+    //@siclog "Step 13-14" siclog@
+    //Steps 4-5 of the generic procedure in TS 38.508-1 [4] subclause 4.9.5.2.2  are performed.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   f_NR5GC_GetMobileIdGUTI(nr_Cell12),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell12)),// @sic R5s200350 sic@
+                                                                                {bit2oct(f_NR_CellInfo_GetTAC(nr_Cell12))}));// @sic R5s200350 sic@
+                                                   
+   // Registration Accept
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12,
+                                   tsc_NR_RbId_SRB2,
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    //Registration Complete
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell12, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not match (v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_NG_REGISTRATION_COMPLETE)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Complete Message Failed");
+    }
+    //@siclog "Step 15" siclog@
+    //The SS transmits a UEInformationRequest message.
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell12,
+                                   -,
+                                   cs_38508_UEInformationRequest(tsc_NR_RRC_TI_Def, -, -, -, -, true_)));
+    //@siclog "Steps 16" siclog@
+    //Check: Does the UE transmit a UEInformationResponse message on NR Cell 12?
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell12,
+                                        cr_38508_UEInformationResponse(tsc_NR_RRC_TI_Def,-,-,-,-,-,
+                                                                                    cr_NR_Rlf_Report_Common(v_RNTI_Value,-,// @sic R5s220508 sic@
+                                                                                                    (0..127), (0..127), // rsrp, rsrq
+                                                                                                    omit,// measResultNeighCells_r16
+                                                                                                    omit,//PreviousPCellId_r16
+                                                                                                    cr_NR_RLF_Report_failedPCellId_cellGlobalId_r16(cr_CGI_Info_Logging_r16(v_PlmnID_NRCell1, v_CellIdentity_NRCell1, v_TAC_NRCell1)),// failedPCellId_r16
+                                                                                                    omit,omit,cr_NR_CGI_Info_Logging_r16_Def(v_CellIdentity_NRCell1),*,?,
+                                                                                                    rlf, t310_Expiry,*,omit))));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    //@siclog "Steps 17" siclog@
+    //void @sic R5-216293 sic@
+      
+  }//End of f_TC_8_1_6_1_3_7_TestBody()
+
+}

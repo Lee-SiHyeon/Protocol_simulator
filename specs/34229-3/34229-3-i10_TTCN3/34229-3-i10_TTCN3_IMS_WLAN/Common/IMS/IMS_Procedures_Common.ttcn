@@ -1,0 +1,1053 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module IMS_Procedures_Common {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_IP_Config all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  type enumerated IMS_TCP_CloseHandling_Type {  /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+                                                   @sic R5s140801: dontWait, renamed to dontWaitOrClose later on sic@ */
+    justWait,                   /* don't release any TCP connection but just wait (duration tsc_IMS_WaitForTcpClose) for UE closing its TCP clients */
+    waitAndClose,               /* wait (duration tsc_IMS_WaitForTcpClose) for UE closing its TCP clients and then close the remaining connections */
+    dontWaitOrClose             /* to be used when f_IMS_TCP_CloseHandling shall not be called at all */
+  };
+
+  /*
+   * @desc      common function to handle closing down TCP connections used for SIP signalling
+   * @param     p_Handling
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_TCP_CloseHandling(IMS_TCP_CloseHandling_Type p_Handling) runs on IMS_PTC
+  {
+    f_Delay(tsc_IMS_WaitForTcpClose);
+
+    select (p_Handling) {
+      case (waitAndClose) {
+        f_IMS_CloseTCP();
+      }
+      case else {
+        // do nothing
+      }
+    }
+  }
+
+  /*
+   * @desc      check whether public user id matches with any public user id in the given list
+   * @param     p_PublicUserIdentityList
+   * @param     p_SipUrl
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PublicUserId_Match(CharStringList_Type p_PublicUserIdentityList,
+                                    SipUrl p_SipUrl) return boolean
+  {
+    var integer i;
+    
+    for (i:=0; i < lengthof(p_PublicUserIdentityList); i:=i+1) {
+      if (f_SIP_MatchURI(p_PublicUserIdentityList[i], p_SipUrl)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      return server port of the network side depending on whether it is protected or not
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_GetPort_ps() runs on IMS_PTC return integer
+  { /* @sic R5s130756 additional changes: p_IsProtected removed (f_IMS_PTC_Security_IPsecIsStarted used instead) sic@ */
+    var IMS_ProtectedPorts_Type v_Protected;
+    var integer v_Port_ps := tsc_IMS_PortNumber_5060;
+
+    if (f_IMS_PTC_Security_IPsecIsStarted()) {
+      v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+      v_Port_ps := v_Protected.Port_ps;       // @sic R5s120907 change 2 sic@
+    }
+    return v_Port_ps;
+  }
+
+  /*
+   * @desc      return server port of the UE side depending on whether it is protected or not
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_GetPort_us() runs on IMS_PTC return integer
+  {
+    var IMS_ProtectedPorts_Type v_Protected;
+    var integer v_Port_us := tsc_IMS_PortNumber_5060;
+
+    if (f_IMS_PTC_Security_IPsecIsStarted()) {
+      v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+      v_Port_us := v_Protected.Port_us;
+    }
+    return v_Port_us;
+  }
+
+  /*
+   * @desc      Usage of tags is described in RFC 3261 clause 19.3:
+   *            when there has been a to-tag in a request the same to-tag is used in the corresponding response;
+   *            when there is no to-tag a new to-tag and the response is for a dialog the stored to-tag is used
+   *            when there still no to-tag a new to-tag is generated for the reponse
+   * @param     p_RequestMessageHeader
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Response_ToTagTX(template (value) MessageHeader p_RequestMessageHeader) runs on IMS_PTC return charstring
+  { /* @sic R5-131897, R5-132063 - new generic function sic@ */
+    /* @sic R5s140017 MCC160 implementation: f_IMS_PTC_ImsInfo_DialogGetToTag, f_IMS_PTC_ImsInfo_DialogSetToTag replaced by f_IMS_PTC_ImsInfo_DialogGetLocalTag, f_IMS_PTC_ImsInfo_DialogSetLocalTag sic@ */
+    var template (omit) charstring v_ToTag := f_MessageHeader_GetToTag(p_RequestMessageHeader);
+    var charstring v_Method;
+
+    if (not isvalue(v_ToTag)) {
+      v_Method := valueof(p_RequestMessageHeader.cSeq.method);
+      if (v_Method == "INVITE") {   /* @sic R5s130497 change 1 - MCC160 implementation sic@ */
+        // => response belongs to a dialog
+        v_ToTag := f_IMS_PTC_ImsInfo_DialogGetLocalTag();  // check if there is already a tag generated for this dialog (essential e.g. in case of call-forwarding when the tag changes; see testcase 15.8)
+        if (not isvalue(v_ToTag)) {
+          v_ToTag := f_IMS_GenerateTag(v_Method);
+          f_IMS_PTC_ImsInfo_DialogSetLocalTag(valueof(v_ToTag));
+        }
+      } else {
+        v_ToTag := f_IMS_GenerateTag(v_Method);
+      }
+    }
+    return valueof(v_ToTag);
+  }
+
+  /*
+   * @desc      Generate To header to be used in a response: in general the To header consists of the address and the to-tag
+   * @param     p_RequestMessageHeader
+   * @param     p_ToTag             (default value: omit)
+   * @return    template (value) To
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Response_ToHeaderTX(template (value) MessageHeader p_RequestMessageHeader,
+                                     template (omit) charstring p_ToTag := omit) runs on IMS_PTC return template (value) To
+  { /* @sic R5-153986: parameter p_ToTag to allow different ToTags for different dialogs created by subscription to even packages sic@ */
+    var SipUrl v_SipUrl := f_Addr_Union_GetSipUrl(p_RequestMessageHeader.toField.addressField);
+    var charstring v_ToTag;
+
+    if (ispresent(p_ToTag)) {
+      v_ToTag := valueof(p_ToTag);
+    } else {
+      v_ToTag := f_IMS_Response_ToTagTX(p_RequestMessageHeader);
+    }
+
+    return cs_ToWithTag(v_SipUrl, v_ToTag);
+  }
+
+  /*
+   * @desc      generate template for To header depending on whether the previous request has had a to-tog or not
+   * @param     p_RequestMessageHeader
+   * @param     p_Is100Response     (default value: false)
+   * @return    template (present) To
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Response_ToHeaderRX(template (value) MessageHeader p_RequestMessageHeader,
+                                     boolean p_Is100Response := false) return template (present) To
+  { /* @sic R5s130685 change 1: new parameter p_Is100Response sic@ */
+    var template (omit) charstring v_ToTagFromRequest := f_MessageHeader_GetToTag(p_RequestMessageHeader);
+    var template (value) SipUrl v_SipUrl := f_Addr_Union_GetSipUrl(p_RequestMessageHeader.toField.addressField);   // @sic R5s130453 change 1 sic@
+    var template (present) To v_To;
+
+    if (ispresent(v_ToTagFromRequest)) {
+      v_To := cr_ToWithTag(v_SipUrl, valueof(v_ToTagFromRequest)); /* @sic R5-132063  sic@ */
+    }
+    else if (not p_Is100Response) {
+      v_To := cr_ToWithTag(v_SipUrl);
+    }
+    else {
+      v_To := cr_ToDef(v_SipUrl);                                  /* @sic R5s130685 change 1 sic@ */
+    }
+    return v_To;
+  }
+
+  /*
+   * @desc      generate template for From header (the from-tag has to be the same as in the corresponding request)
+   * @param     p_RequestMessageHeader
+   * @return    template (present) From
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Response_FromHeaderRX(template (value) MessageHeader p_RequestMessageHeader) return template (present) From
+  {
+    var charstring v_FromTagFromRequest := f_MessageHeader_GetFromTag(p_RequestMessageHeader);
+    var template (value) SipUrl v_SipUrl := f_Addr_Union_GetSipUrl(p_RequestMessageHeader.fromField.addressField);
+
+    return cr_FromWithTag(v_SipUrl, v_FromTagFromRequest);
+  }
+
+  /*
+   * @desc      Route set acc. A.2.3 and A.3.1
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    template (value) RouteBody_List
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RouteSet_MO_Call_TX(IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return template (value) RouteBody_List
+  { /* @sic R5s150692 change 5: parameter p_CallType sic@ */
+    var template (omit) GenericParam v_SigCompParam := f_IMS_PTC_ImsInfo_GetSigCompParam(); // Compression parameter to be included in the last route parameter (see 34.229-1 cl. 13.2.4)
+    var template (omit) integer v_Port_ps := omit;
+    var template (value) RouteBody_List v_RouteBodyList;
+    var template (value) RouteBody v_RouteBodyPCSCF;
+
+    // Protected or unprotected port number depending on whether IPsec has been started or not
+    v_Port_ps := f_IMS_PTC_GetPort_ps();  // @sic R5-180433 sic@
+
+    v_RouteBodyPCSCF := f_RouteBodyWithParamsTX(cs_SipUri_HostPort_lr(f_IMS_PTC_Pcscf_Get(), v_Port_ps), v_SigCompParam);
+
+    select (p_CallType) {
+      case (NORMAL_CALL) {
+        v_RouteBodyList := {
+          cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:pcscf.other.com")),
+          cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:scscf.other.com")),
+          cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:orig@" & tsc_IMS_Scscf)),
+          v_RouteBodyPCSCF
+        };
+      }
+      case (CONFERENCE_CALL) {                          /* @sic R5-155179 sic@ */
+        v_RouteBodyList := {
+          cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:orig@" & tsc_IMS_Scscf)),  /* @sic R5-160796 sic@ */
+          v_RouteBodyPCSCF
+        };
+      }
+      case (REGULAR_EMERGENCY, ASSERTED_EMERGENCY) {    /* @sic R5s150692 change 5, R5-153472 sic@ */
+        v_RouteBodyList := {
+          cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:orig@" & tsc_IMS_Ecscf)),
+          v_RouteBodyPCSCF
+        };
+      }
+      case else {                                       /* @sic R5-155179 sic@ */
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+    return v_RouteBodyList;
+  }
+
+  /*
+   * @desc      Route set acc. A.2.9
+   * @return    template (value) RouteBody_List
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RouteSet_MT_Call_TX() runs on IMS_PTC return template (value) RouteBody_List
+  {
+    var template (omit) GenericParam v_SigCompParam := f_IMS_PTC_ImsInfo_GetSigCompParam(); // Compression parameter to be included in the last route parameter (see 34.229-1 cl. 13.2.4)
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var template (value) RouteBody_List v_RouteBodyList;
+    
+    v_RouteBodyList := {
+      f_RouteBodyWithParamsTX(cs_SipUri_HostPort_lr(f_IMS_PTC_Pcscf_Get(), v_Port_ps), v_SigCompParam),
+      cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:term@scscf1.3gpp.org")),
+      cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:orig@scscf2.3gpp.org")),
+      cs_RouteBody(f_SIP_BuildSipUri_lr_TX("sip:pcscf2.3gpp.org"))
+    };
+    return v_RouteBodyList;
+  }
+
+  /*
+   * @desc      revert order of given RouteBody_List
+   * @param     p_RouteBodyList
+   * @return    template (value) RouteBody_List
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RouteSet_ReverseOrder(template (value) RouteBody_List p_RouteBodyList) return template (value) RouteBody_List
+  {
+    var template (value) RouteBody_List v_RouteBodyList := {};
+    var integer v_LengthOfList;
+    var integer i;
+    var integer k;
+
+    v_LengthOfList := lengthof(p_RouteBodyList);
+    k := v_LengthOfList;
+    for (i:=0; i<v_LengthOfList; i:=i+1) {
+      k := k - 1;
+      v_RouteBodyList[i] := p_RouteBodyList[k];
+    }
+    return v_RouteBodyList;
+  }
+
+  /*
+   * @desc      build up Via header to be received from the UE in the INVITE request (A.2.1)
+   * @param     p_Port_us           (default value: *)
+   * @return    template (present) Via
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SipRequest_ViaRX(template integer p_Port_us := *) runs on IMS_PTC return template (present) Via
+  { /* @sic R5-150745: still in A.2.10 the port number is mandatory for GIBA (in contrast to A.2.1) => parameter p_Port_us sic@ */
+    var template integer v_Port_us := p_Port_us;
+
+    if (f_IMS_PTC_Security_IPsecIsStarted()) {
+      v_Port_us := f_IMS_PTC_GetPort_us();
+    }
+    return cr_ViaDef(?, cr_HostPort(?, v_Port_us));                /* additional checks in f_IMS_MessageHeader_Request_CheckVia: check of FQDN or IP address */
+  }
+
+  /*
+   * @desc      build up Via header to be sent to the UE in the INVITE request
+   * @param     p_CallerHostPort    (default value: cs_HostPort(tsc_IMS_CallerDomain, tsc_IMS_CallerPort))
+   * @return    template (value) Via
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SipRequest_ViaTX(template (value) HostPort p_CallerHostPort := cs_HostPort(tsc_IMS_CallerDomain, tsc_IMS_CallerPort)) runs on IMS_PTC return template (value) Via
+  { /* @sic R5s190727 change 2.2: v_TransportProtocol1, v_TransportProtocol2 sic@ */
+    /* @sic R5s240228: p_CallerHostPort instead of p_CallerDomain, p_CallerPort sic@ */
+    var template (value) ViaBody_List v_ViaBodyList;
+    var template (omit) GenericParam v_SigCompParam := f_IMS_PTC_ImsInfo_GetSigCompParam();   // omit when sigcomp is not started
+    var charstring v_Host := f_IMS_PTC_Pcscf_Get();
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var InternetProtocol_Type v_InternetProtocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var charstring v_TransportProtocol1 := f_IMS_ConvertTransportProtocolToString(v_InternetProtocol); /* @sic NOTE: acc. to discussions regarding rejection of R5-130765 at RAN WG5 Meeting #58 UDP is used for all requests in DL sic@ */
+    var charstring v_TransportProtocol2 := "UDP";   /* acc. to via parameter in TS 34.229 A.2.9 udp shall be used */
+    var boolean v_IsMCX := f_IMS_PTC_TestsuiteInfo_IsMCX();
+    
+    if (v_IsMCX) {                                                       /* @sic R5-196983 sic@
+                                                                            !!!! PROSE ISSUE: via should correspond to the RecordRoute => at least for INVITE and BYE it should be the same as for IMS !!!! */
+      v_ViaBodyList := {
+        cs_ViaBody(v_TransportProtocol1, cs_HostPort(v_Host, v_Port_ps), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch(), v_SigCompParam)),
+        cs_ViaBody(v_TransportProtocol2, p_CallerHostPort,               f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch()))
+      };
+    } else {
+      v_ViaBodyList := {
+        cs_ViaBody(v_TransportProtocol1, cs_HostPort(v_Host, v_Port_ps), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch(), v_SigCompParam)),
+        cs_ViaBody(v_TransportProtocol2, cs_HostPort("scscf1.3gpp.org"), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())),
+        cs_ViaBody(v_TransportProtocol2, cs_HostPort("scscf2.3gpp.org"), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())),
+        cs_ViaBody(v_TransportProtocol2, cs_HostPort("pcscf2.3gpp.org"), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())),
+        cs_ViaBody(v_TransportProtocol2, p_CallerHostPort,               f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch()))
+      };
+    }
+    return cs_Via(v_ViaBodyList);
+  }
+
+  /*
+   * @desc      to distinguish Max-Forwards values for IMS and MCX
+   * @return    template (value) MaxForwards
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_SipRequest_MaxForwardsTX() runs on IMS_PTC return template (value) MaxForwards
+  {
+    var boolean v_IsMCX := f_IMS_PTC_TestsuiteInfo_IsMCX();
+    var integer v_Value;
+
+    if (v_IsMCX) {
+      v_Value := 68;
+    } else {
+      v_Value := 67;
+    }
+    return cs_MaxForwardsDef(v_Value);
+  }
+
+  /*
+   * @desc      returns true, when the given message header of a SIP request is a re-INVITE
+   * @param     p_MessageHeader_Request
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_SipRequest_MessageHeaderIsReINVITE(template (value) MessageHeader p_MessageHeader_Request) return boolean
+  {
+    var charstring v_Method := valueof(p_MessageHeader_Request.cSeq.method);
+    var boolean v_Result := false;
+
+    select (v_Method) {
+      case ("INVITE") {
+        v_Result := isvalue(f_MessageHeader_GetToTag(p_MessageHeader_Request));   // => re-INVITE within an established dialog
+      }
+    }
+    return v_Result;
+  }
+
+  type enumerated CheckToTag_Type {noToTag, dialogToTag};  /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+
+  /*
+   * @desc      check the To header e.g. whether it has unexpected tag
+   * @param     p_MessageHeader
+   * @param     p_CheckType
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_CheckTo(MessageHeader p_MessageHeader,
+                                       CheckToTag_Type p_CheckType) runs on IMS_PTC
+  {
+    var SemicolonParam_List v_ToParams := {};
+    var template (omit) charstring v_ToTagDialog;
+    var template (omit) charstring v_ToTagReceived;
+
+    if (ispresent(p_MessageHeader.toField.toParams)) {
+      v_ToParams := p_MessageHeader.toField.toParams;
+    }
+    select (p_CheckType) {
+      case (noToTag) {
+        if (match(v_ToParams, cr_SemicolonParam_List_WithAnyTag)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid params in 'To'");
+        }
+      }
+      case (dialogToTag) {
+        v_ToTagDialog := f_IMS_PTC_ImsInfo_DialogGetRemoteTag();       /* @sic R5s140017 MCC160 implementation: use remote tag sic@ */
+        v_ToTagReceived := f_MessageHeader_GetToTag(p_MessageHeader);
+        if (not ispresent(v_ToTagReceived)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Missing to-tag");
+        }
+        if (ispresent(v_ToTagDialog) and (valueof(v_ToTagDialog) != valueof(v_ToTagReceived))) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid to-tag");
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      Check Via header
+   * @param     p_MessageHeader
+   * @param     p_Protocol
+   * @param     p_AllowFQDN         (default value: true)
+   * @param     p_CheckRport        (default value: false)
+   * @param     p_Port              (default value: *)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_Request_CheckVia(MessageHeader p_MessageHeader,
+                                                InternetProtocol_Type p_Protocol,
+                                                boolean p_AllowFQDN := true,
+                                                boolean p_CheckRport := false,
+                                                template integer p_Port := *) runs on IMS_PTC
+  { /* p_AllowFQDN  ..  shall be set to false e.g. for condition A6 of A.2.1 */
+    /* p_Port  ..  in general the port is checked with the receive template already and therefor does not need to be checked again here (see f_IMS_RegisterRequest_MessageHeaderRX_Subsequent, f_IMS_InviteRequest_MessageHeaderRX) */
+    /* @sic R5-172412: p_Port sic@ */
+    var ViaBody v_ViaBody := p_MessageHeader.via.viaBody[0];
+    var charstring v_ProtocolString := f_IMS_ConvertTransportProtocolToString(p_Protocol);
+
+    if (not f_IMS_PTC_CheckHostPortForIPAddrOrFQDN(v_ViaBody.sentBy, p_Port, p_AllowFQDN)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid host and/or port in 'via'");
+    }
+    if (f_StringToLower(v_ProtocolString) != f_StringToLower(v_ViaBody.sentProtocol.transport)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid transport protocol in 'via'");
+    }
+    if (p_CheckRport and (p_Protocol != tcp)) {  // @sic R5-133358 rport is optional for tcp sic@
+      if (not match(v_ViaBody.viaParams, cr_SemicolonParam_List_OneSpecificParamNoValue("rport"))) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'rport' is missing in 'via'");
+      }
+    }
+  }
+
+  /*
+   * @desc      Check whether Via header of a response sent by the UE matches Via header sent to the UE in the corresponding request
+   *            (taking into consideration that the format of IP address representation may change)
+   * @param     p_RequestHeader
+   * @param     p_ResponseHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_Response_CheckVia(MessageHeader p_RequestHeader,
+                                                 MessageHeader p_ResponseHeader) runs on IMS_PTC
+  {
+    var integer v_LengthOfViaBody_Request := lengthof(p_RequestHeader.via.viaBody);
+    var integer v_LengthOfViaBody_Response := lengthof(p_ResponseHeader.via.viaBody);
+    var boolean v_Mismatch := false;
+    var integer i;
+
+    if (v_LengthOfViaBody_Request != v_LengthOfViaBody_Response) {
+      v_Mismatch := true;
+    } else {
+      for (i:=0; i < v_LengthOfViaBody_Request; i:=i+1) {
+        if (not f_IPAddresses_Compare(p_RequestHeader.via.viaBody[i].sentBy.host, p_ResponseHeader.via.viaBody[i].sentBy.host)) {
+          v_Mismatch := true;
+          break;
+        }
+      }
+    }
+    if (v_Mismatch) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Mismatch in via header");
+    }
+  }
+
+  /*
+   * @desc      check whether the first entry in the route body matches the P-CSCF address
+   * @param     p_RouteBodyList
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_RouteBody_CheckPcscfAddr(RouteBody_List p_RouteBodyList) runs on IMS_PTC
+  { /* @sic R5s150039: new function to deal with RecordRoute header as well as with Route header sic@ */
+    var charstring v_PcscfAddr := f_SIP_SipUrl_GetDomainName(p_RouteBodyList[0].nameAddr.addrSpec); /* @sic R5s160325 - additional changes: f_SIP_SipUrl_GetDomainName sic@ */
+    
+    if (not f_IMS_PTC_Pcscf_CheckAndSet(v_PcscfAddr)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid host in 'route body'");
+    }
+  }
+
+  /*
+   * @desc      Check Route header of a given request sent by the UE:
+   *            The first entry has to correspond to the IP address of the P-CSCF
+   *            => in case of IPv6 the presentation of the address may differ from the address stored at the IMS PTC
+   * @param     p_RequestHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_Request_CheckRoute(MessageHeader p_RequestHeader) runs on IMS_PTC
+  {
+    fl_RouteBody_CheckPcscfAddr(p_RequestHeader.route.routeBody);                  /* @sic R5s150039: fl_RouteBody_CheckPcscfAddr sic@ */
+  }
+
+  /*
+   * @desc      Check RecordRoute header of a given request sent by the UE:
+   *            The first entry has to correspond to the IP address of the P-CSCF
+   *            => in case of IPv6 the presentation of the address may differ from the address stored at the IMS PTC
+   * @param     p_RequestHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_Response_CheckRecordRoute(MessageHeader p_RequestHeader) runs on IMS_PTC
+  {
+    if (isvalue(p_RequestHeader.recordRoute.routeBody)) {                          /* @sic R5-223453: RecordRoute may not be present in 183 Session Progress for re-INVITE sic@ */
+      fl_RouteBody_CheckPcscfAddr(p_RequestHeader.recordRoute.routeBody);          /* @sic R5s150039: fl_RouteBody_CheckPcscfAddr sic@ */
+    }
+  }
+
+  /*
+   * @desc      Check Contact header
+   * @param     p_MessageHeader
+   * @param     p_EmergencyCallWithoutRegistration (default value: false)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_MessageHeader_CheckContactAddr(MessageHeader p_MessageHeader,
+                                                boolean p_EmergencyCallWithoutRegistration := false) runs on IMS_PTC
+  { /* @sic R5-153760: p_AllowGRUU, p_AllowFQDN removed sic@ */
+    /* @sic R5s160366: p_EmergencyCallWithoutRegistration sic@ */
+    var template integer v_Port := *;
+    var charstring v_Method := p_MessageHeader.cSeq.method;
+    var boolean v_GRUUsInSIP;
+    var SipUrl v_SipUrl;
+
+    if (not match(p_MessageHeader.contact, cr_Contact_Wildcard)) {      // contact may be wildcard for de-registration
+      v_SipUrl := f_MessageHeader_GetContactSipUrl(p_MessageHeader);
+      v_GRUUsInSIP := pc_IMS_GRUUsInSIP and (v_Method != "REGISTER") and not p_EmergencyCallWithoutRegistration;     /* @sic R5s150908, R5s160366: p_EmergencyCallWithoutRegistration sic@ */
+      if (not f_IMS_PTC_CheckSipUrlForIPAddrOrFQDNOrGRUU(v_SipUrl, v_Port, v_GRUUsInSIP)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid SipUrl in 'contact'");
+      }
+    }
+  }
+
+  /*
+   * @desc      Check that Content-Type has "boundary" parameter with the same value as used in the MIME body
+   * @param     p_MessageHeader
+   * @param     p_MIME_Message
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_RequestWithMimeBody_CheckBoundary(MessageHeader p_MessageHeader,
+                                                    MIME_Message p_MIME_Message) runs on IMS_PTC
+  {
+    var template (omit) GenericParam v_BoundaryParam := f_SIP_SemicolonParamList_GetParam(p_MessageHeader.contentType.mParams, "boundary");
+
+    if (not isvalue(v_BoundaryParam)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "MIME ContentType with no boundary parameter");
+    } else if (f_GenericParam_GetValue(v_BoundaryParam) != p_MIME_Message.boundary) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "different boundary in ContentType and message body");
+    }
+  }
+
+  /*
+   * @desc      returns either next Cseq value of ? if there has been no request sent by the UE so far
+   *            the respective CSeq at IMS PTC gets updated with the incremeted value accordingly
+   * @param     p_CseqType          (default value: dialogRemote)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (present) integer
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RequestInDialog_CSeqValueRX(IMS_PTC_CseqType_Type p_CseqType := dialogRemote,
+                                             template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (present) integer
+  {
+    var template (present) integer v_CSeqValue := ?;
+
+    if (isvalue(f_IMS_PTC_ImsInfo_CseqGet(p_CseqType, p_DialogIndex))) {
+      v_CSeqValue := f_IMS_PTC_ImsInfo_CseqIncr(p_CseqType, p_DialogIndex);
+    }
+    return v_CSeqValue;
+  }
+
+  /*
+   * @desc      check whether the CSeq value of the received request matches the incremented value of the previous request (if any)
+   *            the respective CSeq at IMS PTC gets updated with the incremeted value accordingly
+   * @param     p_RequestMessageHeader
+   * @param     p_CseqType          (default value: dialogRemote)
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RequestInDialog_IncrAndCheckCSeqValue(MessageHeader p_RequestMessageHeader,
+                                                       IMS_PTC_CseqType_Type p_CseqType := dialogRemote,
+                                                       template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var template (present) integer v_CSeqValueExpected := f_IMS_RequestInDialog_CSeqValueRX(p_CseqType, p_DialogIndex);
+    var integer v_CSeqValueReceived := p_RequestMessageHeader.cSeq.seqNumber;
+
+    if (not match(v_CSeqValueReceived, v_CSeqValueExpected)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected sequence number");
+    }
+  }
+
+  /*
+   * @desc      Build the From header for requests being received within a dialog (e.g. PRACK or BYE)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (present) From
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RequestInDialog_FromHeaderRX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (present) From
+  { /* @sic R5s140017 MCC160 implementation sic@ */
+    /* @sic R5s140121 change 2.1: "runs on" added sic@ */
+    var charstring v_FromTag := valueof(f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_DialogIndex));     // will cause a runtime error when from-tag has not been set before
+    var template (present) SipUrl v_SipUrl := f_IMS_PTC_ImsInfo_GetSipUriRX(dialogRemoteId, p_DialogIndex);  /* @sic R5s150835: p_DialogIndex sic@ */
+    return cr_FromWithTag(v_SipUrl, v_FromTag);
+  }
+
+  /*
+   * @desc      Build the To header for requests being received within a dialog (e.g. PRACK or BYE)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (present) To
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_RequestInDialog_ToHeaderRX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (present) To
+  { /* @sic R5s140017 MCC160 implementation sic@ */
+    var charstring v_ToTag := valueof(f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex));     /* will cause a runtime error when to-tag has not been set before
+                                                                                                  NOTE: this runtime error is intended as something else is wrong */
+    var template (present) SipUrl v_SipUrl := f_IMS_PTC_ImsInfo_GetSipUriRX(dialogLocalId, p_DialogIndex);   /* @sic R5s150382 change 1: p_DialogIndex sic@ */
+    return cr_ToWithTag(v_SipUrl, v_ToTag);
+  }
+
+  /*
+   * @desc      Build the From header for requests being sent within a dialog (e.g. PRACK or BYE)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (value) From
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_RequestInDialog_FromHeaderTX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (value) From
+  { /* @sic R5s140017 MCC160 implementation sic@ */
+    /* @sic R5s140121 change 4.1: "runs on" added sic@ */
+    var charstring v_FromTag := valueof(f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex));     // will cause a runtime error when to-tag has not been set before
+    var template (value) SipUrl v_SipUrl := f_IMS_PTC_ImsInfo_GetSipUriTX(dialogLocalId, p_DialogIndex);   /* @sic R5s150835: p_DialogIndex sic@ */
+    return cs_From(v_SipUrl, v_FromTag);
+  }
+
+  /*
+   * @desc      Build the To header for requests being sent within a dialog (e.g. PRACK or BYE)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (value) To
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_RequestInDialog_ToHeaderTX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (value) To
+  { /* @sic R5s140017 MCC160 implementation sic@ */
+    var charstring v_ToTag := valueof(f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_DialogIndex));     // will cause a runtime error when to-tag has not been set before
+    var template (value) SipUrl v_SipUrl := f_IMS_PTC_ImsInfo_GetSipUriTX(dialogRemoteId, p_DialogIndex);   /* @sic R5s150835: p_DialogIndex sic@ */
+    return cs_ToWithTag(v_SipUrl, v_ToTag);
+  }
+
+  /*
+   * @desc      check to-tag of received response and store value if necessary (mainly called after receiving 180 or 183 response);
+   *            store coantact URI (-> GRUU)
+   * @param     p_ResponseMessageHeader
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, MCX, NR5GC_IRAT)
+   */
+  function f_IMS_Dialog_CompleteCreationForMTCall(MessageHeader p_ResponseMessageHeader,
+                                                  template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  { /* @sic R5s140017 MCC160 implementation: f_IMS_PTC_ImsInfo_DialogGetToTag, f_IMS_PTC_ImsInfo_DialogSetToTag replaced by f_IMS_PTC_ImsInfo_DialogGetRemoteTag, f_IMS_PTC_ImsInfo_DialogSetRemoteTag sic@ */
+    /* @sic R5s150908: f_IMS_Dialog_SetRemoteTag renamed to f_IMS_Dialog_CompleteCreationForMTCall; handling of contact URI sic@ */
+    var template (omit) charstring v_DialogRemoteTag := f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_DialogIndex);
+    var template (omit) charstring v_ReceivedToTag := f_MessageHeader_GetToTag(p_ResponseMessageHeader);
+    var SipUrl v_ContactUrl;
+    var charstring v_ReceivedToTagValue;
+    
+    if (ispresent(v_ReceivedToTag)) {
+      v_ReceivedToTagValue := valueof(v_ReceivedToTag);
+      if (ispresent(v_DialogRemoteTag)) {  // @sic R5s140173 sic@
+        if (not match(v_ReceivedToTagValue, v_DialogRemoteTag)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid To-tag");
+        }
+      } else {
+        f_IMS_PTC_ImsInfo_DialogSetRemoteTag(v_ReceivedToTagValue);
+      }
+    }
+    if (isvalue(p_ResponseMessageHeader.contact)) {  // 4XX, 5XX responses do not have a Contact header @sic R5s210136 sic@
+      v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_ResponseMessageHeader);
+      f_IMS_PTC_ImsInfo_SetContactUrlUE(v_ContactUrl, dialog, p_DialogIndex);
+    }
+  }
+
+  /*
+   * @desc      return message header with all common headers for a response
+   * @param     p_MessageHeader_Request
+   * @param     p_ToTag             (default value: omit)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_BaseResponse_MessageHeaderTX(template (value) MessageHeader p_MessageHeader_Request,
+                                              template (omit) charstring p_ToTag := omit) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s190882: p_ToTag sic@ */
+   
+    var template (value) MessageHeader v_MessageHeader_Response := cs_MessageHeader_Dummy;
+
+    v_MessageHeader_Response.via             := p_MessageHeader_Request.via;
+    v_MessageHeader_Response.toField         := f_IMS_Response_ToHeaderTX(p_MessageHeader_Request, p_ToTag);  /* @sic R5s130235 additional changes sic@
+                                                                                                                 @sic R5-131897, R5-132063 - generic handling of to-tags sic@
+                                                                                                                 @sic R5s190882: p_ToTag sic@ */
+    v_MessageHeader_Response.fromField       := p_MessageHeader_Request.fromField;
+    v_MessageHeader_Response.callId          := p_MessageHeader_Request.callId;
+    v_MessageHeader_Response.cSeq            := p_MessageHeader_Request.cSeq;
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      return message header with all common headers for a response
+   * @param     p_MessageHeader_Request
+   * @param     p_Is100Response     (default value: false)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_BaseResponse_MessageHeaderRX(template (value) MessageHeader p_MessageHeader_Request,
+                                              boolean p_Is100Response := false) return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader_Response := cr_MessageHeader_Dummy;
+
+    v_MessageHeader_Response.via          := f_Via_ResponseRX(p_MessageHeader_Request.via);                            /* @sic R5s140350 sic@ */
+    v_MessageHeader_Response.fromField    := f_IMS_Response_FromHeaderRX(p_MessageHeader_Request);                     /* @sic R5s130453 sic@ */
+    v_MessageHeader_Response.toField      := f_IMS_Response_ToHeaderRX(p_MessageHeader_Request, p_Is100Response);      /* @sic R5s130453, R5s130685 sic@ */
+    v_MessageHeader_Response.callId       := p_MessageHeader_Request.callId;
+    v_MessageHeader_Response.cSeq         := p_MessageHeader_Request.cSeq;
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      200 OK for other requests than REGISTER or SUBSCRIBE (see TS 34.229, A.3.1)
+   *            NOTE: THIS FUNCTION SHALL NOT BE USED FOR MCX
+   * @param     p_MessageHeader_Request
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_PreconditionRequiredForSDP   (default value: true)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_OtherResponse_200_MessageHeaderRX(template (value) MessageHeader p_MessageHeader_Request,
+                                                   template ContentType p_ContentType := omit,
+                                                   boolean p_PreconditionRequiredForSDP := true) runs on IMS_PTC return template (present) MessageHeader
+  { /* NOTE: Message is sent by the UE => conditions A2, A4 are applicable;
+     *       For A4 (GIBA) pAccessNetworkInfo is optional */
+    /* @sic R5-130683 sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-160790, R5-160903, R5-160793: p_PreconditionIndication sic@ */
+    /* @sic R5-162930: p_PreconditionIndication := PreconditionRequired => per default there is a Require header if the message contains an SDP sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s210615: p_PreconditionsRequiredForSDP (boolean) instead of p_PreconditionIndication (IMS_PreconditionIndication_Type) sic@ */
+    var template (present) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderRX(p_MessageHeader_Request);     /* @sic R5s200000: f_IMS_BaseResponse_MessageHeaderRX sic@ */
+    var template (present) PAccessNetworkInfo v_PAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());  /* acc. to A.3.1 condition A8: access network technology and, if applicable, the cell ID */
+    var boolean v_A2A4 := false;                                        /* true => response sent by UE for INVITE/UPDATE */
+    var boolean v_A8 := true;                                           /* true => any response but not CANCEL */
+    var boolean v_A20 := false;                                         /* true => response sent by UE for INVITE */
+    var boolean v_A18 := pc_IMS_Video_FeatureTag;                       /* true => UE supports video feature tag */
+    var boolean v_A23 := false;                                         /* true => response sent for re-INVITE within an established dialog */
+    var charstring v_Method := valueof(p_MessageHeader_Request.cSeq.method);
+    var integer v_Port_us := f_IMS_PTC_GetPort_us();  /* @sic R5s130985 Change 2 sic@ */
+    var template (present) SemicolonParam_List v_MandatoryContactParams := {};
+    var template (present) SipUrl v_ContactURI;
+
+    select (v_Method) {
+      case ("UPDATE") {
+        v_A2A4 := true;
+      }
+      case ("INVITE") {
+        v_A2A4 := true;
+        v_A20 := true;
+        v_A23 := f_IMS_SipRequest_MessageHeaderIsReINVITE(p_MessageHeader_Request);  // @sic R5s220766/R5s220772 sic@
+      }
+      case ("CANCEL", "MESSAGE") {                                              /* @sic R5-246632, R5-244439 Proposal 2.2.16-3: v_A8 set to false for SIP MESSAGE sic@ */
+        v_A8 := false;
+      }
+    }
+    
+    if (p_PreconditionRequiredForSDP and f_ContentType_IsSDP(p_ContentType)) {  /* @sic R5-160794 sic@
+                                                                                   NOTE 1: in general a SIP response carries an SDP answer (i.e. no offer) and therefore uses a Require but no Supported header
+                                                                                   NOTE 2: when the SDP is optional, ContentType is optional too (-> "ifpresent") and  f_ContentType_IsSDP returns false */
+      v_MessageHeader_Response.require := cr_Require(tsc_OptionTagList_precondition);                /* @sic R5-160790, R5-160903, R5-160793 sic@ */
+    }
+    
+    if (v_A8) {                                                                 /* @sic R5-130683: pAccessNetworkInfo is optional for GIBA; R5s140092 change 12: CANCEL  sic@
+                                                                                   @sic R5-142223: new condition A8: Any response sent by the UE, except for CANCEL requests sic@
+                                                                                   @sic R5s240677: TTCN aligned to 34.229-1 A.3.1 (P-Access-Network-Info to be included for A8 independent from the security scheme sic@ */
+      v_MessageHeader_Response.pAccessNetworkInfo := v_PAccessNetworkInfo;
+    }
+
+    if (v_A2A4) {                                                               /* 200 OK sent by the UE for INVITE/UPDATE
+                                                                                   => 200 OK shall have Contact header field */
+      if (f_IMS_PTC_AudioFeatureTagIsRequired() ) {                                                                // @sic R5-173021 sic@ @sic R5-177127 sic@
+        v_MandatoryContactParams := f_SemicolonParam_List_Add_RX(v_MandatoryContactParams, cr_FeatureParam_Audio); /* @sic R5-165943, R5-170564 sic@ */
+      }
+      if (v_A18 and v_A20) {                                                                                       /* @sic R5-191117 sic@ */
+        v_MandatoryContactParams := f_SemicolonParam_List_Add_RX(v_MandatoryContactParams, cr_FeatureParam_Video);
+      }
+
+      if (f_IMS_PTC_ImsInfo_DialogIsEstablished()) {                            /* In general a 200 OK for INVITE/UPDATE is sent by the UE within a dialog as the dialog creation gets completed by an earlier 18X response;
+                                                                                   nevertheless there is a corner case in 34.339-1 16.X test cases which allow the 200 OK to be the the first non-100-Trying reponse */
+        v_ContactURI := f_IMS_PTC_ImsInfo_GetContactUrlUE_RX(dialog);           /* @sic R5-223454: Contact URI as provided by the UE at dialog creation sic@
+                                                                                   @sic R5s220959, R5-225259: f_IMS_PTC_ImsInfo_GetContactUrlUE_RX instead of f_IMS_PTC_ImsInfo_GetContactUrlUE sic@ */
+      } else {                                                                  /* The UE has not sent any non-100-Trying reponse yet, i.e. the 200 OK eventually creates the dialog */
+        v_ContactURI := f_Contact_SipUri_HostPortRX(?, v_Port_us);              /* host address is checked in f_IMS_MTCallSetup_Receive200OKforINVITE after receiving (f_IMS_MessageHeader_CheckContactAddr)
+                                                                                   @sic R5s150721, R5-153760: cr_SipUri_HostPort replaced by f_Contact_SipUri_HostPortRX sic@ */
+      }
+
+      v_MessageHeader_Response.contact := cr_Contact(v_ContactURI,
+                                                     v_MandatoryContactParams); /* @sic R5-165943 sic@ */
+    }
+
+    if (v_A20) {                        /* response for INVITE
+                                           @sic R5-135004 Change 3 sic@ */
+      if (not v_A23) {                  /* @sic R5-223454: condition A23 sic@ */
+        v_MessageHeader_Response.recordRoute := p_MessageHeader_Request.recordRoute;     // @sic R5-135004: same as in the INVITE sent to the UE sic@
+      }                                 /* @sic R5-223454 - else: RecordRoute remains * sic@ */
+    }
+
+    v_MessageHeader_Response.contentType  := p_ContentType;
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      202 Accepted acc. to 34.229 A.3.3
+   * @param     p_MessageHeader_Request
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, LTE_A_R12, MCX, NR5GC)
+   */
+  function f_IMS_Accepted_202_MessageHeaderTX(MessageHeader p_MessageHeader_Request) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5-174544: SessionId removed sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_MessageHeader_Request);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@ */
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      common checks for 180 and 183 response
+   * @param     p_MessageHeader
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_MessageHeader_180_183_Response_CommonChecks(MessageHeader p_MessageHeader) runs on IMS_PTC
+  {
+    f_IMS_MessageHeader_Response_CheckRecordRoute(p_MessageHeader);   /* @sic R5s150039 Change 4, 5, 6 sic@ */
+    f_IMS_MessageHeader_CheckContactAddr(p_MessageHeader);
+  }
+
+  /*
+   * @desc      to receive response from the UE, check Via header an apply common checks for 180 and 183 response
+   * @param     p_RequestHeader
+   * @param     p_Protocol
+   * @param     p_Response
+   * @param     p_IMS_DATA_RSP_ByRef (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_ReceiveResponse(template (value) MessageHeader p_RequestHeader,
+                                template (present) InternetProtocol_Type p_Protocol,
+                                template (present) IMS_Response_Type p_Response,
+                                out IMS_DATA_RSP p_IMS_DATA_RSP_ByRef) runs on IMS_PTC
+  {
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var MessageHeader v_MessageHeader;
+    var template (omit) integer v_PrevRSeq;
+
+    [] IMS_Client.receive(car_IMS_DATA_RSP(cr_IMS_RoutingInfo(p_Protocol), p_Response)) -> value v_IMS_DATA_RSP
+      {
+        if ((v_IMS_DATA_RSP.RoutingInfo.Protocol == tcp) and ispresent(v_IMS_DATA_RSP.Response.messageBody)) {     /* @sic R5-169122 sic@ */
+          if (not match(v_IMS_DATA_RSP.Response.msgHeader, cr_MessageHeader_Dummy(cr_ContentLength()))) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Response sent on tcp shall have a ContentLength when having a MessageBody");
+          }
+        }
+        v_MessageHeader := v_IMS_DATA_RSP.Response.msgHeader;
+        f_IMS_MessageHeader_Response_CheckVia(valueof(p_RequestHeader), v_MessageHeader);
+    
+        select (v_IMS_DATA_RSP.Response.statusLine.statusCode) {                                /* @sic R5-181190: store and check RSeq value for reliable responses sic@ */
+          case (180, 183) {                                                                     /* @sic R5s190882: rSeq may be optional for MCX => 183 and 180 are handle in the same way sic@ */
+            fl_IMS_MessageHeader_180_183_Response_CommonChecks(v_MessageHeader);                /* @sic R5s180202 sic@ */
+            if (f_MessageHeader_CheckRequire(v_MessageHeader, c_tag100rel)) {
+              if (not ispresent(v_MessageHeader.rSeq.responseNum)) {
+                f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "reliable 180 response shall have RSeq");                /* 34.229-1 A.2.6 condition A3, A12 */
+              }
+              v_PrevRSeq := f_IMS_PTC_ImsInfo_DialogGetRemoteRSeq();
+              if (isvalue(v_PrevRSeq) and (v_MessageHeader.rSeq.responseNum != (valueof(v_PrevRSeq) + 1))) {
+                f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "RSeq value needs to be previous RSeq value + 1");       /* 34.229-1 A.2.6 condition A3 */
+              }
+              f_IMS_PTC_ImsInfo_DialogSetRemoteRSeq(v_MessageHeader.rSeq.responseNum);
+            }
+          }
+        }
+        if (ischosen(v_IMS_DATA_RSP.Response.messageBody.mimeMessageBody)) {
+          fl_IMS_RequestWithMimeBody_CheckBoundary(v_MessageHeader, v_IMS_DATA_RSP.Response.messageBody.mimeMessageBody);
+        }
+        p_IMS_DATA_RSP_ByRef := v_IMS_DATA_RSP;
+      }
+  }
+
+  /*
+   * @desc      wrapper function for a_IMS_ReceiveResponse
+   * @param     p_RequestHeader
+   * @param     p_Protocol
+   * @param     p_Response
+   * @return    IMS_DATA_RSP
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_ReceiveResponse(template (value) MessageHeader p_RequestHeader,
+                                 template (present) InternetProtocol_Type p_Protocol,
+                                 template (present) IMS_Response_Type p_Response) runs on IMS_PTC return IMS_DATA_RSP
+  {
+    var IMS_DATA_RSP v_IMS_DATA_RSP_ByRef;
+    a_IMS_ReceiveResponse(p_RequestHeader, p_Protocol, p_Response, v_IMS_DATA_RSP_ByRef);
+    return v_IMS_DATA_RSP_ByRef;
+  }
+
+  /*
+   * @desc      wrapper altstep to receive 200 OK
+   * @param     p_RequestHeader
+   * @param     p_Protocol
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  altstep a_IMS_ReceiveResponse200OK(template (value) MessageHeader p_RequestHeader,
+                                     template (present) InternetProtocol_Type p_Protocol) runs on IMS_PTC
+  { // NOTE: in general the responses e.g. for different NOTIFY messages differ in the CSeq value only
+    var template (present) MessageHeader v_MessageHeader_Response := f_IMS_OtherResponse_200_MessageHeaderRX(p_RequestHeader);
+    var IMS_DATA_RSP v_IMS_DATA_RSP_ByRef;  // Dummy
+    
+    [] a_IMS_ReceiveResponse(p_RequestHeader, p_Protocol, cr_Response(c_statusLine200, v_MessageHeader_Response), v_IMS_DATA_RSP_ByRef);
+  }
+
+  /*
+   * @desc      to receive request from the UE and check content length
+   * @param     p_IMS_DATA_REQ
+   * @param     p_IMS_DATA_REQ_ByRef (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_ReceiveRequest(template (present) IMS_DATA_REQ p_IMS_DATA_REQ,
+                               out IMS_DATA_REQ p_IMS_DATA_REQ_ByRef) runs on IMS_PTC
+  { /* @sic R5-169122: common altstep to cope with check of ContentLength sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var IMS_Request_Type v_Request;
+    var MessageHeader v_MessageHeader;
+    var template (omit) MessageBody v_MessageBody;
+    
+    [] IMS_Server.receive(p_IMS_DATA_REQ) -> value v_IMS_DATA_REQ
+      {
+        v_Request := v_IMS_DATA_REQ.Request;
+        if (ischosen(v_Request.Register)) {
+          v_MessageHeader := v_Request.Register.msgHeader;
+          v_MessageBody := v_Request.Register.messageBody;
+        } else if (ischosen(v_Request.Invite)) {
+          v_MessageHeader := v_Request.Invite.msgHeader;
+          v_MessageBody := v_Request.Invite.messageBody;
+        } else if (ischosen(v_Request.Options)) {
+          v_MessageHeader := v_Request.Options.msgHeader;
+          v_MessageBody := v_Request.Options.messageBody;
+        } else if (ischosen(v_Request.Bye)) {
+          v_MessageHeader := v_Request.Bye.msgHeader;
+          v_MessageBody := v_Request.Bye.messageBody;
+        } else if (ischosen(v_Request.Cancel)) {
+          v_MessageHeader := v_Request.Cancel.msgHeader;
+          v_MessageBody := v_Request.Cancel.messageBody;
+        } else if (ischosen(v_Request.Ack)) {
+          v_MessageHeader := v_Request.Ack.msgHeader;
+          v_MessageBody := v_Request.Ack.messageBody;
+        } else if (ischosen(v_Request.Prack)) {
+          v_MessageHeader := v_Request.Prack.msgHeader;
+          v_MessageBody := v_Request.Prack.messageBody;
+        } else if (ischosen(v_Request.Notify)) {
+          v_MessageHeader := v_Request.Notify.msgHeader;
+          v_MessageBody := v_Request.Notify.messageBody;
+        } else if (ischosen(v_Request.Subscribe)) {
+          v_MessageHeader := v_Request.Subscribe.msgHeader;
+          v_MessageBody := v_Request.Subscribe.messageBody;
+        } else if (ischosen(v_Request.Publish)) {
+          v_MessageHeader := v_Request.Publish.msgHeader;
+          v_MessageBody := v_Request.Publish.messageBody;
+        } else if (ischosen(v_Request.Update)) {
+          v_MessageHeader := v_Request.Update.msgHeader;
+          v_MessageBody := v_Request.Update.messageBody;
+        } else if (ischosen(v_Request.Refer)) {
+          v_MessageHeader := v_Request.Refer.msgHeader;
+          v_MessageBody := v_Request.Refer.messageBody;
+        } else if (ischosen(v_Request.Message)) {
+          v_MessageHeader := v_Request.Message.msgHeader;
+          v_MessageBody := v_Request.Message.messageBody;
+        } else if (ischosen(v_Request.Info)) {
+          v_MessageHeader := v_Request.Info.msgHeader;
+          v_MessageBody := v_Request.Info.messageBody;
+        } else {
+          FatalError(__FILE__, __LINE__, "Unknown request");
+        }
+
+        if ((v_IMS_DATA_REQ.RoutingInfo.Protocol == tcp) and ispresent(v_MessageBody)) {     /* @sic R5-169122 sic@ */
+          if (not match(v_MessageHeader, cr_MessageHeader_Dummy(cr_ContentLength()))) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Request sent on tcp shall have a ContentLength when having a MessageBody");
+          }
+        }
+        if (ischosen(v_MessageBody.mimeMessageBody)) {                                       /* @sic R5s210009 - Additional MCC160 changes sic@ */
+          fl_IMS_RequestWithMimeBody_CheckBoundary(v_MessageHeader, valueof(v_MessageBody.mimeMessageBody));
+        }
+        p_IMS_DATA_REQ_ByRef := v_IMS_DATA_REQ;
+      }
+  }
+
+  /*
+   * @desc      wrapper function for a_IMS_ReceiveRequest
+   * @param     p_IMS_DATA_REQ
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_ReceiveRequest(template (present) IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC return IMS_DATA_REQ
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    a_IMS_ReceiveRequest(p_IMS_DATA_REQ, v_IMS_DATA_REQ_ByRef);
+    return v_IMS_DATA_REQ_ByRef;
+  }
+
+  /*
+   * @desc      get particular message out of MIME body
+   * @param     p_MIME_Message
+   * @param     p_ContentType
+   * @param     p_IsRequired        (default value: true)
+   * @return    template (omit) MIME_Part
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MIME_MessageBody_FindBody(MIME_Message p_MIME_Message,
+                                           charstring p_ContentType,
+                                           boolean p_IsRequired := true) runs on IMS_PTC return template (omit) MIME_Part
+  {
+    var template (omit) MIME_Part v_MIME_Part := f_SIP_MIME_MessageBody_FindBody(p_MIME_Message, p_ContentType);
+    
+    if (p_IsRequired and not isvalue(v_MIME_Part)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "expected content not found in MIME body");
+    }
+    return v_MIME_Part;
+  }
+
+  /*
+   * @desc      get particular message out of MIME body
+   * @param     p_MIME_Message
+   * @param     p_ContentType
+   * @return    MIME_Part
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MIME_MessageBody_GetBody(MIME_Message p_MIME_Message,
+                                          charstring p_ContentType) runs on IMS_PTC return MIME_Part
+  {
+    var template (omit) MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_FindBody(p_MIME_Message, p_ContentType);
+    return valueof(v_MIME_Part);
+  }
+
+}

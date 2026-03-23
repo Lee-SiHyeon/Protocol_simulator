@@ -1,0 +1,134 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2025-03-13 10:31:52 +0100 (Thu, 13 Mar 2025) $
+// $Rev: 40921 $
+/******************************************************************************/
+
+module EUTRA_CommonProcedures {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_RRCSteps all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      to be used in the test case preamble
+   *            N.B. The power level used in this function is tsc_ServingCellRS_EPRE, if you need this cell to be
+   *            set to a different level for your test, please adjust the level after this function.
+   * @param     p_CellId
+   * @param     p_State
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_NoOfEmergencyNumbers (default value: 0)
+   * @param     p_NtwkFeatSupport   (default value: f_GetDefaultValueNetworkFeatureSupport())
+   * @param     p_ReleaseConnection (default value: rrcConnectionRelease)
+   * @param     p_EquivalentPlmnList (default value: omit)
+   * @param     p_UE_NetworkCap     (default value: DEFAULT)
+   * @param     p_AbsoluteCellPowerLevel (default value: omit)
+   * @status    APPROVED (IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, POS)
+   */
+  function f_EUTRA_Preamble(EUTRA_CellId_Type p_CellId,
+                            IDLEUPDATED_STATE_Type p_State,
+                            EUTRA_ATTACH_Type p_ForcedAttach := NORMAL,
+                            integer p_NoOfEmergencyNumbers := 0,   // Only set this if the list of local emergency numbers should be included in Attach Accept (only for Emergency Call Tests)
+                            template (omit) EPS_NetworkFeatureSupport p_NtwkFeatSupport := f_GetDefaultValueNetworkFeatureSupport(), // @sic R5-130620, R5-155988, R5s180648 sic@
+                            RRCConnectionReleaseRequired_Type p_ReleaseConnection := rrcConnectionRelease, // @sic R5-155534 sic@
+                            template (omit) PLMN_List p_EquivalentPlmnList := omit,
+                            UE_NetworkCap_ToBeTested p_UE_NetworkCap := DEFAULT, //@sic R5s170551 sic@
+                            template (omit) AbsoluteCellPower_Type p_AbsoluteCellPowerLevel := omit) runs on EUTRA_PTC
+  { /* @sic R5s130347: local GuardTimer; R5-115673; R5s170307: p_PDN_TypeToBeUsed removed sic@ */
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var AbsoluteCellPower_Type v_AbsoluteCellPowerLevel := tsc_ServingCellRS_EPRE; //@sic R5s170551 sic@
+    timer t_GuardTimer := tsc_GuardTimePreamble;
+    t_GuardTimer.start;
+    
+    if (ispresent(p_AbsoluteCellPowerLevel)) {  //@sic R5s170551 sic@
+      v_AbsoluteCellPowerLevel := valueof (p_AbsoluteCellPowerLevel);
+    }
+    // First switch cell back on
+    f_EUTRA_SetCellPower(p_CellId, v_AbsoluteCellPowerLevel);
+    
+    // Switch on UE
+    f_EUTRA_SwitchOnUEandStartIP(p_CellId); // @sic R5s120065 sic@
+    
+    // Store the value of NetworkFeatureSupport to be used throughout the test
+    f_EUTRA_MobileInfo_SetNetworkFeatureSupport (p_NtwkFeatSupport); // @sic R5s180648 sic@
+    // Now continue with the procedure
+    v_NAS_Ind := f_EUTRA_InitialRegistration_Step1_4 (p_CellId, PREAMBLE, p_ForcedAttach, p_UE_NetworkCap); // @sic R5s100780, R5s110176, R5-160777 sic@
+    select (p_ReleaseConnection){ // @sic R5-160947 sic@
+      case (rrcConnectionRelease) {
+        f_EUTRA_InitialRegistration_Step5_18b1 (p_CellId, p_State, p_ForcedAttach, v_NAS_Ind, p_EquivalentPlmnList, p_NoOfEmergencyNumbers); // @sic R5s150830 sic@
+      }
+      case (noRrcConnectionRelease) {
+        f_EUTRA_InitialRegistration_Step5_16c1 (p_CellId, p_State, p_ForcedAttach, v_NAS_Ind, p_EquivalentPlmnList, p_NoOfEmergencyNumbers); // @sic R5s150830 sic@
+      }
+    }
+
+    t_GuardTimer.stop;
+  }
+
+  /*
+   * @desc      This function should be used at the end of every test case to ensure the UE
+   *            detaches and release the RRC connection as it is turned off and only then will it
+   *            take down the cell the UE is currently camped on
+   * @param     p_CellId
+   * @param     p_E_State ... values: E1_IDLE, E2_CONNECTED, E3_TESTMODE, E4_DEREGISTERED, E5_MANUAL is handled in it's own function: f_EUTRA_Postamble_E5Manual
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_DRB               (default value: tsc_DRB1)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, POS)
+   */
+  function f_EUTRA_Postamble(EUTRA_CellId_Type p_CellId,
+                             EUTRA_POSTAMBLE_STATE_Type p_E_State,
+                             EUTRA_ATTACH_Type p_ForcedAttach := NORMAL,
+                             template (omit) IP_DrbId_Type p_DRB := tsc_DRB1) runs on EUTRA_PTC // @sic R5s160739 sic@
+  { /* @sic This function has been completely changed in R5-103847 sic@ */
+    // @sic R5s11046: new parameter p_SelectedPlmnId sic@
+    //@sic R5S160376 deleted parameter p_SelectedPlmnId sic@
+
+    if (pc_SwitchOnOff) { // The UE can actually be switched off
+      select (p_E_State) {
+        case (E1_IDLE) {
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_IDLE, p_ForcedAttach, omit, -, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E2_CONNECTED, E3_TESTMODE) {
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_CONNECTED, p_ForcedAttach, omit,-, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E2_T3440) { // @sic R5s110007 sic@
+          //Expect the UE to release RRC connection
+          f_EUTRA_RRC_ConnectionRelease(p_CellId);
+          f_Delay (5.0); // @sic R5-110803 sic@
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_IDLE, p_ForcedAttach, omit, -, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E4_DEREGISTERED) {
+          f_UT_SwitchOffUE (UT, false);
+        }
+      }
+    }
+    else { // The power must be removed from the UE
+      f_UT_PowerOffUE (UT);
+    }
+    //And now remove the cell(s)
+    f_EUTRA_ReleaseAllCells();
+  }
+
+}

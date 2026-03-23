@@ -1,0 +1,254 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2021-11-30 12:19:42 +0100 (ma., 30 nov. 2021) $
+// $Rev: 32030 $
+/******************************************************************************/
+
+module RSRVCC_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from CommonIratDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EUTRA_AuxiliaryFunctions all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_CommonSRVCC all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_IRATFunctions all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from IP_PTC_Templates all;
+  import from NAS_CommonTemplates all;
+  import from NasEmu_Common4G5G all;
+  import from NasEmu_CtrlFunctions all;
+
+  /*
+   * @desc      Configure routing table to discard RTP/RTCP packets on user
+   * @param     p_CellId
+   * @param     p_PdnIndex
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  
+  function f_EUTRA_ConfigureDiscardRtpRtcpData(EUTRA_CellId_Type p_CellId,
+                                               PDN_Index_Type p_PdnIndex) runs on EUTRA_PTC
+  {
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+    var template (value) IP_AddrInfo_Type v_IPv4Addr := cs_IPv4Addr(v_PDN_AddressInfo.Remote_IPAddressIPv4);
+    var template (value) IP_AddrInfo_Type v_IPv6Addr := cs_IPv6Addr(v_PDN_AddressInfo.Remote_IPAddressIPv6);
+    var PortNumber_Type v_MediaPortRTP := tsc_IMS_MediaPort_M1;
+    var PortNumber_Type v_MediaPortRTCP := tsc_IMS_MediaPort_M1 + 1;
+    var template (value) IP_DrbInfo_Type v_DrbInfo;
+    var IP_DrbId_Type v_DrbId;
+
+    select (p_PdnIndex) {
+      case (PDN_1) {
+        v_DrbId := tsc_DRB1;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+    v_DrbInfo := cs_DrbInfo_EUTRA(p_CellId, v_DrbId); /* @sic R5s160131 sic@ */
+    f_IP_ConfigureDiscardDataLoopbackData(IP, v_MediaPortRTP,  v_IPv4Addr, v_DrbInfo, discard);
+    f_IP_ConfigureDiscardDataLoopbackData(IP, v_MediaPortRTCP, v_IPv4Addr, v_DrbInfo, discard);
+    f_IP_ConfigureDiscardDataLoopbackData(IP, v_MediaPortRTP,  v_IPv6Addr, v_DrbInfo, discard);
+    f_IP_ConfigureDiscardDataLoopbackData(IP, v_MediaPortRTCP, v_IPv6Addr, v_DrbInfo, discard);
+  }
+
+  /*
+   * @desc      Common Test Body
+   * @param     p_Port
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function fl_EUTRA_RSRVCC_TestBody(IRAT_CO_ORD_PORT p_Port) runs on EUTRA_PTC
+  {
+    var EUTRA_SecurityParams_Type v_Auth_Params_Native;
+    var NasCountInfo_Type v_NasCountInfo;
+    var NasCount_Type v_NasCountUL;
+    var template (omit) DRX_Config v_DRX_Config;
+    var template (omit) MAC_MainConfig_Type v_MAC_MainConfig := omit;
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList := {cs_508_DRB_ToAddMod_DEFAULT_UM(f_EUTRA_NB_EpsBearerAssociatedDRB(tsc_EpsDedicatedBearerId))};
+    var template (value) NAS_DL_Message_Type v_ActDedicatedEPSBearerCxtReq := f_EUTRA_508_ActDedicatedEPSBearerCxtReq_Speech(tsc_EpsDefaultBearerId, tsc_EpsDedicatedBearerId, PDN_1, false);
+    var template (value) NAS_MSG_RequestList_Type v_NAS_MsgList := {cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_ActDedicatedEPSBearerCxtReq)};
+    
+    // @siclog "Step 1-5" siclog@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // Inform IMS to start Annex C.42 to exchange ATGW (Access Transfer Gateway) information
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]); // Wait for IMS to complete Annex C.42
+    
+    // @siclog "Step 6" siclog@
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1);
+    
+    // @siclog "Step 7" siclog@
+    f_EUTRA_SetCellPower(eutra_Cell1, tsc_NonSuitableOffCellRS_EPRE); // @sic R5-151774 sic@
+    f_IRAT_SendCoOrd(p_Port, cms_IRAT_Trigger);
+    
+    // Backup Auth params and NAS count.
+    v_Auth_Params_Native := f_EUTRA_Security_Get();
+    v_NasCountInfo := f_EUTRA_NB_SS_NAS_CountGet(NASCTRL);
+    
+    // Update security params when authentication done on other side
+    f_EUTRA_InterRAT_InitialiseAuthParams (p_Port, true); // @sic R5s150704 sic@
+
+    //Make HO specific steps for interRAT HO
+    // Configure C-RNTI based contention resolution in target cell
+    f_EUTRA_SS_ConfigRachProcedure(eutra_Cell1, tsc_C_RNTI_Def2, cs_RachProcedureConfig_CRNTI_Dedicated(f_EUTRA_CellInfo_GetRAR_TA(eutra_Cell1),
+                                                                                                        f_EUTRA_CellInfo_GetDL_ChBandwidth(eutra_Cell1))); // @sic R5-123712 sic@
+    
+    f_EUTRA_CellInfo_SetC_RNTI ( eutra_Cell1, tsc_C_RNTI_Def2 );
+    
+    // @siclog "Step 11" siclog@
+    f_EUTRA_SetCellPower(eutra_Cell1, -60); // @sic R5s150856: ensure cell is switched on before SS has to access its parameters sic@
+
+    // activate RRC security at SS target cell for SRB 1, 2 and 1 AM DRB
+    f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT(eutra_Cell1, -, -, true);      // @sic R5s150338: new function f_EUTRA_SS_AS_ActivateSecurity_HO_IRAT, R5s150856 sic@
+    
+    //Configure UL grant configuration ("OnSR", periodic TA is NOT started) in target cell (cell 1)
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell1, cas_ULGrantAllocation_Def_REQ(eutra_Cell1, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_None));
+    
+    f_IRAT_SendCoOrd(p_Port, cms_IRAT_Trigger); // @sic R5s150704 sic@
+
+    // @siclog "Step 13" siclog@
+    SRB.receive( car_SRB1_RrcPdu_IND( eutra_Cell1, cr_508_RRCConnectionReconfigurationComplete( tsc_RRC_TI_Def ) ) );
+    /* SS automatically checks that UE transmit an RRCConnectionReconfigurationComplete using the indicated
+       security key and the indicated security algortihms */
+    f_EUTRA_PreliminaryPass( __FILE__, __LINE__, "Step 13" );
+    
+    //Start periodic sending of TA command in target cell
+    f_EUTRA_SS_CommonCellConfig(eutra_Cell1, cas_PUCCH_Synch_Config_REQ(eutra_Cell1, cs_TimingInfo_Now, cs_UplinkTimeAlignment_Synch_Auto_Def, false)); // @sic R5s150704 sic@
+
+    // @siclog "Step 14" siclog@
+    v_NasCountUL := f_EUTRA_508Check_TrackingAreaUpdating_AfterHO_Steps1to6 (eutra_Cell1,v_Auth_Params_Native, v_NasCountInfo); // @sic R5s150807 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // Trigger IMS-PTC to receive INVITE  @sic R5s150807 sic@
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]); // @sic R5s150807 sic@
+    f_EUTRA_508Check_TrackingAreaUpdating_AfterHO_Steps7to8 (eutra_Cell1, v_NasCountUL); // @sic R5s150807 sic@
+    
+    // @siclog "Step 15" siclog@
+    v_DRX_Config := f_GetUeDrxConfig(DRX_S);
+    v_MAC_MainConfig := cs_MAC_MainConfig_Explicit(cs_MAC_MainConfig_Common(-, v_DRX_Config));     /* @sic R5s140618 change 2 sic@ */
+    if (isvalue(v_DRX_Config)) {
+      f_EUTRA_SS_DrxCtrlConfig(eutra_Cell1, cs_DrxCtrl_Config(valueof(v_DRX_Config)));     /* configure DRX at the SS; @sic R5s140618 change 2 sic@ */
+    }
+    SRB.send(cas_SRB1_RrcNasPduList_REQ(eutra_Cell1,
+                                        cs_TimingInfo_Now,
+                                        cs_RRCConnectionReconfiguration_DRB_Reconfig(tsc_RRC_TI_Def,
+                                                                                     v_DRB_ToAddModList,
+                                                                                     v_MAC_MainConfig),
+                                        v_NAS_MsgList));
+    
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // Trigger IMS-PTC to continue IMS signalling
+    // @siclog "Step 16" siclog@
+    SRB.receive(car_SRB1_RrcPdu_IND(eutra_Cell1,
+                                    cr_508_RRCConnectionReconfigurationComplete(tsc_RRC_TI_Def)));
+    
+    //@siclog "Step 17" siclog@
+    SRB.receive(car_SRB2_NasPdu_IND(eutra_Cell1,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_ActDedicatedEPSBearerCxtAccept(tsc_EpsDedicatedBearerId))));
+    //Wait Trigger from IMS PTC
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.32
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_32_EUTRA() runs on EUTRA_PTC
+  { /* Inter-system mobility / UTRA CS voice to E-UTRA voice / rSRVCC */
+    
+    f_EUTRA_NAS_Init_SRVCC(LTE_AllCellsOnSamePLMN, c4);   /* @sic R5s170597 - Cleanup of UL grant Configuration: f_EUTRA_NAS_Init replaced by f_EUTRA_NAS_Init_SRVCC sic@ */
+    // Create cell and send out system information
+    f_EUTRA_CellInfo_InitMaxReferencePower (eutra_Cell1, -60);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);                  /* @sic R5s150338: f_EUTRA_CellConfig_DefPlusUM_SRVCC replaced by f_EUTRA_CellConfig_SRVCC sic@
+                                                             @sic R5s170597 - Cleanup of UL grant Configuration: f_EUTRA_CellConfig_SRVCC replaced by f_EUTRA_CellConfig_Def sic@ */
+    
+    f_EUTRA_Preamble (eutra_Cell1, STATE2_IDLEUPDATE);
+    
+    //Send relevant EUTRA cell info to UTRAN PTC
+    f_IRAT_Send_EUTRA_SysInfoToOtherPort(UTRAN,
+                                         f_EUTRA_CellInfo_GetEARFCN_DL_r9(eutra_Cell1), // @sic R5-165892 sic@
+                                         f_ConvertDL_BandwidthToInteger (f_EUTRA_CellInfo_GetDL_ChBandwidth (eutra_Cell1)),
+                                         cs_EUTRA_HOInfo(f_ConvertUL_BandwidthToInteger (f_EUTRA_CellInfo_GetUL_ChBandwidth (eutra_Cell1)),
+                                                         f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell1),
+                                                         f_EUTRA_CellInfo_GetRootSequenceIndex (eutra_Cell1)),
+                                         -, -, -, -, -, -, f_EUTRA_CellInfo_GetUL_CarrierNotDefaultTxRx(eutra_Cell1)); // @sic R5-217955 sic@
+    
+    f_EUTRA_RbEst_Def(eutra_Cell1); // @sic R5s150704 sic@
+    f_EUTRA_ConfigureDiscardRtpRtcpData(eutra_Cell1, PDN_1);
+    f_EUTRA_SetCellPower(eutra_Cell1, -60);
+    f_EUTRA_SendAuthParameters (eutra_Cell1, UTRAN); // @sic R5s150704 sic@
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    fl_EUTRA_RSRVCC_TestBody(UTRAN);
+    
+    // Postamble
+    f_EUTRA_TestBody_Set(false);
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    f_EUTRA_Postamble(eutra_Cell1, E2_CONNECTED);
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.34
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_34_EUTRA() runs on EUTRA_PTC
+  { /* Inter-system mobility / UTRA CS voice to E-UTRA voice / alerting / rSRVCC */
+    
+    f_EUTRA_NAS_Init_SRVCC(LTE_AllCellsOnSamePLMN, c4);   /* @sic R5s170597 - Cleanup of UL grant Configuration: f_EUTRA_NAS_Init replaced by f_EUTRA_NAS_Init_SRVCC sic@ */
+    // Create cell and send out system information
+    f_EUTRA_CellInfo_InitMaxReferencePower (eutra_Cell1, -60);
+    f_EUTRA_CellConfig_Def(eutra_Cell1);                  /* @sic R5s150338: f_EUTRA_CellConfig_DefPlusUM_SRVCC replaced by f_EUTRA_CellConfig_SRVCC sic@
+                                                             @sic R5s170597 - Cleanup of UL grant Configuration: f_EUTRA_CellConfig_SRVCC replaced by f_EUTRA_CellConfig_Def sic@ */
+    
+    f_EUTRA_Preamble (eutra_Cell1, STATE2_IDLEUPDATE);
+    
+    //Send relevant EUTRA cell info to UTRAN PTC
+    f_IRAT_Send_EUTRA_SysInfoToOtherPort(UTRAN,
+                                         f_EUTRA_CellInfo_GetEARFCN_DL_r9(eutra_Cell1), // @sic R5-165892 sic@
+                                         f_ConvertDL_BandwidthToInteger (f_EUTRA_CellInfo_GetDL_ChBandwidth (eutra_Cell1)),
+                                         cs_EUTRA_HOInfo (f_ConvertUL_BandwidthToInteger (f_EUTRA_CellInfo_GetUL_ChBandwidth (eutra_Cell1)),
+                                                          f_EUTRA_CellInfo_GetPhyCellId(eutra_Cell1),
+                                                          f_EUTRA_CellInfo_GetRootSequenceIndex (eutra_Cell1)),
+                                         -, -, -, -, -, -, f_EUTRA_CellInfo_GetUL_CarrierNotDefaultTxRx(eutra_Cell1)); // @sic R5-217955 sic@
+    
+    f_EUTRA_RbEst_Def (eutra_Cell1); // @sic R5s150704 sic@
+    f_EUTRA_ConfigureDiscardRtpRtcpData(eutra_Cell1, PDN_1);
+    f_EUTRA_SetCellPower(eutra_Cell1, -60);
+    f_EUTRA_SendAuthParameters (eutra_Cell1, UTRAN); // @sic R5s150704 sic@
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    fl_EUTRA_RSRVCC_TestBody(UTRAN);
+    
+    // Postamble
+    f_EUTRA_TestBody_Set(false);
+    f_IRAT_SendCoOrd(UTRAN, cms_IRAT_Trigger);
+    f_EUTRA_Postamble(eutra_Cell1, E2_CONNECTED);
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]);
+  }
+
+}

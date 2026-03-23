@@ -1,0 +1,1824 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2023-12-06 14:29:49 +0100 (mi., 06 dic. 2023) $
+// $Rev: 37693 $
+/******************************************************************************/
+module RRC_Handover_CA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EUTRA_ASP_TypeDefs all;
+  import from EUTRA_AspSystem_Templates_CA all;
+  import from EUTRA_BandDependentParam all;
+  import from EUTRA_CellCfg_Templates all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoFrequencyRF all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CellInfoInit_CA all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonFunctions_CA all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_Measurement_Templates all;
+  import from EUTRA_Measurement_Templates_CA all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_Parameters all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_RRC_Templates_CA all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from EUTRA_SysInfo_Templates all;
+  import from EUTRA_Timing all;
+  import from Parameters all;
+
+  template (value) MeasConfig cs_MeasRelease_82421_step7:=
+    /* @status    APPROVED (LTE_A_R10_R11)  */
+    cs_MeasConfig(omit,     //@sic R5s140671 sic@
+                  omit,
+                  omit, //@sic R5-142457 sic@
+                  omit,
+                  cs_MeasIdToRemoveList_1Entry(1),
+                  omit);
+
+  /*
+   * @desc     function to check if secondary band supports second frequency i.e. f6
+   * @return    boolean
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function fl_CheckSecondaryBandSupportsF6() return boolean
+  { //@sic R5-133081 sic@
+   
+    var Frequency_fList_CAInterBand_Type v_FreqInterCA := f_EUTRA_CA_InitFrequenciesInterBand(px_EUTRA_CA_BandCombination);  // @sic R5-155910 New CA band combination pixit sic@
+    var boolean v_F6_Supported := (v_FreqInterCA.f6.dl_CarrierFreq != tsc_DummyFrequency);
+   
+    //Some CA bands combination have DL frequencies defined but not UL -> it shall not be considered as supported  e.g. CA_66A_70C @sic R5-180780 sic@
+    if (f_EUTRA_FrequencyBandIsFDD(f_EUTRA_GetCA_SecondaryBand (px_EUTRA_CA_BandCombination)) and not(ispresent(v_FreqInterCA.f6.ul_CarrierFreq))) {
+        v_F6_Supported := false;
+    }
+    
+    return v_F6_Supported;
+  }
+
+  /* @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover from a PCELL+Scell ->  Normal Cell
+   *            The function implements step 2-14 of 36.523-3 cl. 7.16.1 with
+   *             1. configure C-RNTI based contention resolution in SS with minimal grant
+   *                i.e. the UE will have to raise SR to send additional/user data.
+   *             2. activate security at target cell according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   *             3. send the RRCConnectionReconfiguration to UE. This message will include
+   *               3a. Measurement configuration if specified.
+   *               3b. MobilityControlInfo according to 36.508 cl. 4.6.5 Table 4.6.5-1
+   *                   with newUE-Identity set to tsc_C_RNTI_Def2 or p_C_R_NTI
+   *               3c. RadioResourceConfigDedicated according to 36.508 cl. 4.6.3 Table 4.6.3-19
+   *               3d. SecurityConfigHO according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                   with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   * @param     p_SourcePCellId
+   * @param     p_SCellIdRel
+   * @param     p_SCellIndexRel
+   * @param     p_TargetCellId
+   * @param     p_DrbConfigList     (default value: cs_DrbConfigList_DRB1)
+   * @param     p_C_RNTI            (default value: tsc_C_RNTI_Def2)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_DciUlInfo_TargetCell (default value: cs_DciInfo_CcchDcchDtchUL_Def)
+   * @param     p_UL_GrantConfig_SourceCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_Dsr_TransMax      (default value: n4)
+   * @param     p_CarrierFreqEutra_v9e0  (default value: omit)
+   * @param     p_AddAdditionalSpectrumEmission (default value: false)
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_EUTRA_508RRC_IntraLTE_CA_HO_ToNormalInterCell(EUTRA_CellId_Type                     p_SourcePCellId,
+                                                           EUTRA_CellId_Type                     p_SCellIdRel, //Scell to release
+                                                           SCellIndex_r10                        p_SCellIndexRel, //Scell to release
+                                                           EUTRA_CellId_Type                     p_TargetCellId,
+                                                           template (value) RadioBearerList_Type p_DrbConfigList := cs_DrbConfigList_DRB1,
+                                                           C_RNTI                                p_C_RNTI        := tsc_C_RNTI_Def2,
+                                                           template (omit)  MeasConfig           p_MeasConfig    := omit,
+                                                           template (omit)  DciUlInfo_Type       p_DciUlInfo_TargetCell      := cs_DciInfo_CcchDcchDtchUL_Def,
+                                                           template (value) UL_GrantConfig_Type  p_UL_GrantConfig_SourceCell := cs_UL_GrantConfig_OnSR,
+                                                           template (value) UL_GrantConfig_Type  p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                           Dsr_TransMax_Type                     p_Dsr_TransMax := n4,
+                                                           template (omit) CarrierFreqEUTRA_v9e0      p_CarrierFreqEutra_v9e0 := omit, //@sic R5-171441 sic@
+                                                           boolean                               p_AddAdditionalSpectrumEmission := false)  runs on EUTRA_PTC
+  {
+    var template (value) RachProcedureConfig_Type v_RachProcedureConfig;
+    var template (value) DL_DCCH_Message v_RRCConnectionReconfiguration;
+    var boolean v_CnfFlag := tsc_NoCnfReq;  /* @sic R5s150922 - Additional changes: v_CnfFlag instead of v_CnfFlag sic@ */
+    
+    v_RachProcedureConfig := cs_RachProcedureConfig_CRNTI_HO(f_EUTRA_CellInfo_GetRAR_TA(p_TargetCellId),
+                                                             f_EUTRA_CellInfo_GetDL_ChBandwidth(p_TargetCellId));
+    
+    v_RRCConnectionReconfiguration := f_EUTRA_RRCConnectionReconfiguration_IntraLTE_HO_InterCell(p_SourcePCellId,
+                                                                                                 p_TargetCellId,
+                                                                                                 p_C_RNTI,
+                                                                                                 p_MeasConfig,
+                                                                                                 p_Dsr_TransMax,
+                                                                                                 p_CarrierFreqEutra_v9e0,
+                                                                                                 p_AddAdditionalSpectrumEmission,
+                                                                                                 cs_RRCConnectionReconfiguration_SCell_AddMod_IEs(omit, {p_SCellIndexRel}));
+    //@sic R5s150447 sic@
+    //Based on 36.331 cl. 5.3.1.1, release 11 or higher compliant UE may invalidate a handover message which reconfigures a critically extended field of elements to  original version if such message doesn't include full configuration
+    v_RRCConnectionReconfiguration.message_.c1.rrcConnectionReconfiguration.criticalExtensions.c1.rrcConnectionReconfiguration_r8.radioResourceConfigDedicated.physicalConfigDedicated.cqi_ReportConfig := omit;
+    v_RRCConnectionReconfiguration.message_.c1.rrcConnectionReconfiguration.criticalExtensions.c1.rrcConnectionReconfiguration_r8.radioResourceConfigDedicated.physicalConfigDedicated.cqi_ReportConfig_r10 := cs_CQI_ReportConfig_r10_DEFAULT;
+    
+    f_EUTRA_508RRC_IntraLTE_HO_InterCell_Common(p_SourcePCellId,
+                                                p_TargetCellId,
+                                                v_RRCConnectionReconfiguration,
+                                                v_RachProcedureConfig,
+                                                p_DrbConfigList,
+                                                p_C_RNTI,
+                                                p_DciUlInfo_TargetCell,
+                                                p_UL_GrantConfig_SourceCell,
+                                                p_UL_GrantConfig_TargetCell);
+    
+    //Release DRX and MeasGap at the P cell (if necessary)
+    if (f_EUTRA_CellInfo_DrxIsConfigured(p_SourcePCellId)) {
+      f_EUTRA_SS_DrxCtrlConfig(p_SourcePCellId, cs_DrxCtrl_None, -, v_CnfFlag);
+    }
+    
+    f_EUTRA_SS_MeasGapCtrlConfig(p_SourcePCellId, cs_MeasGapCtrl_None, -, v_CnfFlag);
+    // Release Associated Pcell list in Pcell
+    f_EUTRA_SS_CommonCellConfig(p_SourcePCellId, cas_ServingCellRelease_REQ(p_SourcePCellId, cs_TimingInfo_Now, v_CnfFlag));
+    
+    if (p_TargetCellId != p_SCellIdRel) {
+      // No RACH configuration as Already configured for C-RNTI based contention
+      
+      //No update of C-RNTI
+      
+      //  Release DRX and MeasGap at the S cell (if necessary)
+      if (f_EUTRA_CellInfo_DrxIsConfigured(p_SCellIdRel)) {
+        f_EUTRA_SS_DrxCtrlConfig(p_SCellIdRel, cs_DrxCtrl_None, -, v_CnfFlag);
+      }
+      
+      f_EUTRA_SS_MeasGapCtrlConfig(p_SCellIdRel, cs_MeasGapCtrl_None, -, v_CnfFlag);
+      
+      //  Configure SCell as Scell
+      f_EUTRA_SS_CommonCellConfig(p_SCellIdRel, cas_ServingCellRelease_REQ(p_SCellIdRel, cs_TimingInfo_Now, v_CnfFlag));
+      
+      
+      if (not (f_EUTRA_CellInfo_GetNoUL_Frequency(p_SCellIdRel))) {
+        //  configure Default grant configuration on S cell
+        f_EUTRA_ULGrantConfiguration_Common(p_SCellIdRel, cs_TimingInfo_Now, -, cs_UplinkTimeAlignment_Synch_None, -, v_CnfFlag);
+      }
+    }
+  }
+
+  /*
+   * @desc      Common function: REFERENCE TS 36.523-1 clause 8.2.4.17.1/2
+   * @param     p_PCellId
+   * @param     p_SCellId
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_17_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_SCellId,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_Scell;
+    var PhysCellId v_PhysicalCellIdentity_Pcell;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    var integer v_Arfcn_PCell;
+    var SCell_DL_Bandwidth_Type v_PCell_DL_Bandwidth;
+    var template (value) SCellToAddMod_r10 v_SCellToAddMod;
+    var template (omit) CommonSCell_UL_Configuration_Type v_CommonSCell_UL_Configuration := omit;
+    var template (omit) DedicatedSCell_UL_Configuration_Type v_DedicatedSCell_UL_Configuration := omit;
+    var EUTRA_FDD_TDD_CellInfo_Type v_FDD_TDDInfo;
+    var EUTRA_FDD_TDD_CellInfo_Type v_PCell_FDD_TDDInfo ; //@sic R5-169501 sic@
+    var template (omit) TDD_Config v_TDD_Config := omit;  // omitted in FDD
+    //var template (value) CarrierFreqEUTRA v_CarrierFreq_Scell;
+    var template (value) PUCCH_ConfigDedicated_v1020 v_PUCCH_ConfigDedicated;
+    var MeasObjectId v_MeasObjectId;
+    var MeasObjectId v_MeasObjectId_PCell :=tsc_IdMeasObject_f1 ; //@sic R5s144683 sic@
+    var Ul_Bandwidth_Type v_UL_Bandwidth ;
+    var Dl_Bandwidth_Type v_DL_Bandwidth ;
+    var ChannelBandwidthDependency_Type v_ChannelBandwidthDependency;
+    var RadioResourceConfigCommonSIB v_RadioResourceConfigCommonSIB ;
+    var EUTRA_CellSysInfo_Type v_EUTRA_CellSysInfo_Type ;
+    var template (value) Scell_Capability_Type v_Scell_Capability := DlOnly;
+    //@sic R5-171366 sic@
+    var template (omit)  LAA_SCellConfiguration_r13 v_LAA_SCellConfiguration := omit;
+    var boolean v_LAA_Scell ;
+
+    var default v_DefaultRef;
+    
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_SCellId, -79)
+    };
+    if (p_CA_Type == CA_IntraBand or p_CA_Type == CA_IntraBandNonContiguous ) { /* @sic R5-141113 R5s150037 sic@ */
+      v_MeasObjectId := tsc_IdMeasObject_f2;
+      /* if (p_PCellId == eutra_Cell6) //@sic R5s144683 sic@
+          {
+               v_MeasObjectId_PCell := tsc_IdMeasObject_f3;
+          } */
+    } else {
+      v_MeasObjectId := tsc_IdMeasObject_f5;
+    }
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    
+    //Get cell dependant parameters
+    v_LAA_Scell := f_EUTRA_CellInfo_IsLAA (p_SCellId);
+   if (v_LAA_Scell)
+    {
+        v_LAA_SCellConfiguration := cs_508_LAA_SCellConfiguration;
+    }
+    v_PhysicalCellIdentity_Pcell := f_EUTRA_CellInfo_GetPhyCellId(p_PCellId);
+    
+    v_PhysicalCellIdentity_Scell := f_EUTRA_CellInfo_GetPhyCellId(p_SCellId);
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                            v_Frequency_IE_PCell.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Scell :=  cs_CarrierFreqEUTRA(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq);
+        
+    //Set maximum cell power level for cell  p_SCellId to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_SCellId, -79);
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    
+    // Bring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    //Make S Cell on
+    f_EUTRA_SetCellPower(p_SCellId, -91); //@sic R5s160396 sic@
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1 - 2" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA); // UL CA desired
+    //@siclog "Step 3-4" siclog@
+    if (v_LAA_Scell)
+    { //@sic R5s180031 sic@
+    f_EUTRA_SS_CommonCellConfig(p_SCellId,
+                                cas_PhysicalLayerConfigDL_REQ(p_SCellId,
+                                                              cs_TimingInfo_Now,
+                                                              cs_PhysicalLayerConfigDS_RS(cs_Dmtc_PeriodOffsetms160_r12(10),
+                                                                                          cs_Ds_OccasionDuration_r12_FDD(1))));
+    
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA_LAA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            omit,//@sic R5s144683 sic@
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfig_reportConfigEUTRA_eventA3(0, true, 0, ms640, rsrp, both, 1, ms1024, r1))));
+    } else
+    {
+     f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            omit,//@sic R5s144683 sic@
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfig_reportConfigEUTRA_eventA3(0, true, 0, ms640, rsrp, both, 1, ms1024, r1))));
+    }
+    //@siclog "Step 5" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 6" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Scell,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));
+    
+    //Activate the default to receive further measurement reports for cell 2 on cell 1
+    v_DefaultRef := activate(a_EUTRA_AddDefault_PeriodicalMeasurmentReport(p_PCellId,
+                                                                           cr_MeasurementReport(1,
+                                                                                                ?,
+                                                                                                ?,
+                                                                                                cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Scell, omit, ?, ?),
+                                                                                                -,//p_MeasResultForECID_r9
+                                                                                                -,//p_LocationInfo_r10
+                                                                                                cr_MeasResultServFreqList(1, ?, ?))));
+    // @verdict RRCConnectionReconfigurationComplete received on Cell 3
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.17 Step 6");
+    
+    v_Arfcn_PCell := f_EUTRA_CellInfo_GetEARFCN_DL_r9(p_PCellId);
+    v_PCell_DL_Bandwidth := f_EUTRA_CellInfo_GetSCell_DL_ChBandwidth(p_PCellId);
+    v_UL_Bandwidth := f_EUTRA_CellInfo_GetUL_ChBandwidth(p_PCellId);
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(p_PCellId);
+    v_ChannelBandwidthDependency := f_EUTRA_BandDependentParam(v_DL_Bandwidth, v_UL_Bandwidth);
+    v_EUTRA_CellSysInfo_Type := f_EUTRA_CellInfo_GetSYSINFO(p_PCellId);
+    v_RadioResourceConfigCommonSIB := v_EUTRA_CellSysInfo_Type.BCCH_Info.SIs[0].message_.c1.systemInformation.criticalExtensions.systemInformation_r8.sib_TypeAndInfo[0].sib2.radioResourceConfigCommon;
+    v_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_SCellId);//@sic R5-150432 sic@
+    v_PCell_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_PCellId); //@sic R5-169501 sic@
+    if ((v_FDD_TDDInfo.FDD_TDD == TDD) and not v_LAA_Scell ) { //@sic R5-169501 R5-171732 sic@
+            v_TDD_Config := cs_TDD_ConfigDef(v_FDD_TDDInfo.TDD_SubframeAssignment);    // Value omitted in FDD and LAA
+        }
+      //@sic R5-169501 R5s170064 sic@
+      if ( (v_PCell_FDD_TDDInfo.FDD_TDD == TDD) and (v_FDD_TDDInfo.FDD_TDD == FDD) ) { //TDD FDD
+          v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_TDD_FDD_CA;
+      } else if (v_FDD_TDDInfo.FDD_TDD == TDD) {  // initialise tdd-Configuration  to be used in
+      v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_2TX(cs_N1PUCCH_AN_CS_r10_FDD_1TX, cs_N1PUCCH_AN_CS_r10_FDD_2TX); //@sic R5-133275 sic@
+    }
+    else { //FDD
+      v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_1TX(cs_N1PUCCH_AN_CS_r10_FDD_1TX);
+      // Not Addressed for 2TX
+    }
+    //@sic R5s170064 sic@
+      f_EUTRA_SS_CommonCellConfig(p_PCellId, cas_CellConfig_PUCCH_Dedicated(p_PCellId,
+                                                                            cs_TimingInfo_Now,
+                                                                            v_PCell_FDD_TDDInfo.pucch_Config,
+                                                                            v_PUCCH_ConfigDedicated));
+    if (v_UL_CA) {
+      //@sic R5-160646 sic@
+      
+      v_CommonSCell_UL_Configuration := cs_RadioResourceConfigCommonSCell_UL_Configuration_DEFAULT(v_ChannelBandwidthDependency.Pusch_HoppingOffset, v_RadioResourceConfigCommonSIB.soundingRS_UL_ConfigCommon);
+      v_DedicatedSCell_UL_Configuration := cs_RadioResourceConfigDedicatedSCell_UL_Configuration_DEFAULT();//@sic R5s150070 sic@
+       v_Scell_Capability := UL_DL;
+    }
+    v_SCellToAddMod := cs_SCellToAddMod_r10(1,
+                                            v_PhysicalCellIdentity_Pcell,
+                                            v_Arfcn_PCell,
+                                            cs_508_RadioResourceConfigCommonSCell_r10_DEFAULT(v_PCell_DL_Bandwidth, tsc_P_b_1Tx, v_CommonSCell_UL_Configuration, v_TDD_Config),
+                                            cs_RadioResourceConfigDedicatedSCell_r10(cs_PhysicalConfigDedicatedSCell_r10_DEFAULT(v_DedicatedSCell_UL_Configuration,-,v_LAA_SCellConfiguration))); //@sic R5-171366 sic@
+    //@siclog "Step 7 - 8" siclog@
+    f_EUTRA_508RRC_IntraLTE_CA_HO_InterCell(p_PCellId, p_SCellId, p_SCellId, p_PCellId, {v_SCellToAddMod}, {1}, v_Scell_Capability);
+    
+    deactivate(v_DefaultRef);
+    
+    //@siclog "Step 9" siclog@
+    //Check if UE is in state RRC_Connected
+    f_EUTRA_508Check_ConnectedState(p_SCellId);
+    ///////////////////////
+    // Postamble
+    /////////
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_SCellId, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.17.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_17_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change and SCell addition / Intra-band Contiguous CA
+    f_TC_8_2_4_17_Common(eutra_Cell1, eutra_Cell3,  CA_IntraBand); /* @sic R5-141113 sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.17.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_17_2_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change and SCell addition / Inter-Band CA
+    f_TC_8_2_4_17_Common(eutra_Cell1, eutra_Cell10,  CA_InterBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.17.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+   function f_TC_8_2_4_17_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change and SCell addition / Intra-band non-Contiguous CA
+    f_TC_8_2_4_17_Common(eutra_Cell1, eutra_Cell3,  CA_IntraBandNonContiguous); //@sic R5s150323 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.18.1/2
+   * @param     p_PCellId
+   * @param     p_NeighCell
+   * @param     p_SCellId
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_18_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_NeighCell,
+                                EUTRA_CellId_Type p_SCellId,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_NeighCell;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    //var template (value) CarrierFreqEUTRA v_CarrierFreq_Scell;
+    var MeasObjectId v_MeasObjectId ;
+    var MeasObjectId v_MeasObjectId_PCell :=tsc_IdMeasObject_f1 ; //@sic R5s144680 sic@
+    var default v_DefaultRef;
+    //@sic R5s151045 sic@
+    v_CellPowerList_AtT0 := {
+      cs_CellPower(p_NeighCell, -91),
+      cs_CellPower(p_SCellId, -97)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_NeighCell, -79)
+    };
+    if (p_CA_Type == CA_IntraBand or p_CA_Type == CA_IntraBandNonContiguous ) { /* @sic R5-141113 R5s150037 sic@ */
+      v_MeasObjectId := tsc_IdMeasObject_f2;
+      /* if (p_PCellId == eutra_Cell6) //@sic R5s144680 sic@
+          {
+               v_MeasObjectId_PCell := tsc_IdMeasObject_f3;
+          } */
+    } else {
+      v_MeasObjectId := tsc_IdMeasObject_f5;
+    }
+    
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    //@sic R5-144655, R5-144681 sic@
+    // Only needed for the case of non contigious as cell 13 PLMN as per table 4.4.2-2 is PLMN 3
+    f_EUTRA_CellInfo_SetPLMN_1Entry(p_NeighCell, cs_HPLMN_Def);//Home PLMN
+    f_EUTRA_CellInfo_SetTAC(p_NeighCell, oct2bit(tsc_TAC1));
+    //Set maximum cell power level for intra freq cell  to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_NeighCell, -79);
+    
+    //Get cell dependant parameters
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+    
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                           v_Frequency_IE_PCell.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Scell :=  cs_CarrierFreqEUTRA(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq);
+        
+    v_PhysicalCellIdentity_NeighCell := f_EUTRA_CellInfo_GetPhyCellId(p_NeighCell);
+    
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    f_EUTRA_CellConfig_Def(p_NeighCell); //Normal cell configured
+    
+    // ring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    //Set cell power level according to T0
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1 - 2" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA);
+    //@siclog "Step 3-4" siclog@
+     if (f_EUTRA_CellInfo_IsLAA (p_SCellId))
+    { //@sic R5s180031 sic@
+    f_EUTRA_SS_CommonCellConfig(p_SCellId,
+                                cas_PhysicalLayerConfigDL_REQ(p_SCellId,
+                                                              cs_TimingInfo_Now,
+                                                              cs_PhysicalLayerConfigDS_RS(cs_Dmtc_PeriodOffsetms160_r12(10),
+                                                                                          cs_Ds_OccasionDuration_r12_FDD(1))));
+    
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_IntraFreq_CA_LAA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            omit,//@sic R5s144680 sic@
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfig_reportConfigEUTRA_eventA3(0, true, 0, ms2560, rsrp, both, 1, ms1024, r1)))); //@sic R5-140756 sic@
+    } else if(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9 > maxEARFCN)
+    {//band >64
+    //@sic R5s230772 sic@
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_IntraFreq_CA_r9(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                               v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                               v_MeasObjectId,
+                                                                                                                                               omit,//@sic R5s144680 sic@
+                                                                                                                                               v_MeasObjectId_PCell,
+                                                                                                                                               cs_ReportConfig_reportConfigEUTRA_eventA3(0, true, 0, ms2560, rsrp, both, 1, ms1024, r1)))); //@sic R5-140756 sic@
+    } else
+    {
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_IntraFreq_CA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            omit,//@sic R5s144680 sic@
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfig_reportConfigEUTRA_eventA3(0, true, 0, ms2560, rsrp, both, 1, ms1024, r1)))); //@sic R5-140756 sic@
+    }
+     
+     //@siclog "Step 5" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 6" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_NeighCell,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,////p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));
+    
+    //Activate the default to receive further measurement reports for cell 2 on cell 1
+    v_DefaultRef := activate(a_EUTRA_AddDefault_PeriodicalMeasurmentReport(p_PCellId,
+                                                                           cr_MeasurementReport(1,
+                                                                                                ?,
+                                                                                                ?,
+                                                                                                cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_NeighCell, omit, ?, ?),
+                                                                                                -,//p_MeasResultForECID_r9
+                                                                                                -,//p_LocationInfo_r10
+                                                                                                cr_MeasResultServFreqList(1, ?, ?))));
+    
+    
+    //* @verdict Measurement Report received on Cell 3
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.18 or 8.2.4.21 Step 6");
+    
+    //@siclog "Step 7-8" siclog@
+    f_EUTRA_508RRC_IntraLTE_CA_HO_ToNormalInterCell(p_PCellId, p_SCellId, 1, p_NeighCell);
+    
+    deactivate(v_DefaultRef);
+    
+    //@siclog "Step 9" siclog@
+    //Check if UE is in state RRC_Connected
+    f_EUTRA_508Check_ConnectedState(p_NeighCell);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_NeighCell, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.18.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_18_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell release / Intra-band Contiguous CA
+    f_TC_8_2_4_18_Common(eutra_Cell1, eutra_Cell2, eutra_Cell3,  CA_IntraBand); /* @sic R5-141113 sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.18.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_18_2_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell release / Inter-Band CA
+    f_TC_8_2_4_18_Common(eutra_Cell1,eutra_Cell2, eutra_Cell10, CA_InterBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.18.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_18_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell release / Intra-Band non-contagious CA
+    f_TC_8_2_4_18_Common(eutra_Cell1,eutra_Cell2, eutra_Cell3, CA_IntraBandNonContiguous); //@sic R5s150329 R5s150215 sic@
+  }
+
+  /*
+   * @desc      Common function: REFERENCE TS 36.523-1 clause 8.2.4.19.1/2
+   * @param     p_PCellId
+   * @param     p_SCellId
+   * @param     p_PCellId2
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_19_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_SCellId,
+                                EUTRA_CellId_Type p_PCellId2,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_Pcell2;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_PCell2;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell2;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    //var template (value) CarrierFreqEUTRA v_CarrierFreq_Scell;
+    //var template (value) CarrierFreqEUTRA v_CarrierFreq_Pcell2;
+    var MeasObjectId v_MeasObjectId;
+    var MeasObjectId v_MeasObjectId2;
+    var default v_DefaultRef;
+    
+    v_CellPowerList_AtT0 := {
+      cs_CellPower(p_SCellId, -91),
+      cs_CellPower(p_PCellId2, -97)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_PCellId2, -79)
+    };
+    if (p_CA_Type == CA_IntraBand or p_CA_Type == CA_IntraBandNonContiguous ) { /* @sic R5-141113 R5s150037 sic@ */
+      v_MeasObjectId := tsc_IdMeasObject_f1;
+      v_MeasObjectId2 := tsc_IdMeasObject_f3;
+    } else {
+      v_MeasObjectId := tsc_IdMeasObject_f5;
+      v_MeasObjectId2 := tsc_IdMeasObject_f1; //@sic R5s130788 sic@
+    }
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId, p_PCellId2}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    
+    //Get cell dependant parameters
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+    
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                           v_Frequency_IE_PCell.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Scell :=  cs_CarrierFreqEUTRA(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq);
+    
+    v_Frequency_IE_PCell2 := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId2);
+    v_ChBandDependency_PCell2 := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell2.DL_ChBandwidth,
+                                                            v_Frequency_IE_PCell2.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Pcell2 :=  cs_CarrierFreqEUTRA(v_Frequency_IE_PCell2.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_PCell2.UL_DL_Earfcn.ul_CarrierFreq);
+    
+    v_PhysicalCellIdentity_Pcell2 := f_EUTRA_CellInfo_GetPhyCellId(p_PCellId2);
+    
+    //Set maximum cell power level for cell  p_SCellId to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_PCellId2, -79);
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    f_EUTRA_CellInfo_SetC_RNTI(p_PCellId2, tsc_C_RNTI_Def);
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId2);
+    
+    // Bring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1 - 2" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA); // UL CA desired
+    
+    //@siclog "Step 3-4" siclog@
+     
+    if (f_EUTRA_CellInfo_IsLAA (p_SCellId))
+     { //@sic R5s180031 sic@
+    f_EUTRA_SS_CommonCellConfig(p_SCellId,
+                                cas_PhysicalLayerConfigDL_REQ(p_SCellId,
+                                                              cs_TimingInfo_Now,
+                                                              cs_PhysicalLayerConfigDS_RS(cs_Dmtc_PeriodOffsetms160_r12(10),
+                                                                                          cs_Ds_OccasionDuration_r12_FDD(1))));
+    
+    
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA_HO_LAA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                               v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                               v_Frequency_IE_PCell2.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_PCell2.AllowedMeasBandwidth,
+                                                                                                                                               v_MeasObjectId,
+                                                                                                                                               v_MeasObjectId2,
+                                                                                                                                               cs_508_MeasGapConfig_GP1)));
+    } else
+    {
+     f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA_HO(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                               v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                               v_Frequency_IE_PCell2.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                               v_ChBandDependency_PCell2.AllowedMeasBandwidth,
+                                                                                                                                               v_MeasObjectId,
+                                                                                                                                               v_MeasObjectId2,
+                                                                                                                                               cs_508_MeasGapConfig_GP1)));
+    }
+     //@siclog "Step 5" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 6" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Pcell2,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));
+    
+    //Activate the default to receive further measurement reports for Pcell 2 on Pcell
+    v_DefaultRef := activate(a_EUTRA_AddDefault_PeriodicalMeasurmentReport(p_PCellId,
+                                                                           cr_MeasurementReport(1,
+                                                                                                ?,
+                                                                                                ?,
+                                                                                                cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Pcell2, omit, ?, ?),
+                                                                                                -,//p_MeasResultForECID_r9
+                                                                                                -,//p_LocationInfo_r10
+                                                                                                cr_MeasResultServFreqList(1, ?, ?))));
+    // @verdict RRCConnectionReconfigurationComplete received on Cell 3
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.19 Step 6");
+    //@siclog "Step 7 - 8" siclog@
+    f_EUTRA_508RRC_IntraLTE_CA_HO_InterCell(p_PCellId, p_SCellId, p_PCellId2, p_SCellId, -, -, -, -, tsc_C_RNTI_Def); //@sic R5s130788 sic@
+    
+    deactivate(v_DefaultRef);
+    
+    //@siclog "Step 9" siclog@
+    //Check if UE is in state RRC_Connected
+    f_EUTRA_508Check_ConnectedState(p_PCellId2);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_PCellId2, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.19.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_19_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change / SCell no Change / Intra-band Contiguous CA
+    f_TC_8_2_4_19_Common(eutra_Cell3, eutra_Cell1, eutra_Cell6, CA_IntraBand); /* @sic R5-141113 sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.19.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_19_2_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change / SCell no Change / Inter-Band CA
+    f_TC_8_2_4_19_Common(eutra_Cell3, eutra_Cell10,eutra_Cell1, CA_InterBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.19.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_19_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / PCell Change / SCell no Change / Intra-band non-Contiguous CA
+    f_TC_8_2_4_19_Common(eutra_Cell3, eutra_Cell1, eutra_Cell6, CA_IntraBandNonContiguous); //@sic R5s150323 sic@
+  }
+
+  /*
+   * @desc      Common function: REFERENCE TS 36.523-1 clause 8.2.4.20.1/2
+   * @param     p_PCellId
+   * @param     p_SCellId
+   * @param     p_PCellId2
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_20_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_SCellId,
+                                EUTRA_CellId_Type p_PCellId2,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell Change
+    
+    var PhysCellId v_PhysicalCellIdentity_Pcell;
+    var PhysCellId v_PhysicalCellIdentity_Pcell2;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_PCell2;
+    //var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell2;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    var integer v_Arfcn_PCell ;
+    var SCell_DL_Bandwidth_Type v_PCell_DL_Bandwidth;
+    var template (value) SCellToAddMod_r10 v_SCellToAddMod;
+    var template (omit) CommonSCell_UL_Configuration_Type v_CommonSCell_UL_Configuration := omit;
+    var template (omit) DedicatedSCell_UL_Configuration_Type v_DedicatedSCell_UL_Configuration := omit;
+    var EUTRA_FDD_TDD_CellInfo_Type v_FDD_TDDInfo;
+    var EUTRA_FDD_TDD_CellInfo_Type v_PCell_FDD_TDDInfo ; //@sic R5-169501 sic@
+    var template (omit) TDD_Config v_TDD_Config := omit;  // omitted in FDD
+    //var template (omit) CarrierFreqEUTRA v_CarrierFreq_Scell;
+    //var template (omit) CarrierFreqEUTRA v_CarrierFreq_Pcell2;
+    var template (value) PUCCH_ConfigDedicated_v1020 v_PUCCH_ConfigDedicated;
+    var MeasObjectId v_MeasObjectId ;
+    var MeasObjectId v_MeasObjectId_PCell :=tsc_IdMeasObject_f1 ; //@sic R5s144680 sic@
+    var Ul_Bandwidth_Type v_UL_Bandwidth ;
+    var Dl_Bandwidth_Type v_DL_Bandwidth ;
+    var ChannelBandwidthDependency_Type v_ChannelBandwidthDependency;
+    var RadioResourceConfigCommonSIB v_RadioResourceConfigCommonSIB;
+    var EUTRA_CellSysInfo_Type v_EUTRA_CellSysInfo_Type;
+    var boolean v_FeatrGrp_111 ; //@sic R5-150557  sic@
+    //@sic R5-171366 sic@
+    var template (omit)  LAA_SCellConfiguration_r13 v_LAA_SCellConfiguration := omit;
+    var boolean v_LAA_Scell ;
+
+    var default v_DefaultRef;
+    
+    v_CellPowerList_AtT0 := {
+      cs_CellPower(p_SCellId, -91),
+      cs_CellPower(p_PCellId2, -97)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_SCellId, -85),
+      cs_CellPower(p_PCellId2, -79)
+    };
+
+    if (p_CA_Type == CA_IntraBand or p_CA_Type == CA_IntraBandNonContiguous ) { /* @sic R5-141113 R5s140258 R5s150037 sic@ */
+      v_MeasObjectId := tsc_IdMeasObject_f2;
+      /* if (p_PCellId == eutra_Cell6) //@sic R5s144680 sic@
+          {
+               v_MeasObjectId_PCell := tsc_IdMeasObject_f3;
+          } */
+    } else {
+      v_MeasObjectId := tsc_IdMeasObject_f5;
+    }
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId, p_PCellId2}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    
+    //@sic R5-144655, R5-144656 sic@
+    f_EUTRA_CellInfo_SetPLMN_1Entry(p_PCellId2, cs_HPLMN_Def);//Home PLMN
+    f_EUTRA_CellInfo_SetTAC(p_PCellId2, oct2bit(tsc_TAC2));
+    //Get cell dependant parameters
+    v_LAA_Scell := f_EUTRA_CellInfo_IsLAA (p_SCellId);
+   if (v_LAA_Scell)
+    {
+        v_LAA_SCellConfiguration := cs_508_LAA_SCellConfiguration;
+    }
+    v_PhysicalCellIdentity_Pcell := f_EUTRA_CellInfo_GetPhyCellId(p_PCellId);
+
+    //v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                           v_Frequency_IE_PCell.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Scell :=  cs_CarrierFreqEUTRA(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq);
+    
+    v_Frequency_IE_PCell2 := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId2);
+    v_ChBandDependency_PCell2 := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell2.DL_ChBandwidth,
+                                                            v_Frequency_IE_PCell2.UL_ChBandwidth);
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Pcell2 :=  cs_CarrierFreqEUTRA(v_Frequency_IE_PCell2.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_PCell2.UL_DL_Earfcn.ul_CarrierFreq);
+    v_PhysicalCellIdentity_Pcell2 := f_EUTRA_CellInfo_GetPhyCellId(p_PCellId2);
+    
+    //Set maximum cell power level for cell  p_SCellId to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_PCellId2, -79);
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    f_EUTRA_CellInfo_SetC_RNTI(p_PCellId2, tsc_C_RNTI_Def);
+
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId2);
+    
+    // Bring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_TestBody_Set(true);
+    //@siclog "step 1" siclog@
+    //Wait 1 second
+    f_Delay (1.0);
+    //@siclog "Step 2 - 3" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA); // UL CA desired
+    
+   v_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_SCellId); //@sic R5-150432 R5-150557 sic@
+   v_PCell_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_PCellId); //@sic R5-169501 sic@
+   if (v_FDD_TDDInfo.FDD_TDD == TDD) { //@sic R5-169501 R5-171732 sic@
+            if ( not v_LAA_Scell) {v_TDD_Config := cs_TDD_ConfigDef(v_FDD_TDDInfo.TDD_SubframeAssignment);  }  // Value omitted in FDDand LAA
+            v_FeatrGrp_111 := pc_FeatrGrp_111_T;//@sic R5-150577 sic@
+        } else {
+            v_FeatrGrp_111 := pc_FeatrGrp_111_F;//@sic R5-150577 sic@
+            }
+       //@sic R5-169501 R5s170064 sic@
+      if ( (v_PCell_FDD_TDDInfo.FDD_TDD == TDD) and (v_FDD_TDDInfo.FDD_TDD == FDD) ) { //TDD FDD
+          v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_TDD_FDD_CA;
+      } else if (v_FDD_TDDInfo.FDD_TDD == TDD) {  // initialise tdd-Configuration  to be used in
+      v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_2TX(cs_N1PUCCH_AN_CS_r10_FDD_1TX, cs_N1PUCCH_AN_CS_r10_FDD_2TX); //@sic R5-133275 sic@
+      
+    }
+    else { //FDD
+      v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_1TX(cs_N1PUCCH_AN_CS_r10_FDD_1TX);
+      // Not Addressed for 2TX
+    }
+    //@sic R5s170064 sic@
+      f_EUTRA_SS_CommonCellConfig(p_PCellId, cas_CellConfig_PUCCH_Dedicated(p_PCellId,
+                                                                            cs_TimingInfo_Now,
+                                                                            v_PCell_FDD_TDDInfo.pucch_Config,
+                                                                            v_PUCCH_ConfigDedicated));
+   //@siclog "Step 4-5" siclog@
+    if (v_FeatrGrp_111) // EXCEPTION: If UE does not support FGI bit 111, i.e. Event A6, the following step 4 to step 7 except step 6 should not be executed
+    {//@sic R5-150577 sic@
+
+         f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A6(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                               v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                               v_Frequency_IE_PCell2.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                               v_ChBandDependency_PCell2.AllowedMeasBandwidth, //@sic R5s130782 sic@
+                                                                                                                               v_MeasObjectId_PCell, //@sic R5-144680 sic@
+                                                                                                                               v_MeasObjectId,
+                                                                                                                             cs_508_MeasGapConfig_GP1)));
+     } ;
+    //@siclog "Step 6" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 7" siclog@
+    //Receive MeasurementReport
+    if (v_FeatrGrp_111) // EXCEPTION: If UE does not support FGI bit 111, i.e. Event A6, the following step 4 to step 7 except step 6 should not be executed
+    {//@sic R5-150577 sic@
+
+        SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Pcell2,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));
+    
+        //Activate the default to receive further measurement reports for Pcell 2 on Pcell
+        v_DefaultRef := activate(a_EUTRA_AddDefault_PeriodicalMeasurmentReport(p_PCellId,
+                                                                           cr_MeasurementReport(1,
+                                                                                                ?,
+                                                                                                ?,
+                                                                                                cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Pcell2, omit, ?, ?),
+                                                                                                -,//p_MeasResultForECID_r9
+                                                                                                -,//p_LocationInfo_r10
+                                                                                                cr_MeasResultServFreqList(1, ?, ?))));
+    
+    
+      // @verdict RRCConnectionReconfigurationComplete received on Cell 3
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.20 Step 7");
+  }
+    
+    v_Arfcn_PCell := f_EUTRA_CellInfo_GetEARFCN_DL_r9(p_PCellId);
+    v_PCell_DL_Bandwidth := f_EUTRA_CellInfo_GetSCell_DL_ChBandwidth(p_PCellId);
+    v_UL_Bandwidth := f_EUTRA_CellInfo_GetUL_ChBandwidth(p_PCellId);
+    v_DL_Bandwidth := f_EUTRA_CellInfo_GetDL_ChBandwidth(p_PCellId);
+    v_ChannelBandwidthDependency := f_EUTRA_BandDependentParam(v_DL_Bandwidth, v_UL_Bandwidth);
+    v_EUTRA_CellSysInfo_Type := f_EUTRA_CellInfo_GetSYSINFO(p_PCellId);
+    v_RadioResourceConfigCommonSIB := v_EUTRA_CellSysInfo_Type.BCCH_Info.SIs[0].message_.c1.systemInformation.criticalExtensions.systemInformation_r8.sib_TypeAndInfo[0].sib2.radioResourceConfigCommon;
+    
+   
+    
+    if (v_UL_CA) {
+      //@sic R5-160646 sic@
+      
+      v_CommonSCell_UL_Configuration := cs_RadioResourceConfigCommonSCell_UL_Configuration_DEFAULT(v_ChannelBandwidthDependency.Pusch_HoppingOffset, v_RadioResourceConfigCommonSIB.soundingRS_UL_ConfigCommon);
+      v_DedicatedSCell_UL_Configuration := cs_RadioResourceConfigDedicatedSCell_UL_Configuration_DEFAULT();//@sic R5s150070 sic@
+      
+    }
+    v_SCellToAddMod := cs_SCellToAddMod_r10(1,
+                                            v_PhysicalCellIdentity_Pcell,
+                                            v_Arfcn_PCell,
+                                            cs_508_RadioResourceConfigCommonSCell_r10_DEFAULT(v_PCell_DL_Bandwidth, tsc_P_b_1Tx, v_CommonSCell_UL_Configuration, v_TDD_Config),
+                                            cs_RadioResourceConfigDedicatedSCell_r10(cs_PhysicalConfigDedicatedSCell_r10_DEFAULT(v_DedicatedSCell_UL_Configuration,-,v_LAA_SCellConfiguration))); //@sic R5-171366 sic@
+    //@siclog "Step 8 - 9" siclog@
+    f_EUTRA_508RRC_IntraLTE_CA_HO_InterCell(p_PCellId, p_SCellId,p_PCellId2, p_PCellId,{v_SCellToAddMod}, {1});//, v_UL_CA);
+    
+    if (v_FeatrGrp_111) //@sic R5-150577 sic@
+    {
+
+       deactivate(v_DefaultRef);
+    };
+    //@siclog "Step 10-12" siclog@
+    f_EUTRA_ConnectedMode_TAU (p_PCellId2);
+    //@siclog "Step 13" siclog@
+    //Check if UE is in state RRC_Connected
+    f_EUTRA_508Check_ConnectedState(p_PCellId2);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_PCellId2, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.20.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_20_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell Change / Intra-band Contiguous CA
+    f_TC_8_2_4_20_Common(eutra_Cell1, eutra_Cell3, eutra_Cell12, CA_IntraBand); /* @sic R5-141113 sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.20.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_20_2_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell Change/ Inter-Band CA
+    f_TC_8_2_4_20_Common(eutra_Cell1, eutra_Cell10,eutra_Cell30,  CA_InterBand); //@sic R5s130784 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.20.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_20_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell Change / Intra-band non-contiguous CA
+    // Prose needs correction for cell Identies
+    f_TC_8_2_4_20_Common(eutra_Cell1, eutra_Cell3, eutra_Cell12, CA_IntraBandNonContiguous); //@sic R5s150329 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.21.1/2
+   * @param     p_PCellId
+   * @param     p_NeighCell
+   * @param     p_SCellId
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_21_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_NeighCell,
+                                EUTRA_CellId_Type p_SCellId,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_NeighCell;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var Frequency_IE_Type v_Frequency_IE_NeighCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+     var ChannelBandwidthDependency_Type v_ChBandDependency_NeighCell;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    //var template (omit) CarrierFreqEUTRA v_CarrierFreq_Scell;
+    var MeasObjectId v_MeasObjectId2;
+    var MeasObjectId v_MeasObjectId3;
+    var MeasObjectId v_MeasObjectId_PCell :=tsc_IdMeasObject_f1 ; //@sic R5s144517 sic@
+    var default v_DefaultRef;
+
+
+    
+    v_CellPowerList_AtT0 := {
+      cs_CellPower(p_NeighCell, -97), //@sic R5s180372 sic@
+      cs_CellPower(p_SCellId, -91)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_NeighCell, -79),
+      cs_CellPower(p_SCellId, -85)
+    };
+    if (p_CA_Type == CA_IntraBand  or p_CA_Type == CA_IntraBandNonContiguous ) {/* @sic R5-141113 R5s150037 sic@ */
+      v_MeasObjectId2 := tsc_IdMeasObject_f2;
+      v_MeasObjectId3 := tsc_IdMeasObject_f3;
+      /*if (p_PCellId == eutra_Cell6) //@sic R5s144517 sic@
+          {
+               v_MeasObjectId_PCell := tsc_IdMeasObject_f3;
+               v_MeasObjectId3 := tsc_IdMeasObject_f1;
+          } */
+    } else {
+      v_MeasObjectId2 := tsc_IdMeasObject_f5;
+      v_MeasObjectId3 := tsc_IdMeasObject_f6;
+    }
+    
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    f_EUTRA_CellInfo_SetPLMN_1Entry(p_NeighCell, cs_HPLMN_Def);  //@sic R5s130731 sic@
+    f_EUTRA_CellInfo_SetTAC(p_NeighCell, oct2bit(tsc_TAC1));
+    //Set maximum cell power level for intra freq cell  to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_NeighCell, -79);
+    
+    //Get cell dependant parameters
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+    
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                           v_Frequency_IE_PCell.UL_ChBandwidth);
+
+    v_Frequency_IE_NeighCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_NeighCell);
+    v_ChBandDependency_NeighCell := f_EUTRA_BandDependentParam(v_Frequency_IE_NeighCell.DL_ChBandwidth,
+                                                               v_Frequency_IE_NeighCell.UL_ChBandwidth);
+    
+    //@sic R5-165892 sic@
+    //v_CarrierFreq_Scell :=  cs_CarrierFreqEUTRA(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq);
+    
+    
+    v_PhysicalCellIdentity_NeighCell := f_EUTRA_CellInfo_GetPhyCellId(p_NeighCell);
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    f_EUTRA_CellConfig_Def(p_NeighCell); //Normal cell configured
+    
+    // ring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    //Set cell power level according to T0
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1 - 2" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA);
+    
+    //@siclog "Step 3-4" siclog@
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A5_InterFreq_CA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq_r9,//@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_NeighCell.UL_DL_Earfcn.dl_CarrierFreq_r9, //@sic R5-171441 sic@
+                                                                                                                                            v_ChBandDependency_NeighCell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId_PCell, //@sic R5-144517 sic@
+                                                                                                                                            v_MeasObjectId2,
+                                                                                                                                            v_MeasObjectId3,
+                                                                        cs_508_MeasGapConfig_GP1))); //@sic R5s130731 sic@
+    //@siclog "Step 5" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 6" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_NeighCell,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));
+    
+    //Activate the default to receive further measurement reports for cell 2 on cell 1
+    v_DefaultRef := activate(a_EUTRA_AddDefault_PeriodicalMeasurmentReport(p_PCellId,
+                                                                           cr_MeasurementReport(1, ?, ?,
+                                                                                                cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_NeighCell, omit, ?, ?),
+                                                                                                -,//p_MeasResultForECID_r9
+                                                                                                -,//p_LocationInfo_r10
+                                                                                                cr_MeasResultServFreqList(1, ?, ?))));
+    
+    
+    //* @verdict Measurement Report received on Cell 3
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.18 or 8.2.4.21 Step 6");
+    
+    //@siclog "Step 7-8" siclog@
+    f_EUTRA_508RRC_IntraLTE_CA_HO_ToNormalInterCell(p_PCellId, p_SCellId, 1, p_NeighCell,-,-,cs_MeasRelease_82421_step7);
+
+    deactivate(v_DefaultRef);
+    
+    //@siclog "Step 9" siclog@
+    //Check if UE is in state RRC_Connected
+    f_EUTRA_508Check_ConnectedState(p_NeighCell);
+    
+    ///////////////////////
+    // Postamble
+    /////////
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_NeighCell, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.21.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_21_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell release  / Intra-band Contiguous CA
+    f_TC_8_2_4_21_Common(eutra_Cell1, eutra_Cell6, eutra_Cell3,  CA_IntraBand); /* @sic R5-141113 sic@ */
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.21.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_21_2_EUTRA() runs on EUTRA_PTC
+  { /* CA / RRC connection reconfiguration / Handover / Success / SCell release  / Inter-Band CA */
+    var EUTRA_CellId_Type v_Cell3 := eutra_Cell3;
+
+    //@sic R5-133081 sic@
+    if (fl_CheckSecondaryBandSupportsF6()) {
+      v_Cell3 := eutra_Cell28;
+    }
+    f_TC_8_2_4_21_Common(eutra_Cell1, v_Cell3, eutra_Cell10,  CA_InterBand);
+  }
+
+  /*
+   *
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.21.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_21_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Success / SCell release  / Intra-band non-contiguous CA
+    f_TC_8_2_4_21_Common(eutra_Cell1, eutra_Cell6, eutra_Cell3,  CA_IntraBandNonContiguous); //@sic R5s150323 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.23.1/2/3
+   * @param     p_PCellId
+   * @param     p_SCellId
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_23_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_SCellId,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_Scell;
+    var PhysCellId v_PhysicalCellIdentity_Pcell;
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var Frequency_IE_Type v_Frequency_IE_PCell;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_PCell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT0;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT3;
+    var template (value) CellPowerList_Type v_CellPowerList_AtT4;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    var template (value) CarrierFreqEUTRA_v9e0 v_CarrierFreq_Scell_v9e0;  //@sic R5-171442 sic@
+    var MeasObjectId v_MeasObjectId;
+    var MeasObjectId v_MeasObjectId_PCell :=tsc_IdMeasObject_f1 ;
+    //var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_CellInfo_Scell;
+    var EUTRA_SecurityParams_Type v_Auth_Params;
+    var ShortMAC_I v_ShortMAC_I;
+    var float v_T304Max;//@sic R5s141245 sic@
+    var float v_T304Min;
+    var NextHopChainingCount v_Ncc0 := 0;
+    var Ra_PreambleIndex_Type v_Ra_PreambleIndex := 63;
+    timer t_T304;
+
+    v_CellPowerList_AtT0 := {
+      cs_CellPower(p_SCellId, -91)
+    };
+    v_CellPowerList_AtT1 := {
+      cs_CellPower(p_SCellId, -79)
+    };
+    v_CellPowerList_AtT3:= v_CellPowerList_AtT1;
+    v_CellPowerList_AtT2 := {
+      cs_CellPower(p_SCellId, tsc_NonSuitableOffCellRS_EPRE)
+    };
+    v_CellPowerList_AtT4 := {
+      cs_CellPower(p_PCellId, tsc_NonSuitableOffCellRS_EPRE)
+    };
+
+    if (p_CA_Type == CA_IntraBand or p_CA_Type == CA_IntraBandNonContiguous ) {/* @sic R5-141113 R5s150037 sic@ */
+      v_MeasObjectId := tsc_IdMeasObject_f2;
+      /* if (p_PCellId == eutra_Cell6) { //@sic R5s144517 sic@
+        v_MeasObjectId_PCell := tsc_IdMeasObject_f3;
+      } */
+    } else {
+      v_MeasObjectId := tsc_IdMeasObject_f5;
+    }
+    
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    //Set maximum cell power level for intra freq cell  to be used in creation
+    f_EUTRA_CellInfo_InitMaxReferencePower(p_SCellId, -79);
+    //Set PreambleTransMax to n50 in all cells
+    f_EUTRA_CellInfo_SetPreambleTransMax(p_PCellId, n50);
+    f_EUTRA_CellInfo_SetPreambleTransMax(p_SCellId, n50);
+    
+    //Get cell dependant parameters
+    v_PhysicalCellIdentity_Scell := f_EUTRA_CellInfo_GetPhyCellId(p_SCellId);
+    v_PhysicalCellIdentity_Pcell := f_EUTRA_CellInfo_GetPhyCellId(p_PCellId);
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+    
+    v_Frequency_IE_PCell := f_EUTRA_CellInfo_GetFrequencyIEs(p_PCellId);
+    v_ChBandDependency_PCell := f_EUTRA_BandDependentParam(v_Frequency_IE_PCell.DL_ChBandwidth,
+                                                           v_Frequency_IE_PCell.UL_ChBandwidth);
+    
+    //@sic R5-165892 sic@
+    v_CarrierFreq_Scell_v9e0 :=  cs_CarrierFreqEUTRA_v9e0(v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq_r9, v_Frequency_IE_Scell.UL_DL_Earfcn.ul_CarrierFreq_r9);
+    //Get FDD or TDD mode for Cell 1
+    //v_EUTRA_FDD_TDD_CellInfo_Scell := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_SCellId);
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    v_T304Max := f_EUTRA_SetTimerToleranceMax (p_PCellId, rrcTimer, 1.0);
+    v_T304Min := f_EUTRA_SetTimerToleranceMin (p_PCellId, rrcTimer, 1.0);
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    
+    // ring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    
+    //Set cell power level according to T0
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT0);
+    
+    f_EUTRA_TestBody_Set(true);
+    
+    //@siclog "Step 1 - 2" siclog@
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA);
+    //@siclog "Step 3-4" siclog@
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq,
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq,
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            -, // Gap omitted as measurement of scell does not need gaps
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfigEUTRA_A3_82423)));
+    //@siclog "Step 5" siclog@
+    //Set cell power level according to T1
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT1);
+    
+    //@siclog "Step 6" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Scell,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),   //RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));    //@sic R5s141245 sic@
+    // Preconfig target cell for no RACH response
+    //@sic R5s141245 sic@
+    f_EUTRA_SS_ConfigRachProcedure(p_SCellId, //@sic R5s150188 sic@
+                                   omit,
+                                   cs_RachProcedureConfig_NoResponse (f_EUTRA_CellInfo_GetDL_ChBandwidth (p_SCellId)));
+    //@siclog "Step 7" siclog@
+    //Send RRCConnectionReconfiguration to order UE to perform inter freq. HO to S-Cell
+    f_EUTRA_RRC_ConnReconfigHO_IntraLTE_Mobility(p_PCellId,
+                                                 p_SCellId,
+                                                 f_Generate_cs_MobilityControlInfo_HO_RACH(p_SCellId,
+                                                                                           v_CarrierFreq_Scell_v9e0, //@sic R5s141245 R5-171442 sic@
+                                                                                           cs_RACH_ConfigDedicated (v_Ra_PreambleIndex)),
+                                                 -, //@sic R5s141319 sic@
+                                                 cs_RRCConnectionReconfiguration_SCell_AddMod_IEs(omit, {1}));
+    
+    t_T304.start(v_T304Min);   //@sic R5s141245 sic@
+    
+    //Reset SRBs and DRBs of source cell ( P cell )
+    f_EUTRA_SS_SRBs_DRBs_Reset_StopULGrant_noPUCCHSync(p_PCellId); /* stop default UL grant transmission, stop transmission of TA commands &
+                                                                           reset SRBs and DRB1 after 100ms. note: it does not matter when exactly the SRBs are reset as long as it is not less than 100ms */
+    f_EUTRA_SS_CommonCellConfig(p_PCellId, cas_ServingCellRelease_REQ(p_PCellId, cs_TimingInfo_Now));
+    f_EUTRA_SS_CommonCellConfig(p_SCellId, cas_ServingCellRelease_REQ(p_SCellId, cs_TimingInfo_Now));
+    
+    //@siclog "Step 8" siclog@
+    //Set cell power level according to T2
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT2);
+    
+    //Calculate ShortMAC-I to be received in RRCConnectionReestablishment Request from UE in Step 7
+    v_ShortMAC_I := f_EUTRA_Calculate_ShortMAC(p_PCellId, p_PCellId);
+    
+    //Wait T304 + tolerance to fail "Criterion for successful completion of handover"
+    t_T304.timeout; //@sic R5s141245 sic@
+    
+    //Configure PCell for normal PRACH operation
+    f_EUTRA_SS_ConfigRachProcedure_Def(p_PCellId, tsc_C_RNTI_Def);
+    
+    //@siclog "Step 9" siclog@
+    //Receive RRCConnectionReestablishmentRequest on Cell 4
+    SRB.receive(car_SRB0_RrcPdu_IND(p_PCellId,
+                                    cr_508_RRCConnectionReestablishmentRequest(tsc_C_RNTI_Def,
+                                                                               v_PhysicalCellIdentity_Pcell,
+                                                                               cr_ReestablishmentCause_HandoverFailure,
+                                                                               v_ShortMAC_I)));
+    //@verdict RRCConnectionReestablishmentRequest received on P Cell
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.23 Step 9");
+    
+    //Activate RRC security at SS[SRB 1,2 and DRB 1]
+    v_Auth_Params := f_EUTRA_SS_AS_ActivateSecurity_HO_Reest(p_PCellId, f_EUTRA_Security_Get(), v_Ncc0);
+    f_EUTRA_Security_Set(v_Auth_Params);
+    
+    //@siclog "Step 10" siclog@
+    //Transmit RRConnectionReestablishment to resume SRB1 and re-activate security
+    f_EUTRA_RRC_RRCConnectionReestablishment_Def(p_PCellId, v_RRC_TI, v_Ncc0);
+
+    //@siclog "Step 11" siclog@
+    //Receive RRCConnectionReestablishmentComplete
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId,  cr_508_RRCConnectionReestablishmentComplete(v_RRC_TI)));
+    //SS automatically checks that UE transmit the RRCConnectionReestablishmentComplete using the security key derived from the currently active KeNB
+    //* @verdict RRCConnectionReestablishmentComplete received on P Cell
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.23 Step 11");
+    
+    //@siclog "Step 12 - 13" siclog@
+    //RRCConnectionReconfiguration to resume SRB2 and existing DRBs and
+    
+    //Transmit RRCConnectionReconfiguration to add  Scell
+    //Receive RRCConnectionReconfigurationComplete
+    //f_EUTRA_RRC_RRCConnectionReconfiguration_Resume_SRB2_DRBs(p_PCellId, v_RRC_TI);
+    f_EUTRA_508RRC_AddMod_1Scell(p_PCellId,
+                                 p_SCellId,
+                                 1, //SCellIndex_r10
+                                 // p_CA_Type
+                                 v_UL_CA);
+    //@siclog "Step 14-15" siclog@
+    f_EUTRA_RRCConnectionReconfiguration_MeasConfig(p_PCellId,
+                                                    cs_508_RRCConnectionReconfiguration_ConditionMEAS(v_RRC_TI,
+                                                                                                      cs_Measurement_Config_A3_InterFreq_CA(v_Frequency_IE_PCell.UL_DL_Earfcn.dl_CarrierFreq,
+                                                                                                                                            v_ChBandDependency_PCell.AllowedMeasBandwidth,
+                                                                                                                                            v_Frequency_IE_Scell.UL_DL_Earfcn.dl_CarrierFreq,
+                                                                                                                                            v_ChBandDependency_Scell.AllowedMeasBandwidth,
+                                                                                                                                            v_MeasObjectId,
+                                                                                                                                            -, // Gap omitted as measurement of scell does not need gaps
+                                                                                                                                            v_MeasObjectId_PCell,
+                                                                                                                                            cs_ReportConfigEUTRA_A3_82423)));
+    //@siclog "Step 16" siclog@
+    //Set cell power level according to T3
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT3);
+    
+    //@siclog "Step 17" siclog@
+    //Receive MeasurementReport
+    SRB.receive(car_SRB1_RrcPdu_IND(p_PCellId, cr_MeasurementReport(1, //Meas id
+                                                                    ?, //RSRP result
+                                                                    ?, //RSRQ result
+                                                                    cr_MeasResultNeighCells_measResultListEUTRA_1Entry(v_PhysicalCellIdentity_Scell,
+                                                                                                                       omit, //CGI info
+                                                                                                                       ?,    //RSRP result
+                                                                                                                       ?),//RSRQ result
+                                                                    -,//p_MeasResultForECID_r9
+                                                                    -,//p_LocationInfo_r10
+                                                                    cr_MeasResultServFreqList(1, ?, ?))));//@sic R5s141245 sic@
+    // Preconfig  cell for no RACH response
+    f_EUTRA_SS_ConfigRachProcedure(p_SCellId,
+                                   omit,
+                                   cs_RachProcedureConfig_NoResponse(f_EUTRA_CellInfo_GetDL_ChBandwidth(p_SCellId)));
+    
+    //@siclog "Step 18" siclog@
+    //Send RRCConnectionReconfiguration to order UE to perform inter freq. HO to S-Cell
+    f_EUTRA_RRC_ConnReconfigHO_IntraLTE_Mobility(p_PCellId,
+                                                 p_SCellId,
+                                                 f_Generate_cs_MobilityControlInfo_HO_RACH(p_SCellId,
+                                                                                           v_CarrierFreq_Scell_v9e0,
+                                                                                           cs_RACH_ConfigDedicated(v_Ra_PreambleIndex)),
+                                                 -, //@sic R5s141319 sic@
+                                                 cs_RRCConnectionReconfiguration_SCell_AddMod_IEs(omit, {1}));
+    
+    t_T304.start(v_T304Max);   //@sic R5s141245 sic@
+    
+    //Reset SRBs and DRBs of source cell ( P cell )
+    f_EUTRA_SS_SRBs_DRBs_Reset_StopULGrant_noPUCCHSync(p_PCellId); /* stop default UL grant transmission, stop transmission of TA commands &
+                                                                           reset SRBs and DRB1 after 100ms. note: it does not matter when exactly the SRBs are reset as long as it is not less than 100ms */
+    f_EUTRA_SS_CommonCellConfig(p_PCellId, cas_ServingCellRelease_REQ(p_PCellId, cs_TimingInfo_Now));
+    f_EUTRA_SS_CommonCellConfig(p_SCellId, cas_ServingCellRelease_REQ(p_SCellId, cs_TimingInfo_Now));
+    // Prepeare scell with previously no SRB/DRB configured to SRB/DRB configured
+    f_EUTRA_CellConfig_ScellToPcell_Def(p_SCellId, cs_TimingInfo_Now);
+    //@siclog "Step 19" siclog@
+    //Set cell power level according to T2
+    f_EUTRA_SetCellPowerList(v_CellPowerList_AtT4);
+    
+    //Calculate ShortMAC-I to be received in RRCConnectionReestablishment Request from UE in Step 20
+    v_ShortMAC_I := f_EUTRA_Calculate_ShortMAC(p_PCellId, p_SCellId);
+    
+    //Wait T304 + tolerance to fail "Criterion for successful completion of handover"
+    t_T304.timeout; //@sic R5s141245 sic@
+    
+    // Preconfigure target cell for normal RACH operation
+    f_EUTRA_SS_ConfigRachProcedure_Def(p_SCellId, tsc_C_RNTI_Def);
+    
+    //@siclog "Step 20" siclog@
+    //Receive RRCConnectionReestablishmentRequest on Cell 4
+    SRB.receive(car_SRB0_RrcPdu_IND(p_SCellId,
+                                    cr_508_RRCConnectionReestablishmentRequest(tsc_C_RNTI_Def,
+                                                                               v_PhysicalCellIdentity_Pcell,
+                                                                               cr_ReestablishmentCause_HandoverFailure,
+                                                                               v_ShortMAC_I)));
+    //@verdict RRCConnectionReestablishmentRequest received on P Cell
+    f_EUTRA_PreliminaryPass (__FILE__, __LINE__, "Test Case 8.2.4.23 Step 20");
+    
+    //Activate RRC security at SS[SRB 1,2 and DRB 1]
+    v_Auth_Params := f_EUTRA_SS_AS_ActivateSecurity_HO_Reest(p_SCellId, f_EUTRA_Security_Get(), v_Ncc0);//@sic R5s141245 sic@
+    f_EUTRA_Security_Set(v_Auth_Params);
+    
+    //@siclog "Step 21" siclog@
+    //Transmit RRConnectionReestablishment to resume SRB1 and re-activate security
+    f_EUTRA_RRC_RRCConnectionReestablishment_Def(p_SCellId, v_RRC_TI, v_Ncc0); //@sic R5s141245 sic@
+    
+    //@siclog "Step 22" siclog@
+    //Receive RRCConnectionReestablishmentComplete
+    SRB.receive(car_SRB1_RrcPdu_IND(p_SCellId,  cr_508_RRCConnectionReestablishmentComplete(v_RRC_TI)));
+    //SS automatically checks that UE transmit the RRCConnectionReestablishmentComplete using the security key derived from the currently active KeNB
+    //* @verdict RRCConnectionReestablishmentComplete received on P Cell
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.23 Step 22");
+    
+    //@siclog "Step 23-24" siclog@
+    // resume existing radio bearer on s Cell
+    f_EUTRA_RRC_RRCConnectionReconfiguration_Resume_SRB2_DRBs(p_SCellId, v_RRC_TI);
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_SCellId, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.23.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_23_1_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Failure / Re-establishment successful / Intra-band Contiguous CA
+    f_TC_8_2_4_23_Common(eutra_Cell1, eutra_Cell3, CA_IntraBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.23.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_23_2_EUTRA() runs on EUTRA_PTC
+  { /* CA / RRC connection reconfiguration / Handover / Failure / Re-establishment successful  / Inter-Band CA */
+    f_TC_8_2_4_23_Common(eutra_Cell1, eutra_Cell10, CA_InterBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.23.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_23_3_EUTRA() runs on EUTRA_PTC
+  { // CA / RRC connection reconfiguration / Handover / Failure / Re-establishment successful / Intra-band non-contiguous CA
+    f_TC_8_2_4_23_Common(eutra_Cell1,  eutra_Cell3,  CA_IntraBandNonContiguous); //@sic R5s150323 sic@
+  }
+
+  /*
+   * @desc      Common function : REFERENCE TS 36.523-1 clause 8.2.4.16.x
+   * @param     p_PCellId
+   * @param     p_SCellId
+   * @param     p_CA_Type
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_16_Common(EUTRA_CellId_Type p_PCellId,
+                                EUTRA_CellId_Type p_SCellId,
+                                CA_Tested_Type p_CA_Type) runs on EUTRA_PTC
+  {
+    var PhysCellId v_PhysicalCellIdentity_Scell;
+    var Frequency_IE_Type v_Frequency_IE_Scell;
+    var ChannelBandwidthDependency_Type v_ChBandDependency_Scell;
+    var boolean v_UL_CA; //@sic R5s170752 sic@
+    var template (value) DL_DCCH_Message v_RRCConnectionReconfiguration;
+    var integer v_Arfcn_SCell;
+    var SCell_DL_Bandwidth_Type v_SCell_DL_Bandwidth;
+    var template (omit) DedicatedSCell_UL_Configuration_Type v_DedicatedSCell_UL_Configuration := omit;
+    var EUTRA_FDD_TDD_CellInfo_Type v_FDD_TDDInfo;
+    var template (omit) TDD_Config v_TDD_Config := omit;  // omitted in FDD
+    var EUTRA_CellSysInfo_Type v_EUTRA_CellSysInfo_Type ;
+    var EUTRA_FDD_TDD_CellInfo_Type v_PCell_FDD_TDDInfo ; //@sic R5-169501 sic@
+    var RadioResourceConfigCommonSIB v_RadioResourceConfigCommonSIB ;
+    var template (value) PUCCH_ConfigDedicated_v1020 v_PUCCH_ConfigDedicated;
+    var template (omit) CommonSCell_UL_Configuration_Type v_CommonSCell_UL_Configuration := omit;
+    var template (value) Scell_Capability_Type v_Scell_Capability := DlOnly;
+    //@sic R5-171366 sic@
+     var template (omit)  LAA_SCellConfiguration_r13 v_LAA_SCellConfiguration := omit;
+     var boolean v_LAA_Scell ;
+
+    f_EUTRA_Init(c3);
+    f_EUTRA_CA_InitCells({p_PCellId, p_SCellId}, p_CA_Type, c3);
+    v_UL_CA := f_EUTRA_MobileInfo_GetUL_CA(); //@sic R5s170752 sic@
+    
+    //@sic R5-150657 sic@
+    v_LAA_Scell := f_EUTRA_CellInfo_IsLAA (p_SCellId);
+    if (v_LAA_Scell)
+    {
+        v_LAA_SCellConfiguration := cs_508_LAA_SCellConfiguration;
+    }
+    f_EUTRA_CellInfo_SetMIMO_2TX(p_PCellId, cs_AntennaInfoDedicated_2TX_TM2, cs_PhysicalConfigDedicated_AntennaInfo_2TX_TM2); // TM2
+    f_EUTRA_CellInfo_SetMIMO_2TX(p_SCellId); //TM3
+    v_EUTRA_CellSysInfo_Type := f_EUTRA_CellInfo_GetSYSINFO(p_SCellId);
+    v_RadioResourceConfigCommonSIB := v_EUTRA_CellSysInfo_Type.BCCH_Info.SIs[0].message_.c1.systemInformation.criticalExtensions.systemInformation_r8.sib_TypeAndInfo[0].sib2.radioResourceConfigCommon;
+    //Get cell dependant parameters
+    v_PhysicalCellIdentity_Scell := f_EUTRA_CellInfo_GetPhyCellId(p_SCellId);
+    v_Frequency_IE_Scell := f_EUTRA_CellInfo_GetFrequencyIEs(p_SCellId);
+    v_ChBandDependency_Scell := f_EUTRA_BandDependentParam(v_Frequency_IE_Scell.DL_ChBandwidth,
+                                                           v_Frequency_IE_Scell.UL_ChBandwidth);
+    
+    //Set C-RNTI to be used in s-cell creation
+    f_EUTRA_CellInfo_SetC_RNTI(p_SCellId, tsc_C_RNTI_Def);
+    
+    //Create and configure all cells
+    f_EUTRA_CellConfig_Pcell_Def(p_PCellId);
+    f_EUTRA_CellConfig_Scell(p_SCellId); //No DRB's created
+    
+    // bring UE to initial state
+    f_EUTRA_Preamble(p_PCellId, STATE2_IDLEUPDATE);
+    f_EUTRA_RbEst_Def(p_PCellId);
+    
+    f_EUTRA_TestBody_Set(true);
+    //@siclog "step 1" siclog@
+    f_EUTRA_SetCellPower(p_SCellId, -91);//Make S Cell on
+    //@sic R5-165892 sic@
+    v_Arfcn_SCell := f_EUTRA_CellInfo_GetEARFCN_DL_r9(p_SCellId);
+    v_PhysicalCellIdentity_Scell := f_EUTRA_CellInfo_GetPhyCellId(p_SCellId);
+    v_SCell_DL_Bandwidth := f_EUTRA_CellInfo_GetSCell_DL_ChBandwidth(p_SCellId);
+    v_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_SCellId);
+    v_PCell_FDD_TDDInfo := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_PCellId); //@sic R5-169501 sic@
+    if ((v_FDD_TDDInfo.FDD_TDD == TDD) and not v_LAA_Scell) { //@sic R5-169501 R5-171732 sic@
+            v_TDD_Config := cs_TDD_ConfigDef(v_FDD_TDDInfo.TDD_SubframeAssignment);    // Value omitted in FDD
+        }
+      //@sic R5-169501 R5s170064 sic@
+      if ( (v_PCell_FDD_TDDInfo.FDD_TDD == TDD) and (v_FDD_TDDInfo.FDD_TDD == FDD) ) { //TDD FDD
+          v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_TDD_FDD_CA;
+      } else
+      {
+          // Both FDD and TDD as 2 TX
+          v_PUCCH_ConfigDedicated  := cs_508_PUCCH_ConfigDedicated_v1020_2TX(cs_N1PUCCH_AN_CS_r10_FDD_1TX,cs_N1PUCCH_AN_CS_r10_FDD_2TX);
+      }
+      //@sic R5s170064 sic@
+      f_EUTRA_SS_CommonCellConfig(p_PCellId, cas_CellConfig_PUCCH_Dedicated(p_PCellId,
+                                                                            cs_TimingInfo_Now,
+                                                                            v_PCell_FDD_TDDInfo.pucch_Config,
+                                                                            v_PUCCH_ConfigDedicated));
+
+    
+
+    if (v_UL_CA) {
+      v_Scell_Capability := UL_DL;
+      //@sic R5-160646 sic@
+      v_CommonSCell_UL_Configuration := cs_RadioResourceConfigCommonSCell_UL_Configuration_DEFAULT(v_ChBandDependency_Scell.Pusch_HoppingOffset, v_RadioResourceConfigCommonSIB.soundingRS_UL_ConfigCommon);
+      v_DedicatedSCell_UL_Configuration := cs_RadioResourceConfigDedicatedSCell_UL_Configuration_DEFAULT();//@sic R5s150070 sic@
+      
+    }
+    v_RRCConnectionReconfiguration := cs_508_RRCConnectionReconfiguration_SCell_AddModRelease(tsc_RRC_TI_Def, //@sic R5s160254 sic@
+                                                                                              cs_SCellToAddMod_r10(1,
+                                                                                                     v_PhysicalCellIdentity_Scell,
+                                                                                                     v_Arfcn_SCell,
+                                                                                                     cs_508_RadioResourceConfigCommonSCell_r10_DEFAULT(v_SCell_DL_Bandwidth, tsc_P_b_2Tx_4Tx,v_CommonSCell_UL_Configuration,v_TDD_Config, cs_AntennaInfoCommon_2Port,omit,omit),
+                                                                                                     cs_RadioResourceConfigDedicatedSCell_r10(cs_PhysicalConfigDedicatedSCell_r10_DEFAULT(v_DedicatedSCell_UL_Configuration, cds_AntennaInfoDedicated_TM2_r10,v_LAA_SCellConfiguration))), //@sic R5-171366 sic@
+
+                                                                                              v_PUCCH_ConfigDedicated,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              cs_MeasConfig(omit, omit, omit, omit, omit, omit, omit, cs_MeasGapConfig_release), //release GAP @sic R5s140010 R5s140205 sic@
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              cs_AntennaInfo_r10_Explicit(cds_AntennaInfoDedicated_TM3_r10));
+    //@siclog "Step 2 - 3" siclog@
+    //Transmit RRCConnectionReconfiguration
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddModRel_Scell_MIMO(p_PCellId,
+                                        p_SCellId,
+                                        v_RRCConnectionReconfiguration,
+                                        v_Scell_Capability);  // UL CA desired
+    //* @verdict RRCConnectionReconfigurationComplete received on PCell
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.16 Step 3");
+    v_RRCConnectionReconfiguration := cs_508_RRCConnectionReconfiguration_SCell_AddModRelease(tsc_RRC_TI_Def,
+                                                                                              cs_SCellToMod_r10(1, //@sic R5s150263 R5s160254 sic@
+                                                                                                               cs_RadioResourceConfigDedicatedSCell_r10(cs_PhysicalConfigDedicatedSCell_r10_DEFAULT(v_DedicatedSCell_UL_Configuration, cds_AntennaInfoDedicated_TM2_r10,v_LAA_SCellConfiguration))), //@sic R5-171366 sic@
+                                                                                              v_PUCCH_ConfigDedicated,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              cs_MeasConfig(omit, omit, omit, omit, omit, omit, omit, cs_MeasGapConfig_release), //release GAP @sic R5s140010 R5s140205 sic@
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              -,
+                                                                                              cs_AntennaInfo_r10_Explicit(cds_AntennaInfoDedicated_TM2_r10));
+    
+    
+    //@siclog "Step 4 - 5" siclog@
+    //Transmit RRCConnectionReconfiguration
+    //Receive RRCConnectionReconfigurationComplete
+    f_EUTRA_508RRC_AddModRel_Scell_MIMO(p_PCellId,
+                                        p_SCellId,
+                                        v_RRCConnectionReconfiguration,
+                                        v_Scell_Capability);  // UL CA desired
+    //* @verdict RRCConnectionReconfigurationComplete received on PCell
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Test Case 8.2.4.16 Step 5");
+    
+    f_EUTRA_TestBody_Set(false);
+    
+    //Switch/power off UE
+    f_EUTRA_Postamble(p_PCellId, E2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.16.1
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_16_1_EUTRA() runs on EUTRA_PTC
+  { /* CA / RRC connection reconfiguration / Setup and Change of MIMO / Intra-band Contiguous CA/ Intra-band Contiguous CA */
+    f_TC_8_2_4_16_Common(eutra_Cell1, eutra_Cell3, CA_IntraBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.16.2
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_16_2_EUTRA() runs on EUTRA_PTC
+  { /* CA / RRC connection reconfiguration / Setup and Change of MIMO / Intra-band Contiguous CA / Inter-Band CA */
+    f_TC_8_2_4_16_Common(eutra_Cell1, eutra_Cell10, CA_InterBand);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.2.4.16.3
+   * @status    APPROVED (LTE_A_R10_R11)
+   */
+  function f_TC_8_2_4_16_3_EUTRA() runs on EUTRA_PTC
+  { /* CA / RRC connection reconfiguration / Setup and Change of MIMO / Intra-band Contiguous CA/ Intra-band non-Contiguous CA */
+    f_TC_8_2_4_16_Common(eutra_Cell1, eutra_Cell3, CA_IntraBandNonContiguous); //@sic R5s150323 sic@
+  }
+
+}

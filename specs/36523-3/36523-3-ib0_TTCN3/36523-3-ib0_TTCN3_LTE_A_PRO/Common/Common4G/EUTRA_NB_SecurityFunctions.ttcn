@@ -1,0 +1,270 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-18 11:30:22 +0200 (Wed, 18 Jun 2025) $
+// $Rev: 41494 $
+/******************************************************************************/
+module EUTRA_NB_SecurityFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from NAS_AuthenticationCommon all;
+  import from NAS_CommonTypeDefs all;
+  import from NasEmu_CtrlAspTypes all;
+
+  type record VarShortMAC_Input_Type {   /* 36.331 cl. 7.1 */
+    /* @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT, NBIOT) */
+    CellIdentity      cellIdentity,       // Bit string (28)
+    PhysCellId        physCellId,         // Integer (0..503)
+    C_RNTI            c_RNTI              // Bit string (16)
+  };
+
+  template (value) NAS_SecurityInfo_Type cs_NAS_SecurityInfo(B3_Type p_Algo,
+                                                             B128_Key_Type p_Key) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS) */
+    Algorithm         := p_Algo,
+    K_NAS             := p_Key
+  };
+
+  template (value) UE_SecurityCapability cs_NAS_SecurityCapabilityInit :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS) */
+    // @sic R5s100135 sic@
+    iel    := '02'O,
+    eeaCap := '00'O,
+    eiaCap := '00'O,
+    ueaCap := omit,
+    uiaCap := omit,
+    geaCap := omit
+  };
+
+  /*
+   * @desc      Function to encode VarShortMAC from ASN.1 to octetstring
+   * @param     p_VarShortMAC_Input
+   * @param     p_ResumeDiscriminator (default value: omit)
+   * @return    octetstring
+   * @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_IRAT, NBIOT)
+   */
+  function f_EUTRA_NB_VarShortMAC(VarShortMAC_Input_Type p_VarShortMAC_Input,
+                                  template (omit) B1_Type p_ResumeDiscriminator := omit) return octetstring
+  { /* @sic R5s170515 change 6: p_ResumeDiscriminator sic@ */
+    var bitstring v_PhysCellId;
+    var bitstring v_Bitstring_VarShortMAC_Input;
+    var octetstring v_Octetstring_VarShortMAC_Input;
+    
+    v_PhysCellId := int2bit(p_VarShortMAC_Input.physCellId, 9);
+    
+    //Place IEs of VarShortMAC_Input into single bitstring
+    v_Bitstring_VarShortMAC_Input := p_VarShortMAC_Input.cellIdentity & v_PhysCellId & p_VarShortMAC_Input.c_RNTI;
+
+    if (ispresent(p_ResumeDiscriminator)) { /* @sic R5s170515 change 6 sic@ */
+      v_Bitstring_VarShortMAC_Input := v_Bitstring_VarShortMAC_Input & valueof(p_ResumeDiscriminator);
+    }
+
+    //Octet align the bit string
+    v_Bitstring_VarShortMAC_Input := f_OctetAlignedBitString(v_Bitstring_VarShortMAC_Input);  // @sic R5s100324 sic@
+    
+    //Convert bitstring to octet aligned octetstring
+    v_Octetstring_VarShortMAC_Input := bit2oct(v_Bitstring_VarShortMAC_Input);
+    
+    return (v_Octetstring_VarShortMAC_Input);
+  }
+
+  /*
+   * @desc      KASME derivation function (S10); As per annex A.2 of 33.401
+   * @param     p_AuthParams
+   * @param     p_KDF
+   * @param     p_Ks
+   * @param     p_PLMN
+   * @return    B256_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_Authentication_S10(Common_AuthenticationParams_Type p_AuthParams,
+                                         KDF_Type       p_KDF,
+                                         B256_Type      p_Ks,
+                                         NAS_PlmnId     p_PLMN) return B256_Type
+  {
+    const octetstring const_S10_FC := '10'O;
+    var octetstring v_S;
+
+    // Generation of String
+    v_S := const_S10_FC;
+    //FC = 0x10
+    v_S :=  (v_S & p_PLMN);
+    //P0 = serving network ID
+    v_S :=  (v_S & '0003'O) ;
+    //L0 = length of serving network ID (i.e. 0x00 0x03)
+    v_S :=  ( v_S & ( substr (( bit2oct ( p_AuthParams.AUTN )) , 0,6 ))); // @sic R5s160711 sic@
+    //P1 = SQN XOR AK
+    // to have MSB 6 bytes which is SQN xor AK and truncated as SQN xor AK is first 6 bytes of AUTN
+    v_S :=  ( v_S & '0006'O );
+    //L1 = length of SQN XOR AK (i.e. 0x00 0x06)
+    return fx_KeyDerivationFunction( p_KDF, p_Ks, v_S ); // @sic R5s160711 sic@
+  };
+
+  /*
+   * @desc     Converts ASN.1 CipheringAlgorithm_Type to bit string representation
+   * @param     p_Alg
+   * @return    B3_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_ConvertCiphAlg2Bitstring(CipheringAlgorithm_r12 p_Alg) return B3_Type
+  { /* @sic BASELINE MOVING 2015: CipheringAlgorithm_Type -> CipheringAlgorithm_r12 sic@ */
+    var B3_Type v_B3 := '111'B;
+    select (p_Alg) {
+      case (eea0) {
+        v_B3 := '000'B;
+      }
+      case (eea1) {
+        v_B3 := '001'B;
+      }
+      case (eea2) {
+        v_B3 := '010'B;
+      }
+    case (eea3_v1130) {
+        v_B3 := '011'B;
+      }
+      case else {
+        FatalError (__FILE__, __LINE__, "Non defined AS Ciphering algorithm Selected");
+      }
+    }
+    return v_B3;
+  }
+
+  /*
+   * @desc      Converts ASN.1 IntegrityProtAlgorithm_Type to bit string representation
+   * @param     p_Alg
+   * @return    B3_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_ConvertIntAlg2Bitstring(IntegrityProtAlgorithm_Type p_Alg) return B3_Type
+  {
+    var B3_Type v_B3 := '111'B;
+    select (p_Alg) {
+      case (eia1) {
+        v_B3 := '001'B;
+      }
+      case (eia2) {
+        v_B3 := '010'B;
+      }
+      case (eia3_v1130) {
+        v_B3 := '011'B;
+      }
+      case else {
+        FatalError (__FILE__, __LINE__, "Non defined AS Integrity algorithm Selected");
+      }
+    }
+    return v_B3;
+  }
+
+  /*
+   * @desc      KeNB derivation function used at ECM-IDLE to ECM CONNECTED transition,
+   *            ECM-IDLE mode mobility, transition away from EMM-DEREGISTERED to EMM-REGISTERED/ECM-CONNECTED
+   *            and key change on the-fly (S11)
+   *            As per annex A.3 of 33.401
+   * @param     p_KDF
+   * @param     p_KASME
+   * @param     p_UL_NAS_Count
+   * @return    B256_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_Authentication_S11(KDF_Type p_KDF,
+                                         B256_Type p_KASME,
+                                         O4_Type p_UL_NAS_Count) return B256_Type
+  {
+    const octetstring const_S11_FC :='11'O;
+    var octetstring v_S;
+    // Generation of String
+    v_S := const_S11_FC;
+    //FC = 0x11
+    v_S :=   ( v_S & p_UL_NAS_Count);
+    //P0 = Uplink NAS COUNT
+    v_S :=  ( v_S & '0004'O );
+    //L0 = length of uplink NAS COUNT (i.e. 0x00 0x04)
+    return fx_KeyDerivationFunction ( p_KDF, p_KASME, v_S ); // @sic R5s160711 sic@
+  };
+
+  /*
+   * @desc      NH* derivation function (S12)
+   *            As per annex A.4 of 33.401
+   *            The SYNC-input parameter shall be the newly derived KeNB for the initial NH derivation,
+   *            and the previous NH for all subsequent derivations
+   * @param     p_KDF
+   * @param     p_KASME
+   * @param     p_Synch
+   * @return    B256_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_Authentication_S12(KDF_Type p_KDF,
+                                         B256_Type p_KASME,
+                                         B256_Type p_Synch) return B256_Type
+  {
+    const octetstring const_S12_FC :='12'O;
+    var octetstring v_S;
+    // Generation of String
+    v_S := const_S12_FC;
+    //  FC = 0x12
+    v_S :=   ( v_S & bit2oct ( p_Synch ) );
+    // P0 = SYNC-input
+    v_S :=   ( v_S & '0020'O );
+    //L0 = length of SYNC-input (i.e. 0x00 0x20)
+
+    return fx_KeyDerivationFunction ( p_KDF, p_KASME, v_S ); // @sic R5s160711 sic@
+  };
+
+  /*
+   * @desc      KeNB* derivation function (S13)
+   *            As per annex A.5 of 33.401
+   * @param     p_KDF
+   * @param     p_KENB
+   * @param     p_NH
+   * @param     p_PhyCellId
+   * @param     p_EARFCN_DL
+   * @param     p_FromNH            (default value: false)
+   * @return    B256_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_Authentication_S13(KDF_Type p_KDF,
+                                         B256_Type p_KENB,
+                                         B256_Type p_NH,
+                                         PhysCellId p_PhyCellId,
+                                         ARFCN_ValueEUTRA_r9 p_EARFCN_DL,
+                                         boolean p_FromNH := false) // False for Deriving Kenb* from Kenb, else from NH
+    return B256_Type //@sic R5s100496 sic@
+  { // @sic R5s100138 sic@
+    //@sic R5-165892 Band extension p_EARFCN_DL -> ARFCN_ValueEUTRA_r9 sic@
+    const octetstring const_S13_FC :='13'O; //@sic R5s100178 sic@
+    var octetstring v_S;
+    var B256_Type v_SourceKey;
+    // Generation of String
+    v_S := const_S13_FC;
+    //FC = 0x13
+    v_S :=   ( v_S & int2oct ( p_PhyCellId , 2 ) );
+    //P0 = PCI (target physical cell id)
+    v_S :=   ( v_S & '0002'O );
+    //L0 = length of PCI (i.e. 0x00 0x02)
+    if ( p_EARFCN_DL <= maxEARFCN) {  //@sic R5-165892 Band extension, R5s210119 sic@
+        v_S :=   ( v_S & int2oct ( p_EARFCN_DL , 2 ) );
+        v_S :=   ( v_S & '0002'O );
+    } else if ((p_EARFCN_DL >= maxEARFCN_Plus1) and (p_EARFCN_DL <= maxEARFCN2)) { // @sic R5s210119 sic@
+        v_S :=   ( v_S & int2oct ( p_EARFCN_DL , 3 ) ); // @sic R5s170217 sic@
+        v_S :=   ( v_S & '0003'O );
+    }
+    //P1 = EARFCN-DL (target physical cell downlink frequency)
+    //L1 length of EARFCN-DL (i.e. L1 = 0x00 0x02 if EARFCN-DL is between 0 and 65535, and L1 = 0x00 0x03 if EARFCN-DL is between 65536 and 262143)
+    if ( p_FromNH == false) //  @sic R5s100496 sic@ Kenb* derived from Kenb
+      {
+        v_SourceKey := p_KENB; // @sic R5s160711 sic@
+      }
+    else // Kenb* derived from Fresh Derived NH
+      {
+        v_SourceKey := p_NH; // @sic R5s160711 sic@
+      };
+    return fx_KeyDerivationFunction ( p_KDF, v_SourceKey, v_S );//@sic R5s100496, R5s160711 sic@
+  };
+
+}

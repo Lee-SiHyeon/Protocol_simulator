@@ -1,0 +1,481 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-08 20:14:42 +0100 (Thu, 08 Feb 2024) $
+// $Rev: 37834 $
+/******************************************************************************/
+
+module IMS_Procedures_SupplementaryServices {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_Parameters all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from LibSip_SimpleMsgSummaryTypes all;
+  import from NoTargetNamespace_24390_ussd_xsd language "XSD" all;
+  import from XSD all;
+
+  /*
+   * @desc      check From header to be anonymous
+   * @param     p_MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MessageHeader_CheckFromAnonymous(MessageHeader p_MessageHeader) runs on IMS_PTC
+  {
+    var template (present) From v_From_Anonymous := cr_From(cr_DisplayName("Anonymous"),
+                                                            cr_SipUrl_Common(c_sipScheme,
+                                                                             cr_SipUriComponent(cr_UserInfo("anonymous", omit),
+                                                                                                "anonymous.invalid")));
+    if (not match(p_MessageHeader.fromField, v_From_Anonymous)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid From header");
+    }
+  }
+
+  type enumerated PrivacyCheckType_Type { idOnly, idOrHeader }; /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      Check privacy header
+   * @param     p_MessageHeader
+   * @param     p_PrivacyCheckType  (default value: idOnly)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MessageHeader_CheckPrivacy(MessageHeader p_MessageHeader,
+                                            PrivacyCheckType_Type p_PrivacyCheckType := idOnly) runs on IMS_PTC
+  { /* @sic R5-194827: p_PrivacyCheckType sic@ */
+    var boolean v_PrivacyMatchId := match(p_MessageHeader.privacy, cr_Privacy("id"));
+    var boolean v_PrivacyMatchHeader;
+    var boolean v_Result;
+
+    select (p_PrivacyCheckType) { /* @sic R5-194827 sic@ */
+      case (idOnly) {
+        v_Result := v_PrivacyMatchId;
+      }
+      case (idOrHeader) {
+        v_PrivacyMatchHeader := match(p_MessageHeader.privacy, cr_Privacy("header"));
+        v_Result := (v_PrivacyMatchId xor v_PrivacyMatchHeader);
+      }
+    }
+
+    if (not v_Result) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid or missing Privacy header");
+    }
+  }
+
+  template (value) Msg_summary_line cs_MsgSummaryLine_VoiceMessage(charstring p_Msgs,
+                                                                   charstring p_UrgentMsgs := "0/0") :=
+  { /* @status    APPROVED (IMS) */
+    msg_context_class := c_voiceMessage,
+    msgs := p_Msgs,
+    urgent_msgs := p_UrgentMsgs
+  };
+
+  template (value) SimpleMsgSummary cs_SimpleMsgSummary_MessageWaiting(charstring p_Status,
+                                                                       charstring p_AccountURI,
+                                                                       template (omit) Msg_summary_line_list p_MsgSummaryLineList := omit,
+                                                                       template (omit) Opt_msg_headers p_SetOfOptionalLines := omit) :=
+  { /* @status    APPROVED (IMS) */
+    // RFC 3842
+    msg_status_line := {
+      msg_type := c_messageWaiting,
+      msg_status := p_Status
+    },
+    msg_account := {
+      msg_type_account := c_messageAccount,
+      account_URI := p_AccountURI
+    },
+    msg_summary_line_list := p_MsgSummaryLineList,
+    opt_msg_headers := p_SetOfOptionalLines
+  };
+
+  template (value) MessageBody cs_MessageBody_SimpleMsgSummary(template (value) SimpleMsgSummary p_SimpleMsgSummary) :=
+  { /* @status    APPROVED (IMS) */
+    simpleMsgSummary := p_SimpleMsgSummary
+  };
+
+  /*
+   * @desc      Build up message to be sent with NOTIFY for MWI (Message Waiting Indication)
+   * @param     p_FromUrl
+   * @param     p_MessageServerDomain
+   * @return    Opt_msg_headers
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MWI_Message(SipUrl p_FromUrl,
+                              charstring p_MessageServerDomain) return Opt_msg_headers
+  {
+    var Opt_msg_headers v_SetOfOptionalLines := {
+      "To: " & f_SIP_SipUrl2Str(p_FromUrl),
+      "From: <user2_public1@home1.net>",
+      "Subject: call me back!",
+      "Message-ID: 27775334485@" & p_MessageServerDomain,
+      "Message-Context: voice-message",
+      "Date: Fri 09 Dec 2016 09:15 +0100",        // @sic R5-168947 sic@
+      "Priority: urgent"                          // @sic R5-168947 sic@
+    };
+    return v_SetOfOptionalLines;
+  }
+
+  /*
+   * @desc      send NOTIFY for Message Waiting Indication event package (34.229-1 A.6.2); receive 200 OK
+   * @param     p_SubscribeRequest
+   * @param     p_MessageWaiting
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MWI_Notify(SUBSCRIBE_Request p_SubscribeRequest,
+                            boolean p_MessageWaiting) runs on IMS_PTC
+  {  /* A.6.2 prose issues: A.6.2 specifies a pure DL message
+        - Via header: there shall be nothing "optional"
+        - From header: shall be clearly specified (i.e. not "any IMPU" but e.g. "same URI as sent by the UE in the To header of the SUBSCRIBE")
+        - To header: as From header (e.g. "same URI as sent by the UE in the From header of the SUBSCRIBE")
+        - Contact header: shall not be a PIXIT
+        - Message Body: shall refer to "same IMPU as in From header" (@sic see R5-150705 sic@) */
+    /* @sic R5-153756, R5-153986: p_CseqValue removed as global msgSummaryDialog is used instead sic@ */
+    /* @sic R5-210664: p_MessageWaiting instead of p_MessageContent sic@ */
+    var template (value) MessageHeader v_MessageHeader_Notify;
+    var template (present) MessageHeader v_MessageHeader_Response;
+    var charstring v_MessageServerDomain := f_IMS_PTC_ImsInfo_GetHomeDomainName();  /* @sic R5-210664: v_MessageServerDomain instead of p_MessageServerDomain sic@ */
+    var charstring v_NW_AddrStr := f_IMS_PTC_NW_Address_GetAddrStr();
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var CharStringList_Type v_ViaAddressList := { v_NW_AddrStr, tsc_IMS_Scscf, v_MessageServerDomain };
+    var template (value) Via v_Via := f_IMS_NotifyRequest_ViaTX(v_ViaAddressList);    /* @sic R5-153986: new function f_IMS_NotifyRequest_ViaTX sic@ */
+    var template (value) SipUrl v_RequestLineUrl := f_MessageHeader_GetContactSipUrl(p_SubscribeRequest.msgHeader);
+    var template (value) SipUrl v_ContactSipUrl := cs_SipUri_HostPort("Contact@" & v_MessageServerDomain);       /* @sic R5-153764 sic@ */
+    var template (value) ContentType v_ContentType := cs_ContentType("application/simple-message-summary");  /* @sic R5-153756 sic@ */
+    var EventType v_EventType := "message-summary";
+    var Opt_msg_headers v_Message;
+    var SipUrl v_SubscribeFromUrl;
+    var charstring v_AccountURI;
+    var template (value) SimpleMsgSummary v_SimpleMsgSummary;
+    
+    v_MessageHeader_Notify := f_IMS_NotifyRequest_MessageHeader_Common(msgSummaryDialog, v_Via, cs_Contact(v_ContactSipUrl), v_EventType, cs_SubscriptionState_Active("7200"), v_ContentType);
+    v_AccountURI := f_SIP_SipUrl2Str(f_Addr_Union_GetSipUrl(v_MessageHeader_Notify.fromField.addressField));
+
+    if (not p_MessageWaiting) {
+      v_SimpleMsgSummary := cs_SimpleMsgSummary_MessageWaiting("no", v_AccountURI);
+    } else {
+      v_SubscribeFromUrl := f_Addr_Union_GetSipUrl(p_SubscribeRequest.msgHeader.fromField.addressField);
+      v_Message := fl_IMS_MWI_Message(v_SubscribeFromUrl, v_MessageServerDomain);
+      v_SimpleMsgSummary := cs_SimpleMsgSummary_MessageWaiting("yes", v_AccountURI, {cs_MsgSummaryLine_VoiceMessage("1/0")}, v_Message);
+    }
+    
+    IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(v_Protocol), cs_NOTIFY_Request(v_RequestLineUrl, v_MessageHeader_Notify,  cs_MessageBody_SimpleMsgSummary(v_SimpleMsgSummary))));
+    
+    v_MessageHeader_Response := f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Notify);
+    f_IMS_ReceiveResponse(v_MessageHeader_Notify, v_Protocol, cr_Response(c_statusLine200, v_MessageHeader_Response));  /* @sic R5s140350 sic@ */
+  }
+
+  /*
+   * @desc      Receive SUBSCRIBE for MWI and reg even and send the corresponding 200 OK responses
+   * @return    SUBSCRIBE_Request
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MWI_Subscribe() runs on IMS_PTC return SUBSCRIBE_Request
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var SUBSCRIBE_Request v_SubscribeReq_MsgSummaryEvent;
+    var CharStringList_Type v_IMPU_List;
+
+    var template (present) SipUrl v_RequestUrl_RegEvent := f_IMS_PTC_ImsInfo_GetSipUriSubscriptionRX();
+    var template (present) SipUrl v_RequestUrl_MsgSummaryEvent := cr_SipUri_HostPort(?);        // to be checked after SUBSCRIBE has been received
+    var template (present) SipUrl v_ToUrl_MsgSummaryEvent := cr_SipUri_HostPort(?);             // to be checked after SUBSCRIBE has been received
+    var template (present) charstring v_ExpireTime := ?;                                        // value not to be checked acc. to A.6.1
+    var template (present) MessageHeader v_ExpectedMessageHeaderMsgSummary := f_IMS_SubscribeRequest_MessageHeaderRX("message-summary", v_ToUrl_MsgSummaryEvent, v_ExpireTime);
+    var template (present) MessageHeader v_ExpectedMessageHeaderRegEvent := f_IMS_SubscribeRequest_MessageHeaderRX("reg");
+    var boolean v_SubcribedToRegEventPackage := false;
+    var boolean v_SubcribedToMsgSummaryEventPackage := false;
+
+    alt {
+      // Step 1. UE subscribes to the Message Waiting Indication event package.
+      [not v_SubcribedToMsgSummaryEventPackage] a_IMS_SUBSCRIBE_Request(v_IMS_DATA_REQ_ByRef, msgSummaryDialog, v_RequestUrl_MsgSummaryEvent, v_ExpectedMessageHeaderMsgSummary) {
+        v_SubscribeReq_MsgSummaryEvent := v_IMS_DATA_REQ_ByRef.Request.Subscribe;
+        
+        if (px_IMS_MessageAccountIdentity != "") {
+          v_IMPU_List := { px_IMS_MessageAccountIdentity };      /* UE shall use MessageAccountIdentity when configured */
+        } else {
+          v_IMPU_List := f_IMS_PTC_ImsInfo_GetAllIMPUs();        /* any IMPU within the set of IMPUs on ISIM if MessageAccountIdentity is not configured at the UE */
+        }
+        if (not f_IMS_PublicUserId_Match(v_IMPU_List, v_SubscribeReq_MsgSummaryEvent.requestLine.requestUri)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid request URI");
+        }
+        if (not f_IMS_PublicUserId_Match(v_IMPU_List, f_Addr_Union_GetSipUrl(v_SubscribeReq_MsgSummaryEvent.msgHeader.toField.addressField))) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid request URI");
+        }
+        
+        // Step 2. The SS responds SUBSCRIBE with 200 OK
+        f_IMS_SUBSCRIBE_Response(msgSummaryDialog, v_IMS_DATA_REQ_ByRef, "7200");   /* @sic R5-155913: ExpireTime := "7200" sic@ */
+        
+        v_SubcribedToMsgSummaryEventPackage := true;
+        if (not v_SubcribedToRegEventPackage) { repeat; }
+      }
+      // Step 2a. The UE subscribes to the registration event package.
+      [not v_SubcribedToRegEventPackage] a_IMS_SUBSCRIBE_Request(v_IMS_DATA_REQ_ByRef, regEventDialog, v_RequestUrl_RegEvent, v_ExpectedMessageHeaderRegEvent) {
+        
+        // Step 2b. The SS responds with 200 OK
+        f_IMS_SUBSCRIBE_Response(regEventDialog, v_IMS_DATA_REQ_ByRef);
+        
+        v_SubcribedToRegEventPackage := true;
+        if (not v_SubcribedToMsgSummaryEventPackage) { repeat; }
+      }
+    }
+    return v_SubscribeReq_MsgSummaryEvent;
+  }
+
+  /*
+   * @desc      used in 15.27 and 15.28 to check alertInfo
+   * @param     p_MessageHeader_Ringing
+   * @param     p_AlertInfoUrl      (default value: "urn:alert:service:call-waiting")
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CommunicationWaiting_Check180Ringing(template (omit) MessageHeader p_MessageHeader_Ringing,
+                                                      charstring p_AlertInfoUrl := "urn:alert:service:call-waiting") runs on IMS_PTC
+  {
+    var template (present) charstring v_AlertInfoUrl := p_AlertInfoUrl;  /* @sic R5s140092 change 1.2 - temporary solution: (p_AlertInfoUrl, "<" & p_AlertInfoUrl &">") sic@
+                                                                            @sic R5w140111, slide 8: "<", ">" shall be handled by the codec sic@ */
+    
+    if (not ispresent(p_MessageHeader_Ringing)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "No 180 Ringing");
+    }
+    if (not match(valueof(p_MessageHeader_Ringing.alertInfo), cr_AlertInfo(v_AlertInfoUrl))) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid 'alertInfo'");
+    }
+  }
+
+  /*
+   * @desc      to modify the dialog in case of call forwarding
+   * @param     p_CseqValue
+   * @param     p_SessId            (default value: "22222222")
+   * @param     p_SessVersion       (default value: 22222222)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MO_ComunicationForwarding_ModifyDialog(integer p_CseqValue,
+                                                        charstring p_SessId := "22222222",
+                                                        integer p_SessVersion := 22222222) runs on IMS_PTC
+  { /* @sic R5-220229: p_SessId, p_SessVersion sic@ */
+
+    var integer v_SessVersion := p_SessVersion - 1;  // session version is incremented before being used in SDP message
+
+    // set new tag for the dialog:
+    f_IMS_PTC_ImsInfo_DialogSetLocalTag(f_IMS_GenerateTag("INVITE-FORWARDED"));     /* @sic R5s140621 1st change: in terms of the response the To-tag in the local tag here sic@ */
+    // cseq needs to be reset to the value of the INVITE (@sic R5s140621 2nd change sic@)
+    f_IMS_PTC_ImsInfo_CseqSet(dialogRemote, p_CseqValue);
+    
+    // 15.8 Step 11 Send 183 Session Progress
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX(p_SessId);              /* @sic R5-150707 sic@ */
+    f_IMS_PTC_ImsInfo_DialogSetSessVersionTX(v_SessVersion);    /* @sic R5-150707 sic@ */
+    f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageTX(omit);
+    f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageRX(omit);          /* @sic R5s150666, R5-153525 sic@ */
+  }
+
+  template (value) MessageBody cs_MessageBody_USSD(template (value) Ussd_data p_UssdData) := cs_MessageBody_XML_Bitstring(encvalue(p_UssdData)); /* @status    APPROVED (IMS)
+                                                                                                                                                    @sic R5w230106, R5s230374: Ussd_data instead of UssdData_Type sic@ */
+
+  template (present) Ussd_data cr_UssdData(template (present) XSD.String p_Language := ?,
+                                           template (present) XSD.String p_UssdString) :=
+  { /* @status    APPROVED (IMS) */
+    attr := *,
+    language_ := p_Language,
+    ussd_string := p_UssdString,
+    error_code := omit,
+    anyExt := *,
+    elem_list := {}
+  };
+
+  template (value) Ussd_data cs_UssdData(XSD.String p_Language,
+                                         XSD.String p_UssdString) :=
+  { /* @status    APPROVED (IMS) */
+    attr := omit,
+    language_ := p_Language,
+    ussd_string := p_UssdString,
+    error_code := omit,
+    anyExt := omit,
+    elem_list := {}
+  };
+
+  /*
+   * @desc      Build SDP offer sent by the UE for USSD
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_USSD_BuildSDP_OfferRX() runs on IMS_PTC return template (present) SDP_Message
+  {
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var template (present) SDP_media_desc v_SDP_Media_Desc;
+    var template (present) SDP_media_desc_list v_SDP_Media_Desc_List;
+    var template SDP_attribute_list v_SDP_Attribute_List := *;
+    var template (present) charstring v_IPAddrConnection := ?;
+    var template SDP_bandwidth_list v_BandwidthList := cr_SDP_Bandwidth_List_AS;    // @sic R5s221158 - Further additional changes: allow RS/RR parameters sic@
+    var integer v_Port := 0;
+
+    v_SDP_Media_Desc := cr_SDP_Media_Desc(cr_SDP_Media(?, v_Port, ?, ?),
+                                          cr_SDP_Connection(v_AddrType, v_IPAddrConnection),
+                                          v_BandwidthList,
+                                          v_SDP_Attribute_List);
+    v_SDP_Media_Desc_List := { v_SDP_Media_Desc };
+    return cr_SDP_Message_Common(-, v_AddrType, -, v_IPAddrConnection, v_BandwidthList, cr_SDP_Time_Any, v_SDP_Media_Desc_List);
+  }
+
+  /*
+   * @desc      Build SDP answer sent to the UE for USSD
+   * @param     p_SDP_Message_Step2
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_USSD_BuildSDP_AnswerTX(SDP_Message p_SDP_Message_Step2) runs on IMS_PTC return template (value) SDP_Message
+  {
+    var template (value) SDP_Message v_SDP_Message_Step4 := f_IMS_BuildSDP_CommonResponseToOfferTX(p_SDP_Message_Step2);
+    v_SDP_Message_Step4.attributes := omit;
+    v_SDP_Message_Step4.media_list[0].attributes := omit;
+    return v_SDP_Message_Step4;
+  }
+
+  /*
+   * @desc      decode received USSD data and match against expected USSD data
+   * @param     p_XmlBody
+   * @param     p_UssdData
+   * @return    Ussd_data
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_USSD_Message_DecodeAndMatch(XmlBody p_XmlBody,
+                                              template (present) Ussd_data p_UssdData) runs on IMS_PTC return Ussd_data
+  {
+    var Ussd_data v_UssdData;
+    var bitstring v_BitStr := oct2bit(char2oct(p_XmlBody));
+    var integer v_Result := decvalue(v_BitStr, v_UssdData);
+
+    if (v_Result != 0) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid Ussd_data");
+    }
+    if (not match(v_UssdData, p_UssdData)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "received sdpMessageBody does not match");
+    }
+    return v_UssdData;
+  }
+
+  /*
+   * @desc      encode user name of SIP URI for USSD
+   * @param     p_UssdString
+   * @param     p_HomeDomainName
+   * @param     p_EncodingType
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_USSD_SipUri_UserPart(charstring p_UssdString,
+                                       charstring p_HomeDomainName,
+                                       URL_Encoding_Type p_EncodingType) return charstring
+  {
+    return f_URL_Encoding(p_UssdString, p_EncodingType) & ";phone-context=" & p_HomeDomainName;
+  }
+
+  /*
+   * @desc      Build SIP URL for request URI sent by the UE
+   * @param     p_UssdString
+   * @return    template (present) SipUrl
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_USSD_RequestURI(charstring p_UssdString) runs on IMS_PTC return template (present) SipUrl
+  {
+    var charstring v_HomeDomainName := f_IMS_PTC_ImsInfo_GetHomeDomainName();
+    var template (present) GenericParam v_UserParam := cr_GenericParam_Common("user", cr_GenValueToken("dialstring"));
+    var template (present) SemicolonParam_List v_Params := superset(v_UserParam);
+    var template (present) charstring v_UserName := (fl_IMS_USSD_SipUri_UserPart(p_UssdString, v_HomeDomainName, urlEncodingRFC3986),
+                                                     fl_IMS_USSD_SipUri_UserPart(p_UssdString, v_HomeDomainName, urlEncodingRFC2396)); /* @sic R5-225265, R5-225266: urlEncodingRFC3986, urlEncodingRFC2396 sic@
+                                                                                                                                          @sic R5s221158: fl_IMS_USSD_SipUri_UserPart sic@ */
+    var template charstring v_Password := omit;
+    var template charstring v_Host := v_HomeDomainName;
+    var template (present) UriComponents v_UriComponents := cr_SipUriComponent(cr_UserInfo(v_UserName, v_Password), v_Host);
+
+    return  cr_SipUrl_Common(c_sipScheme, v_UriComponents, v_Params);
+  }
+
+  /*
+   * @desc      MO call setup for USSD
+   * @param     p_UssdString
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_USSD_MOCallSetup(charstring p_UssdString) runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var INVITE_Request v_InviteRequest;
+    var MIME_Message v_MIME_Message;
+    var MIME_Part v_MIME_Part;
+    var SDP_Message v_SDP_Offer;
+    var template (present) SipUrl v_RequestURI := fl_IMS_USSD_RequestURI(p_UssdString);
+    var template (present) MessageHeader v_MessageHeader_Invite;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var template (value) SDP_Message v_SDP_MessageTX;
+    var boolean v_SessionTimerNeeded := not f_IMS_PTC_RanTypeIsNR5GC();   // @sic R5-223475 for 5G, no similar CR for 4G sic@
+      
+    // Receive INVITE
+    v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderRX(v_RequestURI, -, -, -, -, -, v_SessionTimerNeeded);
+    v_MessageHeader_Invite.recvInfo := cr_RecvInfo_Def("g.3gpp.ussd");
+    v_MessageHeader_Invite.accept := cr_Accept(superset(cr_AcceptBody(tsc_MimeType_Ussd), cr_AcceptBody(c_sdpApplication), cr_AcceptBody(tsc_MimeType_MultipartMixed)));    // @sic R5s221158 - Further additional changes: superset sic@
+    v_MessageHeader_Invite.contentType := cr_ContentTypeMIME;
+    
+    v_IMS_DATA_REQ := valueof(f_IMS_INVITE_ReceiveRequest_A_2_1_Optional(A_2_1_A4, v_RequestURI, v_MessageHeader_Invite));
+
+    v_InviteRequest := v_IMS_DATA_REQ.Request.Invite;
+    v_MIME_Message := v_InviteRequest.messageBody.mimeMessageBody;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+    
+    // Check SDP offer
+    v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(v_MIME_Message, c_sdpApplication);
+    v_SDP_Offer := f_IMS_SIP_DecodeMatchAndCheckSDP(v_MIME_Part.body.sdpMessageBody, fl_IMS_USSD_BuildSDP_OfferRX());
+
+    // Check USSD
+    v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(v_MIME_Message, tsc_MimeType_Ussd);
+    fl_IMS_USSD_Message_DecodeAndMatch(v_MIME_Part.body.xmlBody, cr_UssdData(-, p_UssdString));
+
+    // Send 100 Trying
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+
+    // Send 200 OK
+    v_MessageHeader_200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, cs_ContentTypeSDP);
+    v_MessageHeader_200OK.recvInfo := cs_RecvInfo_Def("g.3gpp.ussd");           // @sic R5s221158: v_MessageHeader_200OK instead of v_MessageHeader_Invite sic@
+    v_MessageHeader_200OK.accept := cs_Accept({cs_AcceptBody(tsc_MimeType_Ussd), cs_AcceptBody(c_sdpApplication), cs_AcceptBody(tsc_MimeType_MultipartMixed)});    // @sic R5s221158: v_MessageHeader_200OK instead of v_MessageHeader_Invite sic@
+    v_SDP_MessageTX := fl_IMS_USSD_BuildSDP_AnswerTX(v_SDP_Offer);
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_200OK, cs_MessageBody_SDP(v_SDP_MessageTX))));
+
+    // Receive ACK
+    v_RequestURI := f_MessageHeader_GetContactSipUrl(v_MessageHeader_200OK);    // @sic R5s221158 - Further additional changes, R5s230107 sic@
+    v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_RequestURI, v_MessageHeader_Ack)));
+  }
+
+  /*
+   * @desc      MT call release for USSD
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_USSD_MTCallRelease() runs on IMS_PTC
+  {
+    var SipUrl v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    var template (value) ContentType v_ContentType := cs_ContentType(tsc_MimeType_Ussd);
+    var template (value) Ussd_data v_UssdData := cs_UssdData("en", "148*7#");
+
+    f_IMS_CallReleaseMT(v_ContactUrlUE, v_ContentType, cs_MessageBody_USSD(v_UssdData));
+  }
+
+}

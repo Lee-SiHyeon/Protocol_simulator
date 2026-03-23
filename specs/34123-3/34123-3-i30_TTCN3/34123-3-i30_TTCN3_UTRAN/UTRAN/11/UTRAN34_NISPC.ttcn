@@ -1,0 +1,1001 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+module UTRAN34_NISPC {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IP_PTC_CtrlMsgs all;
+  import from LoopbackIP_PacketFilterTest all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN34_CellInfo all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_ConfigurationSteps all;
+  import from UTRAN34_LoopBack_Functions all;
+  import from UTRAN34_LoopBack_Templates all;
+  import from UTRAN34_NISPC_Functions all;
+  import from UTRAN34_NISPC_Templates all;
+  import from UTRAN34_PDP_Functions all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_Component all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Expects Uplink Direkt Transfer message within a time interval given by p_TimerVal parameter and assigns verdict accordingly
+   * @param     p_TimerVal
+   * @param     p_RRCDataIndType
+   * @param     p_LogMsg            (default value: "")
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_NISPC_WaitForPS_UplinkDirectTransfer(float p_TimerVal,
+                                                   template (present) RRCDataIndType p_RRCDataIndType,
+                                                   charstring p_LogMsg := "") runs on UTRAN_PTC
+  {
+    timer t_Timer := p_TimerVal;
+    
+    t_Timer.start;
+    
+    alt {
+      [] t_Timer.timeout {
+        f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, p_LogMsg);
+      }
+      [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, p_RRCDataIndType)) {
+        t_Timer.stop;
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_LogMsg);
+      }
+    }
+  }
+
+  /* @desc      Sends Modify Requests for Primary and Secondary PDP Contexts
+   * @param     p_PrimaryPDPContextParameters (default value: omit)
+   * @param     p_SecondaryPDPContextParameters (default value: omit)
+   * @param     p_TFT               (default value: omit)
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_SendModifyPDPContReq(template (omit) PDPContextParameters p_PrimaryPDPContextParameters := omit,  //@sic R5s150002 sic@
+                                   template (omit) PDPContextParameters p_SecondaryPDPContextParameters := omit, //@sic R5s150002 sic@
+                                   template (omit) TrafficFlowTemplate p_TFT := omit) runs on UTRAN_PTC
+  { //@sic R5s141290 sic@
+    var template (value) LLC_SAPI v_LLC_SAPI := f_UTRAN34_LLC_SAPI_TX();
+    var QualityOfService v_QoS;  //@sic R5s150002 sic@
+    var TI v_Send_TI;           //@sic R5s150002 sic@
+
+    //Send Modify PDP Context Request for Primary PDP Context
+    if(ispresent(p_PrimaryPDPContextParameters)) //@sic R5s150002 sic@
+    {
+        v_QoS := valueof(p_PrimaryPDPContextParameters.qOS);            //@sic R5s150002 sic@
+        v_Send_TI := valueof(p_PrimaryPDPContextParameters.send_TI);    //@sic R5s150002 sic@
+        U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_ModPDPContReq(cs_ModifyPDP_ContextReq(v_Send_TI,  //@sic R5s150002 sic@
+                                                                        v_LLC_SAPI,
+                                                                        v_QoS,
+                                                                        p_TFT))));
+    }
+
+
+    //Send Modify PDP Context Request for Secondary PDP Context
+    if(ispresent(p_SecondaryPDPContextParameters))  //@sic R5s150002 sic@
+    {
+        v_QoS := valueof(p_SecondaryPDPContextParameters.qOS);
+        v_Send_TI := valueof (p_SecondaryPDPContextParameters.send_TI); //@sic R5s150002 sic@
+        U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_ModPDPContReq(cs_ModifyPDP_ContextReq(v_Send_TI,  //@sic R5s150002 sic@
+                                                                        v_LLC_SAPI,
+                                                                        v_QoS,
+                                                                        p_TFT))));
+    }
+
+    if(not(ispresent(p_PrimaryPDPContextParameters)) and not(ispresent(p_SecondaryPDPContextParameters))){ //@sic R5s150002 sic@
+        FatalError (__FILE__, __LINE__, "Function fl_SendModifyPDPContReq - programming error, invalid parameters");
+    }
+  }
+
+  /*
+   * @desc      Local function to execute steps 6 to 26 of the test case 11.9.1
+   * @param     p_PrimPDPContextParameters
+   * @param     p_QualityOfService
+   * @param     p_IP_VersionType
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TestBody_11_9_1_Steps_6_26(PDPContextParameters p_PrimPDPContextParameters,
+                                         template (value) QualityOfService p_QualityOfService,
+                                         IP_VersionType p_IP_VersionType) runs on UTRAN_IP_PTC
+  {
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var template (value) TrafficFlowTemplate v_TFT;
+    var boolean v_IpTypeIsIPv4 := true;
+    var integer v_LengthCount := 0;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterListAdd; // @sic R5s150283 sic@
+    
+    if (p_IP_VersionType == iPv6){
+      v_IpTypeIsIPv4 := false;
+    }
+    
+    //Generate traffic flow template #1
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction := '11'B; // @sic R5s150283, R5-151470 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    
+    //@siclog "Step 7-11" siclog@
+    f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, p_PrimPDPContextParameters, p_QualityOfService, "Test Case 11.9.1, Step 9"); // @sic R5s150283 sic@
+    
+    //@siclog "Step 12" siclog@
+    //Wait for T3380 seconds to ensure no further activate request message comes from UE
+    
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.9.1, Step 12"); // @sic R5s150283 sic@
+    
+    //@siclog "Step 13-16" siclog@
+    //Generate traffic flow template #2
+    v_LengthCount := 0;
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 2);
+    v_PacketFilterByRef.direction := '11'B; // @sic R5s150283, R5-151470 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref;
+    
+    //Generate traffic flow template #3
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 3);
+    v_PacketFilterByRef.direction := '11'B; // @sic R5s150283, R5-151470 sic@
+    v_PacketFilterList[1]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref;
+    
+    //Generate traffic flow template #4
+    if (v_IpTypeIsIPv4 == false) {
+      f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 4);
+      v_PacketFilterByRef.direction := '11'B; // @sic R5s150283, R5-151470 sic@
+      v_PacketFilterList[2]  := v_PacketFilterByRef;
+      v_LengthCount := v_LengthCount + v_PacketFilterLengthByref;// @sic R5s150283 sic@
+    }
+    
+    v_LengthCount := v_LengthCount + 1; // @sic R5s150283 sic@
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    v_TFT.tftOperationCode := '001'B; // @sic R5s150283 sic@
+    
+    f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, p_PrimPDPContextParameters, p_QualityOfService, "Test Case 11.9,1, Step 9", 3); // @sic R5s150531 sic@
+    
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.9.1, Step 17");
+    
+    //@siclog "Step 18" siclog@
+    f_UTRAN34_CloseUE_TestLoop(ps_domain, tsc_UE_TestLoopMode4, cs_UE_TestLoopMode1_LB_Setup2(312, tsc_RB20, 312, tsc_RB22));
+    // Route data to UTRAN PTC
+    f_IP_Handling_StopPDN(IP);
+    
+    //@siclog "Step 19-20" siclog@
+    //Data Loopback
+    // Send IP Packet#1
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 1, tsc_RB20, tsc_RB22);
+    
+    // Send IP Packet#2
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 2, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#3
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 3, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#4
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 4, tsc_RB20, tsc_RB24);
+    
+    // Send IP Packet#5
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 5, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#6
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 6, tsc_RB20, tsc_RB22);
+    
+    // Send IP Packet#7
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 7, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#8
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 8, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#9
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 9, tsc_RB20, tsc_RB24);  // @sic R5s150283 sic@
+    
+    // Send IP Packet#10
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 10, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#11
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 11, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#12
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 12, tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#13
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 13, tsc_RB20, tsc_RB20);
+    
+    if (not v_IpTypeIsIPv4) {//IPv6
+      // Send IP Packet#14
+      f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 14, tsc_RB20, tsc_RB24);  //@sic R5-144246, R5s150283 sic@
+      
+      // Send IP Packet#15
+      f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 15, tsc_RB20, tsc_RB20);
+      
+      // Send IP Packet#16
+      f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 16, tsc_RB20, tsc_RB20);
+      
+      // Send IP Packet#17
+      f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 17, tsc_RB20, tsc_RB20);
+    }
+    
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 11.9.1, Step 19 - 20"); // @sic R5s150283 sic@
+
+    //Generate traffic flow template #5
+    v_LengthCount := 0;
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 5);
+    v_PacketFilterListAdd[0]  := v_PacketFilterByRef;  // @sic R5s150283 sic@
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterListAdd); // @sic R5s150283 sic@
+    v_TFT.iei := '36'O;
+    v_TFT.tftOperationCode := '011'B;
+    
+    //@siclog "Step 21-22" siclog@
+    //SS modifies Primary PDP Context by adding a new packet filter
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(p_PrimPDPContextParameters, v_TFT);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 11.9.1, Step 21 - 22"); // @sic R5s150283 sic@
+    
+    //@siclog "Step 23-26" siclog@
+    //Data Loopback
+    // Send IP Packet#18
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 18,tsc_RB20, tsc_RB20);
+    
+    // Send IP Packet#19
+    f_UTRAN34_SendReceiveIP_PDU(p_IP_VersionType, 2, tsc_RB20, tsc_RB20, false);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 11.9.1, Step 24 - 25"); // @sic R5s150283 sic@
+  }
+
+  /*
+   * @desc  Local function to open UE test loop, to deactivate RB test mode and to release connection
+   * @param     p_CellId
+   * @param     p_CN_Domain
+   * @param     p_RRC_RelStatus
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_OpenUE_TestLoop(UTRAN_CellId_Type p_CellId,
+                              CN_DomainIdentity p_CN_Domain,
+                              RRC_Rel_Status    p_RRC_RelStatus) runs on UTRAN_PTC
+  {
+    f_UTRAN34_OpenUE_TestLoop(p_CN_Domain);
+    f_UTRAN34_DeactivateRB_TestMode(p_CN_Domain);
+    f_UTRAN34_RRC_ConnRel(p_CellId, p_RRC_RelStatus);
+  }
+
+  /*
+   * @desc      Generates IP Packet#1 for TCs 11.1.5.2, 11.2.1a, 11.2.1b
+   * @param     p_IpTypeIsIPv4
+   * @param     p_TOS_TC            (default value: 'A9'O)
+   * @param     p_Protocol          (default value: tsc_IP_Protocol_UDP)
+   * @param     p_SourcePort        (default value: 60001)
+   * @param     p_DestPort          (default value: 60350)
+   * @param     p_IPv4_DestAddr     (default value: "172.168.8.1")
+   * @param     p_IPv6_DestAddr     (default value: "2001:0ba0::0001:0001")
+   * @param     p_IPv6_FlowLabel    (default value: 10)
+   * @return    octetstring
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_Get_IP_Packet(boolean p_IpTypeIsIPv4,
+                            O1_Type p_TOS_TC := 'A9'O,
+                            UInt8_Type p_Protocol  := tsc_IP_Protocol_UDP,
+                            UInt16_Type p_SourcePort := 60001,
+                            UInt16_Type p_DestPort := 60350,
+                            charstring p_IPv4_DestAddr   := "172.168.8.1",
+                            charstring p_IPv6_DestAddr   := "2001:0ba0::0001:0001",
+                            UInt20_Type p_IPv6_FlowLabel := 10)  return octetstring
+  {
+    var charstring v_IPv4_SourceAddr := "192.168.0.1";
+    var charstring v_IPv4_DestAddr;
+    var charstring v_IPv6_SourceAddr := "fe80::1:1";
+    var charstring v_IPv6_DestAddr   := "2001:0ba0::0001:0001";
+    var UInt20_Type v_IPv6_FlowLabel := 10;
+    var UInt16_Type v_SourcePort := 60001;
+    var UInt16_Type v_DestPort := 60350;
+    var O1_Type v_TOS_TC;
+    var UInt8_Type v_Protocol := tsc_IP_Protocol_UDP;
+    var O4_Type v_IPSecSPI := '0F80F000'O;
+    
+    v_Protocol   := p_Protocol;
+    v_SourcePort := p_SourcePort;
+    v_DestPort := p_DestPort;
+    v_IPv4_DestAddr := p_IPv4_DestAddr;
+    v_IPv6_DestAddr := p_IPv6_DestAddr;
+    v_IPv6_FlowLabel := p_IPv6_FlowLabel;
+    v_TOS_TC := p_TOS_TC;
+    
+    return f_PacketFilterTest_CreateDatagram(p_IpTypeIsIPv4,
+                                             v_Protocol,
+                                             v_IPv4_SourceAddr,
+                                             v_IPv4_DestAddr,
+                                             v_IPv6_SourceAddr,
+                                             v_IPv6_DestAddr,
+                                             v_IPv6_FlowLabel,
+                                             v_SourcePort,
+                                             v_DestPort,
+                                             v_IPSecSPI,
+                                             v_TOS_TC);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.1.5.1
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_1_5_1_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_1_5_1_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Release RRC Connection
+    f_UTRAN34_RRC_ConnRel(utran34_Cell1, cell_Dch);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_1_5_1
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_1_5_1_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var PDPContextParameters v_SecPDPContextParameters;
+    var integer v_LengthCount := 0;
+    var template (value) QualityOfService v_QualityOfService:= f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    var template (value) TrafficFlowTemplate v_TFT;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var boolean v_IpTypeIsIPv4 := true;
+    
+    //@siclog "Step 1-6" siclog@
+    v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, false, true);
+    
+    if (v_PrimPDPContextParameters.ip_VersionType == iPv6) {
+      v_IpTypeIsIPv4 :=false;
+    }
+    
+    //Generate traffic flow template #1
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction := '11'B; //@sic R5s151531 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    //@sic R5s140387 R5s140558 sic@
+    
+    //@siclog "Step 7-11" siclog@
+    //@sic R5s140387 sic@
+    v_SecPDPContextParameters := f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, v_PrimPDPContextParameters, v_PrimPDPContextParameters.qOS, "Test Case 11.1.5.1, Step 9");
+    
+    //@siclog "Step 12" siclog@
+    //Wait for T3380 seconds to ensure no further activate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.1.5.1, Step 12");
+    
+    //@siclog "Step 13-14" siclog@
+    //SS sends a modify request to UE for secondary PDP context. UE accepts the modification request from SS
+    //This re-confirms that step 9 was correctly executed in the UE
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(v_SecPDPContextParameters, omit);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.1.5.2
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_1_5_2_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_1_5_2_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Open test loop and release RRC connection
+    fl_OpenUE_TestLoop(utran34_Cell1,ps_domain, cell_Dch);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_1_5_2
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_1_5_2_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var PDPContextParameters v_SecPDPContextParameters;
+    var IP_VersionType v_IP_VersionType;
+    var template (value) QualityOfService v_QualityOfService := f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    var TI v_TI;
+    var template (value) TrafficFlowTemplate v_TFT;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var boolean v_IpTypeIsIPv4 := true;
+    var integer v_LengthCount := 0;
+    var octetstring v_IP_Packet;
+    
+    //@siclog "Step 1-7" siclog@
+    v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, true, true);
+    v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+    if (v_IP_VersionType == iPv6) {
+      v_IpTypeIsIPv4 := false;
+    }
+    
+    //Generate traffic flow template #1
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction := '11'B; //@sic R5s150246 R5-151470 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    
+    //@siclog "Step 8-12" siclog@
+    v_SecPDPContextParameters := f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, v_PrimPDPContextParameters, v_QualityOfService, "Test Case 11.1.5.2, Step 9");
+    
+    //@siclog "Step 13" siclog@
+    //Wait for T3380 seconds to ensure no further activate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.1.5.2, Step 12");
+    
+    //@siclog "Step 14" siclog@
+    //SS activates UE test loop mode 4 to establish UE loopback of IP PDUs
+    f_UTRAN34_CloseUE_TestLoop(ps_domain, tsc_UE_TestLoopMode4, cs_UE_TestLoopMode1_LB_Setup2(312, tsc_RB20, 312, tsc_RB22));
+    // Route data to UTRAN PTC
+    f_IP_Handling_StopPDN(IP);
+    
+    //@siclog "Step 15-16" siclog@
+    // IP Packet#1 should NOT match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType,2, tsc_RB20, tsc_RB20); //IP address does not match filter
+    
+    //@siclog "Step 17-18" siclog@
+    // IP Packet#2 should match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType,1, tsc_RB20, tsc_RB22);
+    
+    //@siclog "Step 19" siclog@
+    f_UTRAN34_OpenUE_TestLoop(ps_domain);
+    
+    //@siclog "Step 20" siclog@
+    //SS Deactivates Secondary PDP Context and expects confirmation within T3395 max
+    
+    v_TI := v_SecPDPContextParameters.send_TI;
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated, tsc_RB3, cs_U_DeactPdpContextReq(cs_DeactPdpContextReqMt(v_TI, -, omit))));  //@sic R5s150015 sic@
+    
+    v_TI := v_SecPDPContextParameters.received_TI;
+    
+    fl_NISPC_WaitForPS_UplinkDirectTransfer(tsc_T3395max, cr_U_DeactPdpContextAcp(cr_DeactPdpContextAcpMo(v_TI)), "Test Case 11.1.5.2, Step 21");
+    
+    //@siclog "Step 21" siclog@
+    //SS reconfigures RAB
+    f_UTRAN34_ReleaseAM_RAB22_r7(utran34_Cell1);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 11.1.5.2, Step 21");
+    
+    
+    //Generate traffic flow template #2
+    //Same as packet filter#1, except for Type of Service/Traffic Class (TOS_TC) component and precedence
+    v_TFT.packetFilterList[0].contents[4] := cs_PktFilterCompTOSTrafficClass('A0FC'O);  //@sic R5s150246 sic@
+    v_TFT.packetFilterList[0].precedence := int2bit(5, 8);
+    
+    //@siclog "Step 23-26" siclog@
+    v_SecPDPContextParameters := f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, v_PrimPDPContextParameters, v_QualityOfService, "Test Case 11.1.5.2, Step 24");
+    
+    //@siclog "Step 27" siclog@
+    //Wait for T3380 seconds to ensure no further activate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.1.5.2, Step 27");
+    
+    //@siclog "Step 29" siclog@
+    f_UTRAN34_CloseUE_TestLoop(ps_domain, tsc_UE_TestLoopMode4, cs_UE_TestLoopMode1_LB_Setup2(312, tsc_RB20, 312, tsc_RB22));
+    // Route data to UTRAN PTC
+    f_IP_Handling_StopPDN(IP);
+    
+    //@siclog "Step 29-32" siclog@
+    // IP Packet#3 should NOT match Packet Filter #2, but do match removed Packet Filter#1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB20); //p_TOC_TS value does not match filter#2
+    
+    // IP Packet#4 should match Packet Filter #2
+    v_IP_Packet := fl_Get_IP_Packet(v_IpTypeIsIPv4, 'A0'O);
+    f_UTRAN34_SendReceiveData(tsc_RB20, tsc_RB22, oct2bit(v_IP_Packet));
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.2.1a
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_2_1a_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_2_1a_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Open test loop and release RRC connection
+    fl_OpenUE_TestLoop(utran34_Cell1, ps_domain, cell_Dch);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_2_1a
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_2_1a_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var PDPContextParameters v_SecPDPContextParameters;
+    var IP_VersionType v_IP_VersionType;
+    var template (value) QualityOfService v_QualityOfService:= f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    var template (value) TrafficFlowTemplate v_TFT1;
+    var template (value) TrafficFlowTemplate v_TFT1Remove; //@sic R5s150279 sic@
+    var template (value) TrafficFlowTemplate v_TFT2;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var integer v_LengthCount := 0;
+    var boolean v_IpTypeIsIPv4 := true;
+    var octetstring v_IP_Packet;
+    
+    //@siclog "Step 1-7" siclog@
+    v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, true, true);
+    v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+    if (v_IP_VersionType == iPv6){
+      v_IpTypeIsIPv4 := false
+        }
+    
+    //Generate traffic flow template #1
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction := '11'B; //@sic R5s150279, R5-151470 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT1 := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT1.iei := '36'O;
+    
+    //@siclog "Step 8-12" siclog@
+    v_SecPDPContextParameters := f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT1, v_PrimPDPContextParameters, v_QualityOfService, "Test Case 11.2.1a, Step 9");
+    
+    //@siclog "Step 13" siclog@
+    //Wait for T3380 seconds to ensure no further activaate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.2.1a, Step 13");
+    
+    //@siclog "Step 14" siclog@
+    f_UTRAN34_CloseUE_TestLoop(ps_domain, tsc_UE_TestLoopMode4, cs_UE_TestLoopMode1_LB_Setup2(312, tsc_RB20, 312, tsc_RB22));
+    // Route data to UTRAN PTC
+    f_IP_Handling_StopPDN(IP);
+    
+    //@siclog "Step 15-16" siclog@
+    // IP Packet#1 should NOT match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 2, tsc_RB20, tsc_RB20);
+    
+    //@siclog "Step 17-18" siclog@
+    // IP Packet#2 should match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB22);
+    
+    //Generate traffic flow template #2
+    v_TFT2 := v_TFT1;
+    v_TFT2.tftOperationCode := tsc_TFT_OperationAdd;
+    v_TFT2.packetFilterList[0].contents[4] := cs_PktFilterCompTOSTrafficClass('A0FC'O); //@sic R5s150279 sic@
+    v_TFT2.packetFilterList[0].precedence := int2bit(5, 8);
+    v_TFT2.packetFilterList[0].iei := '2'H; //@sic R5s150279 sic@
+    
+    //@siclog "Step 19-20" siclog@
+    //SS sends a modify request to UE for secondary PDP context. UE accepts the modification request from SS
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(v_SecPDPContextParameters, v_TFT2);
+    
+    //@siclog "Step 21-22" siclog@
+    // IP Packet#3 (identical to IP Packet#1) should NOT match Packet Filter #1 nor Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 2,tsc_RB20, tsc_RB20);
+    
+    //@siclog "Step 23-24" siclog@
+    // IP Packet#4 (identical to IP Packet#2) should match Packet Filter #1 but not Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB22);
+    
+    //@siclog "Step 25-26" siclog@
+    // IP Packet#5 should match Packet Filter #2 but not Packet Filter #1
+    v_IP_Packet := fl_Get_IP_Packet(v_IpTypeIsIPv4, 'A0'O);
+    f_UTRAN34_SendReceiveData(tsc_RB20, tsc_RB22, oct2bit(v_IP_Packet));
+    
+    //@siclog "Step 27-28" siclog@
+    //Modify Traffic Flow Template #1
+    //v_TFT1.tftOperationCode := tsc_TFT_OperationRemove; //@sic R5s150279 sic@
+    v_TFT1Remove.iei := '36'O;  //@sic R5s150279 sic@
+    v_TFT1Remove.iel := int2oct(2,1);  //@sic R5s150279 sic@ IE Length is 2 octets
+    v_TFT1Remove.tftOperationCode := tsc_TFT_OperationRemove; //@sic R5s150279 sic@
+    v_TFT1Remove.eBit := '0'B; //@sic R5s150279 sic@
+    v_TFT1Remove.noOfPktFilter := int2bit(1, 4);  ////@sic R5s150279 sic@ No of Packet Filters is 1
+    v_TFT1Remove.packetFilterList[0].spare := '00'B; ////@sic R5s150279 sic@
+    v_TFT1Remove.packetFilterList[0].direction := '00'B;  //@sic R5s150279 sic@ Direction = Spare = 00 for PF Remove
+    v_TFT1Remove.packetFilterList[0].iei := '1'H;
+    v_TFT1Remove.parameterList := omit; //@sic R5s150279 sic@
+    
+    //SS sends a modify request to UE for secondary PDP context. UE accepts the modification request from SS
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(v_SecPDPContextParameters, v_TFT1Remove); //@sic R5s150279 sic@
+    
+    //@siclog "Step 29-30" siclog@
+    // IP Packet#6 (identical to IP Packet#2) should match Packet Filter #1 but not Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB20);
+    
+    //@siclog "Step 31-32" siclog@
+    // IP Packet#7 (identical to IP Packet#5) should match Packet Filter #2
+    f_UTRAN34_SendReceiveData(tsc_RB20, tsc_RB22, oct2bit(v_IP_Packet));
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.2.1b
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_2_1b_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_2_1b_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Open test loop and release _RRC connection
+    fl_OpenUE_TestLoop(utran34_Cell1, ps_domain, cell_Dch);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_2_1b
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_2_1b_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var IP_VersionType v_IP_VersionType;
+    var template (value) QualityOfService v_QualityOfService := f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    var template (value) TrafficFlowTemplate v_TFT1;
+    var template (value) TrafficFlowTemplate v_TFT2;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var boolean v_IpTypeIsIPv4 := true;
+    var integer v_LengthCount := 0;
+    
+    //@siclog "Step 1-7" siclog@
+    v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, true, true);
+    v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+    if(v_IP_VersionType == iPv6){
+      v_IpTypeIsIPv4 := false;
+    }
+    
+    //Generate traffic flow template #1
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction :='11'B; // @sic R5s150281, R5-151470 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT1 := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT1.iei := '36'O;
+    v_TFT1.packetFilterList[0].precedence := int2bit(1, 8);
+    
+    //@siclog "Step 8-12" siclog@
+    f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT1, v_PrimPDPContextParameters, v_QualityOfService, "Test Case 11.2.1b, Step 9");
+    
+    //@siclog "Step 13" siclog@
+    //Wait for T3380 seconds to ensure no further activaate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.2.1b, Step 13");
+    
+    //@siclog "Step 14" siclog@
+    f_UTRAN34_CloseUE_TestLoop(ps_domain, tsc_UE_TestLoopMode4, cs_UE_TestLoopMode1_LB_Setup2(312, tsc_RB20, 312, tsc_RB22));
+    // Route data to UTRAN PTC
+    f_IP_Handling_StopPDN(IP);
+    
+    //@siclog "Step 15-16" siclog@
+    // IP Packet#1 should NOT match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 2, tsc_RB20, tsc_RB20);
+    
+    //@siclog "Step 17-18" siclog@
+    // IP Packet#2 should match Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB22);
+    
+    //Generate traffic flow template #2
+    v_LengthCount := 0;
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 2);
+    v_PacketFilterByRef.direction :='11'B; //@sic Rs150531 sic@
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref+1;
+    v_TFT2 := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT2.tftOperationCode := tsc_TFT_OperationAdd;
+    v_TFT2.packetFilterList[0].precedence := int2bit(2, 8);
+    v_TFT2.iei := '36'O; // @sic R5s150281 sic@
+    
+    //@siclog "Step 19-20" siclog@
+    //SS sends a modify request to UE for secondary PDP context. UE accepts the modification request from SS
+    f_UTRAN34_ModifyPDP_ContextMT_Accept(v_PrimPDPContextParameters, v_TFT2);
+    
+    //@siclog "Step 21-22" siclog@
+    // IP Packet#3 should match Packet Filter #2 but not Packet Filter #1
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 4, tsc_RB20, tsc_RB20);
+    
+    //@siclog "Step 23-24" siclog@
+    // IP Packet#4 should match Packet Filter #1 but not Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 6, tsc_RB20, tsc_RB22);
+    
+    //@siclog "Step 25-26" siclog@
+    // IP Packet#5 (identical to IP Packet#2) should match both Packet Filter #1 and Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 1, tsc_RB20, tsc_RB22);
+    
+    //@siclog "Step 27-28" siclog@
+    // IP Packet#6 (identical to IP Packet#1) should NOT match neither Packet Filter #1 nor Packet Filter #2
+    f_UTRAN34_SendReceiveIP_PDU(v_IP_VersionType, 2, tsc_RB20, tsc_RB22, false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.3.2a
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_3_2a_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_3_2a_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Release RRC Connection
+    f_UTRAN34_RRC_ConnRel(utran34_Cell1, cell_Dch);
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_3_2a
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_3_2a_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var PDPContextParameters v_SecPDPContextParameters;
+    var IP_VersionType v_IP_VersionType;
+    var template (value) QualityOfService v_QualityOfService := f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    var TI v_TI;
+    var template (value) TrafficFlowTemplate v_TFT;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var boolean v_IpTypeIsIPv4 := true;
+    var integer v_LengthCount := 0;
+    //var boolean v_GMM_DetachExpect := true; //@sic R5s141290 sic@
+    
+    timer t_T3395max := tsc_T3395max;
+    
+    //@siclog "Step 1-6" siclog@
+    v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, false, true); //check if 2 loops in the TC!
+    v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+    if(v_IP_VersionType == iPv6){   //@sic R5s141153 sic@
+        v_IpTypeIsIPv4 := false
+    }
+
+    //Generate traffic flow template
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, v_IpTypeIsIPv4, 1);
+    v_PacketFilterByRef.direction := '11'B; //@sic R5s151531 sic@
+    
+    v_PacketFilterList[0]  := v_PacketFilterByRef;
+    v_LengthCount := v_LengthCount + v_PacketFilterLengthByref + 1;
+    v_TFT := cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+    v_TFT.iei := '36'O;
+    //@sic R5s140400 R5s140558 sic@
+    
+    //@siclog "Step 7-11" siclog@
+    v_SecPDPContextParameters := f_UTRAN34_SecPDP_Context_MT_r7(utran34_Cell1, v_TFT, v_PrimPDPContextParameters, v_PrimPDPContextParameters.qOS, "Test Case 11.3.2a, Step 9");
+    
+    //@siclog "Step 12" siclog@
+    //Wait for T3380 seconds to ensure no further activaate request message comes from UE
+    f_UTRAN_CheckNoDataInd(tsc_T3380max, "Test Case 11.3.2a, Step 12");
+    
+    //@siclog "Step 13-14" siclog@
+    //Request a deactivation of the primary PDP context and strarts waiting for T3395. SM cause set to #36
+    v_TI := v_PrimPDPContextParameters.send_TI; //@sic R5s140400 sic@
+    
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated, tsc_RB3,  cs_U_DeactPdpContextReq(cs_DeactPdpContextReqMt(v_TI))));
+    
+    v_TI := v_PrimPDPContextParameters.received_TI; //@sic R5s140400 sic@
+    
+    fl_NISPC_WaitForPS_UplinkDirectTransfer(tsc_T3395max, cr_U_DeactPdpContextAcp(cr_DeactPdpContextAcpMo(v_TI)), "Test Case 11.3.2a, Step 14");
+    
+    //It is assumed that the RAB release is faster that the T3395max;
+    //otherwise the timeout will be caught in the RRC default
+    t_T3395max.start;
+    
+    //Be prepared to expect a detach while releasing the RAB
+    
+    //The UE may (optionally) send a Detach Request (only Note 1). The SS shall wait up to 'T3395' seconds for the Detach Request. While waiting the SS releases the RAB associated with this PDP Context. If the SS receives a Detach Request the test execution continues from step A15, otherwise from step B15. SS shall check that no further deactivate request messages are sent during this time.
+    
+    //@siclog "Step 14b" siclog@
+    //SS releases RAB for primary PDP context
+    f_UTRAN34_ReleaseAM_RAB20_NISPC(utran34_Cell1); //@sic R5s140400 sic@
+    f_UTRAN34_ReleaseAM_RAB22_r7 (utran34_Cell1);   //@sic R5s150002, R5-150614 sic@
+    
+
+    alt{ //@sic R5s141290 sic@
+        //Detach Request message is received
+        [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,
+                                                    tsc_RB3,
+                                                    cr_U_DetachRequest(cr_DetachTypeReAttNotRequiredGPRS, cdr_MobileIdTMSI_tlv(?, '24'O) ifpresent)))
+          {
+            t_T3395max.stop;
+            
+            //@siclog "Step A15-A16" siclog@
+            fl_SendModifyPDPContReq(v_PrimPDPContextParameters, v_SecPDPContextParameters);
+
+            //@siclog "Step A17" siclog@
+            f_UTRAN_CheckNoDataInd(tsc_T3386max, "Test Case 11.3.2a, Step A17");
+
+            //@siclog "Step A18" siclog@
+            U_Dc.send(cas_DataReq_PS(utran_CellDedicated, tsc_RB3, cs_U_DetachAcc));
+          }
+        //Detach Request message is not received
+        [] t_T3395max.timeout
+          {
+            //@siclog "Step B15-B15A" siclog@
+            fl_SendModifyPDPContReq(v_PrimPDPContextParameters, omit); //@sic R5s150002 sic@
+            fl_NISPC_WaitForPS_UplinkDirectTransfer(tsc_T3386max, cr_U_SM_Status(cr_SM_StatusMO(cs_SM_Cause('51'O))), "Test Case 11.3.2a, Step B15A");
+            
+            //@siclog "Step B16-B17" siclog@
+            fl_SendModifyPDPContReq(omit, v_SecPDPContextParameters); //@sic R5s150002 sic@
+            fl_NISPC_WaitForPS_UplinkDirectTransfer(tsc_T3386max, cr_U_SM_Status(cr_SM_StatusMO(cs_SM_Cause('51'O))), "Test Case 11.3.2a, Step B17"); //@sic R5s140400 sic@
+    
+          }
+    }
+  } //end of the TC 11.3.2a
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 11.9.1
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_11_9_1_UTRAN() runs on UTRAN_IP_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Cell1 started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_Cell1);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_Cell1);
+    
+    //Idle update to bring UE to Cell_DCH state to register and to release connection again
+    f_UTRAN34_Preamble(utran34_Cell1);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_11_9_1_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Release RRC Connection
+    //f_UTRAN34_RRC_ConnRel(utran34_Cell1, cell_Dch); @sic R5s150795 sic@
+    
+    //Release UTRAN Cell
+    f_UTRAN34_Postamble(utran34_Cell1, U1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_11_9_1
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_11_9_1_Body() runs on UTRAN_IP_PTC
+  {
+    var PDPContextParameters v_PrimPDPContextParameters;
+    var IP_VersionType v_IP_VersionType;
+    var template (value) QualityOfService v_QualityOfService:= f_UTRAN_InitialiseQoS(utran34_Cell1, cell_DCH_64kPS_RAB_SRB);
+    
+    
+    if (pc_IPv4){// @sic R5s150283, R5-151470 sic@
+      //@siclog "Step 1-6, Sub Test 1" siclog@
+      v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, true, true);
+      v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+      //@siclog "Step 6-26" siclog@
+      fl_TestBody_11_9_1_Steps_6_26(v_PrimPDPContextParameters, v_QualityOfService, v_IP_VersionType);
+      //@siclog "Step 27-33" siclog@
+      fl_OpenUE_TestLoop(utran34_Cell1,ps_domain, cell_Dch);  //@sic R5-155288  sic@
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 27 - 29 : Test Case 11.9.1, Sub Test 1 for IPv4 finished");
+    }
+    
+    if (pc_IPv4 and pc_IPv6){  // @sic R5s150283, R5-151470 sic@
+      f_UTRAN34_SwitchPower_Off(utran34_Cell1, U1_IDLE, NotSpecified);
+      f_UT_SwitchOnUE(UT, false);
+      f_UTRAN34_IdleUpdated(utran34_Cell1);
+    }
+    
+    if (pc_IPv6) {// @sic R5s150283, R5-151470 sic@
+      //@siclog "Step 1-6, Sub Test 2" siclog@
+      v_PrimPDPContextParameters := f_UTRAN34_ActivateFirstPDP_Context(utran34_Cell1, v_QualityOfService, true, false);
+      v_IP_VersionType := v_PrimPDPContextParameters.ip_VersionType;
+      //@siclog "Step 6-26" siclog@
+      fl_TestBody_11_9_1_Steps_6_26(v_PrimPDPContextParameters, v_QualityOfService, v_IP_VersionType);
+      //@siclog "Step 27-33" siclog@
+      fl_OpenUE_TestLoop(utran34_Cell1,ps_domain, cell_Dch); //@sic R5-155288  sic@
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 27 - 29 : Test Case 11.9.1, Sub Test 2 for IPv6 finished");
+    }
+  }
+
+}

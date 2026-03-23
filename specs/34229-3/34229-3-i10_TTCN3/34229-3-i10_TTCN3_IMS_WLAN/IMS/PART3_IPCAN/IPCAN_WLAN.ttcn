@@ -1,0 +1,461 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-09-14 09:54:06 +0200 (Thu, 14 Sep 2023) $
+// $Rev: 37128 $
+/******************************************************************************/
+
+module IPCAN_WLAN {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from UpperTesterFunctions all;
+  import from WLAN_CommonProcedures all;
+  import from WLAN_Component all;
+  import from WLAN_Parameters all;
+
+  /*
+   * @desc      return IPCAN specific information to be sent to the IMS PTC
+   * @return    template (value) IPCAN_INFO_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IMS_IpcanInfo() runs on WLAN_PTC return template (value) IPCAN_INFO_Type
+  {
+    var IPCAN_RAN_Type v_RanType := WLAN;
+    var template (omit) integer v_UE_Release := omit;      // no UE release available for WLAN
+    var template (omit) integer v_AuthResLength := omit;
+    var boolean v_NetworkSupportsVoiceOverIMS := true;     /* @sic R5-177127: check of audio feature tag sic@
+                                                              NOTE: VoiceOverIMS is assumed to be supported for WLAN */
+
+    v_AuthResLength := f_WLAN_CellInfo_GetXRES_Length();
+    return cs_IPCAN_INFO(v_RanType, v_UE_Release, v_AuthResLength, v_NetworkSupportsVoiceOverIMS);
+  }
+
+  /*
+   * @desc      Initial registration
+   * @param     p_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_InitialRegistration(WLAN_CellId_Type p_CellId) runs on WLAN_PTC
+  {
+    var boolean v_IMSoWLAN := true;
+    f_WLAN_TurnCellOn(p_CellId,v_IMSoWLAN); //@sic R5s170448, R5-170499 sic@
+
+    // Switch on UE
+    f_UT_SwitchOnUE(UT);
+
+    // Establish IPsec tunnel
+    f_WLAN_EstablishIPsecTunnel(p_CellId, ePDG_IMS1,v_IMSoWLAN);
+  }
+
+  /*
+   * @desc      MO speech call establishment
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MO_SpeechCall(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                      IP_RAT_CTRL_PORT p_PortIP,
+                                      template (value) IP_DrbInfo_Type p_DrbInfo) return TriggerResult_Type
+
+  {
+    var template (value) IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+    var PDN_Index_Type v_PDN_Index:= PDN_1;
+    var TriggerResult_Type v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_PortIMS);  /* wait until IMS PTC has sent "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+                                                                                         or e.g. 503 Service Unavailable */
+    if (v_Result == NORMAL) {                                                         /* => procedure shall not be aborted */
+      
+      if (ischosen(v_DrbInfo.IPsecTunnel)){
+        v_PDN_Index := valueof(v_DrbInfo.IPsecTunnel.PdnId);
+      }
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M1, v_DrbInfo);
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      MT speech call establishment
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MT_SpeechCall(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                      IP_RAT_CTRL_PORT p_PortIP,
+                                      template (value) IP_DrbInfo_Type p_DrbInfo) return TriggerResult_Type
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    var template (value) IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+    var PDN_Index_Type v_PDN_Index:= PDN_1;
+
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);                        // trigger IMS PTC to proceed steps 1-4 of C.11
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_PortIMS);   // wait until IMS PTC has got sent "100 Trying" and "183 Session Progress" from the UE (steps 3 and 4 of C.11)
+    if (v_Result == NORMAL) {                                   // => procedure shall not be aborted
+      if (ischosen(v_DrbInfo.IPsecTunnel)) {
+        v_PDN_Index := valueof(v_DrbInfo.IPsecTunnel.PdnId);
+      }
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M1, v_DrbInfo);
+      f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);                      // trigger IMS PTC to continue with step 5 of C.11 (sending of PRACK)
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      MO video call establishment
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MO_VideoCall(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                     IP_RAT_CTRL_PORT p_PortIP,
+                                     template (value) IP_DrbInfo_Type p_DrbInfo) return TriggerResult_Type
+  {
+    var PDN_Index_Type v_PDN_Index:= PDN_1;
+    var template (value) IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+    var TriggerResult_Type v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_PortIMS);  /* wait until IMS PTC has sent "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+                                                                                         or e.g. 503 Service Unavailable */
+    if (v_Result == NORMAL) {                                                         /* => procedure shall not be aborted */
+      if(ischosen(v_DrbInfo.IPsecTunnel)){
+        v_PDN_Index := valueof(v_DrbInfo.IPsecTunnel.PdnId);
+      }
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M1, v_DrbInfo);
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M2, v_DrbInfo);
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      MT video call establishment
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MT_VideoCall(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                     IP_RAT_CTRL_PORT p_PortIP,
+                                     template (value) IP_DrbInfo_Type p_DrbInfo) return TriggerResult_Type
+  {
+    var PDN_Index_Type v_PDN_Index:= PDN_1;
+    var template (value) IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+    var TriggerResult_Type v_Result := NORMAL;
+
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);                        // trigger IMS PTC to proceed steps 1-4 of C.11
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_PortIMS);   // wait until IMS PTC has got sent "100 Trying" and "183 Session Progress" from the UE (steps 3 and 4 of C.11)
+    if (v_Result == NORMAL) {                                   // => procedure shall not be aborted
+      if(ischosen(v_DrbInfo.IPsecTunnel)){
+        v_PDN_Index := valueof(v_DrbInfo.IPsecTunnel.PdnId);
+      }
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M1, v_DrbInfo);
+      f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M2, v_DrbInfo);
+      f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);                      // trigger IMS PTC to continue with step 5 of C.26 (sending of PRACK)
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      Add video to existing speech call
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_AddVideo(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                 IP_RAT_CTRL_PORT p_PortIP,
+                                 template (value) IP_DrbInfo_Type p_DrbInfo){
+    var PDN_Index_Type v_PDN_Index:= PDN_1;
+    var template (value) IP_DrbInfo_Type v_DrbInfo := p_DrbInfo;
+
+    if(ischosen(v_DrbInfo.IPsecTunnel)){
+      v_PDN_Index := valueof(v_DrbInfo.IPsecTunnel.PdnId);
+    }
+    f_IP_RtpRtcpLoopback(p_PortIP, v_PDN_Index, tsc_IMS_MediaPort_M2, v_DrbInfo);
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);
+  }
+
+  /*
+   * @desc      Release video but keep speech call
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_ReleaseVideo(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                     IP_RAT_CTRL_PORT p_PortIP)
+  {
+    f_IP_RtpRtcpLoopback(p_PortIP, PDN_1, tsc_IMS_MediaPort_M2, omit);
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);
+  }
+
+  /*
+   * @desc      Start MO IMS signalling
+   * @param     p_PortIMS
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MO_IMS_Signalling(IMS_IPCAN_CO_ORD_PORT p_PortIMS)   // p_PortIMS not used but kept for future use
+  {
+    // nothing to be done
+  }
+
+  /*
+   * @desc      Start MT IMS signalling
+   * @param     p_PortIMS
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MT_IMS_Signalling(IMS_IPCAN_CO_ORD_PORT p_PortIMS)
+  {
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);      // trigger IMS PTC to continue with IMS signalling
+  }
+
+  /*
+   * @desc      Initialise IPCAN
+   * @param     p_PortIMS
+   * @param     p_CellId
+   * @param     p_PDN_Id_List       (default value: {ePDG_IMS1})
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_Init(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                             WLAN_CellId_Type p_CellId,
+                             PDN_Index_List_Type p_PDN_Id_List:= {ePDG_IMS1}) runs on WLAN_PTC
+  {
+    var boolean v_IMSoWLAN := true;
+    f_WLAN_Init(WLAN_Only);
+    f_WLAN_CellConfig_Def(p_CellId, p_PDN_Id_List,-, v_IMSoWLAN);
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS, cms_IPCAN_IMS_Response(IPCAN_INIT));
+  }
+
+  /*
+   * @desc      Start XCAP signalling in order to establish XCAP APN
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_XCAP_Signalling(IMS_IPCAN_CO_ORD_PORT p_PortIMS,     // p_PortIMS not used but kept for future use
+                                        IP_RAT_CTRL_PORT p_PortIP,
+                                        template (value) IP_DrbInfo_Type p_DrbInfo) runs on WLAN_PTC
+  {
+    timer t_Watchdog := tsc_WLANWatchDogDef;
+    f_IP_Handling_StartPDN(p_PortIP, ePDG_XCAP, p_DrbInfo); //Applicable for DS2
+    // Establish IPsec tunnel
+    f_WLAN_EstablishIPsecTunnel_Step4(ePDG_XCAP, t_Watchdog); // @sic R5-174498 sic@
+  }
+
+  /*
+   * @desc      Start signalling in order to establish Second Emergency PDN
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_DrbInfo
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_EmergencyCall_Signalling(IMS_IPCAN_CO_ORD_PORT p_PortIMS, // p_PortIMS not used but kept for future use
+                                                 IP_RAT_CTRL_PORT p_PortIP,
+                                                 template (value) IP_DrbInfo_Type p_DrbInfo) runs on WLAN_PTC //@sic R5-183055 sic@
+  {//@sic R5-183055 sic@s
+    timer t_Watchdog := tsc_WLANWatchDogDef;
+    f_IP_Handling_StartPDN(p_PortIP, ePDG_IMS2, p_DrbInfo);
+    // Establish IPsec tunnel
+    f_WLAN_EstablishIPsecTunnel_Step4(ePDG_IMS2, t_Watchdog);
+  }
+
+  /*
+   * @desc      start IPCAN procedure
+   * @param     p_PortIMS
+   * @param     p_CellId
+   * @param     p_ProcedureType
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_StartProcedure(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                       WLAN_CellId_Type p_CellId,
+                                       IMS_TestProcedure_Type p_ProcedureType) runs on WLAN_PTC return TriggerResult_Type
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    var template (value) IP_DrbInfo_Type v_DrbInfoIpSecTunnel := cs_DrbInfo_IPsecTunnel(ePDG_IMS1);
+    
+    select (p_ProcedureType) {
+      case (IPCAN_InitialRegistration) {                                        // initial registration
+        f_WLAN_IPCAN_InitialRegistration(p_CellId);
+      }
+      case (IPCAN_EmergencyCall_NormalService) {                                // emergency call, normal service, uses 112 as default emg number
+        //Additional PDN
+        f_WLAN_IPCAN_EmergencyCall_Signalling(p_PortIMS, IP, cs_DrbInfo_IPsecTunnel(ePDG_IMS2)); //@sic R5-183055 sic@
+        
+      }
+      case (IPCAN_EmergencyCall_LimitedService) {                               // emergency call, limited service
+        FatalError(__FILE__, __LINE__, "f_WLAN_IPCAN_StartProcedure: IPCAN_EmergencyCall_LimitedService not implemented yet");  /* There are no test cases for emergency calls over WLAN yet;
+                                                                                                                                   In case of emergency calls over WLAN, clarification is needed whether a further IPsec tunnel is used
+                                                                                                                                   or existing tunnel is released and a new one established (see 23.402 clause 4.5.4a) */
+      }
+      case (IPCAN_MO_SpeechCall) {                                              // MO speech call
+        v_Result := f_WLAN_IPCAN_MO_SpeechCall(p_PortIMS, IP, v_DrbInfoIpSecTunnel);
+      }
+      case (IPCAN_MT_SpeechCall) {                                              // MT speech call
+        v_Result := f_WLAN_IPCAN_MT_SpeechCall(p_PortIMS, IP, v_DrbInfoIpSecTunnel);
+      }
+      case (IPCAN_MO_VideoCall) {                                               // MO video call
+        v_Result := f_WLAN_IPCAN_MO_VideoCall(p_PortIMS, IP, v_DrbInfoIpSecTunnel);
+      }
+      case (IPCAN_MT_VideoCall) {                                               // MT video call
+        v_Result := f_WLAN_IPCAN_MT_VideoCall(p_PortIMS, IP, v_DrbInfoIpSecTunnel);
+      }
+      case (IPCAN_MO_AddVideo, IPCAN_MT_AddVideo) {                             // add video to existing speech call
+        f_WLAN_IPCAN_AddVideo(p_PortIMS, IP, v_DrbInfoIpSecTunnel);
+      }
+      case (IPCAN_ReleaseVideo) {                                               // Release video but keep speech call
+        f_WLAN_IPCAN_ReleaseVideo(p_PortIMS, IP);
+      }
+      case (IPCAN_MO_IMS_Signalling) {                                          // MO IMS signalling
+        f_WLAN_IPCAN_MO_IMS_Signalling(p_PortIMS);
+      }
+      case (IPCAN_MT_IMS_Signalling) {                                          // MT IMS signalling
+        f_WLAN_IPCAN_MT_IMS_Signalling(p_PortIMS);
+      }
+      case (IPCAN_XCAP_Signalling) {
+        if (not pc_WLAN_XCAP_without_PDN) {
+          f_WLAN_IPCAN_XCAP_Signalling(p_PortIMS, IP, cs_DrbInfo_IPsecTunnel(ePDG_XCAP)); //@sic R5-174498 sic@, @sic R5s230616 change 2.2 sic@
+        }
+      }
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      postamble for IPCAN
+   * @param     p_PortIMS
+   * @param     p_CellId
+   * @param     p_PdnToBeStopped
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_Release(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                WLAN_CellId_Type p_CellId,
+                                PDN_Index_Type p_PdnToBeStopped) runs on WLAN_PTC
+  {
+    var boolean v_IMSoWLAN := true;
+    f_WLAN_Postamble(p_CellId, p_PdnToBeStopped, v_IMSoWLAN);  //@sic R5-174656 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);
+  }
+
+  /*
+   * @desc      Handle end of a procedure
+   * @param     p_PortIMS
+   * @param     p_PortIP
+   * @param     p_ProcedureType
+   * @param     p_LoopbackEstablished
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_EndProcedure(IMS_IPCAN_CO_ORD_PORT p_PortIMS,
+                                     IP_RAT_CTRL_PORT p_PortIP,
+                                     IMS_TestProcedure_Type p_ProcedureType,
+                                     boolean p_LoopbackEstablished)runs on WLAN_PTC
+  {
+    select (p_ProcedureType) {
+      case (IPCAN_MO_SpeechCall, IPCAN_MT_SpeechCall) {
+        if (p_LoopbackEstablished){       // NOTE: in test cases for unsuccessful behaviour there is no loopback
+          f_IP_RtpRtcpLoopback(p_PortIP, PDN_1, tsc_IMS_MediaPort_M1, omit);
+        }
+      }
+      case (IPCAN_MO_VideoCall, IPCAN_MT_VideoCall) {
+        if (p_LoopbackEstablished){       // NOTE: in test cases for unsuccessful behaviour there is no loopback
+          f_IP_RtpRtcpLoopback(p_PortIP, PDN_1, tsc_IMS_MediaPort_M1, omit);
+          f_IP_RtpRtcpLoopback(p_PortIP, PDN_1, tsc_IMS_MediaPort_M2, omit);
+        }
+      }
+      case (IPCAN_XCAP_Signalling){
+        if (pc_WLAN_XCAP_without_PDN){
+          f_WLAN_ePDG_PDN_Release(ePDG_XCAP);
+        }
+      }
+      case (IPCAN_EmergencyCall_NormalService){
+        //Emergecy PDN is deactivated normal PDN is established. @sic R5-171590 sic@
+        f_WLAN_IMS_ePDG_Tunnel_Disconnet_UE_Initated(ePDG_IMS2);   // @sic R5-183096 sic@
+      }
+    } //end select
+    f_IMS_IPCAN_SendCoOrdMsg(p_PortIMS);
+  }
+
+  /*
+   * @desc      Main loop to handle commands from the IMS PTC:
+   *            - IPCAN_INIT
+   *            - IPCAN_STARTPROCEDURE  (procedure)
+   *            - IPCAN_ENDPROCEDURE    (procedure)
+   *            - IPCAN_RELEASE
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPCAN_MainLoop() runs on WLAN_PTC
+  {
+    var WLAN_CellId_Type v_CellId := wlan_Cell27;    /* arbitrarily selected */
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_Coordination_MSG;
+    var IMS_IPCAN_Command_Type v_Command;
+    var integer v_PdnIndex;
+    var boolean v_LoopbackEstablished := false;
+    var boolean v_Done := false;
+    var IMS_TestConfiguration_Type v_TestConfiguration;
+    
+    while (not v_Done) {
+      alt {
+        [] IMS[tsc_Index_IMS1].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS1;
+        }
+        [] IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS2;
+        }
+      }
+      v_Command := v_IMS_IPCAN_Coordination_MSG.IMS_IPCAN_Command;
+      
+      select (v_Command.Name) {
+        case (IPCAN_INIT) {
+          v_TestConfiguration := v_Command.TestConfiguration;     /* @sic R5s201508 sic@ */
+          select(v_TestConfiguration){
+            case (IPCAN_XCAP){
+              if (pc_WLAN_XCAP_without_PDN) { // @sic R5-174498 sic@
+                f_WLAN_IPCAN_Init(IMS[v_PdnIndex], v_CellId,{ePDG_IMS1});
+              } else { /// @sic R5-174498 36.508 cl.4.5A.25 sic@
+                f_WLAN_IPCAN_Init(IMS[v_PdnIndex], v_CellId,{ePDG_IMS1, ePDG_XCAP});
+              }
+            }
+            case (IPCAN_EmergencyCall) {
+              f_WLAN_IPCAN_Init(IMS[v_PdnIndex], v_CellId,{ePDG_IMS1, ePDG_IMS2}); //@sic R5-183055 sic@
+            }
+            case else {
+              f_WLAN_IPCAN_Init(IMS[v_PdnIndex], v_CellId, {ePDG_IMS1});
+            }
+          }
+        }
+        case (IPCAN_STARTPROCEDURE) {
+          if (f_WLAN_IPCAN_StartProcedure(IMS[v_PdnIndex], v_CellId, v_Command.TestProcedure) == NORMAL) {
+            v_LoopbackEstablished := true;   /* NOTE: variable is set to true even when there is no speech or video */
+          }
+        }
+        case (IPCAN_ENDPROCEDURE) {
+          f_WLAN_IPCAN_EndProcedure(IMS[v_PdnIndex], IP, v_Command.TestProcedure, v_LoopbackEstablished);
+          v_LoopbackEstablished := false;
+        }
+        case (IPCAN_RELEASE) {
+          f_WLAN_IPCAN_Release(IMS[v_PdnIndex], v_CellId, ePDG_IMS1);
+          v_Done := true;
+        }
+        case (IPCAN_QUERY) {  /* @sic R5s130133 additional changes: handling of queries from the IMS PTC sic@ */
+          IMS[v_PdnIndex].send(cms_IPCAN_IMS_QueryResponse(f_WLAN_IMS_IpcanInfo()));
+        }
+        case (IPCAN_PROVIDELOCATIONINFORMATION) {
+          FatalError(__FILE__, __LINE__, "'IPCAN_PROVIDELOCATIONINFORMATION' not implemented for WLAN");  /* only used in (EUTRA) emergency call test cases */
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "invalid command");
+        }
+      }
+    }
+  }
+
+}

@@ -1,0 +1,198 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2017-04-15 22:20:31 +0200 (sá., 15 abr. 2017) $
+// $Rev: 18506 $
+/******************************************************************************/
+
+module InterRat_Handover_EtoG_GERAN {
+
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from GERAN_CellInfo all;
+  import from GERAN_CommonFunctions all;
+  import from GERAN_Component all;
+  import from GERAN_Templates all;
+  import from GERAN_TypeDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from UTRANGERAN_CommonFunctions all;
+
+  /*
+   * @desc      To swallow Packet SI Status
+   * @param     p_CellId
+   * @status    APPROVED (LTE_IRAT)
+   */
+  altstep a_GERAN_ReceivePSIStatus(GERAN_CellId_Type p_CellId) runs on GERAN_PTC
+  {
+    [] G_RLC.receive(car_G_RLC_ControlMsg_IND(p_CellId, tsc_PhyCh1, cr_PacketSIStatus1and3)) // @sic R5s150812 sic@
+      {
+        repeat;
+      }
+  }
+
+  /*
+   * @desc      common implementation for TC_8_4_3_2 and TC_8_4_3_3
+   * @param     p_DoSysInfo
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function fl_TC_8_4_3_2and3_GERAN(boolean p_DoSysInfo) runs on GERAN_PTC
+  {
+    var integer v_T0_RSSI_Cell24 := -85;
+    var integer v_T1_RSSI_Cell24 := -65;
+    var G_LLC_DATAMESSAGE_IND v_LLCDataInd;
+    var B3_Type v_UpdateType;
+    var octetstring v_SI1_Octets;
+    var octetstring v_SI3_Octets;
+    var octetstring v_SI13_Octets;
+    var IRAT_Coordination_MSG v_OctetData;
+    
+    //* @desc Initialise all cells
+    f_GERAN_Init (EUTRA_GERAN);
+    
+    if (p_DoSysInfo) { // 8.4.3.3.
+        // Need to send SI 1, 3 and 13 to EUTRA
+        v_SI1_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI1 (geran_Cell24)));
+        v_SI3_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI3 (geran_Cell24)));
+        v_SI13_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI13 (geran_Cell24)));
+        EUTRA.send (cms_IRAT_OctetData (substr(v_SI1_Octets, 2, lengthof(v_SI1_Octets)-2))); // @sic R5s130258 sic@
+        EUTRA.send (cms_IRAT_OctetData (substr(v_SI3_Octets, 2, lengthof(v_SI3_Octets)-2))); // @sic R5s130258 sic@
+        EUTRA.send (cms_IRAT_OctetData (substr(v_SI13_Octets, 2, lengthof(v_SI13_Octets)-2))); // @sic R5s130258 sic@
+    }
+    // Create GERAN cells
+    f_GERAN_CreateCell (geran_Cell24);
+
+    f_GERAN_InterRAT_InitialiseAuthParams();  // The UE starts in EUTRA, so wait for it to send the Auth Params
+    
+    f_GERAN_SetCellPowerLevel ( geran_Cell24, v_T0_RSSI_Cell24 ); //@sic R5s120372 sic@
+
+    //* @desc Coordinate with E-UTRA component to send GERAN frequencies
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell24 );
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell25 );
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell26 );
+    
+    f_GERAN_TestBody_Set( true );
+    
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA);
+    //@siclog "Step 3" siclog@
+    //The SS changes Cell1 and Cell 24 parameters according to the values specified for T1
+    f_GERAN_SetCellPowerLevel ( geran_Cell24, v_T1_RSSI_Cell24 ); //@sic R5s120372 sic@
+    
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA);
+    EUTRA.receive (cmr_IRAT_OctetData) -> value v_OctetData; // @sic R5s130883 sic@
+    
+    //@siclog "Step 6" siclog@
+    //does the test result of generic test procedure in 36.508
+    //subclause 6.4.2.9 indicate that the UE is camped on GERAN Cell 24?
+    // @sic R5-130641 sic@
+    v_LLCDataInd := f_GPRS_ReceiveUplinkMsg(geran_Cell24, car_G_LLC_UnitData_IND(cr_G_RA_UpdReqAny(cr_GMM_UpdateType('0'B, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined)))));
+    v_UpdateType := f_UG_RauReq_GetUpdateValueForRauAcc(v_LLCDataInd.unit.msg.rauReq);
+    f_IRAT_SendCoOrd (EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC to drop power
+    
+    f_GERAN_RAUWithoutRAUReq (geran_Cell24, v_UpdateType, -, true, true, oct2int(v_OctetData.OctetData)); // @sic R5-133584, R5s130883, R5-153114 sic@
+
+    f_GERAN_TestBody_Set( false );
+    
+    f_IRAT_SendCoOrd (EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC Test case is now finished on GERAN side
+    
+    //* @desc Switch off UE and release cell
+    f_GERAN_Postamble ( geran_Cell24, G2_PSHANDOVER );
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.4.3.2
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_8_4_3_2_GERAN() runs on GERAN_PTC
+  { /* Inter-RAT cell change order / From E-UTRA data RRC_CONNECTED to GPRS / Without NACC */
+     fl_TC_8_4_3_2and3_GERAN(false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 8.4.3.3
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_8_4_3_3_GERAN() runs on GERAN_PTC
+  { /* Inter-RAT cell change order / From E-UTRA data to GPRS / With NACC */
+    var integer v_T0_RSSI_Cell24 := -85;
+    var integer v_T1_RSSI_Cell24 := -65;
+    var G_L2_DATAMESSAGE_IND v_ChanReq;
+    var G_LLC_DATAMESSAGE_IND v_LLCDataInd;
+    var B3_Type v_UpdateType;
+    var SI13RO v_SI13RO;
+    var octetstring v_SI1_Octets;
+    var octetstring v_SI3_Octets;
+    var octetstring v_SI13_Octets;
+    var default v_DefaultRef := null;
+    var IRAT_Coordination_MSG v_OctetData;
+    
+    //* @desc Initialise all cells
+    f_GERAN_Init (EUTRA_GERAN);
+    
+    v_SI13RO := f_GERAN_SysInfo_GetSI13_RestOctets (geran_Cell24);
+    v_SI13RO.r4Mask := '1'B;
+    v_SI13RO.sI_STATUS_IND := '1'B;
+    f_GERAN_SysInfo_SetSI13_RestOctets (geran_Cell24, v_SI13RO);
+
+    // Need to send SI 1, 3 and 13 to EUTRA @sic R5-126022, R5s130258 sic@
+    v_SI1_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI1 (geran_Cell24)));
+    v_SI3_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI3 (geran_Cell24)));
+    v_SI13_Octets := bit2oct(encvalue(f_GERAN_SysInfo_GetSI13 (geran_Cell24)));
+    EUTRA.send (cms_IRAT_OctetData (substr(v_SI1_Octets,2, lengthof(v_SI1_Octets)-2))); // @sic R5s130258 sic@
+    EUTRA.send (cms_IRAT_OctetData (substr(v_SI3_Octets,2, lengthof(v_SI3_Octets)-2))); // @sic R5s130258 sic@
+    EUTRA.send (cms_IRAT_OctetData (substr(v_SI13_Octets,2, lengthof(v_SI13_Octets)-2))); // @sic R5s130258 sic@
+
+    // Create GERAN cells
+    f_GERAN_CreateCell (geran_Cell24);
+
+    f_GERAN_InterRAT_InitialiseAuthParams();  // The UE starts in EUTRA, so wait for it to send the Auth Params
+    
+    f_GERAN_SetCellPowerLevel ( geran_Cell24, v_T0_RSSI_Cell24 ); //@sic R5s120372 sic@
+
+    //* @desc Coordinate with E-UTRA component to send GERAN frequencies
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell24 );
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell25 );
+    f_GERAN_Send_IR_SysInfoToEUTRA ( geran_Cell26 );
+    
+    f_GERAN_TestBody_Set( true );
+    
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA);
+    //@siclog "Step 3" siclog@
+    //The SS changes Cell1 and Cell 24 parameters according to the values specified for T1
+    f_GERAN_SetCellPowerLevel ( geran_Cell24, v_T1_RSSI_Cell24 ); //@sic R5s120372 sic@
+    
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA);
+    EUTRA.receive (cmr_IRAT_OctetData) -> value v_OctetData; // @sic R5s130883 sic@
+    
+    // Receive RAU Request Message first @sic R5-126022 sic@
+    // @sic R5s130019 sic@
+    //@siclog "Step 5A" siclog@
+    G_L2.receive (car_G_L2_ACCESS_IND ( geran_Cell24, tsc_PhyCh0, tsc_RACH, ?, ?, cr_ChanReqOnePhase )) -> value v_ChanReq;
+    f_IRAT_SendCoOrd (EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC to drop the power @sic R5-130641, R5s130258 sic@
+    // finish configuring the TBF
+    f_GERAN_ULTBFOnePhase (geran_Cell24, v_ChanReq.access);
+    
+    interleave { // @sic R5s140349 sic@
+      [] G_LLC.receive(car_G_LLC_UnitData_IND(cr_G_RA_UpdReqAny(cr_GMM_UpdateType('0'B, (tsc_I_UpdateTypeRAOnly, tsc_I_UpdateTypeCombined))))) -> value v_LLCDataInd {}
+      // Then the Packet SI Status listing SI 1 and 3 @sic R5-126022 sic@
+      [] G_RLC.receive (car_G_RLC_ControlMsg_IND(geran_Cell24, tsc_PhyCh1, cr_PacketSIStatus1and3)) {}
+    }
+    G_RLC.receive (car_G_RLC_ControlMsg_IND(geran_Cell24, tsc_PhyCh1, cr_PacketControlAcknowledgement)); // @sic R5s130019 sic@
+
+    v_DefaultRef := activate (a_GERAN_ReceivePSIStatus (geran_Cell24));  // @sic R5s130258 sic@
+    v_UpdateType := f_UG_RauReq_GetUpdateValueForRauAcc(v_LLCDataInd.unit.msg.rauReq);
+    f_GERAN_RAUWithoutRAUReq (geran_Cell24, v_UpdateType, -, true, true, oct2int(v_OctetData.OctetData)); // @sic R5-133584, R5s130883, R5-153114 sic@
+    
+    f_GERAN_TestBody_Set( false );
+    
+    f_IRAT_SendCoOrd (EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC Test case is now finished on GERAN side
+    
+    //* @desc Switch off UE and release cell
+    f_GERAN_Postamble ( geran_Cell24, G2_PSHANDOVER );
+    deactivate (v_DefaultRef); // @sic R5s130258 sic@
+  }
+
+}

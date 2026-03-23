@@ -1,0 +1,1327 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module MCX_SIP_Registration {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_PIDF_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCX_CommonDefs all;
+  import from MCX_CoordMsgs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_MIME_Functions all;
+  import from MCX_Parameters all;
+  import from MCX_SIP_Common all;
+  import from MCX_SecurityParameters all;
+  import from MCX_XML_PIDF all;
+  import from MCX_XML_conference_info all;
+  import from MCX_XML_mcdataLocationInfo all;
+  import from MCX_XML_mcdataPresInfoFA all;
+  import from MCX_XML_mcdata_info all;
+  import from MCX_XML_mcpttLocationInfo all;
+  import from MCX_XML_mcpttPresInfoFA all;
+  import from MCX_XML_mcptt_info all;
+  import from MCX_XML_mcvideoLocationInfo all;
+  import from MCX_XML_mcvideo_info all;
+  import from MCX_XML_poc_settings all;
+  import from MCX_XML_resource_lists all;
+  import from MCX_XML_simple_filter all;
+  import from MCX_XML_xcap_diff all;
+  import from MIKEY_TypeDefs all;
+  import from XSD all;
+
+  type record MCX_DataRequestWithXmlBodies_Type {                                               /* @status    APPROVED (MCX) */
+    IMS_Request_Type            Request,
+    MCX_MIME_XmlBodies_Type     XmlBodies  optional
+  };
+
+  type enumerated MCX_Subscription_Type { INITIAL_SUBSCRIBE, RE_SUBSCRIBE, UN_SUBSCRIBE };      /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      Mapping of CSK to respective xcap-diff dialog
+   * @param     p_DialogIndex
+   * @return    MCX_KeyIndex_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_XcapDiffDialog_GetKeyIndex(IMS_PTC_DialogIndex_Type p_DialogIndex) return MCX_KeyIndex_Type
+  {
+    var MCX_KeyIndex_Type v_KeyIndex;
+
+    select (p_DialogIndex) {
+      case (xcapDiffDialogCMS) {
+        v_KeyIndex := CSK_CMS;
+      }
+      case (xcapDiffDialogGMS1) {
+        v_KeyIndex := CSK_GMS1;
+      }
+      case (xcapDiffDialogGMS2) {
+        v_KeyIndex := CSK_GMS2;
+      }
+      case (xcapDiffDialogGMS3) {
+        v_KeyIndex := CSK_GMS3;
+      }
+      case (xcapDiffDialogGMS4) {
+        v_KeyIndex := CSK_GMS4;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "not implemented / to be reviewed");
+      }
+    }
+    return v_KeyIndex;
+  }
+
+  /*
+   * @desc      Extract CSK from MIKEY message and store CSK
+   *            NOTE: as working assumption there are different CSKs for MCX server, CMS and GMS
+   * @param     p_MIKEY_Message
+   * @param     p_KeyIndex
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_IMS_MIKEY_Message_ExtractAndSetCSK(MIKEY_Message p_MIKEY_Message,
+                                                     MCX_KeyIndex_Type p_KeyIndex) runs on MCX_IMS_PTC
+  {
+    var MCX_SecurityParameters_Type v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    var MCX_SecurityKey_Type v_CSK;
+    
+    if (f_MCX_SecurityParameters_KeyExists(v_SecurityParameters, p_KeyIndex)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "CSK has been uploaded already");
+    } else {
+      v_CSK := f_MCX_MIKEY_Message_ExtractKey(p_MIKEY_Message);
+      v_SecurityParameters := f_MCX_SecurityParameters_SetKey(v_SecurityParameters, p_KeyIndex, v_CSK);
+      f_MCX_IMS_PTC_SecurityParameters_Set(v_SecurityParameters);
+    }
+  }
+
+  type record MCX_ServiceInfo_Type {     /* @status    APPROVED (MCX) */
+    MCPTT_Info_Type   Mcptt   optional,
+    MCVideo_Info_Type Mcvideo optional,
+    MCData_Info_Type  Mcdata  optional
+  };
+
+  template (value) MCX_ServiceInfo_Type cs_MCX_Service_Info_Init := { omit, omit, omit };     /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      build up template(s) for MCPTT/MCVideo/MCData info according to 36.579-1 Table 5.5.3.2.1-1, 5.5.3.2.1-2, 5.5.3.2.1-3  for conditions CONFIG, GROUPCONFIG, POC-SETTINGS-EVENT
+   *            and in case of PUBLISH for PoC-Settings only
+   * @param     p_ServiceType
+   * @param     p_IMS_Request
+   * @param     p_PublishWithServiceAuthorization (default value: false)
+   * @return    template (present) MCX_ServiceInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SIP_Registration_McsInfo(MCX_ServiceType_Type p_ServiceType,
+                                           IMS_Request_Type p_IMS_Request,
+                                           boolean p_PublishWithServiceAuthorization := false) runs on MCX_IMS_PTC return template (present) MCX_ServiceInfo_Type
+  {
+    var MCX_ServiceType_Type v_ServiceType := p_ServiceType;
+    var charstring v_AccessToken := f_MCX_IMS_PTC_SecurityParameters_GetAccessToken();
+    var template (omit) charstring v_CurrentClientId := f_MCX_IMS_PTC_ClientId_Get();
+    var template (present) charstring v_ExpectedClientId  := pattern "urn:uuid:[a-zA-Z0-9]#8-[a-zA-Z0-9]#4-[a-zA-Z0-9]#4-[a-zA-Z0-9]#4-[a-zA-Z0-9]#(12)";  /* @sic R5s240680 change 2: "#(12)" instead of "#12" sic@
+                                                                                                                                                              -> ES 201 873-1 B.1.5.3: "In the form "#n" n shall be a single digit" */
+    var template (present) MCPTT_Info_Type v_MCPTT_InfoTemplate := cr_MCPTT_Info_Base;
+    var template (present) MCVideo_Info_Type v_MCVideo_InfoTemplate := cr_MCVideo_Info_Base;
+    var template (present) MCData_Info_Type v_MCData_InfoTemplate := cr_MCData_Info_Base;
+    var template (present) MCX_ServiceInfo_Type v_MCS_Info := cs_MCX_Service_Info_Init;
+
+    if (isvalue(v_CurrentClientId)) {
+      v_ExpectedClientId := valueof(v_CurrentClientId);
+    }
+    select union (p_IMS_Request) {
+      case (Register) {                                                                                                 // Table 5.3.2.4.2-2: SIP REGISTER (Step 3a1, Table 5.3.2.4.1-1) with condition SERVICE_AUTH
+        v_MCPTT_InfoTemplate.mcptt_Params.mcptt_access_token := cr_MCPTT_Content_String(v_AccessToken);                 // Condition CONFIG
+        v_MCVideo_InfoTemplate.mcvideo_Params.mcvideo_access_token := cr_MCVideo_Content_String(v_AccessToken);         // Condition CONFIG
+        v_MCData_InfoTemplate.mcdata_Params.mcdata_access_token := cr_MCData_Content_String(v_AccessToken);             // Condition CONFIG
+
+        v_MCPTT_InfoTemplate.mcptt_Params.mcptt_client_id := cr_MCPTT_Content_String(v_ExpectedClientId);               // Condition CONFIG AND REGISTER_PUBLISH
+        v_MCVideo_InfoTemplate.mcvideo_Params.mcvideo_client_id := cr_MCVideo_Content_String(v_ExpectedClientId);       // Condition CONFIG AND REGISTER_PUBLISH
+        v_MCData_InfoTemplate.mcdata_Params.mcdata_client_id := omit;                                                   // Condition REGISTER
+      }
+      case (Publish) {
+        if (p_PublishWithServiceAuthorization) {                                                                        // Table 5.3.2.5.2-2: SIP PUBLISH (Step 1a2, Table 5.3.2.5.1-1) with condition POC-SETTINGS-EVENT, SERVICE_AUTH
+          v_MCPTT_InfoTemplate.mcptt_Params.mcptt_access_token := cr_MCPTT_Content_String(v_AccessToken);               // Condition CONFIG
+          v_MCVideo_InfoTemplate.mcvideo_Params.mcvideo_access_token := cr_MCVideo_Content_String(v_AccessToken);       // Condition CONFIG
+          v_MCData_InfoTemplate.mcdata_Params.mcdata_access_token := cr_MCData_Content_String(v_AccessToken);           // Condition CONFIG
+        }
+        else {                                                                                                          // Table 5.3.2.5.2-1: SIP PUBLISH (Step 1a1, Table 5.3.2.5.1-1) with condition POC-SETTINGS-EVENT
+          v_MCPTT_InfoTemplate.mcptt_Params.mcptt_request_uri := cr_MCPTT_Content_URI(px_MCPTT_ID_User_A);              // Condition POC-SETTINGS-EVENT
+          v_MCVideo_InfoTemplate.mcvideo_Params.mcvideo_request_uri := cr_MCVideo_Content_URI(px_MCVideo_ID_User_A);    // Condition POC-SETTINGS-EVENT
+          v_MCData_InfoTemplate.mcdata_Params.mcdata_request_uri := cr_MCData_Content_URI(px_MCData_ID_User_A);         // Condition POC-SETTINGS-EVENT
+
+        }
+        v_MCPTT_InfoTemplate.mcptt_Params.mcptt_client_id := cr_MCPTT_Content_String(v_ExpectedClientId);               // Condition POC-SETTINGS-EVENT or CONFIG AND REGISTER_PUBLISH
+        v_MCVideo_InfoTemplate.mcvideo_Params.mcvideo_client_id := cr_MCVideo_Content_String(v_ExpectedClientId);       // Condition POC-SETTINGS-EVENT or CONFIG AND REGISTER_PUBLISH
+        v_MCData_InfoTemplate.mcdata_Params.mcdata_client_id := cr_MCData_Content_String(v_ExpectedClientId);           // Condition POC-SETTINGS-EVENT or CONFIG AND PUBLISH
+      }
+      case (Subscribe) {                                                                                                // Table 5.3.2.6.2-1: SIP SUBSCRIBE (Step 1, Table 5.3.2.6.1-1) with condition CONFIG
+                                                                                                                        // Table 5.3.2.7.2-1: SIP SUBSCRIBE (Step 1a1, Table 5.3.2.7.1-1) with condition GROUPCONFIG
+                                                                                                                        // Table 5.3.2.7.2-3: SIP SUBSCRIBE (Step 1b1, Table 5.3.2.7.1-1; step 1c3, Table 5.3.2.7.1-1) with condition GROUPCONFIG
+                                                                                                                        // Table 5.3.2.7.2-5: SIP SUBSCRIBE (Step 1c1, Table 5.3.2.7.1-1; step 2a1, Table 5.3.2.7.1-2) with condition GROUPCONFIG
+        v_MCPTT_InfoTemplate.mcptt_Params.mcptt_access_token := cr_MCPTT_Content_String(v_AccessToken);
+        v_MCPTT_InfoTemplate.mcptt_Params.mcptt_client_id := cr_MCPTT_Content_String(v_ExpectedClientId) ifpresent;
+        v_ServiceType := MCPTT;                                                                                         // @sic R5-222394: MCVideo and MCData use MCPTT for condition CONFIG or GROUPCONFIG (-> C1-221287) sic@
+      }
+    }
+    select (v_ServiceType) {
+      case (MCPTT) {
+        v_MCS_Info.Mcptt := v_MCPTT_InfoTemplate;
+      }
+      case (MCVideo) {
+        v_MCS_Info.Mcvideo := v_MCVideo_InfoTemplate;
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_MCS_Info.Mcdata := v_MCData_InfoTemplate;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+    return v_MCS_Info;
+  }
+
+  /*
+   * @desc      get client-id from mcptt-info or mcvideo-info or mcdata-info and store it at the MCX PTC
+   * @param     p_XmlBodies
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SIP_Registration_ClientId_Set(MCX_MIME_XmlBodies_Type p_XmlBodies) runs on MCX_IMS_PTC
+  {
+    var XSD.AnyURI v_XsdUri;
+    
+    if (isvalue(p_XmlBodies.McpttInfo.mcptt_Params.mcptt_client_id.choice.mcpttString)) {
+      v_XsdUri := valueof(p_XmlBodies.McpttInfo.mcptt_Params.mcptt_client_id.choice.mcpttString);
+    }
+    else if (isvalue(p_XmlBodies.McvideoInfo.mcvideo_Params.mcvideo_client_id.choice.mcvideoString)) {
+      v_XsdUri := valueof(p_XmlBodies.McvideoInfo.mcvideo_Params.mcvideo_client_id.choice.mcvideoString);
+    }
+    else if (isvalue(p_XmlBodies.McdataInfo.mcdata_Params.mcdata_client_id.choice.mcdataString)) {
+      v_XsdUri := valueof(p_XmlBodies.McdataInfo.mcdata_Params.mcdata_client_id.choice.mcdataString);
+    }
+    else {
+      return;
+    }
+    f_MCX_IMS_PTC_ClientId_Set(f_UniCharstring2Charstring(v_XsdUri));
+  }
+
+  /*
+   * @desc      message header for 200 OK to be sent to the client as response for REGISTER
+   *            36.579-1 Table 5.5.2.17.1.2-1
+   * @param     p_RegisterRequest
+   * @param     p_ServiceType
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_RegisterResponse_200_MessageHeaderTX(REGISTER_Request p_RegisterRequest,
+                                                      MCX_ServiceType_Type p_ServiceType)
+    runs on IMS_PTC return template (value) MessageHeader
+  {
+    var MessageHeader v_MessageHeader := p_RegisterRequest.msgHeader;
+    var SipUrl v_ContactUrl := f_MessageHeader_GetContactSipUrl(v_MessageHeader);
+    var template (value) SemicolonParam_List v_ContactParams := {};
+    var template (value) Contact v_Contact;
+    
+    select (p_ServiceType) { /* @sic R5-216668 sic@ */
+      case (MCPTT) {
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam(tsc_MCX_FeatureTag_g_3gpp_mcptt));
+      }
+      case (MCVideo) {
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam(tsc_MCX_FeatureTag_g_3gpp_mcvideo));
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam(tsc_MCX_FeatureTag_g_3gpp_mcdata_sds));
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam(tsc_MCX_FeatureTag_g_3gpp_mcdata_fd));
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam(tsc_MCX_FeatureTag_g_3gpp_mcdata_ipconn));  // @sic R5-246417: support of IPCON in SIP Registration sic@
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+    v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("expires", tsc_IMS_RegisterExpiration));
+    v_Contact := cs_Contact(v_ContactUrl, v_ContactParams);
+
+    return f_MCX_CommonResponse_200_MessageHeaderTX(v_MessageHeader, v_Contact);
+  }
+
+  /*
+   * @desc      Wrapper function to generate message header for message header for 200 OK to be sent to the client as response for SUBSCRIBE (36.579-1 Table 5.5.2.17.1.2-1)
+   * @param     p_MessageHeader_Request
+   * @param     p_DialogIndex
+   * @param     p_ContactURI
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SubscribeResponse_200_MessageHeaderTX(MessageHeader p_MessageHeader_Request,
+                                                       IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                       template (value) SipUrl p_ContactURI) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (omit) charstring v_ToTag := f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex);
+    var template (value) Contact v_Contact := cs_Contact(p_ContactURI);
+
+    return f_MCX_CommonResponse_200_MessageHeaderTX(p_MessageHeader_Request, v_Contact, -, v_ToTag);
+  }
+
+  /*
+   * @desc      Wrapper function to generate message header for 200 OK to be sent to the client as response for PUBLISH (36.579-1 Table 5.5.2.17.1.2-1)
+   *            NOTE: according to RFC 3903 PUBLISH does not create a dialog
+   * @param     p_MessageHeader_Request
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PublishResponse_200_MessageHeaderTX(MessageHeader p_MessageHeader_Request) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (omit) charstring v_ToTag := f_IMS_GenerateTag("PUBLISH");
+    return f_MCX_CommonResponse_200_MessageHeaderTX(p_MessageHeader_Request, -, -, v_ToTag);
+  }
+
+  /*
+   * @desc      36.579-1 Table 5.5.2.14-1: SIP SUBSCRIBE
+   * @param     p_ServiceType
+   * @param     p_Subscription
+   * @param     p_DialogIndex
+   * @param     p_RequestURI
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SubscribeRequest_MessageHeaderRX(MCX_ServiceType_Type p_ServiceType,
+                                                  MCX_Subscription_Type p_Subscription,
+                                                  IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                  template (present) SipUrl p_RequestURI) runs on IMS_PTC return template (present) MessageHeader
+  {
+    var EventType v_EventType := f_SIP_SUBSCRIBE_DialogIndex2EventType(p_DialogIndex);
+    var template (present) SemicolonParam_List v_MandatoryContactParams;
+    var template (present) charstring v_ExpiresValueRX;
+    var template (present) MessageHeader v_MessageHeader;
+    var template (present) GenericParamList_Type v_FeatureParamList;
+    var template (present) SipUrl v_ToURI := p_RequestURI;
+    var template (value) RouteBody_List v_RouteBodyList;
+    var charstring v_PreferredServiceId;
+    
+    select (p_DialogIndex) {
+      case (xcapDiffDialogCMS, xcapDiffDialogGMS1, xcapDiffDialogGMS2, xcapDiffDialogGMS3, xcapDiffDialogGMS4) {        /* CONFIG or GROUPCONFIG */
+        v_PreferredServiceId := f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(MCPTT);      /* @sic R5-216759, R5-217964 sic@ NOTE: MCVideo and MCData use MCPTT in this case (-> C1-221287) */
+        v_MandatoryContactParams := { crs_MCX_FeatureParam_3gpp_icsi_ref(MCPTT) }       /* @sic R5-216759, R5-217964 sic@ NOTE: MCVideo and MCData use MCPTT in this case (-> C1-221287) */
+      }
+      case else {
+        v_PreferredServiceId := f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_ServiceType);
+        v_MandatoryContactParams := {};                                                 /* @sic R5-216759, R5-217964: no mandatory feature parameters sic@ */
+      }
+    }
+
+
+    if (p_Subscription == UN_SUBSCRIBE) {
+      v_ExpiresValueRX := "0";
+    } else {
+      select (p_DialogIndex) {
+        case (presenceDialog1, presenceDialog2, pocSettingsDialog, confEventDialog) {
+          v_ExpiresValueRX := "4294967295";
+        }
+        case else {
+          v_ExpiresValueRX := ?;         /* Expires is restricted to 600000 for the reg-event package according to 24.229 */
+        }
+      }
+    }
+    v_MessageHeader := f_IMS_SubscribeRequest_MessageHeaderRX(v_EventType, v_ToURI, v_ExpiresValueRX, v_MandatoryContactParams);
+    v_MessageHeader.pPreferredService := cr_PPreferredService(v_PreferredServiceId);
+    v_MessageHeader.contentType := cr_ContentTypeMIME;
+
+    if (p_DialogIndex == confEventDialog) {
+      v_FeatureParamList := { crs_MCX_FeatureParam_3gpp_icsi_ref(p_ServiceType) };
+      v_MessageHeader.acceptContact := cr_AcceptContact_Common(f_MCX_AcceptContact_AcValues_Common_RX(v_FeatureParamList));
+    }
+
+    if (p_Subscription != INITIAL_SUBSCRIBE) {
+      v_RouteBodyList := f_IMS_RouteSet_ReverseOrder(f_MCX_RouteSet_Subscription_TX());
+      v_MessageHeader.route          := cr_Route(v_RouteBodyList);
+      v_MessageHeader.fromField      := f_IMS_RequestInDialog_FromHeaderRX(p_DialogIndex);
+      v_MessageHeader.toField        := f_IMS_RequestInDialog_ToHeaderRX(p_DialogIndex);
+      v_MessageHeader.callId         := f_IMS_PTC_ImsInfo_DialogGetCallId(p_DialogIndex);
+      v_MessageHeader.cSeq.seqNumber := f_IMS_RequestInDialog_CSeqValueRX(-, p_DialogIndex);
+    }
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      NOTIFY message header according to 36.579-1 Table 5.5.2.8-1
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_ContactURI
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_NotifyRequest_MessageHeaderTX(MCX_ServiceType_Type p_ServiceType,
+                                               IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                               SipUrl p_ContactURI) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5s240690: p_ContentType removed sic@ */
+    var EventType v_EventType := f_SIP_SUBSCRIBE_DialogIndex2EventType(p_DialogIndex);
+    var charstring v_PcscfAddress := f_IMS_PTC_Pcscf_Get();
+    var template (value) ContentType v_ContentType := cs_ContentTypeMIME(tsc_MCX_MIME_Boundary);
+    var integer v_MaxForwards := 67;                            // 36.579-1 Table 5.5.2.8-1
+    var charstring v_ServerName;
+    var charstring v_PublicServiceId;
+    var CharStringList_Type v_ViaAddressList;
+    var template (value) Via v_Via;
+    var template (value) MessageHeader v_NotifyHeader;
+
+    select (p_DialogIndex) {
+      case (xcapDiffDialogCMS) {
+        v_ServerName := tsc_MCX_CMS_Hostname;                   // 36.579-1 Table 5.5.2.8-1
+      }
+      case (xcapDiffDialogGMS1,
+            xcapDiffDialogGMS2,
+            xcapDiffDialogGMS3,
+            xcapDiffDialogGMS4) {
+        v_ServerName := tsc_MCX_GMS_Hostname;                   // 36.579-1 Table 5.5.2.8-1
+      }
+      case else {
+        v_ServerName := f_SIP_SipUrl_GetDomainName(p_ContactURI);
+      }
+    }
+    v_ViaAddressList := {v_PcscfAddress, tsc_IMS_Scscf, v_ServerName};
+    v_Via := f_IMS_NotifyRequest_ViaTX(v_ViaAddressList);
+
+    v_NotifyHeader := f_IMS_NotifyRequest_MessageHeader_Common(p_DialogIndex, v_Via, cs_Contact(p_ContactURI), v_EventType, cs_SubscriptionState_Active("7200"), v_ContentType, v_MaxForwards); // @sic R5s240228: v_MaxForwards := 67 sic@
+
+    if (p_DialogIndex == confEventDialog) {                     // 36.579-2 Table 6.1.3.1.3.3-9 and Table 6.1.3.1.3.3-12
+      v_PublicServiceId := f_MCX_MCServer_PublicServiceId(p_ServiceType);
+      v_NotifyHeader.pAssertedID := cs_PAssertedId(f_SIP_BuildSipUri_TX(v_PublicServiceId));
+      v_NotifyHeader.expires := cs_Expires("3600");
+      v_NotifyHeader.subscriptionState := cs_SubscriptionState_Active("3600");
+      v_NotifyHeader.pPreferredService := cs_PPreferredService(tsc_MCX_FeatureTag_3gpp_service_ims_icsi_mcptt); /* NOTE:
+                                                                                                                   24.379 clause 6.3.3.4 specifies that the controlling function shall include a P-Preferred-Service header field;
+                                                                                                                   24.379 clause 10.1.3.3 specifies that the participating function forwards the NOTIFY to the client;
+                                                                                                                   nevertheless looking at RFC 6050, it does not make much sense to send P-Preferred-Service header field to a client */
+    }
+
+    return v_NotifyHeader;
+  }
+
+  /*
+   * @desc      36.579-1 Table 5.5.2.11-1: SIP PUBLISH
+   * @param     p_ServiceType
+   * @param     p_SipUrlTo
+   * @param     p_EventType
+   * @param     p_ExpiresDeltaSec
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PublishRequest_MessageHeaderRX(MCX_ServiceType_Type p_ServiceType,
+                                                template (present) SipUrl p_SipUrlTo,
+                                                EventType p_EventType,
+                                                charstring p_ExpiresDeltaSec)  runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader_Publish := cr_MessageHeader_Dummy;
+    var template (present) SipUrl v_SipUrlFrom := f_MCX_DefaultPublicUserIdRX();                     /* @sic R5-212302: port not present sic@ */
+    var IMS_ProtectedPorts_Type v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+    var integer v_Port_ps := v_Protected.Port_ps;
+    var integer v_Port_us := v_Protected.Port_us;
+
+    v_MessageHeader_Publish.route              := cr_Route(cr_RouteBodyList_InitialReq(v_Port_ps));   /* P-SCCF needs to be checked after receiving (f_IMS_MessageHeader_Request_CheckRoute) */
+    v_MessageHeader_Publish.via                := cr_ViaDef(-, cr_HostPort(?, v_Port_us));            /* host address needs to be checked after receiving (f_IMS_MessageHeader_Request_CheckVia) */
+    v_MessageHeader_Publish.fromField          := cr_FromWithTag(v_SipUrlFrom);
+    v_MessageHeader_Publish.toField            := cr_ToDef(p_SipUrlTo);                               /* absence of the To tag needs to be checked after receiving (f_IMS_MessageHeader_CheckTo) */
+    v_MessageHeader_Publish.expires            := cr_Expires(p_ExpiresDeltaSec);
+    v_MessageHeader_Publish.require            := cr_RequireSecAgree;                                 /* @sic R5-206448 sic@ */
+    v_MessageHeader_Publish.proxyRequire       := cr_ProxyRequireSecAgree;                            /* @sic R5-206448 sic@ */
+    v_MessageHeader_Publish.securityVerify     := f_IMS_PTC_BuildSecurityVerifyHeader();              /* @sic R5-206448 sic@ */
+    v_MessageHeader_Publish.cSeq               := cr_CseqDef(?, "PUBLISH");
+    v_MessageHeader_Publish.callId             := cr_CallId(?);
+    v_MessageHeader_Publish.maxForwards        := cr_MaxForwardsDef;
+    v_MessageHeader_Publish.pAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    v_MessageHeader_Publish.event              := cr_EventDef(p_EventType);
+    v_MessageHeader_Publish.pPreferredService  := cr_PPreferredService(f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_ServiceType));
+    if (p_EventType == "presence") {
+      v_MessageHeader_Publish.accept           := cr_AcceptDef(tsc_MimeType_Pidf);
+    }
+    v_MessageHeader_Publish.contentType        := cr_ContentTypeMIME;
+
+    return v_MessageHeader_Publish;
+  }
+
+  /*
+   * @desc      Table 5.3.2.2.1-1 Step 6 - 7: location configuration
+   * @param     p_ServiceType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_LocationReportingConfiguration(MCX_ServiceType_Type p_ServiceType) runs on MCX_IMS_PTC
+  {
+    var template (value) MessageHeader v_RequestHeader;
+    var template (omit) MCPTT_Info_Type v_MCPTT_Info := omit;
+    var template (omit) MCVideo_Info_Type v_MCVideo_Info := omit;
+    var template (omit) MCData_Info_Type v_MCData_Info := omit;
+    var template (omit) MCPTT_LocationInfo_Type v_MCPTT_LocationInfo := omit;
+    var template (omit) MCVideo_LocationInfo_Type v_MCVideo_LocationInfo := omit;
+    var template (omit) MCData_LocationInfo_Type v_MCData_LocationInfo := omit;
+    var charstring v_AssertedService := f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_ServiceType);
+    var charstring v_AssertedId;
+
+    select (p_ServiceType) {
+      case (MCPTT)   {
+        v_MCPTT_Info := cs_MCPTT_Info_Base(-, omit);            // mcptt-calling-user-id not present according to Table 5.3.2.2.2-2/3/4
+        v_MCPTT_LocationInfo := cs_MCPTT_LocationInfo_Configuration;
+        v_AssertedId := tsc_MCPTT_PublicServiceId_PF_A;
+      }
+      case (MCVideo) {
+        v_MCVideo_Info := cs_MCVideo_Info_Base(-, omit);
+        v_MCVideo_LocationInfo := cs_MCVideo_LocationInfo_Configuration;
+        v_AssertedId := tsc_MCVideo_PublicServiceId_PF_A;
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_MCData_Info := cs_MCData_Info_Base(-, -, omit);
+        v_MCData_LocationInfo := cs_MCData_LocationInfo_Configuration;
+        v_AssertedId := tsc_MCData_PublicServiceId_PF_A;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+    v_RequestHeader := f_MCX_MessageRequest_MessageHeaderTX(p_ServiceType);
+    v_RequestHeader.pAssertedID := cs_PAssertedId(f_SIP_BuildSipUri_TX(v_AssertedId));          /* @sic R5-216671 sic@ @sic R5s220869 Change 7: f_SIP_BuildSipUri_TX instead of f_SIP_BuildSipUri_lr_TX sic@ */
+    v_RequestHeader.pAssertedService := cs_PAssertedService(v_AssertedService);                 /* @sic R5-220468: condition LOCATION-CONFIG sic@ */
+
+    f_MCX_SendMESSAGEwithMIME_Receive200OK(p_ServiceType, v_RequestHeader, v_MCPTT_Info, v_MCVideo_Info, v_MCData_Info, -, -, v_MCPTT_LocationInfo, v_MCVideo_LocationInfo, v_MCData_LocationInfo);
+  }
+
+  /*
+   * @desc      Table 5.3.2.4.1-1: SIP Registration
+   * @param     p_ServiceType
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_Registration(MCX_ServiceType_Type p_ServiceType) runs on MCX_IMS_PTC return IMS_DATA_REQ
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var REGISTER_Request v_RegisterReq;
+    var MIME_Message v_MIME_Message;
+    var template (present) SemicolonParam_List v_MandatoryContactParams := f_MCX_SIP_Register_ContactParams_RX(p_ServiceType);
+    var template (present) MCX_ServiceInfo_Type v_MCS_Info;
+    var MCX_MIME_XmlBodies_Type v_XmlBodies;
+    
+    // Step 1
+    v_IMS_DATA_REQ := f_IMS_REGISTER_InitialRequest(-, -, v_MandatoryContactParams);  // check REGISTER and init GlobalInfo
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+
+    f_IMS_Register_SecurityInit_ImsSecurity(v_RegisterReq);
+
+    // Step 2
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine401, f_IMS_RegisterResponse_401_MessageHeaderTX(v_RegisterReq))));
+    
+    // Step 3a1, 3b1
+    a_IMS_ReceiveRequest(car_IMS_Register_Request(cr_REGISTER_Request(?, ?, *)), v_IMS_DATA_REQ_ByRef);   // @sic R5s240279: message body is optional sic@
+    v_IMS_DATA_REQ := f_IMS_REGISTER_SubsequentRequest(v_IMS_DATA_REQ_ByRef, v_MandatoryContactParams);
+    v_RegisterReq := v_IMS_DATA_REQ.Request.Register;
+    if (isvalue(v_IMS_DATA_REQ.Request.Register.messageBody.mimeMessageBody)) { /* @sic R5-240555: Step 3a1 with SIP REGISTER (access token, CSK) sic@ */
+      if (not match(v_IMS_DATA_REQ.Request.Register.msgHeader.contentType, cr_ContentTypeMIME)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid Content-Type");
+      }
+      v_MIME_Message := v_RegisterReq.messageBody.mimeMessageBody;
+      f_MCX_SIP_RegistrationSubscription_DecodeMatchAndCheckMikeyMessage_SetCSK(p_ServiceType, v_MIME_Message, CSK);
+      v_MCS_Info := fl_MCX_SIP_Registration_McsInfo(p_ServiceType, v_IMS_DATA_REQ.Request);
+      v_XmlBodies := f_MCX_MIME_DecodeAndMatchXML(v_MIME_Message, p_ServiceType, -, v_MCS_Info.Mcptt, -, v_MCS_Info.Mcvideo, -, v_MCS_Info.Mcdata);
+
+      // Store client-id (if any)
+      fl_MCX_SIP_Registration_ClientId_Set(v_XmlBodies);
+    }
+    // Step 4
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, f_MCX_RegisterResponse_200_MessageHeaderTX(v_RegisterReq, p_ServiceType))));
+
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      subscribe procedure:
+   *            SUBSCRIBE according to 36.579-1 Table 5.5.2.14-1 sent by the UE to establish dialog for the given event package;
+   *            dialog gets created and 200 OK is sent to the UE
+   * @param     p_IMS_SUBSCRIBE_REQ (by reference)
+   * @param     p_ServiceType
+   * @param     p_Subscription
+   * @param     p_DialogIndex
+   * @param     p_RequestURI
+   * @param     p_ContactURI
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_SIP_ReceiveSubscribeSend200OK(out IMS_DATA_REQ p_IMS_SUBSCRIBE_REQ,
+                                              MCX_ServiceType_Type p_ServiceType,
+                                              MCX_Subscription_Type p_Subscription,
+                                              IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                              SipUrl p_RequestURI,
+                                              SipUrl p_ContactURI) runs on IMS_PTC
+  {
+    var template (present) MessageHeader v_ExpectedMessageSubscribe;
+    var boolean v_IsReSubscribe := (p_Subscription != INITIAL_SUBSCRIBE);
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ;
+    
+    [] IMS_Server.check(receive(car_IMS_Subscribe_Request(cr_SUBSCRIBE_Request(p_RequestURI, ?, ?)))) {   // check first to avoid the need to initialise v_ExpectedMessageSubscribe in initialization part of altsteps
+      v_ExpectedMessageSubscribe := f_MCX_SubscribeRequest_MessageHeaderRX(p_ServiceType, p_Subscription, p_DialogIndex, p_RequestURI);
+      
+      a_IMS_SUBSCRIBE_Request(v_IMS_SUBSCRIBE_REQ_ByRef, p_DialogIndex, p_RequestURI, v_ExpectedMessageSubscribe, cr_MessageBody_MIME, v_IsReSubscribe);
+      v_IMS_SUBSCRIBE_REQ := v_IMS_SUBSCRIBE_REQ_ByRef;
+
+      f_IMS_PTC_ImsInfo_SetContactUrlSS(p_ContactURI, p_DialogIndex);         /* @sic R5w220111, R5-223945: global variable ContactUrlSS sic@ */
+
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_SUBSCRIBE_REQ.RoutingInfo);
+      v_MessageHeader_200OK := f_MCX_SubscribeResponse_200_MessageHeaderTX(v_IMS_SUBSCRIBE_REQ.Request.Subscribe.msgHeader, p_DialogIndex, p_ContactURI);
+      IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_200OK)));
+      p_IMS_SUBSCRIBE_REQ := v_IMS_SUBSCRIBE_REQ;
+    }
+  }
+
+  /*
+   * @desc      stand-alone subscription
+   *            NOTE: in general not applicable for conditions CONFIG and GROUPCONFIG
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_Subscription
+   * @param     p_RequestURI        (default value: omit)
+   * @param     p_ContactURI        (default value: omit)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McpttInfoExt      (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McvideoInfoExt    (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_McdataInfoExt     (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_SimpleFilter      (default value: omit)
+   * @return    MCX_MIME_XmlBodies_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_Subscription(MCX_ServiceType_Type p_ServiceType,
+                                  IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                  MCX_Subscription_Type p_Subscription,
+                                  template (omit) SipUrl p_RequestURI := omit,
+                                  template (omit) SipUrl p_ContactURI := omit,
+                                  template MCPTT_Info_Type p_McpttInfo := omit,
+                                  template McpttInfoExt_ElementList_Type p_McpttInfoExt := omit,
+                                  template MCVideo_Info_Type p_McvideoInfo := omit,
+                                  template McvideoInfoExt_ElementList_Type p_McvideoInfoExt := omit,
+                                  template MCData_Info_Type p_McdataInfo := omit,
+                                  template McdataInfoExt_ElementList_Type p_McdataInfoExt := omit,
+                                  template PocSettings_Type p_PocSettings := omit,
+                                  template MCX_SimpleFilter_Type p_SimpleFilter := omit) runs on MCX_IMS_PTC return MCX_MIME_XmlBodies_Type
+  { /* @sic R5-233851: request-type="functional-alias-status-determination" in anyExt => p_McpttInfoExt (p_McvideoInfoExt, p_McdataInfoExt for consistency) sic@ */
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ;
+    var MIME_Message v_MIME_Message;
+    var charstring v_PublicServiceId;
+    var SipUrl v_RequestURI;
+    var SipUrl v_ContactURI;
+
+    if (p_Subscription == INITIAL_SUBSCRIBE) {
+      if (isvalue(p_RequestURI)) {
+        v_RequestURI := valueof(p_RequestURI);
+      } else {
+        v_PublicServiceId := f_MCX_MCServer_PublicServiceId(p_ServiceType);
+        v_RequestURI := f_SIP_ParseURI(v_PublicServiceId);
+      }
+      if (isvalue(p_ContactURI)) {
+        v_ContactURI := valueof(p_ContactURI);
+      } else {
+        v_ContactURI := v_RequestURI;
+      }
+    } else {
+      if (isvalue(p_RequestURI) or isvalue(p_ContactURI)) {
+        FatalError(__FILE__, __LINE__, "");
+      }
+      v_RequestURI := f_IMS_PTC_ImsInfo_GetContactUrlSS(p_DialogIndex);
+      v_ContactURI := v_RequestURI;
+    }
+
+    a_MCX_SIP_ReceiveSubscribeSend200OK(v_IMS_SUBSCRIBE_REQ_ByRef, p_ServiceType, p_Subscription, p_DialogIndex, v_RequestURI, v_ContactURI);
+    v_IMS_SUBSCRIBE_REQ := v_IMS_SUBSCRIBE_REQ_ByRef;
+    v_MIME_Message := v_IMS_SUBSCRIBE_REQ.Request.Subscribe.messageBody.mimeMessageBody;
+    
+    return f_MCX_MIME_DecodeAndMatchXML(v_MIME_Message, p_ServiceType, -, p_McpttInfo, p_McpttInfoExt, p_McvideoInfo, p_McvideoInfoExt, p_McdataInfo, p_McdataInfoExt, -, -, -, -, p_PocSettings, -, -, p_SimpleFilter);
+  }
+
+  /*
+   * @desc      Notification: NOTIFY request sent to the UE; UE responds with 200 OK
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_Protocol
+   * @param     p_KeyIndex          (default value: CSK)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_XcapDiff          (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_ConferenceInfo    (default value: omit)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_SendNotify(MCX_ServiceType_Type p_ServiceType,
+                                IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                InternetProtocol_Type p_Protocol,
+                                MCX_KeyIndex_Type p_KeyIndex := CSK,
+                                template (omit) MCPTT_Info_Type p_McpttInfo := omit,
+                                template (omit) MCVideo_Info_Type p_McvideoInfo := omit,
+                                template (omit) MCData_Info_Type p_McdataInfo := omit,
+                                template (omit) MCX_XcapDiff_Type p_XcapDiff := omit,
+                                template (omit) MCX_PIDF_Type p_PIDF := omit,
+                                template (omit) PocSettings_Type p_PocSettings := omit,
+                                template (omit) ConferenceInfo_Type p_ConferenceInfo := omit) runs on MCX_IMS_PTC return template (value) MessageHeader
+  {
+    var SipUrl v_RequestURI := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog, p_DialogIndex);
+    var SipUrl v_ContactURI := f_IMS_PTC_ImsInfo_GetContactUrlSS(p_DialogIndex);
+    var template (value) MessageHeader v_MessageHeader_Notify := f_MCX_NotifyRequest_MessageHeaderTX(p_ServiceType, p_DialogIndex, v_ContactURI);
+    var template (value) MessageBody v_MessageBody_Notify := f_MCX_MIME_MessageBodyTX(p_ServiceType, p_KeyIndex, -, p_McpttInfo, p_McvideoInfo, p_McdataInfo, -, -, -, -, -, p_XcapDiff, p_PIDF, p_PocSettings, p_ConferenceInfo);
+
+    IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(p_Protocol), cs_NOTIFY_Request(v_RequestURI, v_MessageHeader_Notify, v_MessageBody_Notify)));
+
+    return v_MessageHeader_Notify;
+  }
+
+  /*
+   * @desc      Notification: NOTIFY request sent to the UE; UE responds with 200 OK
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @param     p_PocSettings       (default value: omit)
+   * @param     p_ConferenceInfo    (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_Notification(MCX_ServiceType_Type p_ServiceType,
+                                  IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                  template (omit) MCPTT_Info_Type p_McpttInfo := omit,
+                                  template (omit) MCVideo_Info_Type p_McvideoInfo := omit,
+                                  template (omit) MCData_Info_Type p_McdataInfo := omit,
+                                  template (omit) MCX_PIDF_Type p_PIDF := omit,
+                                  template (omit) PocSettings_Type p_PocSettings := omit,
+                                  template (omit) ConferenceInfo_Type p_ConferenceInfo := omit) runs on MCX_IMS_PTC
+  { /* NOTE: further MIME bodies may be added */
+    /* @sic R5s240690: use of f_MCX_SIP_SendNotify sic@ */
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var template (value) MessageHeader v_MessageHeader_Notify;
+    var template (present) MessageHeader v_MessageHeader_200OK;
+
+    // Send NOTIFY
+    v_MessageHeader_Notify := f_MCX_SIP_SendNotify(p_ServiceType, p_DialogIndex, v_Protocol, -, p_McpttInfo, p_McvideoInfo, p_McdataInfo, -, p_PIDF, p_PocSettings, p_ConferenceInfo);
+
+    // Receive 200 OK
+    v_MessageHeader_200OK := f_MCX_CommonResponse_200_MessageHeaderRX(v_MessageHeader_Notify);
+    f_IMS_ReceiveResponse(v_MessageHeader_Notify, v_Protocol, cr_Response(c_statusLine200, v_MessageHeader_200OK));
+  }
+
+  /*
+   * @desc      to receive and check PUBLISH request
+   * @param     p_IMS_DATA_REQ_ByRef (by reference)
+   * @param     p_ServiceType
+   * @param     p_EventType
+   * @param     p_ExpiresDeltaSec   (default value: tsc_MCX_ExpiresMax)
+   * @param     p_MessageBody       (default value: ?)
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_ReceivePublishRequest(out IMS_DATA_REQ p_IMS_DATA_REQ_ByRef,
+                                      MCX_ServiceType_Type p_ServiceType,
+                                      EventType p_EventType,
+                                      charstring p_ExpiresDeltaSec := tsc_MCX_ExpiresMax,
+                                      template (present) MessageBody p_MessageBody := ?) runs on IMS_PTC
+  {
+    var MessageHeader v_MessageHeader;
+    var InternetProtocol_Type v_Protocol;
+    var charstring v_PublicServiceId := f_MCX_MCServer_PublicServiceId(p_ServiceType);
+    var template (present) SipUrl v_SipUrlRequest := f_SIP_BuildSipUri_RX(v_PublicServiceId);
+    var template (present) SipUrl v_SipUrlTo := v_SipUrlRequest;
+    var template (present) MessageHeader v_MessageHeaderTemplate := f_MCX_PublishRequest_MessageHeaderRX(p_ServiceType, v_SipUrlTo, p_EventType, p_ExpiresDeltaSec);
+
+    [] a_IMS_ReceiveRequest(car_IMS_Publish_Request(cr_PUBLISH_Request(v_SipUrlRequest, v_MessageHeaderTemplate, p_MessageBody)), p_IMS_DATA_REQ_ByRef)
+      {
+        v_MessageHeader := p_IMS_DATA_REQ_ByRef.Request.Publish.msgHeader;
+        v_Protocol := p_IMS_DATA_REQ_ByRef.RoutingInfo.Protocol;
+
+        f_IMS_MessageHeader_CheckTo(v_MessageHeader, noToTag);
+        f_IMS_MessageHeader_Request_CheckRoute(v_MessageHeader);
+        f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol);
+      }
+  }
+
+  /*
+   * @desc      Publish procedure: PUBLISH sent by the UE gets responded with 200 OK
+   * @param     p_ServiceType
+   * @param     p_PublishWithServiceAuthorization
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_SIP_PocSettings_ReceivePublishSend200OK(MCX_ServiceType_Type p_ServiceType,
+                                                        boolean p_PublishWithServiceAuthorization) runs on MCX_IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var PUBLISH_Request v_PublishReq;
+    var MIME_Message v_MIME_Message;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    var template (present) MCX_ServiceInfo_Type v_MCS_Info;
+    var MCX_MIME_XmlBodies_Type v_XmlBodies;
+
+    [] a_MCX_ReceivePublishRequest(v_IMS_DATA_REQ_ByRef, p_ServiceType, "poc-settings") {
+      v_IMS_DATA_REQ := v_IMS_DATA_REQ_ByRef;
+      v_PublishReq := v_IMS_DATA_REQ.Request.Publish;
+      v_MessageHeader_200OK := f_MCX_PublishResponse_200_MessageHeaderTX(v_PublishReq.msgHeader);
+      v_MIME_Message := v_PublishReq.messageBody.mimeMessageBody;
+
+      if (p_PublishWithServiceAuthorization) {
+        // Check MIKEY message according to 36.579-1 Table 5.5.9.1-1: MIKEY message from the UE
+        f_MCX_SIP_RegistrationSubscription_DecodeMatchAndCheckMikeyMessage_SetCSK(p_ServiceType, v_MIME_Message, CSK);
+      }
+      v_MCS_Info := fl_MCX_SIP_Registration_McsInfo(p_ServiceType, v_IMS_DATA_REQ.Request, p_PublishWithServiceAuthorization);
+      v_XmlBodies := f_MCX_MIME_DecodeAndMatchXML(v_MIME_Message, p_ServiceType, -, v_MCS_Info.Mcptt, -, v_MCS_Info.Mcvideo, -, v_MCS_Info.Mcdata, -, -, -, -, -, cr_PocSettings);
+
+      // Store client-id (if any)
+      fl_MCX_SIP_Registration_ClientId_Set(v_XmlBodies);
+
+      // Check PoC Settings according to 36.579-1 Table 5.5.3.11-1: PoC Settings
+      f_MCX_MIME_PocSettings_CheckProfileIndex(v_XmlBodies.PocSettings, cr_SelectedUserProfileIndex(f_MCX_MCService_ProfileId(p_ServiceType)));
+
+      IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, v_MessageHeader_200OK)));
+    }
+  }
+
+  /*
+   * @desc      Publish procedure: PUBLISH sent by the UE gets responded with 200 OK
+   *            To be used for "stand-alone" publish procedures
+   * @param     p_ServiceType
+   * @param     p_EventType         (default value: "presence")
+   * @param     p_ExpiresDeltaSec   (default value: tsc_MCX_ExpiresMax)
+   * @param     p_McpttInfo         (default value: omit)
+   * @param     p_McvideoInfo       (default value: omit)
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_PIDF              (default value: omit)
+   * @return    MCX_MIME_XmlBodies_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_Publish(MCX_ServiceType_Type p_ServiceType,
+                             EventType p_EventType := "presence",
+                             charstring p_ExpiresDeltaSec := tsc_MCX_ExpiresMax,
+                             template MCPTT_Info_Type p_McpttInfo := omit,
+                             template MCVideo_Info_Type p_McvideoInfo := omit,
+                             template MCData_Info_Type p_McdataInfo := omit,
+                             template MCX_PIDF_Type p_PIDF := omit) runs on MCX_IMS_PTC return MCX_MIME_XmlBodies_Type
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var IMS_DATA_REQ v_IMS_PUBLISH_REQ;
+    var MIME_Message v_MIME_Message;
+    var template (value) MessageHeader v_MessageHeader_200OK;
+    var MCX_MIME_XmlBodies_Type v_XmlBodies;
+
+    a_MCX_ReceivePublishRequest(v_IMS_DATA_REQ_ByRef, p_ServiceType, p_EventType, p_ExpiresDeltaSec);
+    v_IMS_PUBLISH_REQ := v_IMS_DATA_REQ_ByRef;
+    v_MIME_Message := v_IMS_PUBLISH_REQ.Request.Publish.messageBody.mimeMessageBody;
+
+    v_XmlBodies := f_MCX_MIME_DecodeAndMatchXML(v_MIME_Message, p_ServiceType, -, p_McpttInfo, -, p_McvideoInfo, -, p_McdataInfo, -, -, -, -, -, -, p_PIDF);
+ 
+    v_MessageHeader_200OK := f_MCX_PublishResponse_200_MessageHeaderTX(v_IMS_PUBLISH_REQ.Request.Publish.msgHeader);
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_PUBLISH_REQ.RoutingInfo), cs_Response(c_statusLine200, v_MessageHeader_200OK)));
+
+    return v_XmlBodies;
+  }
+
+  /*
+   * @desc      Notification for functional alias
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_ServiceId
+   * @param     p_PidfWithFunctionalAlias (default value: false)
+   * @param     p_P_id_fa           (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SIP_NotificationFunctionalAlias(MCX_ServiceType_Type p_ServiceType,
+                                                  IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                  charstring p_ServiceId,
+                                                  boolean p_PidfWithFunctionalAlias := false,
+                                                  template (omit) MCPTT_P_id_fa_Type p_P_id_fa := omit) runs on MCX_IMS_PTC
+  {
+    var charstring v_ClientId := f_MCX_IMS_PTC_ClientId_GetValue();
+    var template (value) PIDF_Presence_Type v_Presence := cs_MCX_PIDF_Presence_SingleTuple(p_ServiceId, v_ClientId);
+    var template (omit) MCPTT_FunctionalAlias_Type v_FunctionalAliasMCPTT := omit;
+    var template (omit) MCData_FunctionalAlias_Type v_FunctionalAliasMCData := omit;
+    var template (value) MCX_PIDF_Type v_PIDF;
+
+    if (p_PidfWithFunctionalAlias) {
+      v_FunctionalAliasMCPTT := cs_MCPTT_FunctionalAlias;
+      v_FunctionalAliasMCData := cs_MCData_FunctionalAlias;
+    }
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_PIDF := cs_MCPTT_PIDF_FunctionalAlias(v_Presence, v_FunctionalAliasMCPTT, p_P_id_fa); }
+      case (MCData)  { v_PIDF := cs_MCData_PIDF_FunctionalAlias(v_Presence, v_FunctionalAliasMCData, p_P_id_fa); }
+      case else      { FatalError(__FILE__, __LINE__, "Invalid service type"); }
+    }
+
+    f_MCX_SIP_Notification(MCPTT, p_DialogIndex, -, -, -, v_PIDF);
+  }
+
+  /*
+   * @desc      UE intitated MCX functional alias status subscription or de-subscription (36.579-1 clause 5.3.36)
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_Subscription
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_FunctionalAliasSubscription(MCX_ServiceType_Type p_ServiceType,
+                                                 IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                 MCX_Subscription_Type p_Subscription) runs on MCX_IMS_PTC
+  {
+    var charstring v_MCServiceId := f_MCX_MCService_ID_User_A(p_ServiceType);
+    var template McpttInfoExt_ElementList_Type v_McpttInfoExt := omit;
+    var template MCPTT_Info_Type v_McpttInfo := omit;
+    var template MCData_Info_Type v_McdataInfo := omit;
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        v_McpttInfo := cdr_MCPTT_Info_WithRequestUri(v_MCServiceId);
+        v_McpttInfoExt := { crs_McpttInfoExt_RequestType(functional_alias_status_determination) };    /* @sic R5-233853, R5-233854, R5-233855, R5-233856: MCPTT test cases using MCX generic procedure 5.3.36 sic@ */
+      }
+      case (MCData) {
+        v_McdataInfo := cr_MCData_Info_Base("functional-alias-status-determination", cr_MCData_Content_URI(v_MCServiceId));
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    // Step 3 - 4:
+    f_MCX_SIP_Subscription(p_ServiceType, p_DialogIndex, p_Subscription, -, -, v_McpttInfo, v_McpttInfoExt, -, -, v_McdataInfo);
+
+    // Step 5 - 6:
+    if (p_Subscription != UN_SUBSCRIBE) {
+      fl_MCX_SIP_NotificationFunctionalAlias(p_ServiceType, p_DialogIndex, v_MCServiceId);   // PIDF document with empty status list as there are no activated functional aliases
+    }
+  }
+
+  /*
+   * @desc      Notification for functional alias status change
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_ExpiresDeltaSec
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_FunctionalAliasStatusChange(MCX_ServiceType_Type p_ServiceType,
+                                                 IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                 charstring p_ExpiresDeltaSec) runs on MCX_IMS_PTC
+  {
+    var charstring v_MCServiceId := f_MCX_MCService_ID_User_A(p_ServiceType);
+    var charstring v_ClientId := f_MCX_IMS_PTC_ClientId_GetValue();
+    var template (present) PIDF_Presence_Type v_Presence := cr_MCX_PIDF_Presence(v_MCServiceId, v_ClientId);
+    var template (present) MCX_PIDF_Type v_PIDF_PUBLISH;
+    var template MCPTT_Info_Type v_McpttInfo := omit;
+    var template MCData_Info_Type v_McdataInfo := omit;
+    var MCX_MIME_XmlBodies_Type v_XmlBodies;
+    var XSD.String v_P_id_fa;
+    var boolean v_PidfWithFunctionalAlias;
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        v_McpttInfo := cdr_MCPTT_Info_WithRequestUri(v_MCServiceId);
+        v_PIDF_PUBLISH := cr_MCPTT_PIDF_FunctionalAlias(v_Presence, cr_MCPTT_FunctionalAlias);
+      }
+      case (MCData) {
+        v_McdataInfo := cr_MCData_Info_Base(-, cr_MCData_Content_URI(v_MCServiceId));
+        v_PIDF_PUBLISH := cr_MCData_PIDF_FunctionalAlias(v_Presence, cr_MCData_FunctionalAlias);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    v_XmlBodies := f_MCX_SIP_Publish(p_ServiceType, "presence", p_ExpiresDeltaSec, v_McpttInfo, -, v_McdataInfo, v_PIDF_PUBLISH);
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_P_id_fa := v_XmlBodies.PIDF.Extension.MCPTT.P_id_fa; }
+      case (MCData)  { v_P_id_fa := v_XmlBodies.PIDF.Extension.MCData.P_id_fa; }
+    }
+    v_PidfWithFunctionalAlias := (p_ExpiresDeltaSec != tsc_MCX_Expires0);   /* in case of tsc_MCX_Expires0 the functional alias gets deactivated and the PIDF document has empty status list
+                                                                               otherwise the PIDF document has a status list with <functionalAlias> element */
+    fl_MCX_SIP_NotificationFunctionalAlias(p_ServiceType, p_DialogIndex, v_MCServiceId, v_PidfWithFunctionalAlias, v_P_id_fa);
+  }
+
+  /*
+   * @desc      Decode, match and check MIKEY message and store the contained CSK
+   * @param     p_ServiceType
+   * @param     p_MIME_Message
+   * @param     p_KeyIndex
+   * @param     p_RequestUri        (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_RegistrationSubscription_DecodeMatchAndCheckMikeyMessage_SetCSK(MCX_ServiceType_Type p_ServiceType,
+                                                                                     MIME_Message p_MIME_Message,
+                                                                                     MCX_KeyIndex_Type p_KeyIndex,
+                                                                                     template (omit) SipUrl p_RequestUri := omit) runs on MCX_IMS_PTC
+  { /* @sic R5-240565: p_RequestUri removed; the IDRr is independent from the Request URI; it is the puplic service id of the MC service sic@ */
+    /* @sic R5s240360: p_RequestUri re-introduced as needed for CMS and GMS sic@ */
+    var charstring v_IDRr;
+    var template (present) MIKEY_Message v_MIKEY_MessageTemplate;
+    var MIKEY_Message v_MIKEY_Message;
+
+    if (isvalue(p_RequestUri)) {
+      v_IDRr := f_SIP_SipUrl2Str(valueof(p_RequestUri));
+    } else {
+      v_IDRr := f_MCX_MCServer_PublicServiceId(p_ServiceType);
+    }
+    v_MIKEY_MessageTemplate := f_MIKEY_SAKKE_MessageRX_CSK(p_ServiceType, v_IDRr);
+    v_MIKEY_Message := f_MCX_MIME_DecodeMatchAndCheckMikeyMessage(p_MIME_Message, v_MIKEY_MessageTemplate);
+    fl_MCX_IMS_MIKEY_Message_ExtractAndSetCSK(v_MIKEY_Message, p_KeyIndex);   // p_KeyIndex may be CSK, CSK_CMS, CSK_GMS1, CSK_GMS2
+  }
+
+  /*
+   * @desc      Receive SUBSCRIBE for xcap-diff event (CMS or GMS => condition CONFIG or GROPCONFIG), send 200 OK and check MIME bodies
+   * @param     p_DataRequestWithXmlBodies (by reference)
+   * @param     p_ServiceType
+   * @param     p_Subscription      (default value: INITIAL_SUBSCRIBE)
+   * @param     p_DialogIndex
+   * @param     p_RequestURI
+   * @param     p_ContactURI
+   * @param     p_ResourceListsTemplate
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_SIP_ServiceAuthorization_ReceiveSubscribeSend200OK(out MCX_DataRequestWithXmlBodies_Type p_DataRequestWithXmlBodies,
+                                                                   MCX_ServiceType_Type p_ServiceType,
+                                                                   MCX_Subscription_Type p_Subscription := INITIAL_SUBSCRIBE,
+                                                                   IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                                   SipUrl p_RequestURI,
+                                                                   SipUrl p_ContactURI,
+                                                                   template (present) ResourceLists_Type p_ResourceListsTemplate) runs on MCX_IMS_PTC
+  {
+    var MCX_DataRequestWithXmlBodies_Type v_DataRequestWithXmlBodies;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var SUBSCRIBE_Request v_SubscribeRequest;
+    var MIME_Message v_MIME_Message;
+    var MCX_KeyIndex_Type v_KeyIndex;
+    var template (present) MCX_ServiceInfo_Type v_MCS_Info := cs_MCX_Service_Info_Init;
+   
+    [] a_MCX_SIP_ReceiveSubscribeSend200OK(v_IMS_SUBSCRIBE_REQ_ByRef, p_ServiceType, p_Subscription, p_DialogIndex, p_RequestURI, p_ContactURI) {
+      v_DataRequestWithXmlBodies.Request := v_IMS_SUBSCRIBE_REQ_ByRef.Request;
+      v_SubscribeRequest := v_DataRequestWithXmlBodies.Request.Subscribe;
+      v_MIME_Message := v_SubscribeRequest.messageBody.mimeMessageBody;
+      v_KeyIndex := fl_MCX_XcapDiffDialog_GetKeyIndex(p_DialogIndex);
+
+      if (p_Subscription == INITIAL_SUBSCRIBE) {
+        // Check MIKEY message according to 36.579-1 Table 5.5.9.1-1: MIKEY message from the UE
+        f_MCX_SIP_RegistrationSubscription_DecodeMatchAndCheckMikeyMessage_SetCSK(p_ServiceType, v_MIME_Message, v_KeyIndex, v_SubscribeRequest.requestLine.requestUri);   /* @sic R5s240360, R5-242400: Request URI used as IDRr in MIKEY message sent to GMS/CMS sic@ */
+        v_MCS_Info := fl_MCX_SIP_Registration_McsInfo(p_ServiceType, v_DataRequestWithXmlBodies.Request);
+      }
+      
+      v_DataRequestWithXmlBodies.XmlBodies := f_MCX_MIME_DecodeAndMatchXML(v_MIME_Message, p_ServiceType, v_KeyIndex, v_MCS_Info.Mcptt, -, v_MCS_Info.Mcvideo, -, v_MCS_Info.Mcdata, -, -, -, -, p_ResourceListsTemplate);
+
+      // Store client-id (if any: e.g. there is no MCPTT info in re-SUBSCRIBE)
+      fl_MCX_SIP_Registration_ClientId_Set(v_DataRequestWithXmlBodies.XmlBodies);
+
+      p_DataRequestWithXmlBodies := v_DataRequestWithXmlBodies;
+    }
+  }
+
+  /*
+   * @desc      Send NOTIFY for xcap-diff event (CMS or GMS)
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_Protocol
+   * @param     p_XcapDiff
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_ServiceAuthorization_SendNotify(MCX_ServiceType_Type p_ServiceType,
+                                                     IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                     InternetProtocol_Type p_Protocol,
+                                                     template (value) MCX_XcapDiff_Type p_XcapDiff) runs on MCX_IMS_PTC return template (value) MessageHeader
+  { /* @sic R5w220111, R5-223945: global variable ContactUrlSS => p_ContactUrl removed sic@ */
+    /* @sic R5s240690: use of f_MCX_SIP_SendNotify sic@ */
+    var MCX_KeyIndex_Type v_KeyIndex := fl_MCX_XcapDiffDialog_GetKeyIndex(p_DialogIndex);
+    var template (value) MessageHeader v_MessageHeader;
+
+    v_MessageHeader := f_MCX_SIP_SendNotify(p_ServiceType, p_DialogIndex, p_Protocol, v_KeyIndex, -, -, -, p_XcapDiff);
+
+    return v_MessageHeader;
+  }
+
+  /*
+   * @desc      Receive 200 OK reponse for NOTIFY
+   * @param     p_NotifyHeader
+   * @param     p_Protocol
+   * @status    APPROVED (MCX)
+   */
+  altstep a_MCX_SIP_ServiceAuthorization_NotifyReceive200OK(template (value) MessageHeader p_NotifyHeader,
+                                                            template (present) InternetProtocol_Type p_Protocol) runs on IMS_PTC
+  {
+    var IMS_DATA_RSP v_IMS_DATA_RSP_ByRef;
+    var template (present) MessageHeader v_MessageHeader_200OK := f_MCX_CommonResponse_200_MessageHeaderRX(p_NotifyHeader);
+    var template (present) IMS_Response_Type v_Response := cr_Response(c_statusLine200, v_MessageHeader_200OK);
+
+    [] a_IMS_ReceiveResponse(p_NotifyHeader, p_Protocol, v_Response, v_IMS_DATA_RSP_ByRef) {}
+  }
+
+  /*
+   * @desc      Send NOTIFY and receive 200 OK for xcap-diff event
+   * @param     p_ServiceType
+   * @param     p_DialogIndex
+   * @param     p_XcapDiff
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SIP_XcapDiffNotification(MCX_ServiceType_Type p_ServiceType,
+                                          IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                          template (value) MCX_XcapDiff_Type p_XcapDiff) runs on MCX_IMS_PTC
+  { // @sic R5w220111, R5-223945: global variable ContactUrlSS => p_ContactUrl removed sic@
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var template (value) MessageHeader v_MessageHeader := f_MCX_SIP_ServiceAuthorization_SendNotify(p_ServiceType, p_DialogIndex, v_Protocol, p_XcapDiff);
+    a_MCX_SIP_ServiceAuthorization_NotifyReceive200OK(v_MessageHeader, v_Protocol);
+  }
+
+  /*
+   * @desc      Wrapper/Workaround function for int2enum
+   * @param     p_DialogIndex
+   * @return    IMS_PTC_DialogIndex_Type
+   * @status    APPROVED (MCX)
+   */
+/*   function fl_MCX_IMS_GetNextDialogIndex(IMS_PTC_DialogIndex_Type p_DialogIndex) return IMS_PTC_DialogIndex_Type */
+/*   { */
+/*     var IMS_PTC_DialogIndex_Type v_DialogIndex; */
+/*     int2enum(enum2int(p_DialogIndex) + 1, v_DialogIndex); // @sic R5s220869 Change 5: int2enum sic@ */
+    
+/*     return v_DialogIndex; */
+/*   } */
+
+  function fl_MCX_IMS_GetNextDialogIndex(IMS_PTC_DialogIndex_Type p_DialogIndex) return IMS_PTC_DialogIndex_Type
+  { // !!!! int2enum seems to cause issues with T3Q !!!!
+    var IMS_PTC_DialogIndex_Type v_DialogIndex;
+    select (p_DialogIndex) {
+      case (xcapDiffDialogGMS1) { v_DialogIndex := xcapDiffDialogGMS2; }
+      case (xcapDiffDialogGMS2) { v_DialogIndex := xcapDiffDialogGMS3; }
+      case (xcapDiffDialogGMS3) { v_DialogIndex := xcapDiffDialogGMS4; }
+      case else { FatalError(__FILE__, __LINE__, ""); }
+    }
+    return v_DialogIndex;
+  }
+
+  /*
+   * @desc      Table 5.3.2.2.1-1 step 3, 4, 5 (all parallel): Publication of MCX service settings, Configuration management and Group management subscription
+   * @param     p_ServiceType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_InitialServiceSettingsAndSubscriptions(MCX_ServiceType_Type p_ServiceType) runs on MCX_IMS_PTC
+  { /* @sic R5-215730: p_Procedure removed sic@ */
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var charstring v_MCSUEID := f_SIP_InstanceId();
+    var charstring v_GroupId := f_MCX_MCService_GroupID_Group_A(p_ServiceType);
+    var MCX_SecurityParameters_Type v_SecurityParameters;
+    var MCX_Coordination_MSG v_Dummy;
+    var MCX_DataRequestWithXmlBodies_Type v_DataRequestWithXmlBodies_ByRef;
+    var MCX_DataRequestWithXmlBodies_Type v_DataRequestWithXmlBodies;
+    var template (value) MessageHeader v_MessageHeader_NOTIFY_CONFIG;
+    var template (value) MessageHeader v_MessageHeader_NOTIFY_GROUPCONFIG;
+    var template (value) MCX_XcapDiff_Type v_XcapDiff;
+    var template (value) MIKEY_Message v_MIKEY_Message;
+    var ResourceLists_Type v_ResourceLists;
+    var ResourceLists_ListSequence_Type v_ResourceLists_SequenceList;
+    var boolean v_WaitForPublish := true;
+    var boolean v_WaitForSubscribe_CONFIG := true;
+    var boolean v_WaitForSubscribe_GROUPCONFIG := true;
+    var boolean v_WaitForSubscribe_GROUPKEY := true;                        // group key subscription happens only if security is enabled
+    var boolean v_WaitFor200OK_CONFIG := false;
+    var boolean v_WaitFor200OK_GROUPCONFIG := false;
+    var IMS_PTC_DialogIndex_Type v_DialogIndex_GMS := xcapDiffDialogGMS1;
+    var IMS_PTC_DialogIndex_Type v_DialogIndex_GROUPCONFIG;
+    var template (omit) IMS_PTC_DialogIndex_Type v_DialogIndex_GROUPKEY := omit;
+    var template (present) ResourceLists_ListSequence_Type v_ResourceListsSequence_GMS;
+    var SipUrl v_RequestUri_CMS := f_SIP_ParseURI("sip:" & tsc_MCX_CMS_Hostname);       // 36.579-1 Table 5.5.2.14-1 condition CONFIG           @sic R5s220869 Change 6: f_SIP_ParseURI instead of cr_SipUri_HostPort sic@
+    var SipUrl v_ContactUri_CMS := v_RequestUri_CMS;                                    // 36.579-1 Table 5.5.2.17.1.2-1 condition CONFIG
+    var SipUrl v_RequestUri_GMS := f_SIP_ParseURI("sip:" & tsc_MCX_GMSURI);             // 36.579-1 Table 5.5.2.14-1 condition GROUPCONFIG      @sic R5s220869 Change 6: f_SIP_ParseURI instead of cr_SipUri_HostPort sic@
+    var SipUrl v_ContactUri_GMS := v_RequestUri_GMS;                                    // 36.579-1 Table 5.5.2.17.1.2-1 condition GROUPCONFIG  @sic R5w220205 proposal 2.3-7a, R5-223945 Change 5a sic@
+    var boolean v_PublishWithServiceAuthorization := not isvalue(f_MCX_IMS_PTC_SecurityParameters_GetKey(CSK));         /* @sic R5-240558, R5-240555 sic@
+                                                                                                                           true, when access token has not been sent in 2nd SIP REGISTER of SIP registration (Table 5.3.2.4.1-1 Step 3a1);
+                                                                                                                           => as the Access token needs to be protected the UE needs to provide the CSK
+                                                                                                                           => Existence of CSK can only be used as criteria when security is applied */
+    timer t_WaitForSubscribe_GROUPKEY := 5.0;
+
+    while (v_WaitForPublish or v_WaitForSubscribe_CONFIG or v_WaitForSubscribe_GROUPCONFIG or v_WaitForSubscribe_GROUPKEY or v_WaitFor200OK_CONFIG or v_WaitFor200OK_GROUPCONFIG) {
+      
+      // determine receive template for ResourceLists at the GMS:
+      if (v_WaitForSubscribe_GROUPCONFIG and v_WaitForSubscribe_GROUPKEY) {
+        v_ResourceListsSequence_GMS := ( f_MCX_ResourceLists_SequenceList_GroupDocGKTP(p_ServiceType), // URI of Group Configuration document and URI of GKTP document in any order
+                                         f_MCX_ResourceLists_SequenceList_GroupDocOnly(p_ServiceType), // URI of Group Configuration document
+                                         f_MCX_ResourceLists_SequenceList_GKTP_Only(p_ServiceType) );  // URI of GKTP document
+      } else if (v_WaitForSubscribe_GROUPCONFIG) {
+        v_ResourceListsSequence_GMS := f_MCX_ResourceLists_SequenceList_GroupDocOnly(p_ServiceType);
+      } else if (v_WaitForSubscribe_GROUPKEY) {
+        v_ResourceListsSequence_GMS := f_MCX_ResourceLists_SequenceList_GKTP_Only(p_ServiceType);
+      }
+      
+      alt {
+        // ---------------------------- Table 5.3.2.5.1-1: Publication of MCX service settings -------------------------
+        // Table 5.3.2.5.1-1: step 1a1/1b1, 2                   PUBLISH, 200 OK
+        [v_WaitForPublish] a_MCX_SIP_PocSettings_ReceivePublishSend200OK(p_ServiceType, v_PublishWithServiceAuthorization) {  // IF (v_PublishWithServiceAuthorization) THEN PUBLISH is with service authorization (i.e. shall contain MIKEY message)
+          v_WaitForPublish := false;
+        }
+
+        // ---------------------------- Table 5.3.2.6.1-1: Configuration management subscription -----------------------
+        // Table 5.3.2.6.1-1: step 1, 2                         SUBSCRIBE, 200 OK
+        [v_WaitForSubscribe_CONFIG] a_MCX_SIP_ServiceAuthorization_ReceiveSubscribeSend200OK(v_DataRequestWithXmlBodies_ByRef,
+                                                                                             p_ServiceType,
+                                                                                             -,
+                                                                                             xcapDiffDialogCMS,
+                                                                                             v_RequestUri_CMS,
+                                                                                             v_ContactUri_CMS,
+                                                                                             f_MCX_ResourceLists_SequenceList_CONFIG(p_ServiceType, v_MCSUEID)) {
+          v_DataRequestWithXmlBodies := v_DataRequestWithXmlBodies_ByRef;
+          v_WaitForSubscribe_CONFIG := false;
+
+          f_MCX_SendTrigger(HTTP, CMS);    // send trigger to tell HTTP PTC, that from now on the UE can ask for configuration documents from CMS
+        }
+        // Table 5.3.2.6.1-1: step 3                            NOTIFY
+        [] a_MCX_WaitForCoOrdMsg(HTTP, cmr_MCX_Trigger(CMS), v_Dummy) {    // wait for confirmation that the HTTP PTC is ready to receive CMS HTTP GET requests (Table 5.3.2.6.1-1: step 5, 7, 9)
+          v_XcapDiff := f_MCX_XcapDiff_CONFIG(p_ServiceType, v_MCSUEID);
+          v_MessageHeader_NOTIFY_CONFIG := f_MCX_SIP_ServiceAuthorization_SendNotify(p_ServiceType, xcapDiffDialogCMS, v_Protocol, v_XcapDiff);
+          v_WaitFor200OK_CONFIG := true;
+        }
+        //Table 5.3.2.6.1-1: step 4                             200 OK for NOTIFY
+        [v_WaitFor200OK_CONFIG] a_MCX_SIP_ServiceAuthorization_NotifyReceive200OK(v_MessageHeader_NOTIFY_CONFIG, v_Protocol) {
+          v_WaitFor200OK_CONFIG := false;
+        }
+
+        // ---------------------------- Table 5.3.2.7.1-1: Group management subscription with optional GMK retrieval ---
+        //                              Table 5.3.2.7.1-2: Stand-alone group communication key request
+        // Table 5.3.2.7.1-1: step 1a1, 1b1, 1c1 or 1c3         SUBSCRIBE, 200 OK
+        // Table 5.3.2.7.1-2: step 2a1
+        // NOTE: SUBSCRIBEs at steps 1a1, 1b1 and 1c1 cannot be distinquished in the first place as they have the same message headers and the same request URI
+        [v_WaitForSubscribe_GROUPCONFIG or v_WaitForSubscribe_GROUPKEY] a_MCX_SIP_ServiceAuthorization_ReceiveSubscribeSend200OK(v_DataRequestWithXmlBodies_ByRef,
+                                                                                                                                 p_ServiceType,
+                                                                                                                                 -,
+                                                                                                                                 v_DialogIndex_GMS,
+                                                                                                                                 v_RequestUri_GMS,
+                                                                                                                                 v_ContactUri_GMS,
+                                                                                                                                 cr_MCX_ResourceLists(v_ResourceListsSequence_GMS)) {
+          v_DataRequestWithXmlBodies := v_DataRequestWithXmlBodies_ByRef;
+          v_ResourceLists := v_DataRequestWithXmlBodies.XmlBodies.ResourceLists;
+          v_ResourceLists_SequenceList := v_ResourceLists.sequence_list[0].list.sequence_list;
+
+          if (match(v_ResourceLists_SequenceList, {*, f_MCX_ResourceLists_List_Sequence_GroupDoc(p_ServiceType), *} )) {        /* resource-lists contain entry for group document */
+            v_DialogIndex_GROUPCONFIG := v_DialogIndex_GMS;
+            v_WaitForSubscribe_GROUPCONFIG := false;
+            f_MCX_SendTrigger(HTTP, GMS);                       // send trigger to tell HTTP PTC, that from now on the UE can ask for group configuration documents from GMS
+          }
+          if (match(v_ResourceLists_SequenceList, {*, f_MCX_ResourceLists_List_Sequence_GKTP(p_ServiceType), *} )) {            /* resource-lists contain entry for request of GMK */
+            v_DialogIndex_GROUPKEY := v_DialogIndex_GMS;
+            v_WaitForSubscribe_GROUPKEY := false;
+            // Table 5.3.2.7.1-2: step 2a3
+            t_WaitForSubscribe_GROUPKEY.stop;
+          }
+          v_DialogIndex_GMS := fl_MCX_IMS_GetNextDialogIndex(v_DialogIndex_GMS);   /* 'increment' dialog index   @sic R5-212291: use of int2enum sic@ */
+          if (v_WaitForSubscribe_GROUPKEY) {
+            // Table 5.3.2.7.1-2: step 1
+            t_WaitForSubscribe_GROUPKEY.start;                  // @sic R5s240148 sic@
+          }
+        }
+        // Table 5.3.2.7.1-1: step 3                            NOTIFY
+        [] a_MCX_WaitForCoOrdMsg(HTTP, cmr_MCX_Trigger(GMS), v_Dummy) {    // wait for confirmation the HTTP PTC is ready to receive GMS HTTP GET request (Table 5.3.2.7.1-1: step 5)
+          v_XcapDiff := f_MCX_XcapDiff_GROUPCONFIG(p_ServiceType, v_GroupId);
+          v_MessageHeader_NOTIFY_GROUPCONFIG := f_MCX_SIP_ServiceAuthorization_SendNotify(p_ServiceType, v_DialogIndex_GROUPCONFIG, v_Protocol, v_XcapDiff);
+          v_WaitFor200OK_GROUPCONFIG := true;
+        }
+        // Table 5.3.2.7.1-1: step 4                            200 OK for NOTIFY
+        [v_WaitFor200OK_GROUPCONFIG] a_MCX_SIP_ServiceAuthorization_NotifyReceive200OK(v_MessageHeader_NOTIFY_GROUPCONFIG, v_Protocol) {
+          v_WaitFor200OK_GROUPCONFIG := false;
+        }
+        // Table 5.3.2.7.1-2: step 2b1                          TIMEOUT
+        [] t_WaitForSubscribe_GROUPKEY.timeout {
+          v_WaitForSubscribe_GROUPKEY := false;
+        }
+      }
+    }
+    f_MCX_WaitForTrigger(HTTP);    // Trigger - HTTP is completed
+    
+    if (isvalue(v_DialogIndex_GROUPKEY)) {                      /* UE has requested the GMK in the GKTP entry of the SUBSCRIBE's resource-lists;
+                                                                   @sic R5s240148: GROUPKEY instead of GROUPCONFIG sic@ */
+      // Table 5.3.2.7.1-1: step 7a1, 7a2                       NOTIFY with GMK (GKTP document), 200 OK for NOTIFY
+      v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+
+      v_MIKEY_Message := f_MIKEY_SAKKE_MessageTX_GMK(p_ServiceType, v_SecurityParameters, v_GroupId);
+      v_XcapDiff := f_MCX_XcapDiff_GROUPKEY(p_ServiceType, v_GroupId, encvalue(v_MIKEY_Message));
+      f_MCX_SIP_XcapDiffNotification(p_ServiceType, valueof(v_DialogIndex_GROUPKEY), v_XcapDiff);
+    }
+    f_MCX_IMS_PTC_GroupInfo_Add(v_GroupId, v_DialogIndex_GROUPCONFIG, v_DialogIndex_GROUPKEY);
+  }
+
+  type enumerated MCX_TemporaryGroup_CreateTeardown_Type { CREATE, TEARDOWN };         /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      36.579-1 Table 5.3.22.3-1: NW initiated temporary group creation
+   * @param     p_ServiceType
+   * @param     p_CreateTeardown
+   * @param     p_TemporaryGroupId
+   * @param     p_ConstituentGroupId
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_IMS_TemporaryGroupNotification(MCX_ServiceType_Type p_ServiceType,
+                                                MCX_TemporaryGroup_CreateTeardown_Type p_CreateTeardown,
+                                                charstring p_TemporaryGroupId,
+                                                charstring p_ConstituentGroupId) runs on MCX_IMS_PTC
+  {
+    var MCX_GroupInfo_Type v_GroupInfo := f_MCX_IMS_PTC_GroupInfo_Get(p_ConstituentGroupId);
+    var MCX_SecurityParameters_Type v_SecurityParameters := f_MCX_IMS_PTC_SecurityParameters_Get();
+    var template (value) MCX_SingleTypeGKTPs_Type.on_network_regrouped_GKTPs_list v_RegroupedGKTPsList := {};
+    var template (value) MIKEY_Message v_MIKEY_Message_Group;
+    var template (value) MIKEY_Message v_MIKEY_Message_TemporaryGroup;
+    var template (value) MCX_XcapDiff_Type v_XcapDiff;
+    var MCX_SecurityKey_Type v_NewGMK;
+    var integer v_NewETagIndex;
+
+    select (p_CreateTeardown) {
+      case (CREATE) {
+        // Group document:
+        v_NewETagIndex := 2;            // => PrevETag=<prefix->1, NewETag=<prefix->2
+        // GKTP:
+        v_MIKEY_Message_Group := f_MIKEY_SAKKE_MessageTX_GMK(p_ServiceType, v_SecurityParameters, p_ConstituentGroupId);        // MIKEY message with the current GMK for group A
+        v_NewGMK := f_MCX_SecurityParameters_CreateKey(GMK, 2);
+        f_MCX_SecurityParameters_SetKey(v_SecurityParameters, GMK, v_NewGMK);
+        v_MIKEY_Message_TemporaryGroup := f_MIKEY_SAKKE_MessageTX_GMK(p_ServiceType, v_SecurityParameters, p_TemporaryGroupId); // MIKEY message with the new GMK for temporary group
+        v_RegroupedGKTPsList := { cs_On_network_regrouped_GKTPs(p_TemporaryGroupId, encvalue(v_MIKEY_Message_TemporaryGroup)) };
+      }
+      case (TEARDOWN) {
+        // Group document:
+        v_NewETagIndex := 3;            // => PrevETag=<prefix->2, NewETag=<prefix->3
+        // GKTP:
+        v_NewGMK := f_MCX_SecurityParameters_CreateKey(GMK, 3);
+        f_MCX_SecurityParameters_SetKey(v_SecurityParameters, GMK, v_NewGMK);
+        v_MIKEY_Message_Group := f_MIKEY_SAKKE_MessageTX_GMK(p_ServiceType, v_SecurityParameters, p_ConstituentGroupId);        // MIKEY message with the new GMK for group A
+      }
+    }
+    f_MCX_IMS_PTC_SecurityParameters_Set(v_SecurityParameters);  // => from now on the new key is used for RTP/RTCP
+
+    f_MCX_SendTrigger(HTTP);
+    
+    // step 1 - 2
+    v_XcapDiff := f_MCX_XcapDiff_GROUPCONFIG(p_ServiceType, p_ConstituentGroupId, v_NewETagIndex);
+    f_MCX_SIP_XcapDiffNotification(p_ServiceType, v_GroupInfo.DialogIndex_GROUPCONFIG, v_XcapDiff);
+
+    // step 3 - 4 at HTTP PTC
+    f_MCX_WaitForTrigger(HTTP);
+    
+    // step 5 - 6
+    v_XcapDiff := f_MCX_XcapDiff_GROUPKEY(p_ServiceType, p_ConstituentGroupId, encvalue(v_MIKEY_Message_Group), v_RegroupedGKTPsList);
+    f_MCX_SIP_XcapDiffNotification(p_ServiceType, v_GroupInfo.DialogIndex_GROUPKEY, v_XcapDiff);
+  }
+
+}

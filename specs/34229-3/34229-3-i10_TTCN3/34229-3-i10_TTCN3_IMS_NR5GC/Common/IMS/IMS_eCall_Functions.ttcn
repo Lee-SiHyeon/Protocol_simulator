@@ -1,0 +1,446 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-26 15:16:34 +0100 (Mon, 26 Feb 2024) $
+// $Rev: 37854 $
+/******************************************************************************/
+module IMS_eCall_Functions {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_eCall_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from UpperTesterFunctions all;
+  import from urn_ietf_params_xml_ns_EmergencyCallData_control language "XSD" all;
+
+  const charstring tsc_ECallTestService := "123456"; /* @sic R5-191103 sic@ 36.508 cl. 4.9.5.3
+                                                        @status    APPROVED (IMS, LTE_A_PRO, NR5GC) */
+
+  type enumerated ECall_MSD_Update_Type {msdUpdateRequired, msdUpdateNotRequired}; /* @status    APPROVED (IMS) */
+
+  template (value) UriComponents cs_UriComponents_eCall(charstring p_NamespaceSpecificString) :=
+  { /* @status    APPROVED (IMS, LTE_A_PRO, NR5GC) */
+    urn := {
+      namespaceId := "service",
+      namespaceSpecificString := p_NamespaceSpecificString
+    }
+  };
+
+  template (value) CallInfo cs_CallInfo(charstring p_AbsoluteURI,
+                                        charstring p_Purpose) :=
+  { /* @status    APPROVED (IMS, LTE_A_PRO, NR5GC) */
+    fieldName := CALL_INFO_E,
+    callInfoBody := {
+      { /* BNF in RFC 3261: Call-Info = "Call-Info" HCOLON info *(COMMA info)
+         *                  info = LAQUOT absoluteURI RAQUOT *( SEMI info-param) */
+        url := p_AbsoluteURI,   /* @sic R5s210849 change 2.1: "<", ">" added sic@
+                                   @sic R5-234300, R5w230212: "<", ">" removed sic@ */
+        infoParams := {
+          cs_GenericParam("purpose", p_Purpose)
+        }
+      }
+    }
+  };
+
+  template (present) CallInfo cr_CallInfo(template (present) charstring p_CidUrl := ?,
+                                          template (present) charstring p_Purpose) :=
+  { /* @status    APPROVED (IMS, LTE_A_PRO, NR5GC) */
+    // according to Annex A.2.19
+    fieldName := CALL_INFO_E,
+    callInfoBody := {
+      {
+        url := p_CidUrl,
+        infoParams := cr_SemicolonParam_List_OneSpecificParam("purpose", cr_GenValue(p_Purpose))
+      }
+    }
+  };
+
+  template (present) UriComponents cr_TelUriComponent(template charstring p_SubscriberTelNo) := // @sic R5-191103 sic@
+  { /* @status    APPROVED (IMS, LTE_A_PRO, NR5GC) */
+    tel := {
+      subscriber := p_SubscriberTelNo
+    }
+  };
+
+  /*
+   * @desc      Get the template for the PSAP sip url in RX direction
+   * @param     p_ECallType
+   * @return    template (present) SipUrl
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_SipUrl_eCall_RX(ECall_Type p_ECallType) return template (present) SipUrl
+  {
+    var template (present) SipUrl v_SipUrl;
+
+    select (p_ECallType) {
+      case (MANUAL) {
+        v_SipUrl := cr_SipUrl_Common(c_urnScheme, cs_UriComponents_eCall("sos.ecall.manual"))
+      }
+      case (AUTOMATIC) {
+        v_SipUrl := cr_SipUrl_Common(c_urnScheme, cs_UriComponents_eCall("sos.ecall.automatic"))
+      }
+      case (TEST) { /* @sic R5-220971 sic@ */
+        v_SipUrl := cr_SipUrl_Common(c_telScheme, cr_TelUriComponent(tsc_ECallTestService));
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+    return v_SipUrl;
+  }
+
+  /*
+   * @desc      Common function to build MIME body for eCall DL messages
+   * @param     p_Boundary
+   * @param     p_XmlPartContentId
+   * @param     p_EmergencyCallData_Control
+   * @param     p_SDP_Message       (default value: omit)
+   * @return    template (value) MessageBody
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_IMS_ECall_MIME_MessageBodyTX(charstring p_Boundary,
+                                          charstring p_XmlPartContentId,
+                                          template (value) EmergencyCallData_Control p_EmergencyCallData_Control,
+                                          template (omit) SDP_Message p_SDP_Message := omit) return template (value) MessageBody
+  {
+    var template (value) MIME_Part_List v_MIME_Part_List := {};
+    var XmlBody v_XmlBody := f_IMS_ECall_EmergencyCallData_Control_Encode(p_EmergencyCallData_Control);
+    var charstring v_MsgId := "<" & p_XmlPartContentId & ">";    /* RFC 2045 clause 7 (Content-ID), RFC 822 clause 4.1: msg-id = "<" addr-spec ">"
+                                                                    @sic R5s210849 change 2.1 sic@ */
+    v_MIME_Part_List := f_MIME_Part_List_AddXML(v_MIME_Part_List,
+                                                tsc_MimeType_EmergencyCallDataControlXML,
+                                                cs_MimeContentDisposition("by-reference"),
+                                                cs_MimeContentId(v_MsgId),
+                                                v_XmlBody);
+    if (isvalue(p_SDP_Message)) {
+      v_MIME_Part_List := f_MIME_Part_List_AddSDP(v_MIME_Part_List, valueof(p_SDP_Message));
+    }
+    return cs_MessageBody_MIME(cs_MIME_Message(p_Boundary, v_MIME_Part_List));
+  }
+
+  /*
+   * @desc      Common function to decode and check MIME body with Emergency Call Data (MSD or XML)
+   * @param     p_MIME_Message
+   * @param     p_ContentType
+   * @param     p_CallInfo_CidUrl
+   * @param     p_DispositionParams (default value: *)
+   * @param     p_EmergencyCallDataXML (default value: omit)
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_IMS_ECall_MIME_DecodeAndCheckEmergencyCallData(MIME_Message p_MIME_Message,
+                                                            charstring p_ContentType,
+                                                            charstring p_CallInfo_CidUrl,
+                                                            template SemicolonParam_List p_DispositionParams := *,
+                                                            template EmergencyCallData_Control p_EmergencyCallDataXML := omit) runs on IMS_PTC
+  {
+    var MIME_Part v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(p_MIME_Message, p_ContentType);
+    var charstring v_AddrSpec := f_MIME_ContentId_GetAddrSpec(v_MIME_Part.header.contentId);
+    var template (present) MIME_Part_Header v_HeaderTemplate := cr_MIME_Part_Header(cr_MimeContentType(p_ContentType),
+                                                                                    cr_MimeContentDisposition("by-reference", p_DispositionParams),
+                                                                                    cr_MimeContentId());
+    if (not match(v_MIME_Part.header, v_HeaderTemplate)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MIME header");
+    }
+    if (not match(p_CallInfo_CidUrl, "cid:" & v_AddrSpec)) {      /* @sic R5s230480: check that the cid-uri in the Call-Info has the same addr-spec as the Content-Id of the MIME-Part header sic@
+                                                                     @sic R5-234300, R5w230212: In contrast to the msgId of the Content-Type which according to RFC 2045 clause 7 and RFC 822 has "<" and ">", the cid URI does not have "<" and ">" sic@
+                                                                     @sic R5-234519: the cid URI is with "cid" scheme, the msgId of the Content-Type is without scheme sic@ */
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Content-Id does not match the cid-uri of the Call-Info");
+    }
+    if (ispresent(p_EmergencyCallDataXML)) {
+      if (not ischosen(v_MIME_Part.body.xmlBody) or not f_IMS_ECall_EmergencyCallData_Control_DecodeAndMatch(v_MIME_Part.body.xmlBody, p_EmergencyCallDataXML)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid MIME body");
+      }
+    }
+  }
+
+  /*
+   * @desc      Get addr-spec contained in the Content-ID's msgId: according to RFC 2045 clause 7 and RFC 822: msg-id = "<" addr-spec ">"
+   * @param     p_MessageBody
+   * @return    charstring
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_IMS_MIME_MessageBody_GetContentIdAddrSpec(MessageBody p_MessageBody) runs on IMS_PTC return charstring
+  {
+    var MIME_Part v_MIME_Part;
+    
+    v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(p_MessageBody.mimeMessageBody, tsc_MimeType_EmergencyCallDataMSD);
+    return f_MIME_ContentId_GetAddrSpec(v_MIME_Part.header.contentId); /* @sic R5s230701: "<" and ">" need to be removed sic@ */
+  }
+
+  /*
+   * @desc      Generate SIP_INFO message header for Annex C.47 Step 4 (Annex A.2.20)
+   * @param     p_Boundary
+   * @param     p_CidURL
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, LTE_A_PRO)
+   */
+  function f_IMS_ECall_InfoRequest_MessageHeaderTX(charstring p_Boundary,
+                                                   charstring p_CidURL) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_Info := cs_MessageHeader_Dummy;
+    var charstring v_P_CSCF_Address := f_IMS_PTC_Pcscf_Get();
+    var charstring v_ProtocolString := f_IMS_ConvertTransportProtocolToString(f_IMS_PTC_ImsInfo_GetTransportProtocol());
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var template (value) ViaBody_List v_ViaBodyList := { cs_ViaBody(v_ProtocolString, cs_HostPort(v_P_CSCF_Address, v_Port_ps), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())),
+                                                         cs_ViaBody(v_ProtocolString, cs_HostPort("psap.3gpp.org"),             f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())) };
+    
+    v_MessageHeader_Info.via             := cs_Via(v_ViaBodyList);
+    v_MessageHeader_Info.fromField       := f_IMS_RequestInDialog_FromHeaderTX();// SIP URI of PSAP
+    v_MessageHeader_Info.toField         := f_IMS_RequestInDialog_ToHeaderTX(); // SIP URI of UE
+    v_MessageHeader_Info.callId          := f_IMS_PTC_ImsInfo_DialogGetCallId();
+    v_MessageHeader_Info.cSeq            := cs_CseqDef(f_IMS_PTC_ImsInfo_CseqIncr(dialogLocal), "INFO");
+    v_MessageHeader_Info.maxForwards     := cs_MaxForwardsDef;
+    v_MessageHeader_Info.contentType     := cs_ContentTypeMIME(p_Boundary);
+    v_MessageHeader_Info.contentDisposition := cs_ContentDisposition("Info-Package");
+    v_MessageHeader_Info.callInfo        := cs_CallInfo(p_CidURL, "EmergencyCallData.Control");
+    v_MessageHeader_Info.infoPackage     := cs_InfoPackage("EmergencyCallData.eCall.MSD");
+    return v_MessageHeader_Info;
+  }
+
+  /*
+   * @desc      Generate SIP_INFO message header  for Annex C.47 Step 6 (Annex A.2.19)
+   * @param     p_ConditionA4
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (IMS, LTE_A_PRO)
+   */
+  function f_IMS_ECall_InfoRequest_MessageHeaderRX(boolean p_ConditionA4) runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageInfo_Message := cr_MessageHeader_Dummy;
+    var integer v_CSeqValue := f_IMS_PTC_ImsInfo_CseqIncr(dialogRemote);
+    var charstring v_PackageName := "EmergencyCallData.eCall.MSD";
+    var charstring v_Purpose := v_PackageName;
+
+    if (p_ConditionA4) {    // @sic R5-216339 sic@
+      v_Purpose := "EmergencyCallData.Control";
+    }
+
+    v_MessageInfo_Message.via             := f_IMS_SipRequest_ViaRX();
+    v_MessageInfo_Message.fromField       := f_IMS_RequestInDialog_FromHeaderRX();
+    v_MessageInfo_Message.toField         := f_IMS_RequestInDialog_ToHeaderRX();
+    v_MessageInfo_Message.callId          := f_IMS_PTC_ImsInfo_DialogGetCallId();
+    v_MessageInfo_Message.cSeq            := cr_CseqDef(v_CSeqValue, "INFO");
+    v_MessageInfo_Message.maxForwards     := cr_MaxForwardsDef;
+    v_MessageInfo_Message.contentType     := cr_ContentTypeMIME;
+    v_MessageInfo_Message.contentDisposition :=  cr_ContentDisposition("Info-Package");
+    v_MessageInfo_Message.callInfo        := cr_CallInfo(-, v_Purpose);
+    v_MessageInfo_Message.infoPackage     := cr_InfoPackage(v_PackageName);
+    
+    return v_MessageInfo_Message;
+  }
+
+  /*
+   * @desc      eCall setup according to 34.229-1 Annex C.47 Steps 1 to 3
+   * @param     p_ECallType
+   * @param     p_Context   (default value: A_2_1_A7)
+   * @status    APPROVED (IMS, LTE_A_PRO)
+   */
+  function f_ECall_CallSetup_AnnexC47(ECall_Type p_ECallType, INVITE_A_2_1_Context_Type p_Context := A_2_1_A7) runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_SDP_AudioCodecList_Type v_AudioCodecList := { AMR_16000, AMR_8000 };
+
+    // Step 1. Receive INVITE for an eCall
+    v_InviteRequestWithSdp := f_ECall_InitialInvite_AnnexC47(p_ECallType, p_Context);  // @sic R5s230115, R5s230480 sic@
+    f_ECall_CallSetup_Steps2_3 (v_InviteRequestWithSdp, v_AudioCodecList); // Split Invite into a separate function @sic R5-227567 sic@
+  }
+
+  /*
+   * @desc      eCall setup according to 34.229-1 Annex C.47 / 34.229-5 Annex A.23 Steps 2 to 3
+   * @param     p_InviteRequestWithSdp
+   * @param     p_AudioCodecList
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_ECall_CallSetup_Steps2_3(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                      IMS_SDP_AudioCodecList_Type p_AudioCodecList) runs on IMS_PTC
+  { // Split Invite into a separate function @sic R5-227567 sic@
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) SipUrl v_CalleeContactSipUri;
+    var INVITE_Request v_InviteRequest;
+    var template (value) MessageHeader v_MessageHeader_InviteResponse_200;
+    var template (value) AcceptBody_List v_AcceptBodyList;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var template (value) SDP_Message v_SDP_Message_Step2;
+    var template (value) MessageBody v_MessageBody;
+    var IMS_CallType_Type v_EmergencyType := REGULAR_EMERGENCY;
+    var IMS_SDP_AudioCodecInfo_Type v_AudioCodecInfo;
+    var charstring v_MSDContentIdRef;
+    var charstring v_BoundaryStep2 := "boundary1";
+    var charstring v_ContentId := "psap@3gpp.org";
+    var charstring v_CidUrl_Step2 := "cid:" & v_ContentId;   /* RFC 8147, RFC 2392 clause 2: cid-url = "cid" ":" content-id
+                                                                @sic R5s210849 change 2.1 sic@ */
+    v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    v_AudioCodecInfo := f_IMS_SDP_GetAudioCodecInfo(p_InviteRequestWithSdp.SdpOffer, p_AudioCodecList); // @sic R5-223392 sic@
+    v_MSDContentIdRef := f_IMS_MIME_MessageBody_GetContentIdAddrSpec(v_InviteRequest.messageBody);
+    
+    // Step 2. SS sends 200 OK with SDP contents
+    v_SDP_Message_Step2 := f_IMS_BuildSDP_EmergencyCallAnswer_TX(v_AudioCodecInfo.Fmt, v_AudioCodecInfo.Codec);
+    v_MessageHeader_InviteResponse_200 := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, cs_ContentTypeMIME(v_BoundaryStep2), -, -, -, v_EmergencyType);
+    v_AcceptBodyList := {
+      cs_AcceptBody(c_sdpApplication),
+      cs_AcceptBody(tsc_MimeType_Pidf),
+      cs_AcceptBody(tsc_MimeType_EmergencyCallDataControlXML),
+      cs_AcceptBody(tsc_MimeType_EmergencyCallDataMSD)
+    };
+    v_MessageHeader_InviteResponse_200.accept := cs_Accept(v_AcceptBodyList);
+    v_MessageHeader_InviteResponse_200.callInfo := cs_CallInfo(v_CidUrl_Step2, "EmergencyCallData.Control");
+    v_MessageHeader_InviteResponse_200.recvInfo := cs_RecvInfo_Def("emergencyCallData.eCall.MSD");
+    v_MessageBody := f_IMS_ECall_MIME_MessageBodyTX(v_BoundaryStep2,
+                                                    v_ContentId,
+                                                    cs_EmergencyCallData_Control_Ack(true, v_MSDContentIdRef),
+                                                    v_SDP_Message_Step2);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_InviteResponse_200, v_MessageBody)));
+    
+    // Step 3. UE sends ACK
+    v_CalleeContactSipUri := f_MessageHeader_GetContactSipUrl(v_MessageHeader_InviteResponse_200);
+    v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200, v_EmergencyType);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_CalleeContactSipUri, v_MessageHeader_Ack)));
+  }
+
+  /*
+   * @desc      MSD update  according to 34.229-1 Annex C.47 Steps 4 to 7
+   * @param     p_EmergencyCallData_Control_Step4 (default value: cs_EmergencyCallData_Control_Request)
+   * @param     p_ContactUriSS      (default value: f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri))
+   * @status    APPROVED (IMS, LTE_A_PRO)
+   */
+  function f_ECall_MSDUpdate_AnnexC47(template (value) EmergencyCallData_Control p_EmergencyCallData_Control_Step4 := cs_EmergencyCallData_Control_Request,
+                                      template (present) SipUrl p_ContactUriSS := f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri)) runs on IMS_PTC
+  { /* @sic R5-216339: p_ContactUriSS - same URI as in 200 OK's Contact sent by the SS (see f_ECall_CallSetup_AnnexC47) sic@ */
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := cs_IMS_RoutingInfo(f_IMS_PTC_ImsInfo_GetTransportProtocol());
+    var template (value) MessageHeader v_MessageHeader_Step4;
+    var template (value) MessageBody v_MessageBody_Step4;
+    var template (present) MessageHeader v_MessageHeader_Step6;
+    var InternetProtocol_Type v_Protocol;
+    var SipUrl v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    var charstring v_BoundaryStep4 := "boundaryXXX";
+    var charstring v_ContentId := "test-info@3gpp.org";
+    var charstring v_CidUrl_Step4 := "cid:" & v_ContentId;   /* RFC 8147, RFC 2392 clause 2: cid-url = "cid" ":" content-id
+                                                                @sic R5s210849 change 2.1 sic@ */
+    var charstring v_CidUrl_Step6;
+    var boolean v_ConditionA4 := match(tsc_EmergencyCallData_DataType_invalidMSD, p_EmergencyCallData_Control_Step4.choice.request.datatype);
+    
+    // Step 4. SS sends SIP_INFO to request MSD update
+    v_MessageHeader_Step4 := f_IMS_ECall_InfoRequest_MessageHeaderTX(v_BoundaryStep4, v_CidUrl_Step4);
+    v_MessageBody_Step4 := f_IMS_ECall_MIME_MessageBodyTX(v_BoundaryStep4, v_ContentId, p_EmergencyCallData_Control_Step4);
+    IMS_Client.send(cas_IMS_Info_Request(v_RoutingInfo_DL, cs_INFO_Request(v_ContactUrlUE, v_MessageHeader_Step4, v_MessageBody_Step4)));
+    
+    //Step 5. UE responds with 200 OK
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    f_IMS_ReceiveResponse(v_MessageHeader_Step4, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Step4)));
+    
+    // Step 6. UE sends SIP_INFO with MSD update.
+    v_MessageHeader_Step6 := f_IMS_ECall_InfoRequest_MessageHeaderRX(v_ConditionA4);   /* @sic R5-216339: v_ConditionA4 sic@ */
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Info_Request(cr_INFO_Request(p_ContactUriSS, v_MessageHeader_Step6, cr_MessageBody_MIME))); /* @sic R5-216339: p_ContactUriSS sic@ */
+    v_CidUrl_Step6 := v_IMS_DATA_REQ.Request.Info.msgHeader.callInfo.callInfoBody[0].url;
+
+    f_IMS_MessageHeader_Request_CheckVia(v_IMS_DATA_REQ.Request.Info.msgHeader, v_IMS_DATA_REQ.RoutingInfo.Protocol); // @sic R5s230521 sic@
+
+    if (v_ConditionA4) {
+      // Special case for TC 21.6: A.2.19 with condition A4
+      f_IMS_ECall_MIME_DecodeAndCheckEmergencyCallData(v_IMS_DATA_REQ.Request.Info.messageBody.mimeMessageBody,
+                                                       tsc_MimeType_EmergencyCallDataControlXML,
+                                                       v_CidUrl_Step6,
+                                                       -,
+                                                       cr_EmergencyCallData_Control_Ack(v_ContentId));      // RFC 8147 clause 9.1.1.1: ref attribute references the Content-ID of the body part being acknowledged
+    } else {
+      // Normal case: UE sends MSD according to A.2.19 with condition A3
+      f_IMS_ECall_MIME_DecodeAndCheckEmergencyCallData(v_IMS_DATA_REQ.Request.Info.messageBody.mimeMessageBody,
+                                                       tsc_MimeType_EmergencyCallDataMSD,
+                                                       v_CidUrl_Step6);
+    }
+    
+    //Step 7 SS responds to INFO with 200 Ok
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderTX(v_IMS_DATA_REQ.Request.Info.msgHeader))));
+  }
+
+  /*
+   * @desc      Initial Invite according to 34.229-1 Annex C.47 Steps 1
+   * @param     p_ECallType
+   * @param     p_Context   (default value: A_2_1_A7)  // @sic R5s230115 sic@
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC)
+   */
+  function f_ECall_InitialInvite_AnnexC47(ECall_Type p_ECallType,
+                                          INVITE_A_2_1_Context_Type p_Context := A_2_1_A7) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var MIME_Message v_MIME_Message;
+    var MIME_Part v_MIME_Part;
+    var SDP_Message v_SdpOffer;
+    var template (present) SDP_Message v_SDP_Message_Step1;
+    var template (present) SipUrl v_ECallPSAP_Rx := f_SipUrl_eCall_RX(p_ECallType);
+    var template (present) MessageHeader v_MessageHeader;
+    var template (present) AcceptBody_List v_AcceptBodyList := { cr_AcceptBody(tsc_MimeType_EmergencyCallDataControlXML), * };    // condition A20, A21
+    var template (present) SemicolonParam_List v_DispositionParams := { cr_GenericParam("handling", "optional"), * };             // condition A20, A21
+    var boolean v_A8 := pc_IMS_Geolocation;
+    var charstring v_CidUrl;
+    var ECall_Type v_ECallType := p_ECallType;
+    
+    // Step 1. Receive INVITE for an eCall
+    v_MessageHeader := f_IMS_InviteRequest_MessageHeaderRX(v_ECallPSAP_Rx, -, p_Context, -, v_A8);
+    v_MessageHeader.accept := cr_Accept(v_AcceptBodyList);                         // condition A20, A21, A25 @sic R5-227567 sic@
+    v_MessageHeader.callInfo := cr_CallInfo(-, "EmergencyCallData.eCall.MSD");     // condition A20, A21 @sic R5-227567, R5-210324: "EmergencyCallData" instead of "emergencyCallData" sic@
+    if ((v_ECallType == MANUAL) or (v_ECallType == AUTOMATIC)) { // @sic R5-220971 sic@
+      v_MessageHeader.recvInfo := cr_RecvInfo_Def("EmergencyCallData.eCall.MSD");  // condition A20, A21
+    }
+    v_MessageHeader.contentType := cr_ContentTypeMIME;                             // condition A20, A21, A8, A25 @sic R5-217960 sic@
+    v_IMS_DATA_REQ := valueof(f_IMS_INVITE_ReceiveRequest_A_2_1_Optional(p_Context, v_ECallPSAP_Rx, v_MessageHeader));
+    v_MIME_Message := v_IMS_DATA_REQ.Request.Invite.messageBody.mimeMessageBody;
+
+    // Check PIDF
+    if (v_A8) {
+      v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(v_MIME_Message, tsc_MimeType_Pidf);
+      f_IMS_DecodeAndCheckGeolocation(v_MIME_Part.body.xmlBody);
+    }
+    // Check SDP
+    v_SDP_Message_Step1 := f_IMS_BuildSDP_EmergencyCallOffer_RX();   // Build RX SDP template using codecs AMR and AMR_WB
+    v_MIME_Part := f_IMS_MIME_MessageBody_GetBody(v_MIME_Message, c_sdpApplication);
+    v_SdpOffer := f_IMS_SIP_DecodeMatchAndCheckSDP(v_MIME_Part.body.sdpMessageBody, v_SDP_Message_Step1);
+
+    // Check eCall MSD
+    v_CidUrl := v_IMS_DATA_REQ.Request.Invite.msgHeader.callInfo.callInfoBody[0].url;
+    f_IMS_ECall_MIME_DecodeAndCheckEmergencyCallData(v_MIME_Message, tsc_MimeType_EmergencyCallDataMSD, v_CidUrl, v_DispositionParams);
+
+    return f_IMS_InviteRequestWithSdpMO(v_IMS_DATA_REQ, v_SdpOffer);
+  }
+
+  /*
+   * @desc      eCall setup according to 34.229-5 Annex a.23 Steps 1 to 3
+   * @param     p_ECallType
+   * @param     p_Context           (default value: A_2_1_A7)
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_ECall_CallSetup_A_23(ECall_Type p_ECallType, INVITE_A_2_1_Context_Type p_Context := A_2_1_A7) runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_SDP_AudioCodecList_Type v_AudioCodecList := { EVS_16000 };
+
+    v_InviteRequestWithSdp := f_ECall_InitialInvite_AnnexC47(p_ECallType, p_Context);  // @sic R5s230115, R5s230480, R5s230679 subject to prose CR approval at RAN5#101 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN, cms_IMS_IPCAN_Trigger("Add Voice Bearer")); // @sic R5s230480 sic@
+    f_ECall_CallSetup_Steps2_3 (v_InviteRequestWithSdp, v_AudioCodecList); // Split Invite into a separate function @sic R5-227567 sic@
+    f_IMS_IPCAN_WaitForTrigger(IPCAN, "Voice Bearer Added");   // @sic R5s230480 sic@
+  }
+
+}

@@ -1,0 +1,298 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-11-26 11:27:01 +0100 (Tue, 26 Nov 2024) $
+// $Rev: 39920 $
+/******************************************************************************/
+
+module Emergency_IRAT_NR5GC_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA38_CommonProcedures all;
+  import from EUTRA38_IRAT_CommonFunctions all;
+  import from EUTRA38_NR5GCProcedures all;
+  import from EUTRA38_NR5GC_InitialRegistration all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_Component_Multi5GS all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_NR_CoordMsg all;
+  import from EUTRA_NR_Parameters all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_Timing all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.11.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_4_11_NR5GC_EUTRA() runs on EUTRA_Multi5GS_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / N26 interface not supported / S1 mode to N1 mode transfer of an existing emergency PDN session
+    f_EUTRA38_IRAT_NAS_Init(LTE_AllCellsOnSamePLMN, c31, -, HANDLE_UM_DATA, USE_BIG_GRANTS); // @sic R5s220883, R5s240568 sic@
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+    
+    // Wait for UE to register on NR
+    f_EUTRA_NR_WaitForCoOrd_Trigger (NR, "Preamble");
+    f_EUTRA38_NR5GC_Preamble(eutra_Cell1, TESTMode_OFF, RRC_IDLE, -, -, -, SUPPORTED);
+    // Ok now registered on both RATs
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Preamble"));
+    
+    f_EUTRA_TestBody_Set(true);
+    fl_TC_11_4_11_NR5GC_EUTRA_TestBody ();
+    f_EUTRA_TestBody_Set(false);
+    
+    // take down the cell now
+    f_EUTRA_NR_WaitForCoOrd_Trigger (NR, "Postamble");
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_11_4_11_NR5GC_EUTRA
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_4_11_NR5GC_EUTRA_TestBody() runs on EUTRA_Multi5GS_PTC
+  {
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var EPS_BearerIdentity v_EpsBearerId;
+    var NAS_MSG_Indication_Type v_NasInd;
+    var EUTRA38_DRBInfoList_Type v_ExistingDRBs;
+    var B3_Type v_PDNType := f_GetPdnType();
+    var integer v_BearerId;
+    var integer i;
+
+    //@siclog "Step 1" siclog@
+    f_UT_RequestIMSEmergencyCall (UT);
+
+    //@siclog "Step 2-15" siclog@
+    // have to split this into steps as not using hardcoded bearer ids!
+    // Establish connection and configure default bearer
+    f_EUTRA38_MultiPDN_ServiceRequestAndActivate_SRB2_DRB(eutra_Cell1);
+    SRB.receive(car_SRB_NasPdu_IND(eutra_Cell1, tsc_SRB2, cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, cr_PDNConnReqAdditionalPDN(v_PDNType, cr_AccessPointName_Any ifpresent, '100'B))))
+     -> value v_ReceivedAsp;
+    v_NasInd := v_ReceivedAsp.Signalling.Nas[0];
+    v_EpsBearerId := f_EUTRA38_MultiPDN_EstablishAdditionalPDN_Step2(eutra_Cell1, v_NasInd.Pdu.Msg.pDN_CONNECTIVITY_REQUEST);
+    a_EUTRA_IdleUpdated_ConnectToAdditionalPDN_Step3(eutra_Cell1);
+    a_EUTRA38_MultiPDN_ConnectToAdditionalPDN_Step4(eutra_Cell1, v_EpsBearerId);
+    
+    f_EUTRA38_MultiPDN_ActivateDedicatedEpsBearer_Speech(eutra_Cell1, Emergency_PDN);
+    // Emergency call established
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Emergency Call Established");
+
+    // Emergency call release in IMS
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Release Call"));
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Call Released");
+    
+    //@siclog "Step 15C" siclog@
+    // can now deactivate the emergency speech bearer
+    v_ExistingDRBs := f_EUTRA38_MobileInfo_GetDRBInfoList();
+    for (i:= 0; i < lengthof(v_ExistingDRBs); i :=i+1) {
+      if (not v_ExistingDRBs[i].DefaultBearer) { // the emergency speech bearer will be the only non-default bearer
+        v_BearerId := v_ExistingDRBs[i].BearerId;
+        break;
+      }
+    }
+    f_EUTRA_DeactivateDedicatedEpsBearer_Speech (eutra_Cell1, int2hex(v_BearerId, 1), PDN_2);
+    
+    //@siclog "Step 16" siclog@
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1);
+
+    // @siclog "Step 17" siclog@
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Cell Power"));  // @sic R5s220883 sic@
+    f_EUTRA38_SetCellPower(eutra_Cell1, tsc_NonSuitableOffCellRS_EPRE, tsc_NonSuitableOffCellRS_EPRE);
+    
+    // @siclog "Step 18" siclog@
+    f_EUTRA38_NR5GC_S1ToN1_IdleMode(eutra_Cell1);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.12.NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_4_12_NR5GC_EUTRA() runs on EUTRA_Multi5GS_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / 5GMM-IDLE / Emergency call / Disabling N1 mode / Emergency call establishment over EPS / Success
+
+    f_EUTRA38_IRAT_Init(c31, HANDLE_UM_DATA, USE_BIG_GRANTS);
+
+    //Create and configure cell
+    f_EUTRA_CellConfig_Def(eutra_Cell1);
+
+    f_EUTRA38_NR5GC_PreambleAndSwitchOff(eutra_Cell1); // @sic R5s230035 sic@
+
+    f_EUTRA_TestBody_Set(true);
+    fl_TC_11_4_12_NR5GC_EUTRA_TestBody();
+    f_EUTRA_TestBody_Set(false);
+
+    f_EUTRA38_MultiPDN_Postamble(eutra_Cell1, E1_IDLE); // @sic R5s240275 sic@
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Postamble"));
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_12_NR5GC_EUTRA
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_4_12_NR5GC_EUTRA_TestBody() runs on EUTRA_Multi5GS_PTC
+  {
+
+    var NAS_MSG_Indication_Type v_NasInd;
+    var NasCount_Type v_NasCount;
+    var template UE_AdditionalSecurityCapability v_UEAddSecurityCap; // @sic R5s230881 R5-241528 sic@
+    var template(present) UE_NetworkCap v_UENWCap := cdr_NR5GC_UENetworkCap('58'O);    // @sic R5-243593 sic@
+    timer t_T1 := f_EUTRA_SetTimerToleranceMin (eutra_Cell1, nasTimer, 60.0);
+
+  
+    //@siclog "Step 0" siclog@ //@sic R5-223438 sic@
+    //Set the power levels according to T0 as per Table 11.4.12.3.1-1/2
+    f_EUTRA38_SetCellPower(eutra_Cell1, -91, -91);
+
+    //@siclog "Step 1" siclog@
+    //Make the UE initiate an Emergency call.
+    f_UT_RequestIMSEmergencyCall(UT);
+
+    //@siclog "Step 2 - 4" siclog@
+    //Check: Does the UE transmit an RRCConnectionRequest message with 'establishmentCause' set to 'emergency'?
+    //SS transmits an RRCConnectionSetup message.
+    //Check: Does the UE transmit an RRCConnectionSetupComplete message to confirm the successful completion of the connection establishment and a TRACKING AREA UPDATE REQUEST message is sent to update the registration of the actual tracking area.
+    //For some consequences related to the content of the TRACKING AREA UPDATE REQUEST message see the Notes in TS.36.508 [7], Table 4.5A.2.1-1.
+    if (pc_EN_DC == true ) { // @sic R5s230881 R5-241528 sic@
+      v_UEAddSecurityCap := cr_UE_AddSecurityCap_Any;
+    }
+    else {
+      v_UEAddSecurityCap := omit;
+    }
+
+    v_UENWCap.cIoT_proSeCap := ?;   // @sic R5s240590 sic@
+    v_UENWCap.cIoT_V2X := (? length (2) & '0'B & ? length (5)) ifpresent; // @sic R5-243593, R5s240577 sic@
+    v_NasInd := f_EUTRA38_TAUReqFromN1(eutra_Cell1,
+                                       tsc_RRC_TI_Def,
+                                       -,
+                                       MAPPED_CXT,
+                                       -,
+                                       emergency,
+                                       -,
+                                       v_UEAddSecurityCap,// @sic R5s230881 R5-241528 sic@
+                                       v_UENWCap  // @sic R5-243593, R5s240439 sic@
+                                       );
+                                       
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    f_EUTRA_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    v_NasCount := v_NasInd.SecurityProtection.NasCount;
+    
+    //@siclog "Steps 5-8" siclog@
+    //Steps 5-8 from the Generic Test Procedure for IMS Emergency call establishment in EUTRA: Normal Service as specified in TS 36.508 [7], Table 4.5A.4.3-1 are performed.
+    f_EUTRA38_MultiPDN_Activate_SRB2_DRB_SendRrcMsg(eutra_Cell1,
+                                         tsc_RRC_TI_Def,
+                                         v_NasCount);
+
+    f_EUTRA_Activate_SRB2_DRB_ReceiveRrcAndNasMsg(eutra_Cell1,
+                                                  tsc_RRC_TI_Def);
+
+    //@siclog "Step 9" siclog@
+    //SS responds with TRACKING AREA UPDATE ACCEPT message.
+    //@siclog "Step 10" siclog@
+    //The UE transmits a TRACKING AREA UPDATE COMPLETE message.
+    f_EUTRA38_TrackingAreaUpdateFromN1_WithoutReq(eutra_Cell1,
+                                                    v_NasInd,
+                                                    MAPPED_CXT,
+                                                    noRrcConnectionRelease,
+                                                    -, true,
+                                                    -, true);
+
+    //@siclog "Steps 11-17" siclog@
+    //Steps 9-15 from the Generic Test Procedure for IMS Emergency call establishment in EUTRA: Normal Service as specified in TS 36.508 [7], Table 4.5A.4.3-1 are performed.
+    f_EUTRA38_MultiPDN_EstablishAdditionalPDNs(eutra_Cell1, 1, -, -, -, '100'B, omit, true); // @sic R5s211357 R5-231416 sic@
+    f_EUTRA38_MultiPDN_ActivateDedicatedEpsBearer_Speech(eutra_Cell1, Emergency_PDN);
+  
+    // @siclog "Step 18" siclog@
+    // The SS waits 1 second.
+    f_Delay(1.0);
+
+    // @siclog "Step 18A" siclog@
+    // Set the power levels according to "T1" as per Table 11.4.12.3.1-1/2.
+    f_EUTRA_NR_SendCoOrd (NR, cms_EUTRA_NR_Trigger("Change Power Level"));  // @sic R5-241692 sic@
+
+    // @siclog "Step 19" siclog@
+    // Release IMS Call as specified in the generic procedure in TS 34.229-1 [35] subclause C.32.
+    // Tell IMS PTC to release the call
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2]); // @sic R5s221058 sic@
+
+    // Emergency call release in IMS
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Call Released");
+
+   // The SS deactivates the EPS bearer. [This is the rest of C.32]
+    f_EUTRA_DeactivateEPS_BearerContext (eutra_Cell1,
+                                         int2hex(valueof(f_Get_EPSBearerIdForAPNType(Emergency_PDN)), 1)); // @sic R5s211357 R5s221058 sic@
+ 
+    // @siclog "Step 20" siclog@
+    // The SS releases the RRC connection.
+    f_EUTRA_RRC_ConnectionRelease(eutra_Cell1);// @sic R5-241692 sic@
+
+    // @siclog "Step 21" siclog@
+    t_T1.start; // @sic R5-241692 sic@
+    
+    alt {// @sic R5-241692 sic@
+         // @siclog "Step 22a1" siclog@
+         // The UE transmits an RRCConnectionRequest.
+      [] SRB.check(receive(car_SRB0_RrcPdu_IND(eutra_Cell1, cr_RRCConnectionRequest(cr_EstablishmentCause_Any))))
+        {
+          // @siclog "Step 22a2" siclog@
+          // Stop Timer T1
+          t_T1.stop;
+
+          // @siclog "Steps 22a3-22a7" siclog@
+          // Steps 2-6 of 36.508 Table 6.4.2.7-1 are executed.// @sic R5-243593 sic@
+          v_NasInd := f_EUTRA_RRC_ConnEst_DefWithNas(eutra_Cell1,
+                                                     tsc_RRC_TI_Def,
+                                                     ?,
+                                                     cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                       cr_TAU_Request_N1ToS1(('000'B, '001'B, '010'B),
+                                                                                        ?,
+                                                                                        cr_DRXparameter_Any ('5C'O) ifpresent,
+                                                                                        f_GetAdditionalUpdateType(NORMAL),
+                                                                                        -, -, -,
+                                                                                        ?,
+                                                                                        -, -,
+                                                                                        cr_UeRadioCap ifpresent,
+                                                                                        -,
+                                                                                        cr_UENetworkCap_Any('58'O),          // @sic R5s240577 sic@
+                                                                                        cr_UE_AddSecurityCap_Any ifpresent,
+                                                                                        cr_UEStatus_Any ifpresent)));  // @sic R5s240439 sic@
+      
+          f_EUTRA_TrackingAreaUpdate_Accept_Complete(eutra_Cell1,
+                                                     f_EUTRA_CellInfo_GetGuti(eutra_Cell1),
+                                                     f_GetEPSTAUType(NORMAL),
+                                                     v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.epsBearerContextStatus,
+                                                     v_NasInd.Pdu.Msg.tRACKING_AREA_UPDATE_REQUEST.addUpdateType,
+                                                     NORMAL);
+          f_EUTRA_RRC_ConnectionRelease(eutra_Cell1);  // @sic R5s240439 sic@
+        }
+          // @siclog "Step 22b1" siclog@
+          // Timer T1 expires.
+      [] t_T1.timeout {}
+    }
+
+  }
+
+}

@@ -1,0 +1,873 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module UTRAN_CommonFunctions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_AuthenticationCommon all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from TestcaseProperties all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_Parameters all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+
+  type record UTRAN_CFN_Info_Type {   /* @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN) */
+    integer        frameNumber,
+    ActivationTime actTime,
+    TGCFN          tGCFN
+  };
+
+  template (present) RRCDataIndType cr_U_AnyRAU :=
+  { /* used in a_UTRAN_ReceiveRauRequest */
+    /* @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS) */
+    routingAreaUpdateRequest := ?
+  };
+
+    /*
+   * @desc      To Calculate an activation time
+   * @param     p_FrameNumber
+   * @return    ActivationTime
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function fl_UTRAN_CalculateActTime(integer p_FrameNumber) return ActivationTime
+  {
+    return (256 + p_FrameNumber - (p_FrameNumber mod 8 + 8)) mod 256;
+  }
+
+  /*
+   * @desc      Calculates the TGCFN
+   * @param     p_FrameNumber
+   * @param     p_TtiValue   ..  is equal to tti/10
+   * @return    TGCFN
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_CalculateTGCFN(integer p_FrameNumber,
+                                  integer p_TtiValue) return TGCFN
+  {
+    return (p_FrameNumber+(256-p_TtiValue)) mod 256;
+  }
+
+  /*
+   * @desc      To calculate the activation time with the tti value corresponding to the actual SS configuration.
+   *            The tti value passed as parameter to ts_CPHY_ActTime is equal to tti/10 (e.g. tti 40 -> 4)
+   *            Based on 34.108 on SRB tti.
+   * @param     p_CellId
+   * @return    UTRAN_CFN_Info_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_CalculateActTime(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC return UTRAN_CFN_Info_Type
+  {
+    var RB_ConfigType v_Rb_ConfigType := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var UTRAN_CFN_Info_Type v_CFN_Info;
+    var PhysicalChannelIdentity v_PhyChId;
+    var integer v_TtiValue;
+    
+    select (v_Rb_ConfigType) {
+      case (cell_DCH_Speech,
+            cell_DCH_64kPS_RAB_SRB,
+            cell_DCH_64kPS_AM_RAB, //@sic R5s140400 sic@
+            cell_DCH_StandAloneSRB,
+            cell_DCH_HS_DSCH,
+            cell_DCH_E_HS,
+            cell_DCH_dlSRB_E_HS,
+            cell_Four_DTCH_PS_CS,  //@sic R5s140096 sic@
+            cell_DCH_2AM_PS   //@sic R5s140400 sic@
+            ) {
+        //An RRC connection is established. Use DCCH on DL DPCH1
+        v_PhyChId := tsc_DL_DPCH1;
+        v_TtiValue := 4;
+      }
+      case (cell_DCH_StandAloneSRB_NoConn) {
+        //No RRC connection is established. Use CCCH configuration
+        v_PhyChId := tsc_S_CCPCH1;
+        v_TtiValue := 1;
+      }
+      case (cell_E_HS) {
+        v_PhyChId := tsc_F_DPCH;
+        v_TtiValue := 4;
+      }
+      case (cell_FACH,
+            cell_FACH_NoConn) {
+        //Cell-FACH configured - Activation time does not apply and activation time not needed for Cell-FACH
+        //Create a "dummy" variable to be used when calling the RB SetUp Cmpl function
+        //@sic R5s110210 sic@
+        v_CFN_Info.frameNumber := 0;
+        v_CFN_Info.actTime     := 0;
+        v_CFN_Info.tGCFN       := 0;
+        return v_CFN_Info;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Configuration not supported");
+      }
+    }
+    v_CFN_Info.frameNumber := f_UTRAN_CPHY_GetFrameNumber(p_CellId, v_PhyChId);
+    v_CFN_Info.actTime     := fl_UTRAN_CalculateActTime(v_CFN_Info.frameNumber);
+    v_CFN_Info.tGCFN       := f_UTRAN_CalculateTGCFN(v_CFN_Info.frameNumber, v_TtiValue);
+    return v_CFN_Info;
+  }
+
+  /*
+   * @desc      Function to be used at handover from UTRAN to EUTRA in rSRVCC for derivation of  Defined in 33.102 Annex B6
+   *            The structure for EUTRA_SecurityParams_Type passed as parameter shall have at least valid parameters for:
+   *            Derivation of CK'PS || IK'PS from CKCS || IKCS
+   * @param     p_SecurityInfo
+   * @return    B256_Type
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_Authentication_B6(UTRAN_SecurityInfo_Type p_SecurityInfo) return B256_Type
+  {
+    const octetstring const_B6_FC :='33'O;
+    var octetstring v_S;
+    var bitstring v_Key;
+    
+    // Generation of String
+    v_S := const_B6_FC;
+    //FC = 0x33
+    v_S :=   ( v_S &  tsc_NonceMSC );
+    //P0 = NONCEmsc
+    v_S :=   ( v_S & '0010'O );
+    //L0 = length of NonceMSC (16 bits)
+    
+    v_Key := p_SecurityInfo.authKeys.AuthCS.CKey & p_SecurityInfo.authKeys.AuthCS.IKey;
+    //key = CKcs || IKcs
+    
+    return fx_KeyDerivationFunction ( tsc_KDF_HMAC_SHA_256, v_Key, v_S );
+    // The result is 256 bit  CS'ps || IK'ps  each of 128 bits
+  }
+
+  /*
+   * @desc      Function which sends the Authentication parameters for the UTRAN cell to another PTC
+   * @param     p_Port
+   * @param     p_GUTI              (default value: omit)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT, POS)
+   */
+  function f_UTRAN_SendAuthCoOrdParameters(IRAT_CO_ORD_PORT p_Port,
+                                           template (omit) CoOrd_GUTIParam_Type p_GUTI := omit) runs on UTRAN_PTC
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var Common_AuthenticationParams_Type v_AuthCS;
+    var B256_Type v_CkIkRSRVCC;
+    //@sic R5s150704 sic@
+    if (v_SecurityInfo.cs_cipheringStarted) {
+      v_CkIkRSRVCC := f_UTRAN_Authentication_B6(v_SecurityInfo);
+      v_AuthCS:= v_SecurityInfo.authKeys.AuthPS;
+      v_AuthCS.CK := substr(v_CkIkRSRVCC, 0, 128);
+      v_AuthCS.IK := substr(v_CkIkRSRVCC, 128, 128);
+      v_AuthCS.KeySeq := v_SecurityInfo.authKeys.AuthCS.CKeySeq;
+      
+      p_Port.send(cms_IRAT_AuthInfo(v_SecurityInfo.authKeys.AuthPS , v_AuthCS, p_GUTI, v_SecurityInfo.authKeys.CSinOtherRAT, -, -, -, -, v_SecurityInfo.authKeys.IMS_Registered_WithExtraPDP)); // @sic R5-163054 sic@
+      
+    } else {
+      p_Port.send(cms_IRAT_AuthInfo(v_SecurityInfo.authKeys.AuthPS, v_SecurityInfo.authKeys.AuthPS, p_GUTI, v_SecurityInfo.authKeys.CSinOtherRAT, -, -, -, -, v_SecurityInfo.authKeys.IMS_Registered_WithExtraPDP)); // @sic R5-163054 sic@
+    }
+  }
+
+  /*
+   * @desc      To download a new START value In the security Record
+   * @param     p_Domain
+   * @param     p_StartValue
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_SS_SecurityDownloadStart(CN_DomainIdentity p_Domain,
+                                            START_Value       p_StartValue) runs on UTRAN_PTC
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    
+    if (p_Domain == cs_domain) {
+      v_SecurityInfo.start_CS := p_StartValue;
+    } else if (p_Domain == ps_domain) {
+      v_SecurityInfo.start_PS := p_StartValue;
+    }
+    f_UTRAN_Security_Set(v_SecurityInfo);
+  }
+
+  /*
+   * @desc      To download all security keys to CMAC (for DCH cell configurations only) and U_CRLC.
+   * @param     p_CellId
+   * @param     p_Domain
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_SS_DownloadSecurityKey(UTRAN_CellId_Type p_CellId,
+                                          CN_DomainIdentity p_Domain) runs on UTRAN_PTC
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var B20_Type v_HFN := v_SecurityInfo.authKeys.HFN;
+    var KeyCiphering v_KC;
+    var IntegrityKey v_IK;
+    
+    if (p_Domain == cs_domain) {
+      v_KC := v_SecurityInfo.authKeys.AuthCS.CKey;
+      v_IK := v_SecurityInfo.authKeys.AuthCS.IKey;
+      v_HFN := v_SecurityInfo.start_CS; // @sic R5s110788 sic@
+    }
+    else {
+      v_KC := v_SecurityInfo.authKeys.AuthPS.CK;
+      v_IK := v_SecurityInfo.authKeys.AuthPS.IK;
+      v_HFN := v_SecurityInfo.start_PS; // @sic R5s110788 sic@
+    }
+    
+    select (v_CellConfig) {
+      case (cell_FACH_NoConn, cell_FACH, cell_FACH_NoDedicated, cell_FACH_UL_SRB, cell_FACH_UL_SRB_NoConn, cell_FACH_UL_NoDedicated ) {
+        // Cell FACH  @sic R5-150125 feFACH sic@
+        f_UTRAN_CRLC_SecurityMode_Config(p_Domain, v_HFN, v_KC, v_IK);
+      }
+      case (cell_DCH_StandAloneSRB_NoConn,
+            cell_DCH_StandAloneSRB,
+            cell_DCH_64kPS_RAB_SRB,
+            cell_DCH_64kPS_AM_RAB, //@sic R5s140400 sic@
+            cell_DCH_HS_DSCH,  // @sic R5s110683 sic@
+            cell_DCH_E_HS,
+            cell_E_HS,
+            cell_DCH_dlSRB_E_HS) {
+        // Cell DCH; no TM RAB
+        f_UTRAN_CRLC_SecurityMode_Config(p_Domain, v_HFN, v_KC, v_IK);
+      }
+      case (cell_DCH_Speech, cell_Four_DTCH_PS_CS) { //@sic R5s140096 sic@
+        // cell DCH with TM RAB
+        f_UTRAN_CRLC_SecurityMode_Config(p_Domain, v_HFN, v_KC, v_IK);
+        f_UTRAN_CMAC_SecurityMode_Config(p_Domain, v_HFN, v_KC);
+      }
+    }
+  }
+
+  /*
+   * @desc      Send SecurityModeCommand and receive SecurityModeComplete and configure SS according to UE configuration
+   * @param     p_CellId
+   * @param     p_CellConfig
+   * @param     p_SecurityInfo
+   * @param     p_RB_ActivationTimeInfoList
+   * @param     p_CN_Domain
+   * @param     p_CipherActTime
+   * @param     p_IntegrityOnly (default value: false) - only set to true after HO when only integrity needs to be configured
+   * @return    UTRAN_SecurityInfo_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_StartSecurityUE(UTRAN_CellId_Type p_CellId,
+                                    RB_ConfigType p_CellConfig,
+                                    UTRAN_SecurityInfo_Type p_SecurityInfo,
+                                    template (value) RB_ActivationTimeInfoList p_RB_ActivationTimeInfoList,
+                                    CN_DomainIdentity p_CN_Domain,
+                                    ActivationTime p_CipherActTime,
+                                    boolean p_IntegrityOnly := false) runs on UTRAN_PTC return UTRAN_SecurityInfo_Type
+  {
+    var UTRAN_SecurityInfo_Type  v_SecurityInfo := p_SecurityInfo;
+    var IntegrityProtActivationInfo v_IntegrityActInfo;
+    var bitstring v_UE_SystemSpecificCap  := int2bit(f_InitSystemSpecificCap(),7);
+    var U_RLC_AM_IND v_RLC_AM_DATA_IND;
+    var template (omit) ActivationTime v_CipherActTime;
+    var template (omit) InterRAT_UE_SecurityCapList v_UE_SysSpecCap;
+    var template (omit) CipheringModeInfo_r7 v_CipheringModeInfo;
+    
+    // ********** Send SecurityModeCommand:
+    if (pc_GERAN) {
+      v_UE_SysSpecCap := cs_UE_SysSpecCap(v_UE_SystemSpecificCap);
+    }
+    else { // NOT pc_GERAN
+      v_UE_SysSpecCap := omit;
+    }
+    
+    if (((p_CellConfig == cell_DCH_Speech)) and (v_SecurityInfo.recentSecureDomain == cs_domain)) {
+      // Ciphering on TM  RAB present, hence include Ciphering activation time
+      // Ciphering for signalling RBs 1 to 4
+      v_CipherActTime := p_CipherActTime;
+    } else {
+      // Ciphering for signalling RBs 1 to 4
+      v_CipherActTime := omit;
+    }
+    
+    if (p_IntegrityOnly == true) {      // @sic R5s110382 sic@
+      v_CipheringModeInfo := omit;
+    }
+    else {
+      v_CipheringModeInfo := cs_CipheringModeInfo_r7(v_SecurityInfo.dL_CipherMode,
+                                                     p_RB_ActivationTimeInfoList,
+                                                     v_CipherActTime);
+    }
+    
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated,
+                                     tsc_RB2,
+                                     cs_108_RRC_SecModeCmd(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                           cs_RRC_SecModeCmd(tsc_RRC_TI,
+                                                                             v_SecurityInfo.cipheringAlgorithmCapability,
+                                                                             v_SecurityInfo.integrProtAlgCap,
+                                                                             v_CipheringModeInfo,
+                                                                             v_SecurityInfo.dL_Integrity,
+                                                                             p_CN_Domain,
+                                                                             v_UE_SysSpecCap))));
+    // ********** Receive SecurityModeComplete:
+    alt {
+      [p_IntegrityOnly]     U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated,                                         // @sic R5s110382 sic@
+                                                          tsc_RB2,
+                                                          cr_108_RRC_SecModeCmpl(tsc_RRC_TI, omit))) -> value v_RLC_AM_DATA_IND { }
+      [not p_IntegrityOnly] U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated,
+                                                          tsc_RB2,
+                                                          cr_108_RRC_SecModeCmpl(tsc_RRC_TI, ?))) -> value v_RLC_AM_DATA_IND { }
+      [] U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated,
+                                       tsc_RB2,
+                                       cr_108_SecModeFail(tsc_RRC_TI, ?))) {
+        f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Security Failed");
+      }
+    }
+    
+    if (not p_IntegrityOnly) {       // UL ciphering information is present
+      v_SecurityInfo.uL_CipherMode := v_RLC_AM_DATA_IND.data.aM_message.uL_DCCH_Message.message_.securityModeComplete.rb_UL_CiphActivationTimeInfo;
+      // @sic R5s130558 sic@
+      f_UTRAN_ActivateCiphering_RLC_UL(f_UTRAN_CellInfo_GetFDD_TDD(p_CellId), v_SecurityInfo.recentSecureDomain, v_SecurityInfo.uL_CipherMode);
+    }
+    // integrity:
+    v_SecurityInfo.uL_Integrity := v_RLC_AM_DATA_IND.data.aM_message.uL_DCCH_Message.message_.securityModeComplete.ul_IntegProtActivationInfo;
+    v_IntegrityActInfo := v_SecurityInfo.uL_Integrity;
+    
+    f_UTRAN_CRLC_IntegrityActivate(cas_CRLC_UL_IntegrityActivateReq(utran_CellDedicated,
+                                                                    v_SecurityInfo.recentSecureDomain,
+                                                                    cs_RestRB_IntegrityProtActivationInfoList(v_IntegrityActInfo.rrc_MessageSequenceNumberList[0],
+                                                                                                              v_IntegrityActInfo.rrc_MessageSequenceNumberList[1],
+                                                                                                              v_IntegrityActInfo.rrc_MessageSequenceNumberList[3],
+                                                                                                              v_IntegrityActInfo.rrc_MessageSequenceNumberList[4])));
+    return v_SecurityInfo;
+  }
+
+  /*
+   * @desc      If UE supports GSM, this step initialises tcv_UE_SystemSpecificCap based on PICS
+   * @return    integer
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_InitSystemSpecificCap() return integer
+  {
+    var integer v_UE_SystemSpecificCap := 0;
+    
+    if (pc_GERAN) {
+      v_UE_SystemSpecificCap := v_UE_SystemSpecificCap + 1; //A5_1 always supported
+      v_UE_SystemSpecificCap := v_UE_SystemSpecificCap + 4; // A5_3 always Supported
+      if (pc_A5_4_CS) { // @sic R5s150121 sic@
+        v_UE_SystemSpecificCap := v_UE_SystemSpecificCap + 8;
+      }
+    }
+    return v_UE_SystemSpecificCap;
+  }
+
+  /*
+   * @desc      Configure and Activate (or deactivate) ciphering for all concerned RBs
+   * @param     p_CellId
+   * @param     p_NewKey
+   * @param     p_CN_Domain
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_RRC_Security(UTRAN_CellId_Type p_CellId,
+                                boolean p_NewKey,
+                                CN_DomainIdentity p_CN_Domain) runs on UTRAN_PTC
+  {
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var boolean v_Int_ModifyFlag := false;   // True means that an Integrity Modification is being done at that stage.
+    var template (value) RB_ActivationTimeInfoList v_RB_ActivationTimeInfoList;
+    var CRLC_RRC_MessageSN_CNF v_CRLC_RRC_MessageSN_CNF;
+    var RRC_SequenceNumber v_SN_RB0;
+    var RRC_SequenceNumber v_SN_RB1;
+    var RRC_SequenceNumber v_SN_RB2;
+    var RRC_SequenceNumber v_SN_RB2_UL;
+    var RRC_SequenceNumber v_SN_RB3;
+    var RRC_SequenceNumber v_SN_RB4;
+    var UTRAN_CFN_Info_Type v_CFN_Info :=  f_CalculateActTime(p_CellId);  // @sic R5s120831 sic@
+    var ActivationTime v_CipherActTime:= v_CFN_Info.actTime;  /* TTCN-2: tcv_CipherActTime is set in f_CMAC_CipherCfg_r6 but only if parameter p_CalcNewActTime is set
+                                                                 and the cell configuration causes configuration of ciphering at the SS
+                                                                 => in TTCN-3 we set CipherActTime and hand it over to f_UTRAN_CMAC_CipherCfg
+                                                                 as well as to fl_UTRAN_StartSecurityUE */
+    // @sic R5s120831 sic@
+    //Variables initialisation
+    v_SecurityInfo.dL_CipherMode := valueof(cs_CipheringModeCmdOn(v_SecurityInfo.cipheringAlgorithm));
+    
+    if (p_CN_Domain == cs_domain) {v_SecurityInfo.cs_cipheringStarted := true;}
+    else                          {v_SecurityInfo.ps_cipheringStarted := true;}
+    
+    v_SecurityInfo.recentSecureDomain := p_CN_Domain;
+    if (v_SecurityInfo.integrityStarted) {     // Modify integrity
+      
+      v_CRLC_RRC_MessageSN_CNF := f_UTRAN_CRLC_RRC_MessageSN_Get(tsc_RB0);
+      v_SN_RB0 := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_DL;
+      
+      v_CRLC_RRC_MessageSN_CNF := f_UTRAN_CRLC_RRC_MessageSN_Get(tsc_RB1);
+      v_SN_RB1 := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_DL;
+      
+      v_CRLC_RRC_MessageSN_CNF := f_UTRAN_CRLC_RRC_MessageSN_Get(tsc_RB2);
+      v_SN_RB2 := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_DL;
+      v_SN_RB2_UL := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_UL;
+      
+      v_CRLC_RRC_MessageSN_CNF := f_UTRAN_CRLC_RRC_MessageSN_Get(tsc_RB3);
+      v_SN_RB3 := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_DL;
+      
+      v_CRLC_RRC_MessageSN_CNF := f_UTRAN_CRLC_RRC_MessageSN_Get(tsc_RB4);
+      v_SN_RB4 := v_CRLC_RRC_MessageSN_CNF.count_I_LSB_DL;
+      
+      v_SecurityInfo.dL_Integrity := valueof(cs_IntegrityProtectModify_P(v_SN_RB0, v_SN_RB1, v_SN_RB2, v_SN_RB3, v_SN_RB4, v_SecurityInfo.integrityProtectionAlgorithm));
+      v_Int_ModifyFlag := true;
+    }
+    else {                                            // Start integrity
+      v_SecurityInfo.integrityStarted := true;
+      v_SecurityInfo.dL_Integrity := valueof(cs_IntegrityProtectStart(px_FRESH, v_SecurityInfo.integrityProtectionAlgorithm));
+      v_SecurityInfo.dl_IntegrityCheckInfo := valueof(cs_IntegrityCheckInfo0);
+      v_Int_ModifyFlag := false;
+    }
+    
+    if (p_NewKey == true) {
+      //Authentication was done, reset HFN
+      v_SecurityInfo.authKeys.HFN := '00000000000000000000'B;
+      if (p_CN_Domain == cs_domain) {v_SecurityInfo.start_CS := '00000000000000000000'B;}
+      else                          {v_SecurityInfo.start_PS := '00000000000000000000'B;}
+    }
+    else {
+      if (p_CN_Domain == cs_domain) {v_SecurityInfo.authKeys.HFN := v_SecurityInfo.start_CS;}
+      else                          {v_SecurityInfo.authKeys.HFN := v_SecurityInfo.start_PS;}
+    }
+    f_UTRAN_Security_Set(v_SecurityInfo);     // write back information
+    
+    // Download Security Keys to SS
+    f_UTRAN_SS_DownloadSecurityKey(p_CellId, p_CN_Domain);
+    
+    // ActivateSecurity_DL_SS:
+    if (not v_Int_ModifyFlag) {        // If Start of Integrity: Set DL RRC_MSN to 0, else skip it.
+      f_UTRAN_SetDL_RRC_MessageSN(p_CellId);
+    }
+    f_UTRAN_CRLC_IntegrityActivate(cas_CRLC_DL_IntegrityActivateReq(utran_CellDedicated,
+                                                                    v_SecurityInfo.recentSecureDomain,
+                                                                    v_SecurityInfo.dL_Integrity));
+    
+    if (((v_SecurityInfo.ps_cipheringStarted) and (v_SecurityInfo.recentSecureDomain == ps_domain)) or
+        ((v_SecurityInfo.cs_cipheringStarted) and (v_SecurityInfo.recentSecureDomain == cs_domain))) {
+      v_RB_ActivationTimeInfoList := f_UTRAN_ActivateCiphering_DL_SS(p_CellId, v_CipherActTime);
+    } else {
+      v_RB_ActivationTimeInfoList := cs_RB_ActTimeInfoListSRBs(0, 0, 0, 0);
+    }
+    
+    if (v_Int_ModifyFlag) {
+      f_UTRAN_CRLC_IntegrityActivate(cas_CRLC_UL_IntegrityActivateReq(utran_CellDedicated,
+                                                                      v_SecurityInfo.recentSecureDomain,
+                                                                      cs_RB2_IntegrityProtActivationInfoList(v_SN_RB2_UL)));
+    } else {
+      f_UTRAN_CRLC_IntegrityActivate(cas_CRLC_UL_IntegrityActivateReq(utran_CellDedicated,
+                                                                      v_SecurityInfo.recentSecureDomain,
+                                                                      cs_RB2_IntegrityProtActivationInfoList(0)));
+    }
+    f_UTRAN_CRLC_ProhibitRLC_Ack(tsc_RB2, cas_CRLC_ProhibitRLC_Ack_REQ(utran_CellDedicated, tsc_RB2));
+    
+    // lt_StartSecurity_UE:
+    v_SecurityInfo := f_UTRAN_StartSecurityUE(p_CellId,
+                                               v_CellConfig,
+                                               v_SecurityInfo,
+                                               v_RB_ActivationTimeInfoList,
+                                               p_CN_Domain,
+                                               v_CipherActTime); // @sic R5s150599 no longer an fl_ sic@
+    f_UTRAN_Security_Set(v_SecurityInfo);
+    
+    f_UTRAN_CRLC_ProhibitRLC_Ack(tsc_RB2, cas_CRLC_ContinueRLC_Ack_REQ(utran_CellDedicated, tsc_RB2));
+    
+    if (((v_SecurityInfo.ps_cipheringStarted) and (v_SecurityInfo.recentSecureDomain == ps_domain)) or
+        ((v_SecurityInfo.cs_cipheringStarted) and (v_SecurityInfo.recentSecureDomain == cs_domain))) {
+      f_UTRAN_CRLC_ResumeSecurity(p_CellId);
+      //UnBlock reception of UL PDUs on Dc port - similar as SS resumes of UL RLC PDU in CRLC_Resume_REQ
+      //@sic R5s150532 sic@
+      f_UTRAN_Default_BlockDc(false);
+    }
+  }
+
+  /*
+   * @desc      To check the release indicator reported by UE in RRC CONNECTION REQUEST against the test casse release.
+   * @param     p_ReleaseIndicator_UE
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_CheckReleaseIndicator(AccessStratumReleaseIndicator p_ReleaseIndicator_UE) runs on UTRAN_PTC
+  { // @sic R5-123750 sic@
+    var UTRAN_FddTddMessageClass_Type v_FddTddMessageClass := f_UTRAN_ConfigurationInfo_TestCaseRelease_Get();
+    
+    select (v_FddTddMessageClass) {  // @sic R5s130195 Utran Release sic@
+      case (FDDr7, TDDr7) {
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr8) {
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr9, TDDr9) {
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr10, TDDr10) { // @sic R5s130195 Utran Release sic@
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8, rel_9))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr11, TDDr11) {
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8, rel_9, rel_10))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr12, TDDr12) { /* @sic R5s150329 BASELINE MOVING 2015 sic@*/
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8, rel_9, rel_10, rel_11))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr14, TDDr14) { /* @sic R5-176156 sic@*/
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8, rel_9, rel_10, rel_11, rel_12, rel_13))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }
+      case (FDDr16) {
+        if (not match(p_ReleaseIndicator_UE, complement(rel_4, rel_5, rel_6, rel_7, rel_8, rel_9, rel_10, rel_11, rel_12, rel_13, rel_14, rel_15))) {
+          FatalError(__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+        }
+      }      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+  }
+
+  /*
+   * @desc      To assign the Start values in the security info
+   * @param     p_STARTList
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+   function f_UTRAN_SetSecurityInfo_StartValue(STARTList p_STARTList) runs on UTRAN_PTC
+ {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var integer v_DomainCnt;
+    var integer I;
+    
+    v_DomainCnt := lengthof(p_STARTList);
+    if ((v_DomainCnt > 0) and (v_DomainCnt <= 2)) {
+      for (I:=0; I<v_DomainCnt; I:=I+1) {
+        if (p_STARTList[I].cn_DomainIdentity == cs_domain) {
+          v_SecurityInfo.start_CS := p_STARTList[I].start_Value;
+        } else {
+          v_SecurityInfo.start_PS := p_STARTList[I].start_Value;
+        }
+      }
+    } else {
+      FatalError(__FILE__, __LINE__, "invalid configuration");
+    }
+    f_UTRAN_Security_Set(v_SecurityInfo);
+ }
+
+  /*
+   * @desc      Generate authentication parameters and run  the GMM Authentication procedure
+   *            See 3GPP 24.008 / 4.7, 3GPP 33.102 / 6.3 and  3GPP 34.108 / 8 (for the computation of authentication parameters for Test USIM)
+   *            See also the detailed description in test Step f_MM_Authentication, on which this test Step is based.
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_GMM_Authentication() runs on UTRAN_PTC
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo:= f_UTRAN_Security_Get();
+    var Common_AuthenticationParams_Type v_Auth_Params := v_SecurityInfo.authKeys.AuthPS;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var AUTHENTICATIONANDCIPHERINGRESPONSE v_AuthAndCipherResp;
+    var B32_Type    v_AuthRES_High;
+    var bitstring   v_AuthRES;
+    
+    v_Auth_Params := f_AuthenticationInit(v_Auth_Params);        // modified by f_AuthenticationInit
+    v_SecurityInfo.authKeys.AuthPS := v_Auth_Params;
+    
+    // AUTHENTICATION AND CIPHERING REQUEST using relevant PS keys computed before:
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_AuthAndCiphReq(cs_GMM_AuthRAND(px_eAuthRAND),
+                                                 cs_GMM_KeySeq(v_Auth_Params.KeySeq),
+                                                 cs_GMM_AUTN(v_Auth_Params.AUTN))));
+    alt {
+      // AUTHENTICATION AND CIPHERING RESPONSE including both Authentication Response parameters (RES and RES ext)
+      [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,
+                                                  tsc_RB3,
+                                                  cr_U_AuthAndCiphRsp(cr_AuthRspAny,
+                                                                      cr_AuthCiphRspExtAny)))
+        -> value v_RRC_DataInd
+        {
+          v_AuthAndCipherResp := v_RRC_DataInd.msg.authenticationAndCipheringResponse;
+          v_AuthRES_High := v_AuthAndCipherResp.authRsp.rES;
+          v_AuthRES := v_AuthRES_High & v_AuthAndCipherResp.authRspExt.rES;
+          // Verify that the received Authentication Response parameters match expected response:
+          if (v_AuthRES != substr(v_Auth_Params.XRES, 0, lengthof(v_AuthRES))) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Authentication Failed");
+          }
+          //Initialis authKeys.AuthPS.XRESLength @sic R5s141127 sic@
+          v_SecurityInfo.authKeys.AuthPS.XRESLength := lengthof(v_AuthRES) / 8
+        }
+      // AUTHENTICATION AND CIPHERING RESPONSE including only one Authentication Response parameters (RES):
+      [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,
+                                                  tsc_RB3,
+                                                  cr_U_AuthAndCiphRsp(cr_AuthRspAny,
+                                                                      omit)))
+        -> value v_RRC_DataInd
+        {
+          v_AuthAndCipherResp := v_RRC_DataInd.msg.authenticationAndCipheringResponse;
+          v_AuthRES_High := v_AuthAndCipherResp.authRsp.rES;
+          // Verify that the received Authentication Response parameters match expected response:
+          if (v_AuthRES_High != substr(v_Auth_Params.XRES, 0, lengthof(v_AuthRES_High))) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Authentication Failed");
+          }
+          //Initialis authKeys.AuthPS.XRESLength @sic R5s141127 sic@
+          v_SecurityInfo.authKeys.AuthPS.XRESLength := lengthof(v_AuthRES_High) / 8;
+        }
+      // AUTHENTICATION AND CIPHERING Failure, then stop execution by assigning INCONCLUSIVE verdict as this might be a USIM issue.
+      [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,
+                                                  tsc_RB3,
+                                                  cr_U_AuthAndCiphFailureAny)) {
+        FatalError(__FILE__, __LINE__, "received AUTHENTICATION_AND_CIPHERING_FAILURE");
+      }
+    }
+    f_UTRAN_Security_Set(v_SecurityInfo);
+  }
+
+  /*
+   * @desc      Function used to perform MM Authentication in UTRAN
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_MM_Authentication() runs on UTRAN_PTC
+  {
+    var RRC_DATA_IND v_RRC_DataInd;
+    var AuthRsp v_AuthRsp;
+    var AuthRspExt v_AuthRspExt;
+    var bitstring v_AuthRES;
+    var B32_Type v_AuthRES_High;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var Common_AuthenticationParams_Type v_CommonAuthParams := f_AuthenticationInit(v_SecurityInfo.authKeys.AuthPS);
+    
+    // @sic R5s110318 sic@
+    v_SecurityInfo.authKeys.AuthCS.CKey := v_CommonAuthParams.CK;
+    v_SecurityInfo.authKeys.AuthCS.IKey := v_CommonAuthParams.IK;
+    v_SecurityInfo.authKeys.AuthCS.CKeySeq := v_CommonAuthParams.KeySeq;
+    f_UTRAN_Security_Set(v_SecurityInfo);
+
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_AuthReq(v_SecurityInfo.authKeys.AuthCS.CKeySeq,
+                                          v_CommonAuthParams.RandValue,
+                                          cs_GSM_AUTN(v_CommonAuthParams.AUTN))));
+    
+    alt {
+      //Receive Authentication Response with extension
+      [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                               tsc_RB3,
+                                               cr_U_AuthRspAnyExt)) -> value v_RRC_DataInd
+        {
+          v_AuthRsp := v_RRC_DataInd.msg.authenticationResponse.authRsp;
+          v_AuthRspExt := v_RRC_DataInd.msg.authenticationResponse.authRspExt;
+          
+          //First 32 bits of XRES correspond to AuthRsp and remaining bits correspond to AuthRspExt.
+          //So instead of checking the AuthRsp and AuthRspExt separately,the 2 strings are concatenated and compared against XRES.
+          v_AuthRES_High := v_AuthRsp.rES;
+          v_AuthRES := v_AuthRES_High & v_AuthRspExt.rES;
+          
+          //Bitwaise XOR of XRES and v_AuthRES should result in all zeroes which implies that the 2 bitstrings should match exactly.
+          if (v_AuthRES != substr(v_CommonAuthParams.XRES, 0, lengthof(v_AuthRES))) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received incorrect authentication parameters");
+          }
+        }
+      
+      //Receive Authentication Response without extension
+      [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                               tsc_RB3,
+                                               cr_U_AuthRspAnyNoExt)) -> value v_RRC_DataInd
+        {
+          v_AuthRsp := v_RRC_DataInd.msg.authenticationResponse.authRsp;
+          v_AuthRES_High := v_AuthRsp.rES;
+          
+          //Bitwise XOR of XRES and v_AuthRES should result in all zeroes which implies that the 2 bitstrings should match exactly.
+          if (v_AuthRES_High != substr(v_CommonAuthParams.XRES, 0, lengthof(v_AuthRES_High))) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received incorrect authentication parameters");
+          }
+        }
+      
+      [] U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                               tsc_RB3,
+                                               cr_U_AuthFailAny))
+        {
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Authentication failure received");
+        }
+    }
+  }
+
+  /*
+   * @desc      Disconnects an active CC call. To bring UE from UTRA CS call (U5) state to UTRA connected (U2) state.
+   *            This procedure is according to 36.523-3 cl. 10.1.3 (CC disconnect procedure)
+   * @param     p_TI_S              (default value: cs_TI_MO)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_UTRAN_CC_Disconnect(template (value) TI  p_TI_S:= cs_TI_MO) runs on UTRAN_PTC
+  { // @sic R5s140611 sic@
+    // Step 1: Transmit Downlink Direct Transfer with a Disconnect message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3, cs_U_Disconnect(p_TI_S))); // @sic R5s110547 sic@
+
+    // Step 2: Receive Uplink Direct Transfer with a Release message
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_Rel(cr_TI_Any)));
+
+    // Step 3: Transmit Downlink Direct Transfer with a Release Complete message
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated, tsc_RB3,  cs_U_ReleaseComplete(p_TI_S))); // @sic R5s110547 sic@
+  }
+
+  type enumerated LOCATION_UPDATE_TYPE {TMSI, IMSI, NONE, REJECT};              /* @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+                                                                                   to allow the option to reject the LAU Req too */
+
+  type LOCATION_UPDATE_TYPE LOCATION_UPDATE_ACCEPT_TYPE (TMSI, IMSI, NONE);     /* @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+                                                                                   @sic R5s150830 sic@ */
+
+  /*
+   * @desc      To Page the UE in the cs domain
+   * @param     p_CellId
+   * @param     p_PagCause
+   * @param     p_Tmsi
+   * @status    APPROVED (LTE_IRAT, POS, SSNITZ)
+   */
+  function f_UTRAN_PageCS(UTRAN_CellId_Type p_CellId,
+                          PagingCause p_PagCause,
+                          B32_Type p_Tmsi) runs on UTRAN_PTC
+  {
+    f_UTRAN_CMAC_Pag1_Cfg(p_CellId);
+    U_TM.send(cas_PagingType1(p_CellId, tsc_RB_PCCH, cs_RRC_PagingType1(p_PagCause, cs_CN_PageUE_Identity_TMSI(p_Tmsi), cs_domain)));
+  }
+
+  /*
+   * @desc      Brings UE from connected state to UTRA State Off
+   * @param     p_CellId
+   * @param     p_Utra_Postamble_Condition
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  altstep a_UTRAN_UE_DetachAfterSwitchOff_Common(UTRAN_CellId_Type         p_CellId,
+                                                 UTRA_POSTAMBLE_CONDITIONS p_Utra_Postamble_Condition) runs on UTRAN_PTC
+    
+  {
+    var integer v_AttFlag := f_UTRAN_CellInfo_GetAttFlag(p_CellId);
+    var B2_Type v_Nmo := f_UTRAN_CellInfo_GetNMO(p_CellId);
+    
+    //Step 5a1, 5c1 & 5d1: Receive Detach Request message for the different scenarios
+    // - NMO1 and (C1 or C3) : detach type = power switched off, GPRS/IMSI combined detach
+    // - (NMO1 or NMO2) and C2 : detach type = power switched off, PS detach
+    // - NMO2 and (C1 or C3) : detach type = power switched off, PS detach
+    [] U_Dc.receive((car_PS_InitDirectTransfer(utran_CellDedicated,
+                                               tsc_RB3,
+                                               cr_U_DetachRequest), // @sic R5s110462 sic@
+                     car_PS_UplinkDirectTransfer(utran_CellDedicated, // if received Service Req, then this won't be the first message
+                                                 tsc_RB3,
+                                                 cr_U_DetachRequest))) // @sic R5s120162 sic@
+      {
+        //Step 5d2: Receive IMSI Detach indication
+        // - NMO2 and (C1 or C3)
+        if (v_AttFlag == 1 and ((v_Nmo == tsc_NMO_II and (p_Utra_Postamble_Condition == UTRA_C1 or p_Utra_Postamble_Condition == UTRA_C3)))) { // @sic R5s110155, R5-115770 sic@
+          U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,  // @sic R5s110155, R5s110695, R5s120529 sic@
+                                              tsc_RB3,
+                                              cr_U_Imsi_DetachInd));
+        }
+      }
+    // Step 5b1 or 5d2: Receive IMSI detach Indication
+    // - (NMO1 or NMO2) and C4
+    // When NMO2 and (C1 or C3) : CS and PS are run independently and SS shall accept either PS detach first or IMSI detach first.
+    [] U_Dc.receive((car_InitDirectTransfer(utran_CellDedicated,
+                                           tsc_RB3,
+                                           cr_U_Imsi_DetachInd), // @sic R5s120902, R5s130273 sic@
+                    car_UplinkDirectTransfer(utran_CellDedicated, // @sic R5s160068 sic@
+                                           tsc_RB3,
+                                           cr_U_Imsi_DetachInd)))    {
+      //Step 5d1: Receive Detach request for the scenario
+      // - NMO2 and (C1 or C3)
+      if (v_AttFlag == 1 and
+          v_Nmo == tsc_NMO_II and // @sic R5-115770 sic@
+          (p_Utra_Postamble_Condition == UTRA_C1 or p_Utra_Postamble_Condition == UTRA_C3)) {
+        U_Dc.receive((car_PS_InitDirectTransfer(utran_CellDedicated,
+                                                tsc_RB3,
+                                                cr_U_DetachRequest), // @sic R5s110462 sic@
+                      car_PS_UplinkDirectTransfer(utran_CellDedicated, // if received Service Req, then this won't be the first message
+                                                  tsc_RB3,
+                                                  cr_U_DetachRequest))); // @sic R5s110462 sic@
+      }
+      else {//IMSI Detach only
+      }
+    }
+  }
+
+  /*
+   * @desc      returns the system specific capabilities to be requested to UE
+   *            In UTRAN to E-UTRA test cases UE shall report gsm and eutra capabilities
+   * @return    SystemSpecificCapUpdateReqList_r8
+   * @status    APPROVED (IMS, IMS_IRAT, LTE_A_IRAT, LTE_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_GetSystemSpecificCapability() runs on UTRAN_PTC return SystemSpecificCapUpdateReqList_r8
+  { // @sic R5s120660 sic@
+
+    var SystemSpecificCapUpdateReqList_r8  v_SystemSpecificCapUpdateReqList;
+
+    if (f_GetTestcaseAttrib_RetrieveEutraCapabilities(testcasename()) and not isvalue(f_UTRAN_MobileInfo_EUTRACapability_Get())) { // @sic R5s160394, R5s160573 sic@
+      v_SystemSpecificCapUpdateReqList := {gsm, eutra};
+    } else {
+      v_SystemSpecificCapUpdateReqList :=  {gsm};
+    }
+    return v_SystemSpecificCapUpdateReqList;
+  }
+
+  /*
+   * @desc      Return the RB used in the configuration RB20/25
+   * @param     p_RB_Configuration
+   * @return    integer
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_IRAT, POS, UTRAN)
+   */
+  function fl_UTRAN_IP_Handling_GetDrbId(RB_ConfigType p_RB_Configuration) return integer
+  {
+    var integer v_DrbId;
+    
+    select (p_RB_Configuration) {
+      case (cell_DCH_64kPS_RAB_SRB, cell_FACH_PS, cell_Four_DTCH_PS_CS) {
+        v_DrbId := tsc_RB20;
+      }
+      case (cell_DCH_E_HS, cell_DCH_HS_DSCH, cell_E_HS, cell_DCH_dlSRB_E_HS, cell_FACH_HS, cell_FACH_UL_PS, cell_FACH_UL_FallBack) {
+      //@sic R5-150125 feFACH sic@
+        v_DrbId := tsc_RB25;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Configuration not supported");
+      }
+    }
+    return v_DrbId;
+  }
+
+  /*
+   * @desc      start DHCP and ICMPv6 server for given RAB 20 or RAB 25 depending on the configuration
+   * @param     p_PdnIndex
+   * @param     p_RB_Configuration
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_IRAT, POS, UTRAN)
+   */
+  function f_UTRAN_IP_Handling_Start_Configuration(PDN_Index_Type p_PdnIndex,
+                                                   RB_ConfigType p_RB_Configuration) runs on UTRAN_IP_PTC
+  { // @sic R5-125676 sic@
+    var UTRAN_CellId_Type v_CellId := utran_CellDedicated;                      // @sic R5s140578 change 2.1: cell id is always utran_CellDedicated sic@
+    var integer v_DrbId := fl_UTRAN_IP_Handling_GetDrbId (p_RB_Configuration);  // @sic R5s140161 sic@
+    
+    f_IP_Handling_StartPDN(IP, p_PdnIndex, cs_DrbInfo_UTRAN(v_CellId, v_DrbId));
+  }
+
+}

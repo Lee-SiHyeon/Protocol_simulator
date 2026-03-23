@@ -1,0 +1,820 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-07-15 12:23:56 +0200 (Tue, 15 Jul 2025) $
+// $Rev: 41548 $
+/******************************************************************************/
+
+module NBIOT_RRCSteps {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_RRC_Templates all;
+  import from EUTRA_NB_SecurityDefinitionsAndExternalFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_Paging all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+  import from NBIOT_Timing all;
+  import from TestcaseProperties all;
+
+  const B1_Type tsc_VarShortMAC_ResumeDiscriminator := '1'B;           /* resumeDiscriminator in VarShortResumeMAC-Input (36.331 clause 7.1)
+                                                                          @status    APPROVED (NBIOT) */
+
+  const integer tsc_NBIOT_DelayAfterRRCConnectionRelease := 1100;        /* 1.1 seconds @sic R5s170263 sic@,
+                                                                             R5_181332: don't need to wait for 10s + 10% because assumed UE will stop this timer after the RLC ACK sic@
+                                                                             @status    APPROVED (NBIOT) */
+
+  /*
+   * @desc      returns SRB1bis or SRB1 depending on CP/UP
+   * @param     p_IOT_State
+   * @return    NB_SRB_Identity_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_GetSrb1Id(IOT_STATE_Type p_IOT_State) return NB_SRB_Identity_Type
+  {
+    var NB_SRB_Identity_Type v_SrbId;
+
+    if (p_IOT_State == CONTROL_PLANE) {
+      v_SrbId := tsc_SRB1bis;
+    } else {
+      v_SrbId := tsc_SRB1;
+    }
+    return v_SrbId;
+  }
+
+  /*
+   * @desc      common function to await RRC Connection Request sent by the UE;
+   *            when a running timer is handed over, this is used as watchdog.
+   * @param     p_CellId
+   * @param     p_Timer
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @return    boolean
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionRequest_Common(NBIOT_CellId_Type p_CellId,
+                                                timer p_Timer,
+                                                template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                                template EUTRA_ASN1_InitialUE_Identity_Type p_InitialUE_Identity := ?) runs on NBIOT_PTC return boolean // return true when the RRC Connection Request has been received (before expiry of the timer)
+  { /* common procedure to receive the initial RRC connection request for an expected RRC connection establishment procedure;
+       when RRC connection setup is not explicitly sent from TTCN but is preconfigured at the SS to be sent together with the contention resolution,
+       the default UL grant configuration is configured at the SS */
+
+    var boolean v_TimerIsRunning := p_Timer.running;
+    var template (omit) integer v_HarqProcessNumber := f_NBIOT_CellInfo_GetDefaultHarqProcessNumber(p_CellId); /* @sic R5w180305: support of two HARQ processes sic@ */
+
+    alt {
+      [] SRB.receive(car_NB_SRB0_RrcPdu_IND(p_CellId, cr_RRCConnectionRequest_NB(p_EstablishmentCause, p_InitialUE_Identity)))
+        {
+          p_Timer.stop;       /* NOTE: acc. to ES 201 873-1 cl. 23.3 the timer can be stopped even if it has not been started before */
+
+          // switch on UL grant assignments @sic R5s170506: UL grants started only if there has been an RRCConnectionRequest sic@ */
+          f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_ContinuousGrant(cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, v_HarqProcessNumber))));
+          return true;
+        }
+      [v_TimerIsRunning] p_Timer.timeout
+        {
+        }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      await RRC Connection Request sent by the UE; staight forward case without watchdog timer
+   * @param     p_CellId
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionRequest_Def(NBIOT_CellId_Type p_CellId,
+                                             template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                             template EUTRA_ASN1_InitialUE_Identity_Type p_InitialUE_Identity := ?) runs on NBIOT_PTC
+  {
+    timer t_Dummy; // timer which is not started
+    f_NBIOT_RRC_ConnectionRequest_Common(p_CellId, t_Dummy, p_EstablishmentCause, p_InitialUE_Identity);
+  }
+
+  /*
+   * @desc      Check whether RRCConnectionRequest is received in the given cell within the given time
+   *            NOTE: this function shall be used in general when it shall be checked that there is no RRCConnectionRequest;
+   *                  therefore the p_CellId id "template (present)";
+   *                  to receive the initial RRCConnectionRequest for an expected RRC connection establishment procedure
+   *                  f_NBIOT_RRC_ConnectionRequest_Def or f_NBIOT_RRC_ConnectionRequest_Common shall be used
+   * @param     p_CellId
+   * @param     p_TimerValue
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_JustCheck         (default value: false)
+   * @param     p_InitialUE_Identity (default value: cr_InitialUE_Identity_S_TMSIAny)
+   * @return    boolean
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_RRCConnectionRequest_Check(template (present) NBIOT_CellId_Type p_CellId,
+                                                  float p_TimerValue,
+                                                  template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                                  boolean p_JustCheck := false,
+                                                  template EUTRA_ASN1_InitialUE_Identity_Type p_InitialUE_Identity := cr_InitialUE_Identity_S_TMSIAny) //@sic R5-235330 sic@)
+    runs on NBIOT_PTC return boolean
+  {
+    var template NB_SRB_COMMON_IND v_SRB0_RrcPdu_IND := car_NB_SRB0_RrcPdu_IND(p_CellId, cr_RRCConnectionRequest_NB(p_EstablishmentCause, p_InitialUE_Identity)); //@sic R5-235330 sic@
+    
+    timer t_Wait;
+    t_Wait.start(p_TimerValue);
+    alt {
+      // receive RRC Connection Request on SRB0 (CCCH):
+      [not p_JustCheck] SRB.receive(v_SRB0_RrcPdu_IND)
+        {
+          t_Wait.stop;
+          return true;
+        }
+      [p_JustCheck] SRB.check(receive(v_SRB0_RrcPdu_IND))
+        {
+          t_Wait.stop;
+          return true;
+        }
+      [] t_Wait.timeout
+        {
+        }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      send RRC connection setup
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionSetup_Def()
+  { /* @sic R5s170258 - additional MCC160 changes: attribute DlCcchMsgInSeparateMacPdu removed for NBIOT; function is kept as place holder only sic@ */
+  }
+
+  /*
+   * @desc      receive RRCConnectionSetupComplete
+   * @param     p_CellId
+   * @param     p_ExpectedRRCConnectionSetupComplete
+   * @param     p_ExpectedNasIndication
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionSetupComplete_Def(NBIOT_CellId_Type p_CellId,
+                                                  template (present) UL_DCCH_Message_NB p_ExpectedRRCConnectionSetupComplete,
+                                                  template (present) NAS_MSG_Indication_Type p_ExpectedNasIndication)
+    runs on NBIOT_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    
+    SRB.receive(car_NB_SRB_RrcNasPdu_IND(p_CellId, tsc_SRB1bis, p_ExpectedRRCConnectionSetupComplete, p_ExpectedNasIndication)) -> value v_ReceivedAsp;
+    v_NAS_Ind := v_ReceivedAsp.Signalling.Nas[0];
+    
+    return v_NAS_Ind;
+  }
+
+  /*
+   * @desc      Send UECapabilityEnquiry message and receives UECapabilityInformation message.
+   *            The received UE Capabilities are decoded and stored in the structure for the Mobile Info.
+   *            Also defined in 36.508 8.1.5A.8 to check UE in RRC_CONNECTED state
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_Capability(NBIOT_CellId_Type p_CellId,
+                              IOT_STATE_Type p_IOT_State,
+                              EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def) runs on NBIOT_PTC
+  {
+    var NB_SRB_Identity_Type v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    
+    SRB.send(cas_NB_SRB_RrcPdu_REQ(p_CellId, v_SrbId, cs_TimingInfo_Now, cs_508_UeCapabilityEnquiry_NB(p_RRC_TI)));
+    SRB.receive(car_NB_SRB_RrcPdu_IND(p_CellId, v_SrbId, cr_UeCapabilityInformation_NB_Any(p_RRC_TI))) -> value v_ReceivedAsp;
+    f_NBIOT_MobileInfo_SetUECapability (v_ReceivedAsp.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation_r13.criticalExtensions.ueCapabilityInformation_r13.ue_Capability_r13); // @sic R5-174291, R5-181277 sic@
+    // Check the UE release
+    f_NBIOT_CheckReleaseIndicator (v_ReceivedAsp.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation_r13.criticalExtensions.ueCapabilityInformation_r13.ue_Capability_r13.accessStratumRelease_r13); // @sic R5-183056 sic@
+  }
+
+  /*
+   * @desc      To check the NBIOT release reported by UE against the tc release
+   * @param     p_ReleaseIndicator_UE
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_CheckReleaseIndicator(AccessStratumRelease_NB_r13 p_ReleaseIndicator_UE)
+  {
+    var integer v_RelMin;
+    var integer v_Rel;
+    var template (omit) integer v_UE_Release := f_NBIOT_ConvertAccessStratumReleaseToInteger(p_ReleaseIndicator_UE);
+    
+    if (isvalue(v_UE_Release)) {
+      v_Rel := valueof(v_UE_Release);
+      
+      select (f_GetTestcaseAttrib_Eutra_Release (testcasename())) {
+        case ("rel_18") { // >= rel18     @sic R5s240444 BASELINE MOVING 2024 sic@
+          v_RelMin := 18;
+        }
+        case ("rel_17") { // >= rel17     @sic R5s221178 BASELINE MOVING 2022 sic@
+          v_RelMin := 17;
+        }
+        case ("rel_16") { // >= rel16     @sic R5s201386 BASELINE MOVING 2020 sic@
+          v_RelMin := 16;
+        }
+        case ("rel_15") { // >= rel15  @sic R5s180552 BASELINE MOVING 2018 sic@
+          v_RelMin := 15;
+        }
+        case ("rel_14") { // >= rel14
+          v_RelMin := 14;
+        }
+        case else { //By default minimum release is rel-13 for NBIOT
+          v_RelMin := 13;
+        }
+      }
+      if (v_Rel < v_RelMin) {
+        f_SetVerdictInconc (__FILE__, __LINE__, "Wrong Access Stratum release indicator");
+      }
+    }
+  }
+
+  /*
+   * @desc      to convert NBIOT ASN.1 AccessStratumRelease type to integer (e.g. rel13 -> 13)
+   * @param     p_AccessStratumRelease
+   * @return    template (omit) integer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ConvertAccessStratumReleaseToInteger(AccessStratumRelease_NB_r13 p_AccessStratumRelease) return template (omit) integer
+  {
+    var template (omit) integer v_UE_Release := omit;
+    select (p_AccessStratumRelease) {
+      case (rel13) {v_UE_Release := 13;}
+      case (rel14) {v_UE_Release := 14;}  /* @sic R5s170597 BASELINE MOVING 2017 sic@ */
+      case (rel15) {v_UE_Release := 15;}  /* @sic R5s180552 BASELINE MOVING 2018 sic@ */
+      case (rel16) {v_UE_Release := 16;}  /* @sic R5s201386 BASELINE MOVING 2020 sic@ */
+      case (rel17) {v_UE_Release := 17;}  /* @sic R5s221178 BASELINE MOVING 2022 rel-17 sic@ */
+      case (rel18) {v_UE_Release := 18;}  /* @sic R5s240444 BASELINE MOVING 2024 rel-18 sic@ */
+      }
+    return v_UE_Release;
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.523-3 clause 7A.7
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_TimingAtT
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionRelease_Local(NBIOT_CellId_Type p_CellId,
+                                               IOT_STATE_Type p_IOT_State,
+                                               SubFrameTiming_Type p_TimingAtT) runs on NBIOT_PTC
+  { /* NOTE: the function schedules all steps to release and reconfigure the SRBs (and default DRB)
+     *       => this will in fact happen in the future */
+    var SubFrameTiming_Type v_Timing := p_TimingAtT;
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var DRB_IdentityList_Type v_DrbIdList := f_NBIOT_SS_ActiveDRBs(p_CellId, p_IOT_State);   // @sic R5s180547 sic@
+    var template (omit) integer v_HarqProcessNumber := f_NBIOT_CellInfo_GetDefaultHarqProcessNumber(p_CellId); /* @sic R5w180305: support of two HARQ processes sic@ */
+    var integer v_NPDCCH_PeriodBundle; // depending on NW type either NPDCCH period or NPDCCH bundle
+
+    v_NPDCCH_PeriodBundle := f_NBIOT_GetNPDCCH_PeriodBundle(p_CellId); //@sic R5-235443, R5s230478 cl 2.7, R5-237436 sic@
+          
+    /* Step 1 at T: disable the UL grant */
+    v_TimingInfo := cs_TimingInfo_EUTRA_NB(v_Timing);
+    f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Stop, v_TimingInfo);   // @sic R5s220319 - MCC160 implementation: use of timing information according to 36.523-3 clause 7A.7 sic@
+    
+    /* Step 2 at T+64ms */
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, v_NPDCCH_PeriodBundle); //@sic R5-s235443, R5-237436 sic@
+    v_TimingInfo := cs_TimingInfo_EUTRA_NB(v_Timing);
+
+    if (p_IOT_State == USER_PLANE) {
+      /* release security */
+      f_NBIOT_SS_RRC_ReleaseSecurity(p_CellId, v_TimingInfo);
+    }
+    f_NBIOT_ULGrantTransmission(p_CellId,
+                                cs_NB_UL_GrantScheduling_Start(cs_NB_PeriodicGrant(cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, v_HarqProcessNumber),   /* @sic R5w180305: support of two HARQ processes sic@ */
+                                                                                   4)),                                                          /* @sic R5-177097: give 4 sub-sequent UL grants to allow the UE to do RLC ACK sic@ */
+                                v_TimingInfo);
+     
+    /* Step 3 at T+80ms: Release SRBs and DRBs */
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 16 + v_NPDCCH_PeriodBundle);  //@sic R5-s235443, R5-237436 sic@
+    v_TimingInfo := cs_TimingInfo_EUTRA_NB(v_Timing);
+    f_NBIOT_SS_SRBs_DRBs_Release(p_CellId, p_IOT_State, v_TimingInfo, v_DrbIdList);   // @sic R5s180547: v_DrbIdList sic@
+    
+    /* Step 4 at T+96ms: Configure SRBs and DRBs */
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 32 + v_NPDCCH_PeriodBundle); //@sic R5-s235443, R5-237436 sic@
+    v_TimingInfo := cs_TimingInfo_EUTRA_NB(v_Timing);
+    f_NBIOT_SS_SRBs_DRBs_Config(p_CellId, p_IOT_State, v_TimingInfo, omit);
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.331 cl. 5.3.8; 36.523-3 cl. 7A.7
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_RRCConnectionRelease
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SrbId             (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionRelease_Common(NBIOT_CellId_Type p_CellId,
+                                                IOT_STATE_Type p_IOT_State,
+                                                template (value) DL_DCCH_Message_NB p_RRCConnectionRelease,
+                                                template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                                template (omit) NB_SRB_Identity_Type p_SrbId := omit) runs on NBIOT_PTC
+  { /* @sic R5s170250: p_IOT_State instead of p_SrbId sic@ */
+    var NB_SRB_Identity_Type v_SrbId;
+    var SubFrameTiming_Type v_TimingAtT;   // time T: sending of RRCConnectionRelease acc. to 36.523-3 clause 7A.7
+    var SubFrameTiming_Type v_TimingNow := f_NBIOT_GetCurrentTiming(p_CellId);
+    var integer v_MilliSecondsDelay := 300;
+    var integer v_Duration;
+    
+    timer t_Timer;
+      
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()== ntn_GSO)
+    {//@sic R5s230706, R5-237436, R5s250272 sic@
+        v_MilliSecondsDelay :=  f_NBIOT_NTN_Get_T_NTNoffset(p_CellId);
+    }
+
+
+    if (isvalue(p_SrbId)) {  // @sic R5s180217 sic@
+     v_SrbId := valueof(p_SrbId);
+    } else {
+     v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+    }
+
+    if (f_TimingInfo_IsNow(p_TimingInfo)) {
+      v_TimingAtT := f_NBIOT_GetNextSearchSpace(p_CellId, v_MilliSecondsDelay);
+    }
+    else {
+      // dedicated timing info is given
+      v_TimingAtT := valueof(p_TimingInfo.SubFrame);
+    }
+    v_Duration := f_SubFrameTiming_Duration(v_TimingNow, v_TimingAtT) + tsc_NBIOT_DelayAfterRRCConnectionRelease;   /* @sic R5s170263: tsc_NBIOT_DelayAfterRRCConnectionRelease sic@ */
+    t_Timer.start(int2float(v_Duration) / 1000.0);
+    
+    SRB.send(cas_NB_SRB_RrcPdu_REQ(p_CellId,
+                                   v_SrbId,
+                                   cs_TimingInfo_EUTRA_NB(v_TimingAtT),
+                                   p_RRCConnectionRelease));
+    
+    f_NBIOT_RRC_ConnectionRelease_Local(p_CellId, p_IOT_State, v_TimingAtT);
+    
+    alt {
+      [] t_Timer.timeout {}
+      [] SRB.check(receive(car_NB_SRB0_RrcPdu_IND(?, cr_RRCConnectionRequest_NB(cr_EstablishmentCause_NB_Any, ?)))) {   /* @sic R5s170366: ? as InitialUE_Identity sic@ */
+        // there is an RRCConnectionRequest sent by the UE which can be received by TTCN-3 in a subsequent function
+        t_Timer.stop;
+      }
+    }
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 36.331 cl. 5.3.8
+   * @param     p_CellId
+   * @param     p_IOT_State         (default value: CONTROL_PLANE)
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_ReleaseCause      (default value: other)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SrbId             (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionRelease(NBIOT_CellId_Type p_CellId,
+                                         IOT_STATE_Type p_IOT_State := CONTROL_PLANE,
+                                         EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                         ReleaseCause_NB_r13 p_ReleaseCause := other,
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                         template (omit) NB_SRB_Identity_Type p_SrbId := omit) runs on NBIOT_PTC
+  { /* @sic R5s170250: p_IOT_State instead of p_SrbId sic@ */
+    f_NBIOT_RRC_ConnectionRelease_Common(p_CellId, p_IOT_State, cs_RRCConnectionRelease_NB(p_RRC_TI, p_ReleaseCause), p_TimingInfo, p_SrbId); // @sic R5s180217 sic@
+  }
+
+  /*
+   * @desc      Special function to test T3411 during RRC connection release. Used in some NAS tests
+   * @param     p_CellId
+   * @param     p_IOT_State         (default value: CONTROL_PLANE)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_ConnectionReleaseAndTestT3411(NBIOT_CellId_Type p_CellId,
+                                                     IOT_STATE_Type p_IOT_State := CONTROL_PLANE) runs on NBIOT_PTC
+  {
+    var NB_SRB_Identity_Type v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+    var SubFrameTiming_Type v_TimingAtT;   // time T: sending of RRCConnectionRelease acc. to 36.523-3 clause 7A.7
+    var integer v_MilliSecondsDelay := 300;
+    
+    timer t_T3411;
+
+    v_TimingAtT := f_NBIOT_GetNextSearchSpace(p_CellId, v_MilliSecondsDelay);
+
+    t_T3411.start(f_NBIOT_SetTimerToleranceMin(nasTimer, 10.0)); // T3411 = 10s. Don't need to check tsc_NBIOT_DelayAfterRRCConnectionRelease as this is the same value
+    
+    SRB.send(cas_NB_SRB_RrcPdu_REQ(p_CellId,
+                                   v_SrbId,
+                                   cs_TimingInfo_EUTRA_NB(v_TimingAtT),
+                                   cs_RRCConnectionRelease_NB(tsc_RRC_TI_Def, other)));
+    
+    f_NBIOT_RRC_ConnectionRelease_Local(p_CellId, p_IOT_State, v_TimingAtT);
+    
+    alt {
+      [] t_T3411.timeout {
+        repeat;
+      }
+      [] SRB.check(receive(car_NB_SRB0_RrcPdu_IND(?, cr_RRCConnectionRequest_NB(cr_EstablishmentCause_NB_Any, ?)))) {   /* @sic R5s170366: ? as InitialUE_Identity sic@ */
+        // there is an RRCConnectionRequest sent by the UE which can be received by TTCN-3 in a subsequent function
+        if (t_T3411.running) {
+          t_T3411.stop;
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "RRC Con Req received before T3411 timed out");
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      Reset SRB and active DRBs
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_DelayBeforeReset  (default value: noDelay)
+   * @param     p_StopULGrant       (default value: false)
+   * @param     p_CnfFlag           (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_SRBs_DRBs_Reset(NBIOT_CellId_Type  p_CellId,
+                                      IOT_STATE_Type p_IOT_State,
+                                      DelayBeforeConfiguration_Type p_DelayBeforeReset := noDelay,
+                                      boolean p_StopULGrant := false,
+                                      template (omit) boolean p_CnfFlag := omit) runs on NBIOT_PTC
+  { /* Note: this function shall use timing info "Now" only otherwise between release and config there have to be at least 5ms */
+
+    var DRB_IdentityList_Type v_DrbIdList := f_NBIOT_SS_ActiveDRBs(p_CellId, p_IOT_State);   // @sic R5s180547 sic@
+
+    f_DelayBeforeConfiguration(p_DelayBeforeReset);
+    if (p_StopULGrant) {
+      f_NBIOT_StopULGrantTransmission(p_CellId);
+    }
+    f_NBIOT_SS_SRBs_DRBs_Release(p_CellId, p_IOT_State, -, v_DrbIdList, p_CnfFlag);   // @sic R5s180547: v_DrbIdList sic@
+    f_NBIOT_SS_SRBs_DRBs_Config(p_CellId, p_IOT_State, -, -, p_CnfFlag);
+  }
+
+  /*
+   * @desc      send RRC connection reconfiguration
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_NAS_MSG_Request   (default value: omit)
+   * @param     p_DRB_Id            (default value: tsc_DRB1)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Send(NBIOT_CellId_Type p_CellId,
+                                                               EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                                               template (omit) NAS_MSG_Request_Type p_NAS_MSG_Request := omit,
+                                                               EUTRA_ASN1_DRB_Identity_Type p_DRB_Id := tsc_DRB1)
+    runs on NBIOT_PTC
+  { /* As for LTE the dedicatedInfoNASList (if any) gets set by the NAS emulator */
+    var template (omit) NAS_MSG_RequestList_Type v_NasMsgList := omit;
+    
+    if (isvalue(p_NAS_MSG_Request)) {
+      v_NasMsgList := {p_NAS_MSG_Request};
+    }
+    
+    SRB.send(cas_NB_SRB1_RrcNasPduList_REQ(p_CellId,
+                                           cs_TimingInfo_Now,
+                                           cs_RRCConnectionReconfiguration_NB_DRB_Est(p_RRC_TI, p_DRB_Id),
+                                           v_NasMsgList));
+  }
+
+  /*
+   * @desc      send RRC connection reconfiguration and receive RRC connection reconfiguration complete
+   *            typically used to establish DRB1 during initial registration
+   * @param     p_CellId
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_NAS_MSG_Request   (default value: omit)
+   * @param     p_DRB_Id            (default value: tsc_DRB1)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Est(NBIOT_CellId_Type p_CellId,
+                                                              EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                                              template (omit) NAS_MSG_Request_Type p_NAS_MSG_Request := omit,
+                                                              EUTRA_ASN1_DRB_Identity_Type p_DRB_Id := tsc_DRB1)
+    runs on NBIOT_PTC
+  {
+    f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Send(p_CellId, p_RRC_TI, p_NAS_MSG_Request, p_DRB_Id);
+    SRB.receive(car_NB_SRB_RrcPdu_IND(p_CellId, tsc_SRB1, cr_RRCConnectionReconfigurationComplete_NB(p_RRC_TI)));
+  }
+
+  /*
+   * @desc      send RRCConnectionRelease to suspend the connection
+   * @param     p_CellId
+   * @param     p_ResumeIdentity    (default value: tsc_CIOT_ResumeIdentity_Def)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionSuspend(NBIOT_CellId_Type p_CellId,
+                                        EUTRA_ASN1_ResumeIdentity_r13_Type p_ResumeIdentity := tsc_CIOT_ResumeIdentity_Def) runs on NBIOT_PTC
+  { /* @sic R5-182302 change 4, R5w180105: if present RRCConectionResume gets pre-configured at the SS for the same cell where the RRCConnectionRelease is sent sic@ */
+
+    var template (value) DL_DCCH_Message_NB v_RRCConnectionRelease := cs_RRCConnectionRelease_NB(-, rrc_Suspend, p_ResumeIdentity);
+
+    f_NBIOT_RRC_ConnectionRelease_Common(p_CellId, USER_PLANE, v_RRCConnectionRelease);
+  }
+
+  /*
+   * @desc      reestablish DRB1, security and set msg 4 to RRCConnectionResume for the given cell
+   * @param     p_CellId
+   * @param     p_RRCConnResume
+   * @param     p_RadioBearer       (default value: cs_NB_DRB_Config(tsc_DRB1))
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigDRB1AndRachProcedureMsg4_RRCConnResume(NBIOT_CellId_Type p_CellId,
+                                                                   template (value) DL_DCCH_Message_NB p_RRCConnResume,
+                                                                   template (value) NB_RadioBearer_Type p_RadioBearer := cs_NB_DRB_Config(tsc_DRB1)) runs on NBIOT_PTC
+  { /* in contrast to the RRCConnectionSetup the RRCConnectionResume is an SRB1 message sent on DCCH  */
+    var NBIOT_SecurityParams_Type v_SecurityParams;
+
+    f_NBIOT_SS_CommonRadioBearerConfig_SingleDRB(p_CellId, p_RadioBearer);
+
+    v_SecurityParams := f_NBIOT_Security_Get();
+    v_SecurityParams := f_NBIOT_SS_AS_ReestablishResumeSecurity(p_CellId, v_SecurityParams, rrcConnectionResume);
+    f_NBIOT_Security_Set(v_SecurityParams);
+    
+    f_NBIOT_SS_ConfigRachProcedureMsg4(p_CellId, -, p_RRCConnResume);
+  }
+
+  /*
+   * @desc      Steps 1 - 3 of procedure 8.1.5A.6 but with optional NAS messages (being TAU for 8.1.5A.6 but omit in general)
+   * @param     p_CellId
+   * @param     p_ResumeIdentity    (default value: ?)
+   * @param     p_ShortMAC_I        (default value: ?)
+   * @param     p_ResumeCause       (default value: ?)
+   * @param     p_Expected_NAS_UL_Message (default value: *)
+   * @return    template (omit) NAS_UL_Message_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRCConnectionResume(NBIOT_CellId_Type p_CellId,
+                                       template (present) EUTRA_ASN1_ResumeIdentity_r13_Type p_ResumeIdentity := ?,
+                                       template (present) EUTRA_ASN1_ShortMAC_I_Type p_ShortMAC_I := ?,
+                                       template (present) EstablishmentCause_NB_r13 p_ResumeCause := ?,
+                                       template NAS_UL_Message_Type p_Expected_NAS_UL_Message := *) runs on NBIOT_PTC return template (omit) NAS_UL_Message_Type
+  { /* NOTE: RRCConnectionResume is sent on SRB1 as after contention resolution (according to 36.508 Table 8.1.6.1-11 and Table 8.1.6.3-11 RRCConnectionResume does not contain any physical layer configuration like UESS configuration */
+    /* @sic R5-182302 change 4, R5w180105: p_ContinueROHC removed as RRCConnectionResume is preconfigured at the SS before this procedure starts sic@ */
+    var EUTRA_ASN1_RRC_TransactionIdentifier_Type v_RRC_TI := tsc_RRC_TI_Def;
+    var template (present) SecurityHeaderType v_ExpectedSecurityStatus;
+    var NB_SRB_COMMON_IND v_NB_SRB_COMMON_IND;
+    var NAS_UL_Message_Type v_NAS_UL_Message;
+    var template (omit) NAS_UL_Message_Type v_PiggybackedNasMessage := omit;
+
+    if (ischosen(p_Expected_NAS_UL_Message.tRACKING_AREA_UPDATE_REQUEST)) {  /* @sic R5s170515 change 3.1: acc. to 24.301 cl. 4.4.5 TRACKING AREA UPDATE REQUEST is always unciphered sic@ */
+      v_ExpectedSecurityStatus := tsc_SHT_IntegrityProtected;
+    } else {
+      v_ExpectedSecurityStatus := tsc_SHT_IntegrityProtected_Ciphered;
+    }
+
+    f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Start);   /* @sic R5s170515 change 3.2 sic@ */
+
+    SRB.receive(car_NB_SRB0_RrcPdu_IND(p_CellId, cr_RRCConnectionResumeRequest_NB(p_ResumeIdentity, p_ShortMAC_I, p_ResumeCause)));
+
+    /* @sic R5-182302 change 4, R5w180105: RRCConnectionResume preconfigured at the SS before procedure starts sic@ */
+    /* SS automatically sends preconfigured RRCConnectionResume_NB */
+
+    alt {
+      [] SRB.receive(car_NB_SRB_RrcNasPdu_IND(p_CellId, tsc_SRB1, cr_RRCConnectionResumeComplete_NB(v_RRC_TI), cr_NAS_Indication(v_ExpectedSecurityStatus, ?))) /* @sic R5s170772 change 2.3: v_ExpectedSecurityStatus sic@ */
+        -> value v_NB_SRB_COMMON_IND {
+        v_NAS_UL_Message := v_NB_SRB_COMMON_IND.Signalling.Nas[0].Pdu.Msg;
+        if (not match(v_NAS_UL_Message, p_Expected_NAS_UL_Message)) {
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "RRCConnectionResumeComplete: Piggybacked NAS message does not match");
+        }
+        v_PiggybackedNasMessage := v_NAS_UL_Message;                         /* @sic R5s170515 change 3.3 sic@ */
+      }
+      [] SRB.receive(car_NB_SRB_RrcPdu_IND(p_CellId, tsc_SRB1, cr_RRCConnectionResumeComplete_NB(v_RRC_TI))) {
+        if (ispresent(p_Expected_NAS_UL_Message)) {
+          f_NBIOT_SetVerdictFailOrInconc (__FILE__, __LINE__, "RRCConnectionResumeComplete: Piggybacked NAS message expected");
+        }
+      }
+    }
+    f_NBIOT_SS_ConfigRachProcedureMsg4(p_CellId, f_NBIOT_508_RRCConnectionSetup());
+    return v_PiggybackedNasMessage;
+  }
+
+  /*
+   * @desc      Function to calculate shortMAC-I that is used as a parameter in RRCConnectionReestablishmentRequest
+   * @param     p_CellId_Source
+   * @param     p_CellId_Current    (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_RRC_RRCConnectionReestablishmentRequest_r14(NBIOT_CellId_Type p_CellId_Source,
+                                                               template (omit) NBIOT_CellId_Type p_CellId_Current := omit) runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId_Current := p_CellId_Source;
+    var NBIOT_SecurityParams_Type v_SecurityParams := f_NBIOT_Security_Get();
+    var GutiParameters_Type v_Source_GUTI := f_NBIOT_CellInfo_GetGuti(p_CellId_Source);
+    var NB_SRB_COMMON_IND  v_NB_SRB_COMMON_IND;
+    var B16_Type v_ReceivedMac;
+    var MessageAuthenticationCode v_CalculatedMac;
+    var B28_Type v_CellIdentity;
+    var O4_Type v_NASCOUNT;
+    var B5_Type v_BearerId := '00000'B;
+    var integer v_Direction := 0;
+    var EUTRA_ASN1_S_TMSI_Type v_S_TMSI;
+    
+    if (ispresent(p_CellId_Current)) {
+      v_CellId_Current := valueof(p_CellId_Current);
+    }
+    SRB.receive(car_NB_SRB0_RrcPdu_IND(v_CellId_Current, cr_RRCConnectionReestablishmentRequest_NB_r14(?, otherFailure)))-> value v_NB_SRB_COMMON_IND;
+  
+    /* According to 36.331 cl. 5.3.7.4
+       calculate ul-NAS-MAC using the cellIdentity of the PCell in which the trigger for the re-establishment occurred;
+       1>  using 28 bits bitstring cellIdentity of the PCell;
+       2>  with the K_NAS key and NAS integrity protection algorithm; and
+       3>  with all input bits for COUNT, BEARER('00000') and DIRECTION set to binary ones; */
+
+    v_CellIdentity := f_NBIOT_CellInfo_GetCellIdentity (v_CellId_Current);
+    v_NASCOUNT := '00'O & '0000'O & bit2oct(v_NB_SRB_COMMON_IND.Signalling.Rrc.Ccch.message_.c1.rrcConnectionReestablishmentRequest_r13.criticalExtensions.later.rrcConnectionReestablishmentRequest_r14.ue_Identity_r14.ul_NAS_Count_r14);
+    v_ReceivedMac := v_NB_SRB_COMMON_IND.Signalling.Rrc.Ccch.message_.c1.rrcConnectionReestablishmentRequest_r13.criticalExtensions.later.rrcConnectionReestablishmentRequest_r14.ue_Identity_r14.ul_NAS_MAC_r14;
+
+    v_CalculatedMac := fx_NasIntegrityAlgorithmBitstring(v_CellIdentity,
+                                                         v_SecurityParams.NAS_Integrity.Algorithm,
+                                                         v_SecurityParams.NAS_Integrity.K_NAS,
+                                                         v_NASCOUNT,
+                                                         v_BearerId,
+                                                         v_Direction);
+
+    if( bit2oct(v_ReceivedMac) != substr(v_CalculatedMac, 0, 2) ){
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received ul-NAS-MAC-r14 does not match calculated NAS MAC");
+    }
+
+    v_S_TMSI.mmec := v_Source_GUTI.MME_Code;
+    v_S_TMSI.m_TMSI := v_Source_GUTI.M_TMSI;
+    if (v_S_TMSI != v_NB_SRB_COMMON_IND.Signalling.Rrc.Ccch.message_.c1.rrcConnectionReestablishmentRequest_r13.criticalExtensions.later.rrcConnectionReestablishmentRequest_r14.ue_Identity_r14.s_TMSI_r14){
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received s-TMSI-r14 does not match s-TMSI");
+    }
+  }
+
+  /*
+   * @desc      Trigger SS to send paging request to UE on eDRX
+   * @param     p_CellId
+   * @param     p_EDRXValue_Index
+   * @param     p_SystemInfoMod_eDRX (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ModifySysinfo_eDRX(NBIOT_CellId_Type p_CellId,
+                                      integer p_EDRXValue_Index,
+                                      template (omit)  NB_Paging_SystemInfoModification_eDRX_Type p_SystemInfoMod_eDRX := omit) runs on NBIOT_PTC
+  {
+    var SubFrameTiming_Type v_Timing;
+    var SubFrameTiming_Type v_StartNextModPeriod;
+    var integer v_ModificationPeriodFrames := f_NB_CalculateModificationPeriod(p_CellId);
+    
+    //Get the current SFN and subframe
+    v_Timing := f_NBIOT_GetCurrentTiming(p_CellId);
+    
+    f_NBIOT_UE_PageSysinfoMod_eDRX(p_CellId, p_EDRXValue_Index, p_SystemInfoMod_eDRX); // @sic R5s170792 sic@
+    
+    // Now calculate next modification period to start sending the new SIBs
+    v_StartNextModPeriod.HSFN.Number := (v_Timing.HSFN.Number + (v_Timing.SFN.Number + v_ModificationPeriodFrames)/1024) mod 1024;
+    v_StartNextModPeriod.SFN.Number := (v_Timing.SFN.Number + v_ModificationPeriodFrames) mod 1024;
+    f_NBIOT_SS_ConfigureSysinfo(p_CellId, true, cs_TimingInfo_SFN(v_StartNextModPeriod.SFN.Number, v_StartNextModPeriod.HSFN.Number));
+  }
+
+  /*
+   * @desc      Calculate the BCCH modification period length in radio frames as per 36.331 cl 6.7.3.2
+   * @param     p_CellId
+   * @return    integer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NB_CalculateModificationPeriod(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return integer
+  {
+    var integer v_PagingCycle;
+    var integer v_ModPeriodcoef;
+    var integer v_ModificationPeriodFrames;
+    var NBIOT_CellSysInfo_Type  v_Sysinfo := f_NBIOT_CellInfo_GetSYSINFO (p_CellId);
+    var PCCH_Config_NB_r13 v_PcchConfig := f_NBIOT_CellInfo_GetPCCH_ConfigInSYSINFO(p_CellId);
+
+    // Get the modification period coefficient from sysinfo sic@
+    select (v_Sysinfo.BCCH_Info.SIs[0].message_.c1.systemInformation_r13.criticalExtensions.systemInformation_r13.sib_TypeAndInfo_r13[0].sib2_r13.radioResourceConfigCommon_r13.bcch_Config_r13.modificationPeriodCoeff_r13){
+      case (n16) {v_ModPeriodcoef:=16}
+      case (n32) {v_ModPeriodcoef:=32}
+      case (n64) {v_ModPeriodcoef:=64}
+      case (n128) {v_ModPeriodcoef:=128}
+      case else{
+        FatalError (__FILE__, __LINE__, "invalid modification period coefficient");
+      }
+    }
+
+    // Get paging cycle from sysinfo
+    v_PagingCycle := f_NBIOT_GetPagingCycleValue (v_PcchConfig.defaultPagingCycle_r13);
+
+    // As per 36.331 cl 6.7.3.2: modification period in radio frames= modificationPeriodCoeff * defaultPagingCycle.
+    v_ModificationPeriodFrames := v_PagingCycle*v_ModPeriodcoef;
+
+    return v_ModificationPeriodFrames;
+  }
+
+   /*
+   * @desc      Modify sysinfo without activation time or with a specific activaionTime
+   *            No Paging, ValueTag - should be changed according to parameter
+   *            To be used when the cell is switched off or when sysinfo shall be modified immediately
+   * @param     p_CellId
+   * @param     p_ChangeValueTag    (default value: true)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigureSysinfo(NBIOT_CellId_Type p_CellId,
+                                       boolean p_ChangeValueTag := true,
+                                       template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now)
+    runs on NBIOT_PTC
+  {
+    var NBIOT_CellSysInfo_Type v_SysInfo := f_NBIOT_CellInfo_GetSYSINFO(p_CellId);  // Get SYSINFO to be sent
+    
+    if (p_ChangeValueTag) {
+      v_SysInfo.BCCH_Info.MIB_NB.message_.systemInfoValueTag_r13 := (v_SysInfo.BCCH_Info.MIB_NB.message_.systemInfoValueTag_r13 + 1) mod 32;
+      f_NBIOT_SetSysinfo (p_CellId, v_SysInfo);
+    }
+    f_NBIOT_SS_CommonCellConfig(p_CellId,
+                                cas_NB_ModifySysInfo_REQ(p_CellId,
+                                                         p_TimingInfo,
+                                                         -,
+                                                         v_SysInfo));
+  }
+
+  /*
+   * @desc      - Page UE (subject to p_PagingFlag) and Send the modified SYSINFO
+                ValueTag - should be changed according to parameter
+   * @param     p_CellId
+   * @param     p_PagingFlag        (default value: true)
+   * @param     p_ChangeValueTag    (default value: true)
+   * @return    SubFrameTiming_Type (time at which the paging will happen)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ModifySysinfo(NBIOT_CellId_Type p_CellId,
+                                 boolean p_PagingFlag := true,
+                                 boolean p_ChangeValueTag := true) runs on NBIOT_PTC return SubFrameTiming_Type
+  {
+    var SubFrameTiming_Type v_Timing;
+    var SubFrameTiming_Type v_TimeOfPaging;
+    var SubFrameTiming_Type v_StartNextModPeriod;
+    var integer v_ModificationPeriodFrames := f_NB_CalculateModificationPeriod(p_CellId);
+    var integer v_Timing_SFN;  //Variable used to perform SFN calculation on 20 bits (HSFN*1024 + SFN)
+               
+    //Get the current SFN and subframe
+    v_Timing := f_NBIOT_GetCurrentTiming(p_CellId);
+
+    //Add processing delay to current SFN and calculate full 20 bits SFN (HSFN*1024 + SFN)
+    v_Timing_SFN := v_Timing.HSFN.Number * 1024 + v_Timing.SFN.Number + tsc_SfnDelay; // @sic R5s170910 sic@
+    
+    // Calculate the next Modification Period @sic R5s170910 sic@
+    v_Timing_SFN := v_Timing_SFN + (v_ModificationPeriodFrames - (v_Timing_SFN mod v_ModificationPeriodFrames));
+    v_TimeOfPaging.HSFN.Number := (v_Timing_SFN / 1024) mod 1024;
+    v_TimeOfPaging.SFN.Number  := v_Timing_SFN mod 1024;
+    v_TimeOfPaging.Subframe.Number  := 0;
+
+    v_Timing_SFN := v_Timing_SFN + v_ModificationPeriodFrames;
+    v_StartNextModPeriod.HSFN.Number := (v_Timing_SFN / 1024) mod 1024;
+    v_StartNextModPeriod.SFN.Number  := v_Timing_SFN mod 1024;
+    v_StartNextModPeriod.Subframe.Number  := 0;
+
+    if (p_PagingFlag) {
+      f_NBIOT_UE_PageSysinfoMod (p_CellId, v_TimeOfPaging);
+    }
+
+    f_NBIOT_SS_ConfigureSysinfo(p_CellId, p_ChangeValueTag, cs_TimingInfo_SFN(v_StartNextModPeriod.SFN.Number, v_StartNextModPeriod.HSFN.Number));
+    return v_TimeOfPaging;
+  }
+
+  /*
+   * @desc      - Increment the valueTag according to p_ChangeValueTag
+   *            - No Paging message is sent (e.g. when UE is OFF)
+   *            - Send the modified SYSINFO immediately as UE is OFF
+   * @param     p_CellId
+   * @param     p_ChangeValueTag    (default value: false)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ModifySysinfoUE_Off(NBIOT_CellId_Type p_CellId,
+                                       boolean p_ChangeValueTag := false) runs on NBIOT_PTC
+  {
+    var SubFrameTiming_Type     v_Timing;
+    var SubFrameTiming_Type     v_Timing_SFN;
+    
+    //Get the current SFN and subframe
+    v_Timing := f_NBIOT_GetCurrentTiming(p_CellId);
+    //Modify sysinfo now as UE is OFF
+    v_Timing_SFN := v_Timing;
+    v_Timing_SFN.HSFN.Number := (v_Timing.HSFN.Number + (v_Timing.SFN.Number + tsc_SfnDelay)/1024) mod 1024;
+    v_Timing_SFN.SFN.Number := (v_Timing.SFN.Number + tsc_SfnDelay) mod 1024;
+
+    f_NBIOT_SS_ConfigureSysinfo (p_CellId, p_ChangeValueTag, cs_TimingInfo_SFN(v_Timing_SFN.SFN.Number, v_Timing_SFN.HSFN.Number)); //@sic R5s170763 sic@
+    
+    //Wait the duration of the delay to ensure new SYSINFO takes effect
+    f_Delay (int2float(tsc_SfnDelay)/100.0);
+  }
+
+}

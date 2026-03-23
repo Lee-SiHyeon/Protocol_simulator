@@ -1,0 +1,1476 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-02-28 20:53:22 +0100 (Sat, 28 Feb 2026) $
+// $Rev: 43062 $
+/******************************************************************************/
+
+module PDCP_TC_Common_NR {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from L2_Common4G5G all;
+  import from LoopbackIP all;
+  import from NR_ASP_DrbDefs all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_ConfigurationSteps all;
+  import from NR_L2_Common all;
+  import from NR_PDCP_Common all;
+  import from NR_PDCP_Templates all;
+  import from NR_PDCP_TypeDefs all;
+  import from NR_RRC_Templates all;
+  import from NR_ResourceAllocation all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+  import from TestcaseProperties all;
+
+  type record of integer PDUSizeList_Type;      /* @status    APPROVED (ENDC, NR5GC) */
+
+  template (present) NR_PDCP_PDU_Type cr_NR_PDCP_PDU_12B(template (present) B12_Type p_PDCP_SN_12B,
+                                                         template (present) NR_PDCP_SDU_Type p_NR_PDCP_SDU := ?) := // @sic R5s210787 sic@
+  {  /* @status    APPROVED (ENDC, NR5GC) */
+    DataPduSN12Bits := {
+      D_C             := tsc_NR_PDCP_D_C_Data,
+      Reserved        := tsc_B3_Reserved,
+      SequenceNumber  := p_PDCP_SN_12B,
+      SDU             := p_NR_PDCP_SDU,
+      MAC_I           := *
+    }
+  };
+
+  template (present) NR_PDCP_PDU_Type cr_NR_PDCP_PDU_18B(template (present) B18_Type p_PDCP_SN_18B,
+                                                         template (present) NR_PDCP_SDU_Type p_NR_PDCP_SDU := ?) := // @sic R5s210787 sic@
+  {  /* @status    APPROVED (ENDC, NR5GC) */
+    DataPduSN18Bits := {
+      D_C             := tsc_NR_PDCP_D_C_Data,
+      Reserved        := tsc_B5_Reserved,
+      SequenceNumber  := p_PDCP_SN_18B,
+      SDU             := p_NR_PDCP_SDU,
+      MAC_I           := *
+    }
+  };
+
+  /*
+   * @desc      Increment TX_NEXT
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_Offset
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+   function f_NR_PDCP_Increment_TX_NEXT(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, integer p_Offset)
+   {
+      p_NR_PDCP_State.TX_NEXT  := (p_NR_PDCP_State.TX_NEXT + p_Offset) mod (p_NR_PDCP_State.Maximum_PDCP_SN+1);
+   }
+
+  /*
+   * @desc      Increment NEXT_RX
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_Offset
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_Increment_NEXT_RX(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, integer p_Offset)
+  {
+    p_NR_PDCP_State.RX_NEXT  := (p_NR_PDCP_State.RX_NEXT + p_Offset) mod (p_NR_PDCP_State.Maximum_PDCP_SN+1);
+  }
+
+  /*
+   * @desc      Send a PDCP PDU from the SS stack
+   * @param     p_PDCP_Rec          (by reference)
+   * @param     p_NR_CellId
+   * @param     p_Sdu
+   * @param     p_TimingInfo        (default value: omit)
+   * @param     p_RlcBearerRouting  (default value: omit)
+   * @param     p_MacBearerRoutingCA (default value: omit)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_Send(inout NR_PDCP_SS_State_Type p_PDCP_Rec,
+                          NR_CellId_Type p_NR_CellId,
+                          octetstring p_Sdu,
+                          template (omit) SubFrameTiming_Type p_TimingInfo := omit,
+                          template (omit) RlcBearerRouting_Type p_RlcBearerRouting :=omit,
+                          template (omit) MacBearerRouting_Type p_MacBearerRoutingCA := omit)
+  runs on NR_BASE_PTC
+  {
+    var template (value) NR_PDCP_PDU_Type v_Pdu;
+    var DRB_Identity v_DrbId := p_PDCP_Rec.DRB_Id;
+    var octetstring v_Sdu := p_Sdu;
+    var integer v_TX_NEXT := p_PDCP_Rec.TX_NEXT;
+    var NR_PDCP_SN_Size_Type v_PDCP_SN_Size := p_PDCP_Rec.PDCP_SN_Size;
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_Now; //@sic R5s190329 sic@
+
+    select(v_PDCP_SN_Size){
+      case(PDCP_SNLength12){
+        v_Pdu := cs_NR_PDCP_PDU_12B(v_TX_NEXT, v_Sdu);
+      }
+      case (PDCP_SNLength18) {
+        v_Pdu := cs_NR_PDCP_PDU_18B(v_TX_NEXT, v_Sdu);
+      } case else {
+        FatalError(__FILE__, __LINE__, "NR_PDCP_SN_Size incorrect");
+      }
+    }
+    if (isvalue(p_TimingInfo)) {
+      v_TimingInfo := cs_TimingInfo_NR(valueof(p_TimingInfo));
+    }
+     
+    if(isvalue(p_RlcBearerRouting)){ //@sic R5-220641 sic@ - no runtime error with check of isvalue(p_RlcBearerRouting)
+      DRB.send(cas_NR_DRB_COMMON_REQ_PDCP_PDUList_DC(p_NR_CellId,
+                                                v_DrbId,
+                                                p_RlcBearerRouting,
+                                                v_TimingInfo,
+                                                {v_Pdu},
+                                                 -));
+    } else {
+      DRB.send(cas_NR_DRB_COMMON_REQ_PDCP_PDUList(p_NR_CellId,
+                                                v_DrbId,
+                                                v_TimingInfo,
+                                                {v_Pdu},
+                                                 -,
+                                                 -,
+                                                 p_MacBearerRoutingCA));
+    }
+    f_NR_PDCP_Increment_TX_NEXT(p_PDCP_Rec, 1);
+}
+
+  /*
+   * @desc      Receive a PDCP PDU from the SS stack
+   * @param     p_PDCP_Rec          (by reference)
+   * @param     p_NR_CellId
+   * @param     p_ExpectedPdcpSdu
+   * @param     p_DcRlcBearerRouting (default value: crs_RlcBearerRouting_None)
+   * @param     p_CheckSN           (default value: true)
+   * @return    TimingInfo_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_Recv(inout NR_PDCP_SS_State_Type p_PDCP_Rec,
+                          NR_CellId_Type p_NR_CellId,
+                          octetstring p_ExpectedPdcpSdu,
+                          template (present) RlcBearerRouting_Type p_DcRlcBearerRouting := crs_RlcBearerRouting_None,
+                          boolean p_CheckSN := true ) runs on NR_BASE_PTC return TimingInfo_Type
+  {
+    var template (omit) integer v_RX_NEXT := p_PDCP_Rec.RX_NEXT;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu;
+    var NR_PDCP_SDU_Type v_ReceivedSdu;
+    var NR_DRB_COMMON_IND v_ReceivedPdu;
+    var TimingInfo_Type v_TimingInfo;
+    var NR_PDCP_SN_Size_Type v_PDCP_SN_Size := p_PDCP_Rec.PDCP_SN_Size;
+   
+    if (not p_CheckSN) {
+      v_RX_NEXT := omit; //Sequence Number not checked.
+    }
+    v_ExpectedPdu := f_NR_PDCP_PDU_Get(v_PDCP_SN_Size, v_RX_NEXT);
+    DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_NR_CellId, p_PDCP_Rec.DRB_Id, p_DcRlcBearerRouting, -, {v_ExpectedPdu})) -> value v_ReceivedPdu;
+    
+    select (v_PDCP_SN_Size) {
+      case (PDCP_SNLength12){
+        v_ReceivedSdu := v_ReceivedPdu.U_Plane.SlotData.PduSduList.PdcpPdu[0].DataPduSN12Bits.SDU;
+      }
+      case (PDCP_SNLength18){
+        v_ReceivedSdu := v_ReceivedPdu.U_Plane.SlotData.PduSduList.PdcpPdu[0].DataPduSN18Bits.SDU;
+      }
+      case else{
+        FatalError(__FILE__, __LINE__, "NR_PDCP_SN_Size incorrect");
+      }
+    }
+    
+    if (not match(v_ReceivedSdu, p_ExpectedPdcpSdu)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unexpected NR PDCP SDU");
+    }
+    
+    f_NR_PDCP_Increment_NEXT_RX(p_PDCP_Rec,1);
+    v_TimingInfo := v_ReceivedPdu.Common.TimingInfo;
+    return v_TimingInfo;
+  }
+
+  /*
+   * @desc      Build a PDU Template
+   * @param     p_NR_PDCP_SN_Size
+   * @param     p_PDCP_RX_SN        (default value: omit)
+   * @param     p_NR_PDCP_SDU       (default value: ?)
+   * @return    template (present) NR_PDCP_PDU_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_PDU_Get (NR_PDCP_SN_Size_Type p_NR_PDCP_SN_Size,
+                            template (omit) integer p_PDCP_RX_SN := omit,
+                            template (present) NR_PDCP_SDU_Type p_NR_PDCP_SDU := ?) return template (present) NR_PDCP_PDU_Type
+  {
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu;
+    select (p_NR_PDCP_SN_Size) {
+      case (PDCP_SNLength12) {
+        if (isvalue(p_PDCP_RX_SN)) {
+          v_ExpectedPdu := cr_NR_PDCP_PDU_12B(int2bit(valueof(p_PDCP_RX_SN),12),p_NR_PDCP_SDU); //@sic R5s210787 sic@
+        } else {
+          v_ExpectedPdu := cr_NR_PDCP_PDU_12B(?, p_NR_PDCP_SDU);//@sic R5s190203 R5s210787 sic@
+        }
+      }
+     case (PDCP_SNLength18) {
+       if (isvalue(p_PDCP_RX_SN)) {
+         v_ExpectedPdu := cr_NR_PDCP_PDU_18B(int2bit(valueof(p_PDCP_RX_SN),18),p_NR_PDCP_SDU); //@sic R5s210787 sic@
+        }
+        else {
+         v_ExpectedPdu := cr_NR_PDCP_PDU_18B(?, p_NR_PDCP_SDU); //@sic R5s210787 sic@
+       }
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "NR_PDCP_SN_Size incorrect");
+      }
+    }
+   return v_ExpectedPdu;
+}
+
+  /*
+   * @desc Initialize TTCN PDCP Parameters
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_NR_PDCP_Size
+   * @param     p_DrbId             (default value: tsc_NR_DRB2)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_Init(out NR_PDCP_SS_State_Type p_NR_PDCP_State,
+                          NR_PDCP_SN_Size_Type p_NR_PDCP_Size,
+                          DRB_Identity p_DrbId := tsc_NR_DRB2)
+  {
+    p_NR_PDCP_State.PDCP_SN_Size  := p_NR_PDCP_Size;
+    p_NR_PDCP_State.TX_NEXT  := 0;
+    p_NR_PDCP_State.RX_NEXT  := 0;
+    p_NR_PDCP_State.DRB_Id := p_DrbId;
+
+    select (p_NR_PDCP_Size) {
+      case (PDCP_SNLength12) {
+        p_NR_PDCP_State.Maximum_PDCP_SN  := tsc_NR_Maximum_PDCP_SN_12;  //Maximum_PDCP_SN = 2[pdcp-SN-Size] -1.
+         }
+      case (PDCP_SNLength18) {
+       p_NR_PDCP_State.Maximum_PDCP_SN  := tsc_NR_Maximum_PDCP_SN_18; //Maximum_PDCP_SN = 2[pdcp-SN-Size] -1.
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "NR_PDCP_SN_Size incorrect");
+      }
+    }
+
+  }
+
+  /*
+   * @desc     Generate Pdcp PDU List
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_NumberofSDU       (default value: 64)
+   * @param     p_Sdu
+   * @return    NR_PDCP_PDUList_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_GeneratePdcpPDUList(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, integer p_NumberofSDU := 64, NR_PDCP_SDU_Type p_Sdu) return NR_PDCP_PDUList_Type //@sic R5s200516 sic@
+   {
+     var template (value) NR_PDCP_PDU_Type v_PdcpPdu;
+     var integer k;
+     var integer v_NumberofSDU := p_NumberofSDU;
+     var NR_PDCP_SDU_Type v_Sdu := p_Sdu;
+     var NR_PDCP_PDUList_Type v_PdcpPduList;
+     
+    for (k:=0; k < v_NumberofSDU; k:=k+1){
+        if (p_NR_PDCP_State.PDCP_SN_Size == PDCP_SNLength12){
+            v_PdcpPdu := cs_NR_PDCP_PDU_12B(p_NR_PDCP_State.TX_NEXT, v_Sdu);
+        }else { //PDCP_SNLength18
+            v_PdcpPdu := cs_NR_PDCP_PDU_18B(p_NR_PDCP_State.TX_NEXT, v_Sdu);
+        }
+        f_NR_PDCP_Increment_TX_NEXT(p_NR_PDCP_State, 1);
+        v_PdcpPduList[k] := valueof(v_PdcpPdu);
+    }
+     return v_PdcpPduList;
+   }
+
+  /*
+   * @desc      Send  a Pdcp PDU List
+   * @param     p_PDCP_Rec          (by reference)
+   * @param     p_NR_CellId
+   * @param     p_PdcpPduList
+   * @param     p_TimingInfo        (default value: omit)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+   function f_NR_PDCPPDUList_Send(inout NR_PDCP_SS_State_Type p_PDCP_Rec,
+                                        NR_CellId_Type p_NR_CellId,
+                                        NR_PDCP_PDUList_Type p_PdcpPduList,
+                                        template (omit) SubFrameTiming_Type p_TimingInfo := omit) runs on NR_BASE_PTC
+   {
+    var NR_PDCP_PDUList_Type v_PdcpPduList:=p_PdcpPduList;
+    var DRB_Identity v_DrbId := p_PDCP_Rec.DRB_Id;
+    var template (value) TimingInfo_Type v_TimingInfo := cs_TimingInfo_Now;
+ 
+    if (isvalue(p_TimingInfo)) {
+      v_TimingInfo := cs_TimingInfo_NR(valueof(p_TimingInfo));
+    }
+    
+    DRB.send(cas_NR_DRB_COMMON_REQ_PDCP_PDUList(p_NR_CellId,
+                                                v_DrbId,
+                                                v_TimingInfo,
+                                                v_PdcpPduList,
+                                                 -));
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.1.1
+   * @param     p_NR_PDCP_State     (by reference)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_1_1_NR_TestBody(inout NR_PDCP_SS_State_Type p_NR_PDCP_State) runs on NR_BASE_PTC
+  { //@sic R5-211387 sic@
+    fl_TC_7_1_3_1_1and2(p_NR_PDCP_State, 4096, 1);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.1.2
+   * @param     p_NR_PDCP_State     (by reference)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_1_2_NR_TestBody(inout NR_PDCP_SS_State_Type p_NR_PDCP_State) runs on NR_BASE_PTC
+  { //@sic R5-211387 sic@
+    fl_TC_7_1_3_1_1and2(p_NR_PDCP_State, 8192, 32);
+  }
+
+  /*
+   * @desc      Maintenance of PDCP sequence numbers / User plane / 12 bit SN & 18 bit SN
+   * @param     p_NR_PDCP_State
+   * @param     p_OuterLoop
+   * @param     p_InnerLoop
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function fl_TC_7_1_3_1_1and2(NR_PDCP_SS_State_Type p_NR_PDCP_State,
+                               integer p_OuterLoop,
+                               integer p_InnerLoop) runs on NR_BASE_PTC
+  {//@sic R5-211387 sic@
+    var NR_SecurityParams_Type v_NR_Security:= f_NR_Security_Get();
+    var integer i:=0;
+    var integer j:=0;
+    var integer k:=0;
+    var integer v_NumberOfPdu := p_InnerLoop;
+    var integer v_SduSize := 1;
+    var NR_PDCP_PDUList_Type v_PdcpPduList;
+    var NR_PDCP_SDU_Type v_Sdu := f_GetN_OctetsFromPRBS (20,(v_SduSize));
+    var integer v_VerdictFilter; // @sic R5-211387 sic@
+    var NR_L2DataList_Type v_NR_L2DataList;
+    var NR_PDCP_PDU_Type v_NR_PDCP_PDU_Received;
+    var integer v_LenPDUList;
+    var integer v_ListOffset:=0; // @sic R5s210579 sic@
+    var SubFrameTiming_Type v_TimingCurrentSlot;
+    var SubFrameTiming_Type v_TimingPreviousSlot;
+    var template (present) NR_PDCP_PDU_Type v_NR_PDCP_PDU_Expected;
+    
+    p_NR_PDCP_State.KUPenc := v_NR_Security.AS_Ciphering.KUPenc;
+
+    if (p_NR_PDCP_State.PDCP_SN_Size == PDCP_SNLength18) {
+      v_VerdictFilter := 4096; // @sic R5-211387 sic@
+    } else { //SN12
+      v_VerdictFilter := 256;
+    }
+
+    v_TimingPreviousSlot := f_NR_GetCurrentTiming(nr_Cell1); // initialize slot  @sic R5-213462, R5s210674  sic@
+    
+    // EXCEPTION: : Steps 1 - 2 shall be repeated from j = 0 to j = FLOOR(Maximum_PDCP_SN/iteration_size). (Note 1, 4)
+    for (j := 0; j < p_OuterLoop; j:= j + 1) { // @sic R5-197663, R5-197664, R5-202613 sic@
+     //@siclog "Step 1" siclog@
+     // SS transmits in one slot several PDCP PDUs in a PDCP PDU list without header compression, the number of PDCP PDUs sent in each PDCP PDU list is defined by the iteration_size. (Note 4, 5).
+      v_PdcpPduList := f_GeneratePdcpPDUList(p_NR_PDCP_State, v_NumberOfPdu,v_Sdu);
+      f_NR_PDCPPDUList_Send(p_NR_PDCP_State,nr_Cell1,v_PdcpPduList);
+      
+    // EXCEPTION: In Step 2, SS may receive a PDCP PDU or several PDCP PDUs, then step 2 may be repeated multiple times until all PDCP PDUs with SN=j*iteration_size to SN=(((j+1)* iteration_size)-1) for each iteration are received.
+    // @siclog "Step 2" siclog@
+    // CHECK: Does UE transmit PDCP PDUs with SN=0 for the first iteration and all PDCP PDUs for each iteration?(Note 2)(Note 6) // @sic R5-213462 sic@
+    for (i := 0; i < p_InnerLoop; i:= i + 1) { // @sic R5-211387 sic@
+      // Get next list of PDCP PDUs received
+      v_NR_L2DataList := f_NR_PDCP_PDU_GetList(p_NR_PDCP_State, v_TimingCurrentSlot); // @sic R5-211387, R5s210674 sic@
+      f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot); // both slots must be different @sic R5-213462  sic@
+      v_TimingPreviousSlot := v_TimingCurrentSlot; // Keep the info on the present slot @sic R5-213462  sic@
+      v_LenPDUList := lengthof(v_NR_L2DataList.PdcpPdu);
+      v_ListOffset := i; // note i at start of PDU list @sic R5s210579 sic@
+      for (k := 0; k < v_LenPDUList; k := k + 1) {
+        // set i to account for k
+        i := v_ListOffset + k; // @sic R5-213462 R5s210579 sic@
+        if (i == p_InnerLoop) {f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2, too many PDCP PDUs received");}; // check ok ???
+        // extract the PDCP PDU to be handled
+        v_NR_PDCP_PDU_Received := v_NR_L2DataList.PdcpPdu[k];
+        // build the PDCP PDU expected (template)
+        v_NR_PDCP_PDU_Expected := v_PdcpPduList[i]; // ith element in the currently used v_PdcpPduList
+        // match the PDCP PDU to be handled against the PDCP PDU expected
+        if (not match (v_NR_PDCP_PDU_Received, v_NR_PDCP_PDU_Expected)) {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2, mismatch of received and expected PDUs");
+        };
+
+        if ((i == 0) and (j == 0)) { // SN = 0
+          f_NR_PreliminaryPass(__FILE__, __LINE__, " SN=0 ");
+        }
+        else { // SN = 1 ..
+          if ((((j * p_InnerLoop) + i + 1) mod v_VerdictFilter) == 0) {f_NR_PreliminaryPass(__FILE__, __LINE__, " SN = " &  int2str((j * p_InnerLoop) + i) )}; // @sic R5-185083, R5-187106, R5s200315, R5s200957 sic@
+        }
+      }
+     }
+    }
+     //@siclog "Step 3" siclog@
+    // SS transmits a PDCP PDU containing one PDCP SDU without header compression.
+    f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell1, v_Sdu);
+    //@siclog "Step 4" siclog@
+    // CHECK: Does UE transmit a PDCP PDU with SN=0?
+    f_NR_PDCP_Recv(p_NR_PDCP_State, nr_Cell1, v_Sdu, cr_RlcBearerRouting_NR(nr_Cell1));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    //@siclog "Step 5" siclog@
+    //SS transmits a PDCP PDU containing one PDCP SDU without header compression.
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1, v_Sdu);
+    //@siclog "Step 6" siclog@
+    //CHECK: Does UE transmit a PDCP PDU with SN=1?
+    f_NR_PDCP_Recv(p_NR_PDCP_State, nr_Cell1, v_Sdu, cr_RlcBearerRouting_NR(nr_Cell1));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    
+  }
+
+  /*
+   * @desc      Receive list of L2Data
+   * @param     p_NR_PDCP_State
+   * @param     p_TimingCurrentSlot (by reference)
+   * @return    NR_L2DataList_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_NR_PDCP_PDU_GetList(NR_PDCP_SS_State_Type p_NR_PDCP_State,
+                                 out SubFrameTiming_Type p_TimingCurrentSlot)
+    runs on NR_BASE_PTC return NR_L2DataList_Type
+  { // @sic R5-211387 R5s210395 sic@
+    var NR_DRB_COMMON_IND v_NR_DRB_COMMON_IND;
+    var NR_L2DataList_Type v_NR_L2DataList;
+
+    DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList(nr_Cell1,
+                                                   p_NR_PDCP_State.DRB_Id)) -> value v_NR_DRB_COMMON_IND;
+    v_NR_L2DataList := v_NR_DRB_COMMON_IND.U_Plane.SlotData.PduSduList;
+    p_TimingCurrentSlot := v_NR_DRB_COMMON_IND.Common.TimingInfo.SubFrame; // @sic R5s210674 sic@
+    return v_NR_L2DataList;
+  }
+
+   /* @desc Test case procedure steps 1 to 7
+   * @param     p_NR_PDCP_State     (by reference)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_4_1_NR_Step1to7(inout NR_PDCP_SS_State_Type p_NR_PDCP_State) runs on NR_BASE_PTC
+  {
+   var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {55,68,81,94,107, 120, 133, 146}); // @sic R5s250501 sic@
+   var template (value) NR_RadioBearerList_Type v_SS_Drb_ConfigList;
+   var NR_AbsoluteCellPower_Type v_CellPowerAtT1Cell2_FR1 := -82;
+   var NR_AbsoluteCellPower_Type v_CellPowerAtT1Cell2_FR2 := -82;
+   var SubFrameTiming_Type v_TimingInfoStart;
+   var integer k;
+   
+   //Step 2 and 3 shall be repeated for k=0 to 1
+    //@siclog "Step 2-3" siclog@
+    for (k:= 0; k <= 1; k:= k+1) {
+      //SS transmits a PDCP Data PDU containing one PDCP SDU
+      f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell1, v_SduList[k]); //@sic R5s200063, R5s250501 sic@
+      //Does UE transmit a PDCP Data PDU with SN=K for the first iteration?
+      f_NR_PDCP_Recv(p_NR_PDCP_State, nr_Cell1, v_SduList[k], cr_RlcBearerRouting_NR(nr_Cell1)); // @sic R5s250501 sic@
+    }
+    
+    //@siclog "Step 3A" siclog@ //@sic R5-201219 sic@
+    //The SS changes NR Cell 2 parameters according to the row "T1" in table 7.1.3.4.1.3.2.0-1.
+    f_NR_SetCellPower (nr_Cell2, v_CellPowerAtT1Cell2_FR1, v_CellPowerAtT1Cell2_FR2); //@sic R5-195929 sic@
+    
+ 
+    v_SS_Drb_ConfigList := {f_NR_GetRadioBearerConfig_FullAM(nr_Cell1,
+                                                                    p_NR_PDCP_State.DRB_Id,
+                                                                    -,
+                                                                    cs_NR_PDCP_RbConfig_TransparentMode(f_NR_38508_SetPDCP_SN_Size()), // @sic R5-227535 sic@,
+                                                                    cs_NR_RLC_TestModeConfig_NotAcK,
+                                                                    -,
+                                                                    -,
+                                                                    ms150)};// @sic R5s200690 sic@
+
+  
+    v_TimingInfoStart := f_NR_GetNextSendOccasion_DL(nr_Cell1);//@sic R5-201219 sic@
+    for (k:= 0; k <= 2; k:= k+1) { //@sic  R5s190844 sic@
+      //@siclog "Step 4" siclog@
+      //Configure the SS to not ACK next RLC PDU  @sic R5-190752 ,R5-191296 sic@
+      f_NR_SS_CommonRadioBearerConfig(nr_Cell1, v_SS_Drb_ConfigList);
+      //@siclog "Step 5" siclog@
+      //The SS sends the PDCP Data PDU
+      f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell1, v_SduList[k+2], f_SubFrameTiming_AddMilliSeconds(v_TimingInfoStart, 100*k)); //@sic R5-201219, R5-222511, @sic R5s250501 sic@
+      //@siclog "Step 6" siclog@
+      //The UE sends the PDCP Data PDU
+      f_NR_PDCP_Recv(p_NR_PDCP_State, nr_Cell1, v_SduList[k+2], cr_RlcBearerRouting_NR(nr_Cell1)); // @sic R5s250501 sic@
+    }
+    
+    //@siclog "Step 6A" siclog@
+    f_NR_ULGrantConfiguration_Stop(nr_Cell1);
+      
+    //@siclog "Step 7" siclog@ Void
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.4.1
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_WaitforRRCConCmp  (default value: false)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_4_1_NR_Step10to23(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, boolean p_WaitforRRCConCmp := false) runs on NR_BASE_PTC
+  {
+    var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {55,68,81,94,107, 120, 133, 146}); // @sic R5s250501 sic@
+    var NR_ResourceAllocation_Type v_NR_ResourceAllocation;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP(nr_Cell1, tsc_NR_BWP_Id);
+    var SubFrameTiming_Type v_TimingDL;
+    var SubFrameTiming_Type v_TimingUL;
+    var SubFrameTiming_Type v_TimingCurrentSlot;
+    var SubFrameTiming_Type v_TimingPreviousSlot;
+   // var TimingInfo_Type v_TimingInfo;
+    var template (present) NR_PDCP_PDU_Type  v_ExpectedPdu1;
+    var template (present) NR_PDCP_PDU_Type  v_ExpectedPdu2;
+    var template (present) NR_PDCP_PDU_Type  v_ExpectedPdu3;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu4;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu5;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu6;
+    var NR_DRB_COMMON_IND v_ReceivedPdu1;
+    var NR_DRB_COMMON_IND v_ReceivedPdu2;
+    var NR_DRB_COMMON_IND v_ReceivedPdu3;
+    var NR_DRB_COMMON_IND v_ReceivedPdu4;
+    var NR_DRB_COMMON_IND v_ReceivedPdu5;
+    var NR_DRB_COMMON_IND v_ReceivedPdu6;
+    var NR_AbsoluteCellPower_Type v_CellPowerAtT2Cell1_FR1 := -82;
+    var NR_AbsoluteCellPower_Type v_CellPowerAtT2Cell1_FR2 := -82;
+    var NR_AbsoluteCellPower_Type v_CellPowerAtT2Cell2_FR1 := -88;
+    var NR_AbsoluteCellPower_Type v_CellPowerAtT2Cell2_FR2 := -91;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2 :=  {
+            cs_NR_CellPower(nr_Cell1, v_CellPowerAtT2Cell1_FR1, v_CellPowerAtT2Cell1_FR2),
+            cs_NR_CellPower(nr_Cell2, v_CellPowerAtT2Cell2_FR1, v_CellPowerAtT2Cell2_FR2)
+     }; //@sic R5-195929 sic@
+    timer t_Wait:= 5.0;
+    
+    // for ENDC RRCReconfigurationComplete is not received, just one UL Grant is assigned (112 bits)for STATUS PDU
+    // For NR5GC, RRCReconfigurationComplete is received, 2 Grants (2x112 bits)are assigned, one for RRCReconfigurationComplete and one for STATUS PDU
+
+    //@siclog "Step 9" siclog@
+    // The SS assigns  UL grant during the Random Access procedure on NR Cell 2 to allow the UE to send only PDCP status report and
+    // 5 octets PDCP STATUS REPORT + 3 octets RLC header + 2 octets MAC header + 3oct BSR or padding = 13 octets
+    
+    v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(112, v_NR_UplinkBWP); //@sic R5-198906 sic@
+    //@sic R5s201484 sic@
+    v_TimingDL := f_NR_GetNextSendOccasion_DL(nr_Cell2); // Timing of DL
+    v_TimingUL := f_NR_GetNextSendOccasion_ULafterDL(nr_Cell2, v_TimingDL, 20);
+    if ( p_WaitforRRCConCmp) {  // if NR5GC start a periodic grant to receive RRCReconfigurationComplete and PDCP STATUS REPORT  @sic R5s210282 sic@
+      f_NR_ULGrantConfiguration_StartPeriodicGrant(nr_Cell2, cs_TimingInfo_NR(v_TimingUL), v_NR_ResourceAllocation, 20);
+    } else {  // if ENDC - only one grant for PDCP STATUS REPORT
+      f_NR_ULGrantConfiguration_StartPeriodicCyclicGrant(nr_Cell2, cs_TimingInfo_NR(v_TimingUL), v_NR_ResourceAllocation, 20, 1);
+    }
+    
+    if ( p_WaitforRRCConCmp) {//@sic R5s210032 sic@
+        interleave {//@sic R5s201484 sic@
+            //Receive RRCReconfigurationComplete
+            []SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell2, cr_38508_RRCReconfigurationComplete)){}
+    
+            //@siclog "Step 11" siclog@
+            //Does the UE send PDCP Control PDUs via RLC-AM RB with the following content to the SS:
+            //D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 5?
+            []DRB.receive (car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2,
+                                                        p_NR_PDCP_State.DRB_Id,
+                                                        cr_RlcBearerRouting_NR(nr_Cell2), //@sic R5s190844 sic@
+                                                        -,
+                                                        {cr_NR_PDCP_STATUS_REPORT(5)})){}
+
+        }
+    }
+    else{
+        //@siclog "Step 11" siclog@
+        //Does the UE send PDCP Control PDUs via RLC-AM RB with the following content to the SS:
+        //D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 5?
+         DRB.receive (car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2,
+                                                        p_NR_PDCP_State.DRB_Id,
+                                                        cr_RlcBearerRouting_NR(nr_Cell2), //@sic R5s190844 sic@
+                                                        -,
+                                                        {cr_NR_PDCP_STATUS_REPORT(5)}));
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+    
+    if ( p_WaitforRRCConCmp) {  // if NR5GC  @sic R5s210282 sic@
+        f_NR_ULGrantConfiguration_Stop(nr_Cell2);
+    }
+    
+    if(p_WaitforRRCConCmp){ //@sic R5-204363 sic@
+        f_NR_SS_SRBs_DRBs_Release(nr_Cell1, cs_TimingInfo_Now, f_NR_GetActiveDRBs(nr_Cell1)); //@sic R5s200690 sic@
+        f_NR_SS_SRBs_DRBs_Config(nr_Cell1, cs_TimingInfo_Now, omit);
+    };
+    
+    //@siclog "Step 12" siclog@
+    //The SS generates a PDCP status report message and sends it to UE: D/C field = 0 (PDCP control PDU)
+    //and PDU Type =000, FMC field = 3
+    DRB.send (cas_NR_DRB_COMMON_REQ_PDCP_PDUList (nr_Cell2,
+                                               p_NR_PDCP_State.DRB_Id,
+                                               -,
+                                               {cs_NR_PDCP_STATUS_REPORT(2)})); //@sic R5-196261 sic@
+                                               
+   //@siclog "Step 13" siclog@
+   // The SS starts the UL default grant transmission.
+   f_NR_ULGrantConfiguration_Start(nr_Cell2);
+   
+   //@siclog "Step 15" siclog@
+   //@sic R5-213462 sic@
+    p_NR_PDCP_State.RX_NEXT:= 2;//@sic R5-196261 sic@
+   
+    v_ExpectedPdu1:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[2]); // @sic R5s210719, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu2:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[3]); // @sic R5s210719, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu3:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[4]); // @sic R5s210719, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu4:= {v_ExpectedPdu1, v_ExpectedPdu2};
+    v_ExpectedPdu5:= {v_ExpectedPdu2, v_ExpectedPdu3};
+    v_ExpectedPdu6:= {v_ExpectedPdu1, v_ExpectedPdu2, v_ExpectedPdu3};
+    
+  alt {
+      // receive PDU1
+      // @sic R5s210838 sic@
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, {v_ExpectedPdu1})) -> value v_ReceivedPdu1 // @sic R5s210719 sic@
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu1.Common.TimingInfo.SubFrame;
+          alt {
+            // receive PDU2
+            [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, {v_ExpectedPdu2})) -> value v_ReceivedPdu2 // @sic R5s210719 sic@
+              {
+                v_TimingCurrentSlot := v_ReceivedPdu2.Common.TimingInfo.SubFrame;
+                f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                v_TimingPreviousSlot:= v_TimingCurrentSlot;
+              }
+                // receive PDU3
+            [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, {v_ExpectedPdu3})) -> value v_ReceivedPdu3 // @sic R5s210719 sic@
+                {
+                  v_TimingCurrentSlot := v_ReceivedPdu3.Common.TimingInfo.SubFrame;
+                  f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                  f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+                }
+            // receive PDU2 and PDU3
+            [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, v_ExpectedPdu5)) -> value v_ReceivedPdu5
+              {
+                v_TimingCurrentSlot := v_ReceivedPdu5.Common.TimingInfo.SubFrame;
+                f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+              }
+           }
+         }
+      // receive PDU1 and PDU2
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, v_ExpectedPdu4)) -> value v_ReceivedPdu4
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu4.Common.TimingInfo.SubFrame;
+            // receive PDU3
+           DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, {v_ExpectedPdu3})) -> value v_ReceivedPdu3;
+           v_TimingCurrentSlot := v_ReceivedPdu3.Common.TimingInfo.SubFrame;
+           f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+           f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+         }
+      // receive PDU1, PDU2 and PDU3
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell2, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell2), -, v_ExpectedPdu6)) -> value v_ReceivedPdu6
+        {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15");
+        }
+    }
+    
+   //@siclog "Step 16" siclog@
+    //The SS sends the PDCP Data PDU#5
+    p_NR_PDCP_State.TX_NEXT:= 5;
+    f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell2, v_SduList[5]); // @sic R5s250501 sic@
+   
+    //@siclog "Step 17" siclog@
+   //The UE sends the PDCP Data PDU#5
+    f_NR_PDCP_Recv(p_NR_PDCP_State, nr_Cell2, v_SduList[5], cr_RlcBearerRouting_NR(nr_Cell2)); // @sic R5s250501 sic@
+    
+    //@siclog "Step 20" siclog@
+    //SS transmits a PDCP Data PDU containing one PDCP SDU#7
+    p_NR_PDCP_State.TX_NEXT:= 7;
+    p_NR_PDCP_State.RX_NEXT:= 7;
+    //The SS sends the PDCP Data PDU
+    f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell2, v_SduList[7]); // @sic R5s250501 sic@
+   
+   //@siclog "Step 21" siclog@
+   //Check: Does the UE transmit a PDCP DATA PDU#7 on NR Cell 2?
+    t_Wait.start;
+    alt {
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList(nr_Cell2, p_NR_PDCP_State.DRB_Id)) {
+          t_Wait.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 21");
+        }
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 21A" siclog@
+    f_NR_ULGrantConfiguration_Stop(nr_Cell1); //@sic R5-190752 sic@
+   //@siclog "Step 22" siclog@
+   //The SS changes NR Cell 1 and NR Cell 2 parameters according to row "T2" in Table 7.1.3.4.1.3.1-1.
+   f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.4.1
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_WaitforRRCConCmp  (default value: false)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_4_1_NR_Step25to30(inout NR_PDCP_SS_State_Type p_NR_PDCP_State,  boolean p_WaitforRRCConCmp := false) runs on NR_BASE_PTC
+  {
+    var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {55,68,81,94,107, 120, 133, 146}); // @sic R5s250501 sic@
+    var NR_ResourceAllocation_Type v_NR_ResourceAllocation;
+    var SubFrameTiming_Type v_TimingDL;
+    var SubFrameTiming_Type v_TimingUL;
+    var SubFrameTiming_Type v_TimingCurrentSlot;
+    var SubFrameTiming_Type v_TimingPreviousSlot;
+    var template (present) NR_PDCP_PDU_Type  v_ExpectedPdu1;
+    var template (present) NR_PDCP_PDU_Type  v_ExpectedPdu2;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu3;
+    var NR_DRB_COMMON_IND v_ReceivedPdu1;
+    var NR_DRB_COMMON_IND v_ReceivedPdu2;
+    var NR_DRB_COMMON_IND v_ReceivedPdu3;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP(nr_Cell1, tsc_NR_BWP_Id);
+    timer t_Wait:= 5.0;
+   
+    // for ENDC RRCReconfigurationComplete is not received, jut one UL Grant is assigned (112 bits)for STATUS PDU
+    // For NR5GC, RRCReconfigurationComplete is received, 2 Grants (2x112 bits)are assigned, one for RRCReconfigurationComplete and one for STATUS PDU
+ 
+     //@siclog "Step 24" siclog@
+    // The SS assigns UL grant during the Random Access procedure on NR Cell 1 to allow the UE to send only PDCP status report.
+    // 5 octets PDCP STATUS REPORT + 3 octets RLC header + 2 octets MAC header = 10 octets
+    v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(112, v_NR_UplinkBWP); //@sic R5-198906 sic@
+    v_TimingDL := f_NR_GetNextSendOccasion_DL(nr_Cell1); // Timing of DL
+    v_TimingUL := f_NR_GetNextSendOccasion_ULafterDL(nr_Cell1, v_TimingDL, 20);
+     if ( p_WaitforRRCConCmp) {  // if NR5GC start a periodic grant to receive RRCReconfigurationComplete and PDCP STATUS REPORT @sic R5s210282 sic@
+      f_NR_ULGrantConfiguration_StartPeriodicGrant(nr_Cell1, cs_TimingInfo_NR(v_TimingUL), v_NR_ResourceAllocation, 20);
+    } else {  // if ENDC
+      f_NR_ULGrantConfiguration_StartPeriodicCyclicGrant(nr_Cell1, cs_TimingInfo_NR(v_TimingUL), v_NR_ResourceAllocation, 20, 1);
+    }
+
+    if ( p_WaitforRRCConCmp) {//@sic R5s210032 sic@
+        //EXCEPTION: Steps 25 and 26 can occur in any order. (Note 7)
+        interleave {//@sic R5s201484 sic@
+            //@siclog "Step 25" siclog@
+            //The UE transmits a NR RRCReconfigurationComplete message.(Note 4)
+            []SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete)){}
+    
+            //@siclog "Step 26" siclog@
+            //Does the UE send PDCP Control PDUs via RLC-AM RB with the following content to the SS:
+            //D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 5?
+            []DRB.receive (car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1,
+                                                    p_NR_PDCP_State.DRB_Id,
+                                                    cr_RlcBearerRouting_NR(nr_Cell1), //@sic R5s190844 sic@
+                                                    -,
+                                                    {cr_NR_PDCP_STATUS_REPORT(6,'80'O)})){}
+
+        }
+     
+     }
+     
+    else{
+        //@siclog "Step 26" siclog@
+        //Does the UE send PDCP Control PDUs via RLC-AM RB with the following content to the SS:
+        //D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 5?
+        DRB.receive (car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1,
+                                                    p_NR_PDCP_State.DRB_Id,
+                                                    cr_RlcBearerRouting_NR(nr_Cell1), //@sic R5s190844 sic@
+                                                    -,
+                                                    {cr_NR_PDCP_STATUS_REPORT(6,'80'O)}));
+    }
+     
+    if(p_WaitforRRCConCmp){ //@sic R5-204363 sic@
+        f_NR_ULGrantConfiguration_Stop(nr_Cell1);    // @sic R5s210282 sic@
+        f_NR_SS_SRBs_DRBs_Release(nr_Cell2, cs_TimingInfo_Now, f_NR_GetActiveDRBs(nr_Cell2)); //@sic R5s200690 sic@
+        f_NR_SS_SRBs_DRBs_Config(nr_Cell2, cs_TimingInfo_Now, omit);
+    };
+   //@siclog "Step 27" siclog@
+   //The SS generates a PDCP status report message and sends it to UE: D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 6 on NR Cell 1.
+    DRB.send (cas_NR_DRB_COMMON_REQ_PDCP_PDUList (nr_Cell1,
+                                               p_NR_PDCP_State.DRB_Id,
+                                               -,
+                                               {cs_NR_PDCP_STATUS_REPORT(6)}));
+                                               
+
+    //@siclog "Step 28" siclog@
+    // The SS starts the UL default grant transmission.
+    f_NR_ULGrantConfiguration_Start(nr_Cell1);
+    
+    //@siclog "Step 28A" siclog@
+    //The SS sends the PDCP Data PDU#5
+    p_NR_PDCP_State.TX_NEXT:= 5;
+    f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell1, v_SduList[5]); //@sic R5-190752, R5s250501 sic@
+
+    //@siclog "Step 28B" siclog@
+    //Check: Does the UE transmit a PDCP Data PDU via RLC-AM RB with the following content back to the SS?
+    t_Wait.start; //@sic R5-190752 sic@
+    alt {
+      [] DRB.receive((car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1,
+                                                         p_NR_PDCP_State.DRB_Id,
+                                                         cr_RlcBearerRouting_NR(nr_Cell1)))) {
+          t_Wait.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 28B");
+        }
+      [] t_Wait.timeout{}
+    }
+    
+    //@siclog "Step 29" siclog@
+    //SS transmits a PDCP Data PDU containing one PDCP SDU#6
+    p_NR_PDCP_State.TX_NEXT:= 6;
+    p_NR_PDCP_State.RX_NEXT:= 6;
+    f_NR_PDCP_Send(p_NR_PDCP_State, nr_Cell1, v_SduList[6]);  // @sic R5s250501 sic@
+   
+   //@siclog "Steps 30 - 31" siclog@
+   //Check: Does the UE transmit a PDCP Data PDU via RLC-AM RB with the following content back to the SS? D/C field = 1 (PDCP Data PDU) and PDCP SN=6 on NR Cell 1.
+   //Note: Data is previously received packet in PDCP Data PDU#6.(Note 9)
+   //Check: Does the UE transmit PDCP Data PDU via RLC-AM RB with the following content back to the SS? D/C field = 1 (PDCP Data PDU) and PDCP SN=7 on NR Cell 1.
+   //Note: Data is previously received packet in PDCP Data PDU#7(Note 9).
+    //@sic R5-213462  sic@
+    v_ExpectedPdu1:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[6]);// @sic R5s210719, R5s250501x sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu2:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[7]);// @sic R5s210719, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu3:= {v_ExpectedPdu1,v_ExpectedPdu2}; // @sic R5s210719 sic@
+    
+    alt {
+      // receive PDU1
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -,{v_ExpectedPdu1})) -> value v_ReceivedPdu1 // @sic R5s210719 sic@
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu1.Common.TimingInfo.SubFrame;
+          // receive PDU2
+          DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu2})) -> value v_ReceivedPdu2; // @sic R5s210719 sic@
+          v_TimingCurrentSlot := v_ReceivedPdu2.Common.TimingInfo.SubFrame;
+          f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 30-31");
+        }
+      // receive PDU1 and PDU2
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu3))-> value v_ReceivedPdu3
+        {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 30-31");
+        }
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.3
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_PSCellId
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_5_3_NR_TestBody_Step1to4A(inout NR_PDCP_SS_State_Type p_NR_PDCP_State,
+                                                NR_CellId_Type p_PSCellId) runs on NR_BASE_PTC
+  {
+    var DRB_Identity v_DrbId := p_NR_PDCP_State.DRB_Id;
+    var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {75,79,83}); // @sic R5s250501 sic@
+    var NR_SecurityParams_Type v_NR_Security:= f_NR_Security_Get();
+    var integer k;
+    var NR_CellId_Type v_PSCellId := p_PSCellId;
+    var template (value) NR_RLC_TestModeConfig_Type v_NR_RLC_TestModeConfig := {Info := {NotACK_NextRLC_PDU := Start}};
+    var template (value) NR_RadioBearerList_Type v_SS_Drb_ConfigList := {
+      f_NR_GetRadioBearerConfig_FullAM(v_PSCellId, v_DrbId, -, cs_NR_PDCP_RbConfig_TransparentMode, v_NR_RLC_TestModeConfig)
+    };
+
+    p_NR_PDCP_State.KUPenc := v_NR_Security.AS_Ciphering.KUPenc;
+
+    //@siclog "Step 1" siclog@
+    // Void
+
+    //@siclog "Step 2" siclog@
+    // The SS creates 3 PDCP Data PDUs and the Next_PDCP_TX_SN is set to "0".
+    // PDUs are created in the subsequent steps
+
+    //EXCEPTION: Steps 2A and 4 shall be repeated for k=0 to 2 (increment=1).
+    //@siclog "Step 2A-4" siclog@
+    for (k:= 0; k <= 2; k:= k+1) {
+      //The SS is configured on PSCell to not send RLC acknowledgement (RLC ACK) to the UE.
+      f_NR_SS_CommonRadioBearerConfig(v_PSCellId, v_SS_Drb_ConfigList);
+
+      //The SS sends the PDCP Data PDU #k on SCG DRB on (PSCell): D/C field = 1 (PDCP Data PDU) and PDCP SN = k.
+      f_NR_PDCP_Send(p_NR_PDCP_State,v_PSCellId,v_SduList[k]); // @sic R5s250501 sic@
+
+      //The UE sends the PDCP Data PDU #k on the AM RLC entity configured for PSCell: D/C field = 1 (PDCP Data PDU) and PDCP SN = k.
+      f_NR_PDCP_Recv(p_NR_PDCP_State,v_PSCellId,v_SduList[k],cr_RlcBearerRouting_NR(v_PSCellId)); // @sic R5s250501 sic@
+    }
+        
+    //@siclog "Step 4A" siclog@
+    // The SS ignores scheduling requests unless otherwise specified and does not allocate any uplink grant.
+    f_NR_ULGrantConfiguration_Stop(v_PSCellId, -, cs_NR_UplinkTimeAlignment_Keep);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.3
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_PSCellId
+   * @param     p_PCellId
+   * @param     p_Timing
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_5_3_NR_TestBody_Step7to9(inout NR_PDCP_SS_State_Type p_NR_PDCP_State,
+                                               NR_CellId_Type p_PSCellId,
+                                               NR_CellId_Type p_PCellId,
+                                               SubFrameTiming_Type p_Timing) runs on NR_BASE_PTC
+  {
+    var DRB_Identity v_DrbId := p_NR_PDCP_State.DRB_Id;
+    var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {75,79,83}); // @sic R5s250501 sic@
+    var NR_SecurityParams_Type v_NR_Security:= f_NR_Security_Get();
+    var integer k;
+    var NR_CellId_Type v_PSCellId := p_PSCellId;
+    var NR_CellId_Type v_NRCellId := p_PCellId; // CellId to be used in step 9
+    var template (value) NR_ResourceAllocation_Type v_NR_ResourceAllocation;
+    var NR_UplinkBWP_Type v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP(v_PSCellId, tsc_NR_BWP_Id);
+    var SubFrameTiming_Type v_TimingUL;
+    
+    p_NR_PDCP_State.KUPenc := v_NR_Security.AS_Ciphering.KUPenc;
+
+    //@siclog "Step 6" siclog@
+    // The SS assigns 1 UL grant of sufficent size.
+    // For EN-DC, 104-bits of grant size is provided to include 10 bytes of PDCP Status report MAC PDU+ 3 bytes of Short BSR and/or Padding.
+    // For NR-DC, 272-bits of grant size to include 5 bytes of RLC STATUS MAC PDU, 10 bytes of PDCP Status report MAC PDU, 14 bytes of RRCReconfigurationComplete MAC PDU, 2 bytes of Short BSR and 3 bytes of Padding.
+    if (f_GetTestcaseAttrib_ENDC(testcasename())) //@sic R5s230377 sic@
+    {
+      v_NRCellId := p_PSCellId;
+      v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(104, v_NR_UplinkBWP);
+    }
+    else
+    {
+      v_NRCellId := p_PCellId;
+      v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(272, v_NR_UplinkBWP); // @sic R5s230377 sic@
+    }
+    f_NR_OneULGrantTransmission(v_NRCellId, cs_TimingInfo_NR(p_Timing), v_NR_ResourceAllocation); //@sic R5s220028 - UL grant with the timing information, R5s220194, R5s230377 sic@
+
+    //EXCEPTION: Steps 7 and 8 can occur in any order.
+    //@siclog "Step 8" siclog@
+    //The UE sends PDCP Control PDUs via RLC-AM RB entity configured for PSCell Connectivity (EN-DC) and PCell for Connectivity (NR-DC)with the following content to the SS:
+    //D/C field = 0 (PDCP control PDU) and PDU Type =000, FMC field = 3.
+    if (f_GetTestcaseAttrib_ENDC(testcasename())) // @sic R5s230377 sic@
+    {
+      DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(v_NRCellId,
+                                                        v_DrbId,
+                                                        cr_RlcBearerRouting_NR(v_NRCellId),
+                                                        -,
+                                                        {cr_NR_PDCP_STATUS_REPORT(3)}));
+    }
+    else
+    {
+      interleave {
+        //@siclog "Step 7" siclog@
+        //The UE transmits a NR RRCReconfigurationComplete.
+        []SRB.receive (car_NR_SRB_RrcPdu_IND(v_NRCellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete)){}
+        []DRB.receive (car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(v_NRCellId,
+                                                             v_DrbId,
+                                                             cr_RlcBearerRouting_NR(v_NRCellId),
+                                                             -,
+                                                             {cr_NR_PDCP_STATUS_REPORT(3)})){}
+      }
+    }
+
+    //@siclog "Step 8A" siclog@
+    // After 100 ms the SS allocates 3 UL grants every 20ms of sufficient size to enable the UE to return each received PDCP PDU in one looped back PDCP PDU on PSCell for Connectivity (EN-DC) and PCell for Connectivity (NR-DC).
+    // 75, 79, 83 octets of PDCP Data + 3 octets PDCP header + 3 octets RLC header + 2 octets MAC header + 2 octets BSR or padding => max. 93 octets
+    v_NR_ResourceAllocation := f_NR_ResourceAllocation_UplinkGrant(768, v_NR_UplinkBWP); // @sic R5s260009 sic@
+    v_TimingUL := f_NR_GetNextSendOccasion_UL(v_NRCellId);  // @sic R5s230377 sic@
+    f_NR_ULGrantConfiguration_StartPeriodicCyclicGrant(v_NRCellId, cs_TimingInfo_NR(v_TimingUL), v_NR_ResourceAllocation, 20, 3); //@sic R5-197255, R5s200029, R5s230377 sic@
+
+    //EXCEPTION: Step 9 shall be repeated for k=0 to 2 (increment=1).
+    //@siclog "Step 9" siclog@
+    // Check: Does the UE send the PDCP Data PDU #k via the AM RLC entity configured for PSCell for  Connectivity ENDC and PCell for Connectivity (NR-DC).
+    // D/C field = 1 (PDCP Data PDU) and PDCP SN = k. Data is previously received data from PDU #k ?
+    p_NR_PDCP_State.RX_NEXT:= 0;
+    for (k:= 0; k <= 2; k:= k+1) {
+      f_NR_PDCP_Recv(p_NR_PDCP_State,v_NRCellId,v_SduList[k],cr_RlcBearerRouting_NR(v_NRCellId)); // @sic R5s250501 sic@
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.4
+   * @param     p_NR_PDCP_State     (by reference)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+  function f_TC_7_1_3_5_4_NR_Step1to17(inout NR_PDCP_SS_State_Type p_NR_PDCP_State) runs on NR_BASE_PTC
+  {
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var NR_PDCP_SDUList_Type v_SduList := f_GenerateSDU (p_NR_PDCP_State, {64, 164});
+    var NR_PDCP_SDUList_Type v_SduList1 := f_GenerateSDU (p_NR_PDCP_State, {50,60,70,80,90}); // @sic R5s250501 sic@
+    var NR_SecurityParams_Type v_NR_Security:= f_NR_Security_Get();
+    var SubFrameTiming_Type v_TimingInfo1;
+    var SubFrameTiming_Type v_TimingInfo2;
+    var SubFrameTiming_Type v_TimingInfo3;
+    var SubFrameTiming_Type v_SubFrameTimingT1;
+    var SubFrameTiming_Type v_SubFrameTimingT2;
+    var SubFrameTiming_Type v_TimingCurrentSlot;
+    var SubFrameTiming_Type v_TimingPreviousSlot;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu1;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu2;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu3;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu4;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu5;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu6;
+    var NR_DRB_COMMON_IND v_ReceivedPdu1;
+    var NR_DRB_COMMON_IND v_ReceivedPdu2;
+    var NR_DRB_COMMON_IND v_ReceivedPdu3;
+    var NR_DRB_COMMON_IND v_ReceivedPdu4;
+    var NR_DRB_COMMON_IND v_ReceivedPdu5;
+    var NR_DRB_COMMON_IND v_ReceivedPdu6;
+    var float v_T_reordering;
+    var TimingInfo_Type v_TimingInfo;
+    var integer v_Duration;
+    timer t_Wait := 1.0;
+    
+    p_NR_PDCP_State.KUPenc := v_NR_Security.AS_Ciphering.KUPenc ;
+    
+    //@siclog "Step 1" siclog@
+    //SS transmits a PDCP Data PDU containing one PDCP SDU #131072 resp. #2048
+    if (f_NR_SupportOfRedCap()){ //@sic R5s230199 R5-231533 R5-256178 sic@
+      p_NR_PDCP_State.TX_NEXT := 2048;
+    }
+    else {
+      p_NR_PDCP_State.TX_NEXT := 131072; //@sic R5s190227 sic@
+    }
+
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_IPData);
+    
+    //@siclog "Step 2" siclog@
+    //Does the UE transmit a PDCP SDU via the AM RLC entity in the next 1s?
+    t_Wait.start;
+    alt {
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList(nr_Cell1, p_NR_PDCP_State.DRB_Id)) {
+        t_Wait.stop;
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4");
+      }
+      [] t_Wait.timeout{}
+    }
+    //@siclog "Step 3" siclog@
+    //The SS sends the PDCP SDU #1
+    p_NR_PDCP_State.TX_NEXT := 1;
+    v_TimingInfo1 := f_NR_GetNextSendOccasion_DL(nr_Cell1);
+    v_TimingInfo2 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo1,20);
+    v_TimingInfo3 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo2,120);
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList1[1],v_TimingInfo1); // @sic R5s250501 sic@
+    //@siclog "Step 4" siclog@
+    //The SS sends the PDCP SDU #2
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList1[2],v_TimingInfo2); // @sic R5s250501 sic@
+    //@siclog "Step 5" siclog@ Wait for 100ms (< configured t-Reordering)
+    //v_TimingInfo3 - v_TimingInfo2
+    //@siclog "Step 6" siclog@ The SS sends the PDCP SDU #0
+    p_NR_PDCP_State.TX_NEXT := 0;
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList1[0],v_TimingInfo3); // @sic R5s250501 sic@
+    //@sic R5-213462 sic@
+    //@siclog "Step 7-9" siclog@
+    //UE transmits the PDCP SDU #0 via the AM RLC entity #0,#1,#2 (Note 4). @sic R5s190227 sic@
+    v_ExpectedPdu1:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList1[0]); //@sic R5s210673, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu2:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList1[1]); //@sic R5s210673, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu3:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList1[2]); //@sic R5s210673, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    //@sic R5s210673 sic@
+    v_ExpectedPdu4:= {v_ExpectedPdu1, v_ExpectedPdu2};
+    v_ExpectedPdu5:= {v_ExpectedPdu2, v_ExpectedPdu3};
+    v_ExpectedPdu6:= {v_ExpectedPdu1, v_ExpectedPdu2, v_ExpectedPdu3};
+
+    
+    alt {
+      // receive PDU1
+        [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu1})) -> value v_ReceivedPdu1 //@sic R5s210673 sic@
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu1.Common.TimingInfo.SubFrame;
+          alt {
+            // receive PDU2
+           []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu2})) -> value v_ReceivedPdu2 // @sic R5s210673 sic@
+              {
+                v_TimingCurrentSlot := v_ReceivedPdu2.Common.TimingInfo.SubFrame;
+                f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                v_TimingPreviousSlot:= v_TimingCurrentSlot;
+                // receive PDU3
+                DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu3})) -> value v_ReceivedPdu3; // @sic R5s210673 sic@
+                v_TimingCurrentSlot := v_ReceivedPdu3.Common.TimingInfo.SubFrame;
+                f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7-9");
+                }
+             // }
+            // receive PDU2 and PDU3
+            [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu5)) -> value v_ReceivedPdu5 // @sic R5s210673 sic@
+              {
+                v_TimingCurrentSlot := v_ReceivedPdu5.Common.TimingInfo.SubFrame;
+                f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7-9");
+              }
+           }
+         }
+      // receive PDU1 and PDU2
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu4)) -> value v_ReceivedPdu4
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu4.Common.TimingInfo.SubFrame;
+            // receive PDU3
+            DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu3})) -> value v_ReceivedPdu3;
+            v_TimingCurrentSlot := v_ReceivedPdu3.Common.TimingInfo.SubFrame;
+            f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7-9");
+         }
+      // receive PDU1, PDU2 and PDU3
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu6)) -> value v_ReceivedPdu6
+        {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7-9");
+        }
+    }
+    
+    //@siclog "Step 10" siclog@
+    //The SS sends the PDCP SDU #4
+    v_TimingInfo1 := f_NR_GetNextSendOccasion_DL(nr_Cell1); //t-Reordering starts
+    v_TimingInfo2 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo1,100); //Next PDU
+    v_TimingInfo3 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo1,120); //Wait for PDU
+    v_SubFrameTimingT1 := v_TimingInfo3;
+    p_NR_PDCP_State.TX_NEXT := 4;
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList1[4],v_TimingInfo1); // @sic R5s250501 sic@
+    //@siclog "Step 11" siclog@ Wait for 100ms (< configured t-Reordering)
+    //v_TimingInfo2 - v_TimingInfo1
+    //@siclog "Step 12" siclog@ The SS sends the PDCP SDU #7
+    p_NR_PDCP_State.TX_NEXT := 7;
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList[0],v_TimingInfo2);
+    //@siclog "Step 13" siclog@ The SS sends the PDCP SDU #3
+    p_NR_PDCP_State.TX_NEXT := 3;
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList1[3],v_TimingInfo3); // @sic R5s250501 sic@
+    
+    //@siclog "Step 14-15" siclog@ UE transmits a PDCP SDU #3, #4 (Note 5). @sic R5s190227 sic@
+    //@sic R5-213462 sic@
+    v_ExpectedPdu1:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList1[3]); // @sic R5s210673, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu2:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList1[4]); // @sic R5s210673, R5s250501 sic@
+    f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu4:= {v_ExpectedPdu1,v_ExpectedPdu2}; // @sic R5s210673 sic@
+    
+    alt {
+      // receive PDU1
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu1})) -> value v_ReceivedPdu1 // @sic R5s210673 sic@
+      {
+          v_TimingPreviousSlot := v_ReceivedPdu1.Common.TimingInfo.SubFrame;
+          // receive PDU2
+          DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu2})) -> value v_ReceivedPdu2; // @sic R5s210673 sic@
+            v_TimingCurrentSlot := v_ReceivedPdu2.Common.TimingInfo.SubFrame;
+            f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 14-15");
+          }
+      // receive PDU1 and PDU2
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu4))-> value v_ReceivedPdu3 // @sic R5s210673 sic@
+        {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 14-15");
+        }
+    }
+
+    //@siclog "Step 16" siclog@ UE transmits a PDCP SDU #7
+    p_NR_PDCP_State.RX_NEXT := 5; //@sic R5-194837 sic@
+    v_TimingInfo := f_NR_PDCP_Recv(p_NR_PDCP_State,nr_Cell1,v_SduList[0], cr_RlcBearerRouting_NR(nr_Cell1));
+    v_SubFrameTimingT2 := v_TimingInfo.SubFrame;
+    // Check 1: Is (T2 - T1) > t-Reordering?
+    v_Duration := f_SubFrameTiming_Duration(v_SubFrameTimingT1, v_SubFrameTimingT2);
+    v_T_reordering := f_NR_SetTimerToleranceMin(nr_Cell1,l2Timer,300.0);
+    if (v_Duration > float2int(v_T_reordering)){
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    }
+    //@siclog "Step 17" siclog@ The SS sends the PDCP SDU #9
+    p_NR_PDCP_State.TX_NEXT := 9;
+    f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList[1]);
+  }
+
+  /*
+   * @desc  Generates a SDU List
+   * @param     p_NR_PDCP_State
+   * @param     p_PDUSizeList
+   * @return    NR_PDCP_SDUList_Type
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+   function f_GenerateSDU(NR_PDCP_SS_State_Type p_NR_PDCP_State, PDUSizeList_Type p_PDUSizeList) return NR_PDCP_SDUList_Type
+   {
+     var integer v_NumberofSDU := lengthof(p_PDUSizeList);
+     var NR_PDCP_SDUList_Type v_SduList;
+     var integer k;
+     var integer v_SduSize;
+     var integer v_HeaderSize;
+
+     if (p_NR_PDCP_State.PDCP_SN_Size == PDCP_SNLength12){
+            v_HeaderSize := 2 ;
+     }else { //PDCP_SNLength18
+              v_HeaderSize :=  3;
+     }
+     for (k:=0; k < v_NumberofSDU; k:=k+1){
+        v_SduSize :=  p_PDUSizeList[k]-v_HeaderSize;
+        if (v_SduSize<=0){
+         FatalError(__FILE__, __LINE__, "Invalid PDCP PDU Size");
+        }
+        v_SduList[k] := f_GetN_OctetsFromPRBS (20,v_SduSize);
+     }
+     return v_SduList;
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.1
+   * @param     p_NR_PDCP_State
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+   function f_TC_7_1_3_5_1_NR_TestBody(NR_PDCP_SS_State_Type p_NR_PDCP_State) runs on NR_BASE_PTC
+  {
+    var NR_SecurityParams_Type v_NR_Security:= f_NR_Security_Get();
+    var SubFrameTiming_Type v_TimingInfo1;
+    var SubFrameTiming_Type v_TimingInfo2;
+    var SubFrameTiming_Type v_TimingInfok;
+    var SubFrameTiming_Type v_TimingUL;
+    var SubFrameTiming_Type v_TimingCurrentSlot;
+    var SubFrameTiming_Type v_TimingPreviousSlot;
+    var NR_PDCP_SDUList_Type v_SduList;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu1;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu2;
+    var template (present) NR_PDCP_PDUList_Type v_ExpectedPdu3;
+    var NR_DRB_COMMON_IND v_ReceivedPdu1;
+    var NR_DRB_COMMON_IND v_ReceivedPdu2;
+    var NR_DRB_COMMON_IND v_ReceivedPdu3;
+    var float v_T_discard;
+    var integer k;
+    p_NR_PDCP_State.KUPenc := v_NR_Security.AS_Ciphering.KUPenc;
+
+     //Stop UL Grants
+     f_NR_ULGrantConfiguration_Stop(nr_Cell1, -, cs_NR_UplinkTimeAlignment_Keep);
+    //@siclog "Step 1" siclog@ All PDCP PDUs use same SDU v_IPData
+     v_SduList := f_GenerateSDU (p_NR_PDCP_State, {46, 62, 78, 94, 110});
+
+     v_TimingInfo1 := f_NR_GetNextSendOccasion_DL(nr_Cell1);
+     v_TimingInfok := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo1,20);
+ 
+    //@siclog "Step 3" siclog@
+    for (k:= 0; k <= 2; k:= k+1) {
+      //SS transmits a PDCP Data PDU containing one PDCP SDU
+      f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1,v_SduList[k], v_TimingInfok);
+      v_TimingInfok := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo1, 20*(k+2));
+    }
+    //@siclog "Step 4" siclog@ Wait Discard timer to expire. @sic R5s190225, R5s190770 sic@
+    v_T_discard := f_NR_SetTimerToleranceMax(nr_Cell1,l2Timer, 500.0);
+    v_TimingInfo2 := f_SubFrameTiming_AddMilliSeconds(v_TimingInfok, float2int(v_T_discard) - 20);
+
+    //@siclog "Step 5" SS transmits a PDCP Data PDU containing one PDCP SDU @sic R5s190225 sic@
+    v_TimingInfok := v_TimingInfo2;
+    for (k:= 0; k <= 1; k:= k+1) {
+      f_NR_PDCP_Send(p_NR_PDCP_State,nr_Cell1, v_SduList[k+3], v_TimingInfok);
+      v_TimingInfok := f_SubFrameTiming_AddMilliSeconds(v_TimingInfo2,20*(k+1));
+    }
+    
+    v_TimingPreviousSlot:= f_NR_GetCurrentTiming(nr_Cell1); //@sic R5-213462 sic@
+    //@siclog "Step 6" The SS resumes normal UL grant allocation.
+    v_TimingUL := f_NR_GetNextSendOccasion_ULafterDL(nr_Cell1, v_TimingInfok, 0); // @sic R5s190590 sic@
+    f_NR_ULGrantConfiguration_Start(nr_Cell1, cs_TimingInfo_NR(v_TimingUL));
+    //@siclog "Step 7" siclog@ Does UE transmit a PDCP Data PDU # 5 of size 94 bytes? (Note 2)
+    //@sic R5-213462 R5s210673 sic@
+   // p_NR_PDCP_State.RX_NEXT := p_NR_PDCP_State.TX_NEXT - 2;
+    v_ExpectedPdu1:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, -,v_SduList[3]);  // @sic R5s210787 sic@
+    //f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu2:= f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, -, v_SduList[4]); // @sic R5s210787 sic@
+    //f_NR_PDCP_Increment_NEXT_RX(p_NR_PDCP_State,1);
+    v_ExpectedPdu3:= {v_ExpectedPdu1,v_ExpectedPdu2};
+    
+    alt {
+      // receive PDU1
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu1})) -> value v_ReceivedPdu1 //@sic R5s210673 sic@
+        {
+          v_TimingPreviousSlot := v_ReceivedPdu1.Common.TimingInfo.SubFrame;
+          // receive PDU2
+          DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, {v_ExpectedPdu2})) -> value v_ReceivedPdu2; //@sic R5s210673 sic@
+          v_TimingCurrentSlot := v_ReceivedPdu2.Common.TimingInfo.SubFrame;
+          f_NR_SubFrameTiming_DifferentSlots (v_TimingCurrentSlot, v_TimingPreviousSlot);
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 7-8");
+        }
+      // receive PDU1 and PDU2
+      []  DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(nr_Cell1, p_NR_PDCP_State.DRB_Id, cr_RlcBearerRouting_NR(nr_Cell1), -, v_ExpectedPdu3))-> value v_ReceivedPdu3
+        {
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 7-8");
+        }
+    }
+  }
+
+  /*
+   * @desc      Sending PDCP PDUs using SCG path
+   * @param     p_PDCP_Rec          (by reference)
+   * @param     p_NR_CellId
+   * @param     p_Sdu
+   * @param     p_RlcBearerRouting
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+ function f_NR_PDCP_Send_SCGCell(inout NR_PDCP_SS_State_Type p_PDCP_Rec,
+                          NR_CellId_Type p_NR_CellId,
+                          octetstring p_Sdu,
+                          template (value) RlcBearerRouting_Type p_RlcBearerRouting)
+  runs on NR_BASE_PTC{ // @sic R5-220641 sic@
+
+    var SubFrameTiming_Type v_TimingInfo;
+    var RlcBearerRouting_Type v_RlcBearerRoutingSCG:= valueof(p_RlcBearerRouting);
+    if(ischosen(p_RlcBearerRouting.NR)){
+      v_RlcBearerRoutingSCG:= valueof(p_RlcBearerRouting);
+      v_TimingInfo := f_NR_GetNextSendOccasion_DL(v_RlcBearerRoutingSCG.NR);
+      f_NR_PDCP_Send(p_PDCP_Rec,p_NR_CellId,p_Sdu, v_TimingInfo, p_RlcBearerRouting);
+
+    }else{
+      v_TimingInfo := f_NR_ReceiveTimefromEUTRA (p_NR_CellId);
+      f_NR_PDCP_Send(p_PDCP_Rec,p_NR_CellId,p_Sdu, v_TimingInfo, p_RlcBearerRouting);
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.3.5.2
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_SCG_RoutingRlcRouting
+   * @param     p_PrimaryPath
+   * @param     p_SecondaryPath
+   * @param     p_TestStep
+   * @param     p_PSCellId          (default value: nr_Cell1)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+ function f_TC_7_1_3_5_2_NR_CheckULPrimaryPath(inout NR_PDCP_SS_State_Type p_NR_PDCP_State,// @sic R5s220567 sic@
+                                               template (value) RlcBearerRouting_Type p_SCG_RoutingRlcRouting,
+                                               template (value) RlcBearerRouting_Type p_PrimaryPath,
+                                               template (value) RlcBearerRouting_Type p_SecondaryPath,
+                                               charstring p_TestStep,
+                                               NR_CellId_Type p_PSCellId := nr_Cell1)  runs on NR_BASE_PTC//@sic R5s221355 sic@
+  {// @sic R5-220641 sic@
+    var NR_PDCP_SDUList_Type v_SduList;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu;
+    timer t_WaitForPdu:= 2.0;
+
+    v_SduList := f_GenerateSDU (p_NR_PDCP_State, {64, 164});
+
+    //@siclog "Step 1 or 2C" siclog@
+    //The SS sends a PDCP Data PDU on the split DRB on AM RLC entity configured for SCG on PSCell Data PDU = 64 bytes.
+    f_NR_PDCP_Send_SCGCell(p_NR_PDCP_State,p_PSCellId,v_SduList[0], p_SCG_RoutingRlcRouting);//@sic R5s221355 sic@
+    v_ExpectedPdu := f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT, v_SduList[0]);
+    t_WaitForPdu.start;
+    alt{
+    //@siclog "Step 2 or 2D" siclog@
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_PrimaryPath, -, {v_ExpectedPdu}))//@sic R5s221355 sic@
+      { //Does UE transmit a PDCP Data PDU on the primary AM RLC entity?
+        f_NR_PreliminaryPass(__FILE__, __LINE__, p_TestStep);
+        p_NR_PDCP_State.RX_NEXT := p_NR_PDCP_State.RX_NEXT + 1;
+        t_WaitForPdu.stop;
+      }
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_SecondaryPath, -, {v_ExpectedPdu}))//@sic R5s221355 sic@
+      { //Does UE transmit a PDCP Data PDU on the AM RLC secondary entity in next two seconds?
+         f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, p_TestStep);
+      }
+      [] t_WaitForPdu.timeout{
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, p_TestStep);
+      }
+    }
+   //@sic R5s220534 sic@
+ }
+
+  /*
+   * @desc      Test Steps 3 to 4b2
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_PrimaryPath
+   * @param     p_SecondaryPath
+   * @param     p_PSCellId          (default value: nr_Cell1)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+ function f_TC_7_1_3_5_2_Steps3to4b2(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, // @sic R5s220567 sic@
+                                     template (value) RlcBearerRouting_Type p_PrimaryPath,
+                                     template (value) RlcBearerRouting_Type p_SecondaryPath,
+                                     NR_CellId_Type p_PSCellId := nr_Cell1) runs on NR_BASE_PTC {//@sic R5s221355 sic@
+    var NR_PDCP_SDUList_Type v_SduList;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu;
+    var boolean v_ReceivedPdu := false;
+    timer t_WaitForPdu:= 2.0;
+
+    v_SduList := f_GenerateSDU (p_NR_PDCP_State, {164});
+    //@siclog "Step 3" siclog@
+    //The SS sends a PDCP Data PDU on the split DRB on AM RLC entity configured for SCG on PSCell. Data PDU=164 bytes.
+    f_NR_PDCP_Send_SCGCell(p_NR_PDCP_State,p_PSCellId,v_SduList[0], p_PrimaryPath); //Primary path is configured on SCG  @sic R5-220641, R5s221355 sic@
+    v_ExpectedPdu := f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT,v_SduList[0]);
+    t_WaitForPdu.start;
+    alt{
+      //@siclog "Step 4a1-4b2" siclog@
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_PrimaryPath, -, {v_ExpectedPdu}))//@sic R5s221355 sic@
+      {//Does UE transmit a PDCP Data PDU on the AM RLC primary entity?
+         if (v_ReceivedPdu){
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4a1");
+         }else{
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4a1");
+            p_NR_PDCP_State.RX_NEXT := p_NR_PDCP_State.RX_NEXT + 1; //@sic R5s210275 sic@
+            v_ReceivedPdu := true;
+         }
+         repeat;
+      }
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_SecondaryPath, -, {v_ExpectedPdu})) //@sic R5s190401, R5s221355 sic@
+      { //Does UE transmit a PDCP Data PDU on the AM RLC secondary entity?
+         if (v_ReceivedPdu){
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4b1");
+         }else{
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4b2");
+            p_NR_PDCP_State.RX_NEXT := p_NR_PDCP_State.RX_NEXT + 1; //@sic R5s210275 sic@
+            v_ReceivedPdu := true;
+         }
+         repeat;
+      }
+      [] t_WaitForPdu.timeout{
+      
+         if (v_ReceivedPdu){//@sic R5s210065 sic@
+            v_ReceivedPdu := false
+         }
+         else{
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4a1-4b2");
+         }
+      }
+    }
+ }
+
+  /*
+   * @desc      Test Steps 7 to 8b2
+   * @param     p_NR_PDCP_State     (by reference)
+   * @param     p_PrimaryPath
+   * @param     p_SecondaryPath
+   * @param     p_PSCellId          (default value: nr_Cell1)
+   * @status    APPROVED (ENDC, NR5GC)
+   */
+ function f_TC_7_1_3_5_2_Steps7to8b2(inout NR_PDCP_SS_State_Type p_NR_PDCP_State, // @sic R5s220567 sic@
+                                      template (value) RlcBearerRouting_Type p_PrimaryPath,
+                                      template (value) RlcBearerRouting_Type p_SecondaryPath,
+                                      NR_CellId_Type p_PSCellId := nr_Cell1) runs on NR_BASE_PTC {//@sic R5s221355 sic@
+    var boolean v_ReceivedPdu := false;
+    var NR_PDCP_SDUList_Type v_SduList;
+    var template (present) NR_PDCP_PDU_Type v_ExpectedPdu;
+    timer t_WaitForPdu:= 2.0;
+ 
+
+    v_SduList := f_GenerateSDU (p_NR_PDCP_State, {64});
+    //@siclog "Step 7" siclog@
+    //The SS sends a PDCP Data PDU on the split DRB on AM RLC entity configured for SCG on PSCell. Data PDU = 64 bytes @sic R5s210065, R5s221355 sic@
+    f_NR_PDCP_Send_SCGCell(p_NR_PDCP_State,p_PSCellId,v_SduList[0], p_PrimaryPath);//Primary path is configured on SCG  @sic R5-220641 sic@
+    v_ExpectedPdu := f_NR_PDCP_PDU_Get(p_NR_PDCP_State.PDCP_SN_Size, p_NR_PDCP_State.RX_NEXT);
+    t_WaitForPdu.start;
+    alt{
+      //@siclog "Step 8a1-8b2" siclog@
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_PrimaryPath, -, {v_ExpectedPdu}))//@sic R5s221355 sic@
+      {//Does UE transmit a PDCP Data PDU on the AM RLC primary entity?
+         if (v_ReceivedPdu){
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 8a1");
+         }else{
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8a1");
+            v_ReceivedPdu := true;
+         }
+         repeat;
+      }
+      [] DRB.receive(car_NR_DRB_COMMON_IND_PDCP_PDUList_DC(p_PSCellId, p_NR_PDCP_State.DRB_Id , p_SecondaryPath, -, {v_ExpectedPdu}))//@sic R5s221355 sic@
+      { //Does UE transmit a PDCP Data PDU on the AM RLC secondary entity ?
+         if (v_ReceivedPdu){
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 8b1");
+         }else{
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8b2");
+            v_ReceivedPdu := true;
+         }
+         repeat;
+      }
+      [] t_WaitForPdu.timeout{
+            if (v_ReceivedPdu){
+                v_ReceivedPdu := false
+            }
+            else{
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 8a1-8b2");
+            }
+      }
+    }
+}
+
+}

@@ -1,0 +1,612 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2024-10-09 15:50:27 +0200 (Wed, 09 Oct 2024) $
+// $Rev: 39798 $
+/******************************************************************************/
+
+module NG_NasEmu_Common {
+
+  import from CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NG_NasEmu_CtrlAspTypes all;
+  import from NG_SecurityDefinitionsAndExternalFunctions all;
+  import from NasEmu_Common4G5G all;
+
+  type union NG_NasEmu_DecodedNasPduUL_Type {               /* Return type for f_NasEmu_DecodeMsg
+                                                               @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NG_NAS_UL_Message_Type  Msg,
+    Null_Type            Invalid
+  };
+
+  type record NG_NasEmu_DecodingInfo_Type {                 /* Return type for f_DecipherAndDecodeNasPdu
+                                                               @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NG_NAS_MSG_Indication_Type  NasIndication optional,     /* omit when octetstring cannot be decoded */
+    boolean                  IntegrityError
+  };
+
+  type integer NG_NasEmu_SN;                                /* sequence number as usual (1 octet)
+                                                              @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  template (value) NG_NasEmu_DecodingInfo_Type cs_NG_DecodingInfo_Init :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NasIndication := omit,
+    IntegrityError := false
+  };
+
+  type record NG_NasSecurity_Type {                         /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    NG_NAS_SecurityInfo_Type    Integrity,
+    NG_NAS_SecurityInfo_Type    Ciphering,
+    NasCountInfo_Type           NasCount,
+    B5_Type                     BearerId,
+    boolean                     SecurityStarted /* can be set to true after the download of security keys since
+                                                   ciphering is assumed for all security protected NAS PDUs in UL */
+  };
+
+  /*
+   * @desc      initialise the global information
+   * @return    NG_NasSecurity_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_NasSecurity_Init() return NG_NasSecurity_Type
+  {
+    return valueof(cs_NG_NasSecurity_Init);    // valueof cannot be avoided here
+  }
+
+  template (present) NG_NAS_CTRL_REQ cr_NG_NAS_CTRL_Security_REQ :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := ?,
+    Request := {
+      Security := ?
+    }
+  };
+
+  template (present) NG_NAS_CTRL_REQ cr_NG_NAS_CTRL_NasCount_REQ :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := ?,
+    Request := {
+      NasCount := ?
+    }
+  };
+
+  template (value) NG_NAS_CTRL_CNF cs_NG_NAS_CTRL_Security_CNF :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := cs_NasCtrlCnfAspCommonPart,
+    Confirm := {
+      Security := true
+    }
+  };
+
+  template (value) NG_NAS_CTRL_CNF cs_NG_NAS_CTRL_NasCountSet_CNF :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := cs_NasCtrlCnfAspCommonPart,
+      Confirm := {
+      NasCount := {
+        Set := true
+      }
+    }
+  };
+
+  template (value) NG_NAS_CTRL_CNF cs_NG_NAS_CTRL_NasCountGet_CNF(template (value) NasCountInfo_Type p_NasCountInfo) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := cs_NasCtrlCnfAspCommonPart,
+    Confirm := {
+      NasCount := {
+        Get := p_NasCountInfo
+      }
+    }
+  };
+
+  template (value) NG_NasSecurity_Type cs_NG_NasSecurity_Init :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Integrity := {
+      Algorithm := '0000'B,
+      K_NAS     := int2bit(0, 128)
+    },
+    Ciphering := {
+      Algorithm := '0000'B,
+      K_NAS     := int2bit(0, 128)
+    },
+    NasCount := {
+      UL        := f_NasCountInit(),
+      DL        := f_NasCountInit()
+    },
+    BearerId := '00001'B,       /* 3GPP Access */
+    SecurityStarted := false
+  };
+
+  template (value) NG_NAS_DL_Message_Type cs_NG_SecurityProtected_NasMsg(SecurityHeaderType p_SecurityHeaderType,
+                                                                  MessageAuthenticationCode p_MessageAuthenticationCode,
+                                                                  NAS_SequenceNumber p_NAS_SequenceNumber,
+                                                                  template (value) NG_NAS_Message p_NAS_Message) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    security_Protected_Nas_Message := {
+      protocolDiscriminator              := tsc_EPD_GMM,
+      spareHalfOctet                     := tsc_SpareHalfOctet,
+      securityHeaderType                 := p_SecurityHeaderType,
+      messageAuthenticationCode          := p_MessageAuthenticationCode,
+      sequenceNumber                     := p_NAS_SequenceNumber,
+      plainNASMessage                    := p_NAS_Message
+    }
+  };
+
+  /*
+   * @desc      estimate COUNT (in UL) based on SN of received PDU and previous COUNT
+   *            Note: at the beginning COUNT is intialised with 0 as well as the SN at the UE
+   *                  => an overflow is assumed when (previous SN > received SN)
+   * @param     p_PrevCount
+   * @param     p_SequenceNumber
+   * @return    NasCount_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasSecurity_EstimateCOUNT(NasCount_Type p_PrevCount,
+                                       NG_NasEmu_SN p_SequenceNumber) return NasCount_Type
+  {
+    var integer v_PrevCountValue := oct2int(p_PrevCount);
+    var integer v_CountValue;
+    var integer v_MaxSnPlus1;
+    var integer v_PrevSnValue;
+    var integer v_ReceivedSnValue;
+    var integer v_OverflowCounter;    /* Note: for normal (long) SN this is the overflow counter as described in 24.301;
+                                         for 5 bit SN it includes the 3 most significant bits of the least significant octet (what normally is the SN) */
+    v_ReceivedSnValue := p_SequenceNumber;
+    v_MaxSnPlus1 := 256;
+    v_OverflowCounter := v_PrevCountValue / v_MaxSnPlus1;
+    v_PrevSnValue := v_PrevCountValue mod v_MaxSnPlus1;
+
+    if (v_ReceivedSnValue < v_PrevSnValue) {     // => overflow
+      v_OverflowCounter := (v_OverflowCounter + 1) mod 65536;
+    }
+    v_CountValue := (v_OverflowCounter * v_MaxSnPlus1) + v_ReceivedSnValue;
+
+    return int2oct(v_CountValue, 4);
+  };
+
+  /*
+   * @desc      wrapper function for encvalue
+   * @param     p_NasMessage
+   * @return    bitstring
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_EncvalueNAS(template (value) NG_NAS_DL_Message_Type p_NasMessage) return bitstring
+  {
+    return encvalue(p_NasMessage);
+  };
+
+  /*
+   * @desc      wrapper function for decvalue
+   * @param     p_EncodedNasMessage (by reference)
+   * @param     p_NAS_UL_Message    (by reference)
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_DecvalueNAS(inout bitstring p_EncodedNasMessage,
+                                   out NG_NAS_UL_Message_Type p_NAS_UL_Message) return integer
+  {
+    return decvalue(p_EncodedNasMessage, p_NAS_UL_Message);
+  };
+
+  /*
+   * @desc      return a the decoded NAS PDU (v_DecodedNasPduUL.Msg) or v_DecodedNasPduUL.Invalid
+   * @param     p_EncodedMsg
+   * @return    NG_NasEmu_DecodedNasPduUL_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_DecodeMsg(octetstring p_EncodedMsg) return NG_NasEmu_DecodedNasPduUL_Type
+  {
+    var bitstring v_NasPduBitstring;
+    var NG_NAS_UL_Message_Type v_NAS_UL_Message;
+    var NG_NasEmu_DecodedNasPduUL_Type v_DecodedNasPduUL;
+
+    v_NasPduBitstring := oct2bit(p_EncodedMsg);
+    if (f_NG_NasEmu_DecvalueNAS(v_NasPduBitstring, v_NAS_UL_Message) != 0) {  /* v_NasPduBitstring needed as a variable since being 'inout' in decvalue
+                                                                              v_NAS_UL_Message is out parameter i.e. needs not to be initialised */
+      f_NasEmulationError(__FILE__, __LINE__, "NAS message cannot be decoded");
+      v_DecodedNasPduUL.Invalid := true;
+    } else {
+      v_DecodedNasPduUL.Msg := v_NAS_UL_Message;
+    }
+    return v_DecodedNasPduUL;
+  }
+
+  /*
+   * @desc      check whether NAS message contains piggybacked message and decode it
+   *            Note: function is called recursively
+   * @param     p_NAS_UL_Message
+   * @param     p_NasSecurityByRef
+   * @param     p_NasCount
+   * @return    template (omit) NG_NAS_UL_PduList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_DecodePiggybacked(NG_NAS_UL_Message_Type p_NAS_UL_Message,
+                                         NG_NasSecurity_Type p_NasSecurityByRef,
+                                         NasCount_Type p_NasCount) return template (omit) NG_NAS_UL_PduList_Type
+  {
+    var template (omit) NG_NAS_UL_PduList_Type v_NAS_UL_PduList := omit;
+    var template (omit) NG_NAS_UL_Pdu_Type     v_NAS_UL_Pdu := omit;
+    var octetstring v_PiggybackedOctetString := ''O;
+    var octetstring v_CipheredString := ''O;
+    var octetstring v_NonCleartextString := ''O;  // for CP Service Req
+    var octetstring v_CleartextString := ''O;  // for CP Service Req
+    var NG_NasEmu_DecodedNasPduUL_Type v_DecodedNasPduUL;
+
+    if (ischosen(p_NAS_UL_Message.ul_Nas_Transport)) {
+      if (p_NAS_UL_Message.ul_Nas_Transport.payloadContainerType.container == tsc_PayloadContainerESMMsg) { // @sic R5w190208 sic@
+        // only decode if ESM Msg (other container types must be decoded in test case)
+        v_PiggybackedOctetString := p_NAS_UL_Message.ul_Nas_Transport.payload.payload;
+      }
+    } else if (ischosen(p_NAS_UL_Message.security_Mode_Complete)) {
+        if (ispresent(p_NAS_UL_Message.security_Mode_Complete.nasMsg)) {
+          // In this case, the value will be unciphered (as the whole message is ciphered)
+          v_PiggybackedOctetString := p_NAS_UL_Message.security_Mode_Complete.nasMsg.replayedNASMsgContainerValue;
+        }
+    } else if (ischosen(p_NAS_UL_Message.registration_Request)) {
+      if (ispresent(p_NAS_UL_Message.registration_Request.nasMsg)) {
+        v_CipheredString := p_NAS_UL_Message.registration_Request.nasMsg.replayedNASMsgContainerValue;
+      }
+    } else if (ischosen(p_NAS_UL_Message.service_Request)) {
+      if (ispresent(p_NAS_UL_Message.service_Request.nasMsg)) {
+        v_CipheredString := p_NAS_UL_Message.service_Request.nasMsg.replayedNASMsgContainerValue;
+      }
+    } else if (ischosen(p_NAS_UL_Message.deregistration_RequestMO)) {  // @sic R5-245493 sic@
+      if (ispresent(p_NAS_UL_Message.deregistration_RequestMO.nasMsg)) {
+        v_CipheredString := p_NAS_UL_Message.deregistration_RequestMO.nasMsg.replayedNASMsgContainerValue;
+      }
+    } else if (ischosen(p_NAS_UL_Message.cp_Service_Request)) {  // @sic R5s201387 Baseline Moving sic@
+      // This doesn't contain the whole NAS msg, so must be treated separately
+      if (ispresent(p_NAS_UL_Message.cp_Service_Request.cIoTSmallDataContainer)) {  // if this is present, nothing else will be
+        v_NonCleartextString := p_NAS_UL_Message.cp_Service_Request.cIoTSmallDataContainer.encodedstring;
+        if (p_NasSecurityByRef.SecurityStarted) {
+        // if security not started, do nothing and leave piggybacked msg as omit, else...
+          // Decipher NAS container
+          v_NonCleartextString := fx_NG_NasDeciphering(v_NonCleartextString,
+                                         p_NasSecurityByRef.Ciphering.Algorithm,
+                                         p_NasSecurityByRef.Ciphering.K_NAS,
+                                         p_NasCount,
+                                         p_NasSecurityByRef.BearerId);
+          // replace this IE with the unciphered version
+          p_NAS_UL_Message.cp_Service_Request.cIoTSmallDataContainer.encodedstring := v_NonCleartextString;
+          // now return this whole message as the piggybacked message (all is now decoded and deciphered)
+          v_NAS_UL_PduList[0].Msg := p_NAS_UL_Message;
+          v_NAS_UL_PduList[0].PiggybackedPduList := omit;
+        }
+      } else if (ispresent(p_NAS_UL_Message.cp_Service_Request.nasMsg)) {
+        v_NonCleartextString := p_NAS_UL_Message.cp_Service_Request.nasMsg.replayedNASMsgContainerValue;
+        if (p_NasSecurityByRef.SecurityStarted) {
+        // if security not started, do nothing and leave piggybacked msg as omit, else...
+          // Decipher NAS container
+          v_NonCleartextString := fx_NG_NasDeciphering(v_NonCleartextString,
+                                         p_NasSecurityByRef.Ciphering.Algorithm,
+                                         p_NasSecurityByRef.Ciphering.K_NAS,
+                                         p_NasCount,
+                                         p_NasSecurityByRef.BearerId);
+          // remove this IE from the whole message
+          p_NAS_UL_Message.cp_Service_Request.nasMsg := omit;
+          // re-encode the message (now only the cleartext part)
+          v_CleartextString := bit2oct(encvalue(p_NAS_UL_Message));
+          // then put these 2 parts together so the whole message can be decoded
+          v_PiggybackedOctetString := v_CleartextString & v_NonCleartextString;
+        }
+      }
+    } else {
+      // NAS message does not contain piggybacked NAS message or decoding must be done in test case
+    }
+
+    if (lengthof(v_CipheredString) > 0) {
+    // Only for those initial NAS messages with a ciphered NAS message container
+      if (p_NasSecurityByRef.SecurityStarted) {
+        // if security not started, do nothing and leave piggybacked msg as omit, else...
+        // Decipher complete NAS message
+        v_PiggybackedOctetString := fx_NG_NasDeciphering(v_CipheredString,
+                                         p_NasSecurityByRef.Ciphering.Algorithm,
+                                         p_NasSecurityByRef.Ciphering.K_NAS,
+                                         p_NasCount,
+                                         p_NasSecurityByRef.BearerId);
+      }
+    }
+    
+    // Now decode piggybacked message, if there is one (or more)
+    if (lengthof(v_PiggybackedOctetString) > 0) {
+
+      v_DecodedNasPduUL := f_NG_NasEmu_DecodeMsg(v_PiggybackedOctetString);
+      if (ischosen(v_DecodedNasPduUL.Invalid)) {
+        // do nothing i.e. keep v_NAS_UL_Pdu as omit
+      } else {
+        v_NAS_UL_Pdu.Msg := v_DecodedNasPduUL.Msg;
+        // recursive call: check whether piggybacked message contains further piggybacked messages
+        v_NAS_UL_Pdu.PiggybackedPduList := f_NG_NasEmu_DecodePiggybacked(v_DecodedNasPduUL.Msg, p_NasSecurityByRef, p_NasCount);
+      }
+      v_NAS_UL_PduList[0] := v_NAS_UL_Pdu;      // only one PDU piggybacked considered
+    }
+    return v_NAS_UL_PduList;
+  }
+
+  /*
+   * @desc      encode piggybacked (GSM) message and add it to the NAS PDU
+   *            Note: if there is a piggybacked GSM message the whole IE of the GMM ie replaced (i.e. not only the octetstring)
+   * @param     p_NAS_DL_Pdu
+   * @return    octetstring
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_NasEmu_EncodePiggybacked(NG_NAS_DL_Pdu_Type p_NAS_DL_Pdu) return octetstring
+  {
+    var template (value) NG_NAS_DL_Message_Type v_NAS_DL_Message := p_NAS_DL_Pdu.Msg;
+    var NG_NAS_DL_PduList_Type v_PiggybackedPduList;
+    var NG_NAS_DL_Pdu_Type v_PiggybackedPDU;
+    var integer v_NoOfPiggybacked;
+    var octetstring v_EncodedPiggybackedMsg;
+
+    if (ispresent(p_NAS_DL_Pdu.PiggybackedPduList)) {
+      v_PiggybackedPduList := p_NAS_DL_Pdu.PiggybackedPduList;
+      v_NoOfPiggybacked := lengthof(v_PiggybackedPduList);
+    } else {
+      v_NoOfPiggybacked := 0;
+    }
+
+    if (v_NoOfPiggybacked > 0) {
+      v_PiggybackedPDU := v_PiggybackedPduList[0];
+      v_EncodedPiggybackedMsg := bit2oct(f_NG_NasEmu_EncvalueNAS(v_PiggybackedPDU.Msg));
+
+      if (v_NoOfPiggybacked > 1) {
+        f_NasEmulationError(__FILE__, __LINE__, "number of piggybacked PDUs is > 1 but only one piggy-backed message is considered");
+      }
+      if (ispresent(v_PiggybackedPDU.PiggybackedPduList)) {
+        f_NasEmulationError(__FILE__, __LINE__, "Only one piggy-backed message is considered");
+        /* piggybacking for the piggybacked PDU is ignored */
+      }
+      
+      if (ischosen(v_NAS_DL_Message.dl_Nas_Transport)) {
+        v_NAS_DL_Message.dl_Nas_Transport.payload := cs_PayloadContainer(omit, v_EncodedPiggybackedMsg);
+
+      } else {
+        f_NasEmulationError(__FILE__, __LINE__, "NAS message can not carry piggy-backed NAS PDU");
+        /* piggy backed message is ignored */
+      }
+    }
+    return bit2oct(f_NG_NasEmu_EncvalueNAS(v_NAS_DL_Message));
+  }
+
+  /*
+   * @desc      encode and cipher NAS PDU
+   * @param     p_NasSecurityByRef  (by reference)
+   * @param     p_NAS_MSG_Request
+   * @return    octetstring
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_EncodeAndCipher_NG_NasPdu(inout NG_NasSecurity_Type p_NasSecurityByRef,
+                                   NG_NAS_MSG_Request_Type p_NAS_MSG_Request) return octetstring
+  {
+    var SecurityHeaderType v_SecurityStatus := p_NAS_MSG_Request.SecurityProtection.Status;
+    var boolean v_ForceMacError := p_NAS_MSG_Request.SecurityProtection.ForceMacError;
+    var octetstring v_EncodedNasPdu;
+    var NasCount_Type v_CountDL;
+    var MessageAuthenticationCode v_CalculatedMac;
+    var NAS_SequenceNumber v_SequenceNumber;
+    var octetstring v_Octet7toN;
+
+    v_EncodedNasPdu := f_NG_NasEmu_EncodePiggybacked(p_NAS_MSG_Request.Pdu);
+
+    if (v_SecurityStatus != tsc_SHT_NoSecurityProtection) {
+
+      if (not p_NasSecurityByRef.SecurityStarted) {
+        f_NasEmulationError(__FILE__, __LINE__, "security is not started");
+        /* => PDU will not be security protected */
+
+      } else {
+        // INCREMENT DL NAS COUNT:
+        v_CountDL := f_NasSecurity_IncrementCOUNT(p_NasSecurityByRef.NasCount.DL);
+        p_NasSecurityByRef.NasCount.DL := v_CountDL;
+
+        // APPLY CIPHERING (if necessary):
+        if ((v_SecurityStatus == tsc_SHT_IntegrityProtected_Ciphered) or
+            (v_SecurityStatus == tsc_SHT_IntegrityProtected_Ciphered_NewSecurityContext)) {
+
+          v_EncodedNasPdu := fx_NG_NasCiphering(v_EncodedNasPdu,
+                                             p_NasSecurityByRef.Ciphering.Algorithm,
+                                             p_NasSecurityByRef.Ciphering.K_NAS,
+                                             v_CountDL,
+                                             p_NasSecurityByRef.BearerId);
+        }
+
+        // APPLY INTEGRITY PROTECTION:
+        v_SequenceNumber := f_NasSecurity_ExtractSNfromCOUNT(v_CountDL);
+        v_Octet7toN := v_SequenceNumber & v_EncodedNasPdu;
+        v_CalculatedMac := fx_NG_NasIntegrityAlgorithm(v_Octet7toN,
+                                                    p_NasSecurityByRef.Integrity.Algorithm,
+                                                    p_NasSecurityByRef.Integrity.K_NAS,
+                                                    v_CountDL,
+                                                    p_NasSecurityByRef.BearerId,
+                                                    tsc_DirectionDL);
+
+        if (v_ForceMacError) {
+          v_CalculatedMac := not4b v_CalculatedMac;      // O4_Type
+        }
+
+        // build up SECURITY PROTECTED NAS message
+        v_EncodedNasPdu := bit2oct(f_NG_NasEmu_EncvalueNAS(cs_NG_SecurityProtected_NasMsg(v_SecurityStatus,
+                                                                                   v_CalculatedMac,
+                                                                                   v_SequenceNumber,
+                                                                                   v_EncodedNasPdu)));
+      }
+    }
+    return v_EncodedNasPdu;
+  }
+
+  template (value) NG_NAS_MSG_Indication_Type cs_NG_NAS_MSG_Indication(NG_NasSecurity_Type p_NasSecurityByRef,
+                                                                 SecurityHeaderType p_NAS_SecurityStatus,
+                                                                 NasCount_Type p_NasCount,
+                                                                 NG_NAS_UL_Message_Type p_NAS_UL_Message) :=
+  { /* local type templates (uses f_NG_NasEmu_DecodePiggybacked) */
+    /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    SecurityProtection:= {
+      Status := p_NAS_SecurityStatus,
+      NasCount := p_NasCount
+    },
+    Pdu := {
+      Msg := p_NAS_UL_Message,
+      PiggybackedPduList := f_NG_NasEmu_DecodePiggybacked(p_NAS_UL_Message, p_NasSecurityByRef, p_NasCount)
+    }
+  };
+
+  /*
+   * @desc      Decipher and decode NAS PDU
+   *            Notes:
+   *            - When receiving a security protected NAS PDU firstly deceiphering is applied; integrity protection is applied on the deciphered NAS PDU;
+   *            - Deciphering is applied on the encoded NAS PDU only (but not on any other IE of SECURITY PROTECTED NAS MESSAGE) since the SN is used for deciphering;
+   *            - if the NAS PDU is security protected (without error) the UL NAS COUNT is incremented
+   * @param     p_NasSecurityByRef  (by reference)
+   * @param     p_NAS_DedicatedInformation
+   * @return    template (value) NG_NasEmu_DecodingInfo_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NG_DecipherAndDecodeNasPdu(inout NG_NasSecurity_Type p_NasSecurityByRef,
+                                     octetstring p_NAS_DedicatedInformation) return template (value) NG_NasEmu_DecodingInfo_Type
+  {
+    var template (value) NG_NasEmu_DecodingInfo_Type v_DecodingInfo := cs_NG_DecodingInfo_Init; // NasIndication := omit, IntegrityError := false
+    var NG_NasEmu_DecodedNasPduUL_Type v_DecodedNasPduUL;
+    var octetstring v_IntegrityProtectedOctets;
+    var NG_SECURITY_PROTECTED_NAS_MESSAGE v_SecurityProtectedNasMsg;
+    var MessageAuthenticationCode v_ContainedMac;
+    var MessageAuthenticationCode v_CalculatedMac;
+    var NG_NasEmu_SN v_SequenceNumber;
+    var NG_NAS_Message v_EncodedNasPdu;
+    var NasCount_Type v_CountUL;
+    var SecurityHeaderType v_SecurityHeader;
+
+    // Decode NAS message: message is either SECURITY_PROTECTED_NAS_MESSAGE or non-protected NAS message
+    v_DecodedNasPduUL := f_NG_NasEmu_DecodeMsg(p_NAS_DedicatedInformation);
+
+    if (ischosen(v_DecodedNasPduUL.Invalid)) {
+      return v_DecodingInfo;            // v_DecodingInfo is {omit, false}
+    }
+
+    if (ischosen(v_DecodedNasPduUL.Msg.security_Protected_Nas_Message)) {     // SECURITY_PROTECTED_NAS_MESSAGE
+
+      v_SecurityProtectedNasMsg := v_DecodedNasPduUL.Msg.security_Protected_Nas_Message;
+
+      v_SecurityHeader      := v_SecurityProtectedNasMsg.securityHeaderType;
+      v_ContainedMac        := v_SecurityProtectedNasMsg.messageAuthenticationCode;
+      v_SequenceNumber      := oct2int(v_SecurityProtectedNasMsg.sequenceNumber);
+      v_EncodedNasPdu       := v_SecurityProtectedNasMsg.plainNASMessage;
+      v_CountUL             := f_NG_NasSecurity_EstimateCOUNT(p_NasSecurityByRef.NasCount.UL, v_SequenceNumber);
+
+
+      if ((not p_NasSecurityByRef.SecurityStarted) and (v_SecurityHeader != tsc_SHT_IntegrityProtected)) {
+        /* Note: A UE is allowed to transmit a security protected Reg request (Security header set to '0001'B)
+         *       at the initial registration in case the USIM used has a valid security context  */
+
+        f_NasEmulationError(__FILE__, __LINE__, "security protected PDU received but security is not started");
+        return v_DecodingInfo;            // v_DecodingInfo is {omit, false}
+
+      } else {
+        if (p_NasSecurityByRef.SecurityStarted) {
+
+          // CHECK INTEGRITY
+          v_IntegrityProtectedOctets := v_SecurityProtectedNasMsg.sequenceNumber & v_EncodedNasPdu;
+          v_CalculatedMac := fx_NG_NasIntegrityAlgorithm(v_IntegrityProtectedOctets,
+                                                      p_NasSecurityByRef.Integrity.Algorithm,
+                                                      p_NasSecurityByRef.Integrity.K_NAS,
+                                                      v_CountUL,
+                                                      p_NasSecurityByRef.BearerId,
+                                                      tsc_DirectionUL);
+          if (v_ContainedMac == v_CalculatedMac) {
+            p_NasSecurityByRef.NasCount.UL := v_CountUL;   /* write back the latest count value */
+
+          } else {
+            // UL NAS COUNT is not updated in case of integrity error
+            v_DecodingInfo.IntegrityError := true;
+          }
+
+          // DECIPHERING:
+          if ((v_SecurityHeader == tsc_SHT_IntegrityProtected_Ciphered) or
+              (v_SecurityHeader == tsc_SHT_IntegrityProtected_Ciphered_NewSecurityContext)) {
+
+              v_EncodedNasPdu := fx_NG_NasDeciphering(v_EncodedNasPdu,
+                                                 p_NasSecurityByRef.Ciphering.Algorithm,
+                                                 p_NasSecurityByRef.Ciphering.K_NAS,
+                                                 v_CountUL,
+                                                 p_NasSecurityByRef.BearerId);
+          }
+        } else {
+          // NAS security not started yet, but e.g. in case of REG REQ
+          p_NasSecurityByRef.NasCount.UL := v_CountUL;   /* write back the latest count value */
+        }
+        // Decode NAS message
+        v_DecodedNasPduUL := f_NG_NasEmu_DecodeMsg(v_EncodedNasPdu);
+        if (ischosen(v_DecodedNasPduUL.Invalid)) {
+          // Do nothing: v_DecodingInfo.NasIndication remains omit
+        } else {
+          v_DecodingInfo.NasIndication := cs_NG_NAS_MSG_Indication(p_NasSecurityByRef,
+                                                                v_SecurityHeader,
+                                                                v_CountUL,
+                                                                v_DecodedNasPduUL.Msg);
+        }
+      }
+    } else {                                                                  // non security protected PDU
+      v_DecodingInfo.NasIndication := cs_NG_NAS_MSG_Indication(p_NasSecurityByRef,
+                                                               tsc_SHT_NoSecurityProtection,
+                                                               p_NasSecurityByRef.NasCount.UL,    /* Note: NAS-Count shall be ignored by the test case
+                                                                                                  in case of non-protected messages */
+                                                               v_DecodedNasPduUL.Msg);
+    }
+    return v_DecodingInfo;
+  }
+
+  /*
+   * @desc      handle configuration of the NAS emulation (NAS_CTRL_REQ)
+   * @param     p_Port
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_NG_NasEmu_ConfigurationHandler(NG_NASEMU_CTRL_PORT p_Port,
+                                           inout NG_NasSecurity_Type p_NasSecurityByRef)
+  {
+    var NG_NAS_CTRL_REQ v_ConfigAsp;
+    var NasCountInfo_Type v_NasCountInfo;
+    
+    [] p_Port.receive(cr_NG_NAS_CTRL_Security_REQ) -> value v_ConfigAsp {          /* NAS SECURITY */
+      if (ischosen(v_ConfigAsp.Request.Security.StartRestart)) {                /* Start NAS Security */
+        p_NasSecurityByRef.SecurityStarted := true;
+        p_NasSecurityByRef.Integrity := v_ConfigAsp.Request.Security.StartRestart.Integrity;
+        p_NasSecurityByRef.Ciphering := v_ConfigAsp.Request.Security.StartRestart.Ciphering;
+        if (ispresent(v_ConfigAsp.Request.Security.StartRestart.NasCountReset)) {
+          p_NasSecurityByRef.NasCount.UL := f_NasCountInit();
+          p_NasSecurityByRef.NasCount.DL := f_NasCountInit();
+        }
+      } else {                                                                  /* Release: Reset NAS Security */
+        p_NasSecurityByRef := f_NG_NasEmu_NasSecurity_Init();
+      }
+      if (v_ConfigAsp.Common.ControlInfo.CnfFlag) {
+        p_Port.send(cs_NG_NAS_CTRL_Security_CNF);
+      }
+    }
+    [] p_Port.receive(cr_NG_NAS_CTRL_NasCount_REQ) -> value v_ConfigAsp {            /* NAS COUNT */
+      if (ischosen(v_ConfigAsp.Request.NasCount.Set)) {
+        v_NasCountInfo := v_ConfigAsp.Request.NasCount.Set;
+        if (ispresent(v_NasCountInfo.UL)) {
+          p_NasSecurityByRef.NasCount.UL := v_NasCountInfo.UL;
+        } /* else: keep as it is */
+        if (ispresent(v_NasCountInfo.DL)) {
+          p_NasSecurityByRef.NasCount.DL := v_NasCountInfo.DL;
+        } /* else: keep as it is */
+        if (v_ConfigAsp.Common.ControlInfo.CnfFlag) {
+          p_Port.send(cs_NG_NAS_CTRL_NasCountSet_CNF);
+        }
+      } else if (ischosen(v_ConfigAsp.Request.NasCount.Get)) {
+        if (v_ConfigAsp.Common.ControlInfo.CnfFlag) {
+          p_Port.send(cs_NG_NAS_CTRL_NasCountGet_CNF(p_NasSecurityByRef.NasCount));
+        }
+      }
+    }
+  }
+
+}

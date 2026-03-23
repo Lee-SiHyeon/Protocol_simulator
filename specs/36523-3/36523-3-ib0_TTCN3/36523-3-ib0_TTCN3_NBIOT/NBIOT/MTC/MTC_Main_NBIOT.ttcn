@@ -1,0 +1,137 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2018-03-17 18:33:11 +0100 (Sat, 17 Mar 2018) $
+// $Rev: 20830 $
+/******************************************************************************/
+
+module MTC_Main_NBIOT {
+
+  import from CommonDefs all;
+  import from EUTRA_Component all;
+  import from MTC_Base all;
+  import from MTC_Component_NBIOT all;
+  import from MTC_UpperTester all;
+  import from NBIOT_Component all;
+  import from NasEmu_Component_EUTRA all;
+  import from NasEmu_Component_NBIOT all;
+  import from NasEmu_Main_EUTRA all;
+  import from NasEmu_Main_NBIOT all;
+  import from UpperTesterSystemCmds all;
+
+  /*
+   * @desc      Connect all PTCs (NBIOT test cases)
+   * @param     p_System
+   * @param     p_Nbiot
+   * @param     p_Eutra
+   * @status    APPROVED (NBIOT)
+   */
+  function f_MTC_ConnectPTCs_NBIOT(SYSTEM_NBIOT p_System,
+                                   NBIOT_PTC p_Nbiot,
+                                   EUTRA_PTC p_Eutra) runs on MTC_NBIOT
+  {
+    var NASEMU_NBIOT_PTC v_NASEMU_NB_PTC;
+    var NASEMU_EUTRA_PTC v_NASEMU_PTC;
+
+    vc_Components.Nbiot := p_Nbiot;
+    vc_Components.Eutra := p_Eutra;    /* @sic R5-181279 sic@ */
+
+    if (p_Nbiot == null) {
+      FatalError (__FILE__, __LINE__, "invalid configuration");
+      mtc.stop;
+    }
+
+    // ***** MTC *****
+    f_MTC_BASE_Map(p_System);
+
+    // ***** NBIOT PTC *****
+    f_NBIOT_PTC_Map(p_System, p_Nbiot);
+    v_NASEMU_NB_PTC := f_NasEmu_CreateConnectAndMap_NBIOT(p_System, p_Nbiot);   // create NasEmu, map system ports and connect with NBIOT PTC
+    v_NASEMU_NB_PTC.start(f_NASEMU_MainLoop_NBIOT());                           // start NASEMU
+
+    // ***** EUTRA PTC *****
+    if (p_Eutra != null) {  /* @sic R5-181279 sic@ */
+      f_EUTRA_PTC_Map(p_System, p_Eutra);                // map EUTRA system ports
+      v_NASEMU_PTC := f_NasEmu_CreateConnectAndMap_EUTRA(p_System, p_Eutra);  // create NasEmu, map system ports and connect with EUTRA PTC
+      v_NASEMU_PTC.start(f_NASEMU_MainLoop_EUTRA());                          // start NASEMU
+      // FFS: Assumed IMS and IP PTCs aren't required
+    }
+
+    // ***** Connect PTCs to MTC *****
+    connect(mtc:PTC_Ut[tsc_MTC_PortIndex_NBIOT], p_Nbiot:UT);
+    if (p_Eutra != null)     {connect(mtc:PTC_Ut[tsc_MTC_PortIndex_EUTRA],    p_Eutra:UT);} /* @sic R5-181279 sic@ */
+
+    // ***** Connect NBIOT PTC to other PTCs *****
+    if (p_Eutra != null)     {connect(p_Nbiot:EUTRA,    p_Eutra:NBIOT);} /* @sic R5-181279 sic@ */
+
+    f_UT_InitialPowerOffUE(Ut);
+  }
+
+  /*
+   * @desc      stop mtc, NAS emulator, IP PTC etc. when all test case components have finished
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_MTC_StopIfFinished_NBIOT() runs on MTC_NBIOT
+  {
+    if (vc_Components.Nbiot == null and
+        (vc_Components.Eutra == null)) {      /* @sic R5-181279 sic@ */
+      f_MTC_Stop(pass);                      // 'pass' will overrule 'none' only
+    }
+  }
+
+  /*
+   * @desc      Interface to control the other components
+   * @status    APPROVED (NBIOT)
+   */
+  altstep a_PTC_Control_NBIOT() runs on MTC_NBIOT
+  { /* NOTEs:
+       - acc. to ES 201 873-1 Annex F.1.1 an error verdict shall be assignd when "running" is applied on any uninitialised component
+       - it seems that "running" cannot be used in the "[]" */
+    
+    [] any component.killed
+      { // at a component something's gone wrong and it killed itself, so have to stop everything else
+        all component.kill;
+        mtc.stop;
+      }
+    
+    [vc_Components.Nbiot != null] vc_Components.Nbiot.done
+      {
+        vc_Components.Nbiot := null;
+        fl_MTC_StopIfFinished_NBIOT();
+      }
+    [vc_Components.Eutra != null] vc_Components.Eutra.done /* @sic R5-181279 sic@ */
+      {
+        vc_Components.Eutra := null;
+        fl_MTC_StopIfFinished_NBIOT();
+      }
+  }
+
+  /*
+   * @desc      Main loop of the MTC
+   * @param     p_GuardTimer timer
+   * @status    APPROVED (NBIOT)
+   */
+  function f_MTC_MainLoop_NBIOT(timer p_GuardTimer) runs on MTC_NBIOT
+  {
+    f_MTC_BASE_Init();
+
+    while (true) {      /* mtc will be stopped by a_PTC_Control_NBIOT or due to timeout of the guard timer;
+                           => neither a_PTC_Control_NBIOT nor a_UpperTester needs to use 'repeat' */
+      alt {
+        [] a_PTC_Control_NBIOT();             // handle 'done' and 'killed' of PTCs: MTC will be stopped, when all PTCs are terminated or a fatal error occurs
+        
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_NBIOT);    // handle upper tester for PTC 1 (NBIOT)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_EUTRA);    // handle upper tester for PTC 0 (EUTRA) /* @sic R5-181279 sic@ */
+        [] a_MTC_ReceiveFromUT_SendToPTC();
+ 
+        [] p_GuardTimer.timeout {f_MTC_Stop(fail);}    /* acc. to the assumption that preamble and postamble are short compared to the testbody
+                                                          a FAIL verdict is assigned (rather than an INCONC) */
+      }
+    }
+  }
+
+}

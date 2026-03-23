@@ -1,0 +1,388 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-11-28 12:40:58 +0100 (Thu, 28 Nov 2024) $
+// $Rev: 39972 $
+/******************************************************************************/
+
+module MCX_XML_mcsecKMSInterface {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from MCX_CommonDefs all;
+  import from MCX_SecurityFunctions all;
+  import from MCX_SecurityParameters all;
+  import from MCX_XML_Encryption all;
+  import from MCX_XML_Signature all;
+  import from XSD all;
+  import from http_www_w3_org_2001_04_xmlenc  language "XSD" all;
+  import from urn_3gpp_ns_mcsecKMSInterface_1_0  language "XSD" all;
+
+  /*
+   * @desc      Add enveloped signature to the given KMS message
+   * @param     charstring
+   * @param     p_MCServiceID
+   * @param     p_InK
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_XML_SignKmsMessage(universal charstring p_EncodedKmsMessage,
+                                     charstring p_MCServiceID,
+                                     MCX_SecurityKey_Type p_InK) return universal charstring
+  {
+    var bitstring v_SigningKey := f_MCX_XML_GenerateProtectionKey(p_InK, tsc_MCX_FC_Integrity, p_MCServiceID);
+    return fx_MCX_XML_AddEnvelopedSignature(p_EncodedKmsMessage, v_SigningKey);
+  }
+
+  template (value) KmsCertificateType cs_MCX_XML_KMSCertificate(charstring p_CertURI,
+                                                                charstring p_KmsURI,
+                                                                integer p_KeyPeriodLength,
+                                                                integer p_KeyPeriodOffset,
+                                                                octetstring p_PubEncKey,
+                                                                octetstring p_PubAuthKey) :=
+  { /* 36.579-1 Table 5.5.4.10.6-1: KMS Certificate */
+    /* @status    APPROVED (MCX) */
+    id := omit,
+    isSecurityGateway := omit,
+    role := root,
+    version := "1.1.0",
+    attr := omit,
+    certUri := p_CertURI,
+    kmsUri := p_KmsURI,
+    issuer := omit,
+    validFrom := omit,
+    validTo := omit,
+    revoked := false,
+    userIdFormat := "2",
+    userKeyPeriod := p_KeyPeriodLength,
+    userKeyOffset := p_KeyPeriodOffset,
+    pubEncKey := p_PubEncKey,
+    pubAuthKey := p_PubAuthKey,
+    parameterSet := omit,
+    kmsDomainList := omit,
+    elem_list := {}
+  };
+
+  template (value) KMSMessage cs_MCX_XML_KMSMessage_KmsInit(template (value) KmsCertificateType p_KmsCertificate) :=
+  { /* @status    APPROVED (MCX) */
+    attr := omit,
+    choice := {
+      kmsInit := {
+        id := omit,
+        version := "1.0.0",
+        attr := omit,
+        choice := {
+          kmsCertificate := p_KmsCertificate
+        },
+        elem_list := {}
+      }
+    }
+  };
+
+  /*
+   * @desc      SignedKmsResponse according to 36.579-1 Table 5.5.4.10.6-1: KMS Certificate
+   * @param     p_SecurityParameters
+   * @param     p_RequestUri
+   * @param     p_MCServiceID
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_SignedKmsInitResponse(MCX_SecurityParameters_Type p_SecurityParameters,
+                                           charstring p_RequestUri,
+                                           charstring p_MCServiceID) return universal charstring
+  { /* @sic R5-242398: p_RequestUri sic@ */
+    var template (value) KmsCertificateType v_KmsCertificate := cs_MCX_XML_KMSCertificate(tsc_MCX_KMS_CertUri,
+                                                                                          tsc_MCX_KMS_Hostname,
+                                                                                          p_SecurityParameters.KeyPeriod.Length,
+                                                                                          p_SecurityParameters.KeyPeriod.Offset,
+                                                                                          p_SecurityParameters.SAKKE.PublicKey,
+                                                                                          p_SecurityParameters.ECCSI.KPAK);
+    var template (value) KMSMessage v_KMSMessage := cs_MCX_XML_KMSMessage_KmsInit(v_KmsCertificate);
+    var MCX_SecurityKey_Type v_InK := f_MCX_SecurityParameters_GetExistingKey(p_SecurityParameters, InK);
+
+    return f_MCX_SignedKmsResponse_EncodeAndSign(p_RequestUri, v_KMSMessage, p_MCServiceID, v_InK);
+  }
+
+  template (value) AbstractKeyContentType_derivations cs_MCX_XML_EncKeyContent(template (value) EncryptedKey p_EncryptedKey) :=
+  { /* @status    APPROVED (MCX) */
+    encKeyContentType := {
+      encryptedKey := p_EncryptedKey
+    }
+  };
+
+  template (value) EncryptedKey cs_MCX_XML_EncryptedKey(charstring p_CipherKeyName,
+                                                        octetstring p_CipheredKey) :=
+  { /* @status    APPROVED (MCX) */
+    encoding := omit,
+    id := omit,
+    mimeType := omit,
+    recipient := omit,
+    type_ := omit,
+    encryptionMethod := {
+      embed_values := {},
+      algorithm := tsc_XML_EncryptionAlgorithm_KW_AES256,
+      keySize := omit,
+      oAEPparams := omit,
+      elem_list := {}
+    },
+    keyInfo := {
+      embed_values := {},
+      id := omit,
+      choice_list := {
+        {
+          keyName := p_CipherKeyName
+        }
+      }
+    },
+    cipherData := {
+      choice := {
+        cipherValue := p_CipheredKey
+      }
+    },
+    encryptionProperties := omit,
+    referenceList := omit,
+    carriedKeyName := omit
+  };
+
+  /*
+   * @desc      Encrypt the given key and return EncryptedKey XML element
+   * @param     p_ToBeCipheredKey
+   * @param     p_MCServiceID
+   * @param     p_TrK
+   * @return    template (value) EncryptedKey
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_XML_EncryptedKey(octetstring p_ToBeCipheredKey,
+                                   charstring p_MCServiceID,
+                                   MCX_SecurityKey_Type p_TrK) return template (value) EncryptedKey
+  {
+    var bitstring v_CipherKey := f_MCX_XML_GenerateProtectionKey(p_TrK, tsc_MCX_FC_Confidentiality, p_MCServiceID);
+    var charstring v_CipherKeyName := f_Base64Encode(p_TrK.Id);
+    var octetstring v_CipheredKey := f_MCX_XML_EncryptKey(p_ToBeCipheredKey, v_CipherKey);
+    var template (value) EncryptedKey v_EncryptedKey := cs_MCX_XML_EncryptedKey(v_CipherKeyName, v_CipheredKey);
+    
+    return v_EncryptedKey;
+  }
+
+  template (value) KmsKeySet cs_MCX_XML_KeySet(charstring p_KmsUri,
+                                               charstring p_UserUri,
+                                               charstring p_UserId,
+                                               integer p_KeyPeriodNo,
+                                               template (value) EncryptedKey p_EncryptedUserDecryptKey,
+                                               template (value) EncryptedKey p_EncryptedUserSigningKeySSK,
+                                               template (value) EncryptedKey p_EncryptedUserPubTokenPVT) :=
+  { /* @status    APPROVED (MCX) */
+    id := omit,
+    version := "1.1.0",
+    attr := omit,
+    kmsUri := p_KmsUri,
+    certUri := omit,
+    issuer := omit,
+    userUri := p_UserUri,
+    userID := p_UserId,
+    validFrom := omit,
+    validTo := omit,
+    keyPeriodNo := p_KeyPeriodNo,
+    revoked := false,
+    userDecryptKey := cs_MCX_XML_EncKeyContent(p_EncryptedUserDecryptKey),
+    userSigningKeySSK := cs_MCX_XML_EncKeyContent(p_EncryptedUserSigningKeySSK),
+    userPubTokenPVT := cs_MCX_XML_EncKeyContent(p_EncryptedUserPubTokenPVT)
+  };
+
+  template (value) KMSMessage cs_MCX_XML_KMSMessage_KmsKeyProv(template (value) KmsKeySet p_KeySet) :=
+  { /* @status    APPROVED (MCX) */
+    attr := omit,
+    choice := {
+      kmsKeyProv := {
+        id := omit,
+        version := "1.0.0",
+        attr := omit,
+        kmsKeySet_list := {
+          p_KeySet
+        },
+        elem_list := {}
+      }
+    }
+  };
+
+  /*
+   * @desc      SignedKmsResponse according to 36.579-1 Table 5.5.4.10.8-1: KMS Key Set
+   * @param     p_SecurityParameters
+   * @param     p_RequestUri
+   * @param     p_MCServiceID
+   * @param     p_MCPTT_UID
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_XML_SignedKmsKeyProvResponse(MCX_SecurityParameters_Type p_SecurityParameters,
+                                              charstring p_RequestUri,
+                                              charstring p_MCServiceID,
+                                              octetstring p_MCPTT_UID) return universal charstring
+  { /* @sic R5-242398: p_RequestUri sic@ */
+    var MCX_SecurityKey_Type v_TrK := f_MCX_SecurityParameters_GetExistingKey(p_SecurityParameters, TrK);
+    var MCX_SecurityKey_Type v_InK := f_MCX_SecurityParameters_GetExistingKey(p_SecurityParameters, InK);
+    var charstring v_UserId := f_Base64Encode(oct2bit(p_MCPTT_UID));     /* Base64 encoded UID corresponding to the key set according to 33.180 Table D.3.3.2-1 */
+    var template (value) EncryptedKey v_EncryptedUserDecryptKey    := fl_MCX_XML_EncryptedKey(p_SecurityParameters.SAKKE.ClientRSK, p_MCServiceID, v_TrK);
+    var template (value) EncryptedKey v_EncryptedUserSigningKeySSK := fl_MCX_XML_EncryptedKey(p_SecurityParameters.ECCSI.ClientSskPvtPair.SSK, p_MCServiceID, v_TrK);
+    var template (value) EncryptedKey v_EncryptedUserPubTokenPVT   := fl_MCX_XML_EncryptedKey(p_SecurityParameters.ECCSI.ClientSskPvtPair.PVT, p_MCServiceID, v_TrK);
+
+    var template (value) KmsKeySet v_KmsKeySet := cs_MCX_XML_KeySet(tsc_MCX_KMS_Hostname,
+                                                                    p_MCServiceID,
+                                                                    v_UserId,
+                                                                    p_SecurityParameters.KeyPeriod.No,
+                                                                    v_EncryptedUserDecryptKey,
+                                                                    v_EncryptedUserSigningKeySSK,
+                                                                    v_EncryptedUserPubTokenPVT);
+    var template (value) KMSMessage v_KMSMessage := cs_MCX_XML_KMSMessage_KmsKeyProv(v_KmsKeySet);
+
+    return f_MCX_SignedKmsResponse_EncodeAndSign(p_RequestUri, v_KMSMessage, p_MCServiceID, v_InK);
+  }
+
+  template (value) SignedKmsResponse cs_MCX_XML_SignedKMSResponse(template (omit) charstring p_KmsResponseId,
+                                                                  charstring p_KmsURI,
+                                                                  charstring p_Timestamp,
+                                                                  charstring p_UserURI,
+                                                                  charstring p_ClientReqUrl,
+                                                                  template (value) KMSMessage p_KMSMessage,
+                                                                  template (value) Signature_Type p_Signature) :=
+  { /* @status    APPROVED (MCX) */
+    id := omit,
+    attr := omit,
+    kmsResponse := {
+      id := p_KmsResponseId,
+      version := omit,
+      attr := omit,
+      userUri := p_UserURI,
+      kmsUri := p_KmsURI,
+      time := p_Timestamp,
+      kmsId := omit,
+      clientReqUrl := p_ClientReqUrl,
+      kmsMessage := p_KMSMessage,
+      kmsError := omit,
+      elem_list := {}
+    },
+    signature_ := p_Signature
+  };
+
+  /*
+   * @desc      Encode and sign KMS response
+   * @param     p_ClientReqUrl
+   * @param     p_KMSMessage
+   * @param     p_MCServiceID
+   * @param     p_InK
+   * @return    universal charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SignedKmsResponse_EncodeAndSign(charstring p_ClientReqUrl,
+                                                 template (value) KMSMessage p_KMSMessage,
+                                                 charstring p_MCServiceID,
+                                                 MCX_SecurityKey_Type p_InK) return universal charstring
+  {
+    var charstring v_KeyName := f_Base64Encode(p_InK.Id);    // 33.180 clause 9.3.5
+    var charstring v_KmsResponseId := "kmsResponse";
+    var charstring v_ReferenceURI := "#" & v_KmsResponseId;
+    var template (value) SignedKmsResponse v_SignedKmsResponse := cs_MCX_XML_SignedKMSResponse(v_KmsResponseId,
+                                                                                               tsc_MCX_KMS_Hostname,
+                                                                                               f_UTC_Timestamp(),     // !!!! WORKAROUND: Mantis TTCN-3 Ticket 7999 !!!!
+                                                                                               p_MCServiceID,         // @sic R5-246643: MC service ID instead of MC ID sic@
+                                                                                               p_ClientReqUrl,
+                                                                                               p_KMSMessage,
+                                                                                               cs_MCX_XML_Signature(-, v_ReferenceURI, v_KeyName));
+    var bitstring v_Bitstring := encvalue(v_SignedKmsResponse);
+    var universal charstring v_EncodedSignedKmsResponse := f_Bit2Unichar(v_Bitstring);
+    return fl_MCX_XML_SignKmsMessage(v_EncodedSignedKmsResponse, p_MCServiceID, p_InK);
+  }
+
+  template (present) KmsRequestType cr_KmsRequest(XSD.AnyURI p_UserUri,
+                                                  XSD.AnyURI p_KsmUri,
+                                                  XSD.AnyURI p_ClientReqUrl) :=
+  { /* 36.579-1 Table 5.5.4.10.9-1: KmsRequest */
+    /* @status    APPROVED (MCX) */
+    id := ?,
+    version := "1.1.0",
+    attr := omit,
+    userUri := p_UserUri,
+    kmsUri := p_KsmUri,
+    time := ?,
+    clientId := *,
+    deviceId := *,
+    clientReqUrl := p_ClientReqUrl,
+    krrList := omit,
+    clientError := omit,
+    elem_list := {}
+  };
+
+  template (present) SignedKmsRequestType cr_SignedKmsRequest(template (present) KmsRequestType p_KmsRequest,
+                                                              template (present) Signature_Type p_Signature) :=
+  { /* 36.579-1 Table 5.5.4.10.9-1: SignedKmsRequest */
+    /* @status    APPROVED (MCX) */
+    id := *,
+    attr := omit,
+    kmsRequest := p_KmsRequest,
+    signature_ := p_Signature
+  };
+
+  /*
+   * @desc      Decode signed KMS request
+   * @param     charstring
+   * @return    SignedKmsRequestType
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SignedKmsRequest_Decode(universal charstring p_HttpBody) return SignedKmsRequestType
+  { /* p_HttpBody is declared as universal charstring as fx_XML_SetElementContent returns universal charstring */
+    var bitstring v_Bitstring := f_Unichar2Bit(p_HttpBody);
+    var SignedKmsRequest v_SignedKmsRequest;
+
+    if (decvalue(v_Bitstring, v_SignedKmsRequest) != 0) {
+      FatalError(__FILE__, __LINE__, "Can not decode SignedKmsRequest");
+    }
+    return v_SignedKmsRequest;
+  }
+
+  /*
+   * @desc      Decode and check signed KMS request
+   * @param     p_HttpBody
+   * @param     p_MCServiceID
+   * @param     p_ClientReqUrl
+   * @param     p_InK
+   * @return    boolean
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SignedKmsRequest_DecodeAndCheck(charstring p_HttpBody,
+                                                 charstring p_MCServiceID,
+                                                 charstring p_ClientReqUrl,
+                                                 MCX_SecurityKey_Type p_InK) return boolean
+  {
+    var universal charstring v_EncodedKmsRequest := p_HttpBody;    // universal charstring as fx_XML_SetElementContent returns universal charstring
+    var charstring v_KeyName := f_Base64Encode(p_InK.Id);          // 33.180 clause 9.3.5
+    var SignedKmsRequest v_ReceivedKmsRequest := f_MCX_SignedKmsRequest_Decode(p_HttpBody);
+    var SignedKmsRequest v_SignedKmsRequest;
+    var template (present) SignedKmsRequestType v_ExpectedSignedKmsRequest;
+    var XSD.AnyURI v_ReferenceURI;
+
+    // Clear Digest and Signature values in KmsRequest's Signature
+    v_EncodedKmsRequest := fx_XML_SetElementContent(v_EncodedKmsRequest, f_XPATH_ExpressionForAnyNamespaces("//SignedKmsRequest/Signature/SignedInfo/Reference[1]/DigestValue"), "");
+    v_EncodedKmsRequest := fx_XML_SetElementContent(v_EncodedKmsRequest, f_XPATH_ExpressionForAnyNamespaces("//SignedKmsRequest/Signature/SignatureValue"), "");
+
+    // Create (new) signature
+    v_EncodedKmsRequest := fl_MCX_XML_SignKmsMessage(v_EncodedKmsRequest, p_MCServiceID, p_InK);
+    v_SignedKmsRequest := f_MCX_SignedKmsRequest_Decode(v_EncodedKmsRequest);
+
+    // Check received KmsRequest against expected KmsRequest
+    v_ReferenceURI := "#" & v_SignedKmsRequest.kmsRequest.id;
+    v_ExpectedSignedKmsRequest := cr_SignedKmsRequest(cr_KmsRequest(p_MCServiceID,
+                                                                    tsc_MCX_KMS_Hostname,
+                                                                    p_ClientReqUrl),
+                                                      cr_MCX_XML_Signature(v_ReferenceURI,
+                                                                           tsc_XML_Signature_CanonicalizationAlgorithm_C14N,
+                                                                           v_KeyName,
+                                                                           v_SignedKmsRequest.signature_.signedInfo.reference_list[0].digestValue,
+                                                                           v_SignedKmsRequest.signature_.signatureValue.base));
+    return match(v_ReceivedKmsRequest, v_ExpectedSignedKmsRequest);
+  }
+
+}

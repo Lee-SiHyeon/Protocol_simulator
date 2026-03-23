@@ -1,0 +1,1626 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-04 09:21:59 +0100 (Wed, 04 Mar 2026) $
+// $Rev: 43179 $
+/******************************************************************************/
+
+module NR5GC_Handover {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from LoopbackIP all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions_CA all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_HandoverCommonFunctions all;
+  import from NR_L2_Common all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+
+  template (value) MasterKeyUpdate cs_MasterKeyUpdate(boolean p_KeySetChangeIndicator,
+                                                      NextHopChainingCount p_NextHopChainingCount,
+                                                      template (omit) octetstring p_IRAT_NASContainer := omit) :=
+  { /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+    keySetChangeIndicator := p_KeySetChangeIndicator,
+    nextHopChainingCount := p_NextHopChainingCount,
+    nas_Container := p_IRAT_NASContainer
+  };
+
+  /*
+   * @desc      Function to generate RRCConnectionReconfiguration to be used for intra-NR inter-cell HO & intra-Cell HO
+   *            Table 4.8.1-1A: RRCReconfiguration-HO
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_SIB1              (default value: omit)
+   * @param     p_SysInfo           (default value: omit)
+   * @param     p_MasterKeyUpdate   (default value: omit)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_SCellToAddModList (default value: omit)
+   * @param     p_SCellToReleaseList (default value: omit)
+   * @param     p_PDCP_Config       (default value: cs_38508_PDCP_Config)
+   * @param     p_RRCReconfiguration_v1540_IEs (default value: omit)
+   * @param     p_T304              (default value: ms1000)
+   * @return    template (value) DL_DCCH_Message
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_RRCReconfiguration_IntraNR_HO(NR_CellId_Type                                p_TargetCellId,
+                                                 RNTI_Value                                    p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                 boolean                                       p_RBConfig_KeyChange := true,
+                                                 template (omit) MeasConfig                    p_MeasConfig := omit,
+                                                 template (omit) SIB1                          p_SIB1 := omit,
+                                                 template (omit) SystemInformation             p_SysInfo := omit,
+                                                 template (omit) MasterKeyUpdate               p_MasterKeyUpdate := omit,
+                                                 template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                 template (omit) CellGroupConfig               p_CellGroupConfig := omit,
+                                                 template (omit) CellGroupConfig.sCellToAddModList p_SCellToAddModList := omit,
+                                                 template (omit) CellGroupConfig.sCellToReleaseList p_SCellToReleaseList := omit,
+                                                 template (value) PDCP_Config                   p_PDCP_Config := cs_38508_PDCP_Config,
+                                                 template (omit) RRCReconfiguration_v1540_IEs  p_RRCReconfiguration_v1540_IEs := omit,
+                                                 ReconfigurationWithSync.t304                  p_T304 := ms1000
+                                                 )
+    runs on NR5GC_PTC return template (value) DL_DCCH_Message
+  { //@sic R5-194821 - R5s200690 change 4: added p_CellGroupConfig sic@
+    //@sic R5-213445: added p_PDCP_Config R5s230308: added p_T304 sic@
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) RRCReconfiguration_v1530_IEs v_RRCReconfiguration_v1530;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) RadioBearerConfig  v_RadioBearerConfig := f_NR5GC_GetExisting_RadioBearerConfig(p_RBConfig_KeyChange, p_PDCP_Config);
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerToAddModList := f_NR5GC_GetExisting_BearerToAddModList(true_); //Initialise RLC_BearerConfig with re-establishment
+    var template (omit) octetstring v_SIB1 := omit;     //@sic R5s190795 sic@
+    var template (omit) octetstring v_SysInfo := omit;  //@sic R5s190795 sic@
+
+    //CellGroupCongfig with condition PCell_change
+    if (ispresent(p_CellGroupConfig)) {  //@sic R5s200690 change 4 sic@
+      v_CellGroupConfig := p_CellGroupConfig; // compiler warning may be ignored due to check
+    } else {
+      //CellGroupCongfig with condition PCell_change
+      v_CellGroupConfig := f_NR_GetCellGroupConfigHO ( p_TargetCellId,
+                                                       v_RLC_BearerToAddModList,
+                                                       p_RNTI_Value,
+                                                       p_RACH_ConfigDedicated,
+                                                       p_SCellToAddModList,
+                                                       p_SCellToReleaseList,
+                                                       p_T304
+                                                     );
+    }
+    if (isvalue(p_SIB1)) {
+        v_SIB1 :=  bit2oct(encvalue(p_SIB1));
+    }
+    if (isvalue(p_SysInfo)) {
+        v_SysInfo :=  bit2oct(encvalue(p_SysInfo));
+    }
+    v_RRCReconfiguration_v1530 := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_CellGroupConfig)),
+                                                                     p_MasterKeyUpdate,
+                                                                     v_SIB1,
+                                                                     v_SysInfo,
+                                                                     -,
+                                                                     p_RRCReconfiguration_v1540_IEs);
+    v_RRCReconfiguration := cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig, -, p_MeasConfig, v_RRCReconfiguration_v1530);
+    return v_RRCReconfiguration;
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraNR InterCell handover.
+   *            The function implements steps 1-16 of 38.523-3 cl 7.3.5.3.1:Sequence of intra-NR inter-cell handover
+   *            Note: By default RACH-ConfigDedictaed is not included in RRCReconfiguration => PRACH CBRA procedure is applied
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_SIB1              (default value: omit)
+   * @param     p_SysInfo           (default value: omit)
+   * @param     p_MasterKeyUpdate   (default value: omit)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell(NR_CellId_Type                       p_SourceCellId,
+                                               NR_CellId_Type                       p_TargetCellId,
+                                               RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                               boolean                              p_RBConfig_KeyChange := true,
+                                               template (omit)  MeasConfig          p_MeasConfig  := omit,
+                                               template (omit) SIB1                 p_SIB1 := omit,
+                                               template (omit) SystemInformation    p_SysInfo := omit,
+                                               template (omit) MasterKeyUpdate      p_MasterKeyUpdate := omit,
+                                               template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                               template (present) UL_DCCH_Message   p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete
+                                               ) runs on NR5GC_PTC
+  { //@sic R5-195240 sic@
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, p_RNTI_Value); //CBRA
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var NextHopChainingCount v_NCC;
+
+    if (isvalue(p_RACH_ConfigDedicated.uplink)){ //CFRA
+       v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CFRA(v_NR_PhysicalParameters);
+    }
+    if (isvalue(p_MasterKeyUpdate)){
+        v_NCC := valueof(p_MasterKeyUpdate.nextHopChainingCount);
+    } else {
+        v_NCC := tsc_NR_38508_NextHopChainingCount;
+    }
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO(p_TargetCellId,
+                                                                  p_RNTI_Value,
+                                                                  p_RBConfig_KeyChange,
+                                                                  p_MeasConfig,
+                                                                  p_SIB1,
+                                                                  p_SysInfo,
+                                                                  p_MasterKeyUpdate,
+                                                                  p_RACH_ConfigDedicated
+                                                                 );
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common(p_SourceCellId,
+                                               p_TargetCellId,
+                                               p_RNTI_Value,
+                                               p_RBConfig_KeyChange,
+                                               v_RRCReconfiguration,
+                                               v_RachProcedureConfig,
+                                               v_DRBInfoList,
+                                               -,
+                                               -,
+                                               p_RRCConnReconfigComplete,
+                                               v_NCC,
+                                               p_RACH_ConfigDedicated,
+                                               p_MeasConfig
+                                                );
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover.
+   *            The function implements step 1-16 of 38.523-3 cl. 7.3.5.3.1
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RRCReconfiguration
+   * @param     p_RachProcedureConfig
+   * @param     p_DrbInfoList
+   * @param     p_UL_GrantConfig_SourceCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common(NR_CellId_Type                               p_SourceCellId,
+                                                      NR_CellId_Type                               p_TargetCellId,
+                                                      RNTI_Value                                   p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                      boolean                                      p_RBConfig_KeyChange := true,
+                                                      template (value) DL_DCCH_Message             p_RRCReconfiguration,
+                                                      template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                      template (value) NR_DRBInfoList_Type         p_DrbInfoList,
+                                                      template (value) UL_GrantConfig_Type         p_UL_GrantConfig_SourceCell := cs_UL_GrantConfig_OnSR,
+                                                      template (value) UL_GrantConfig_Type         p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                      template (present) UL_DCCH_Message           p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete,
+                                                      NextHopChainingCount                         p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                      template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                      template (omit)  MeasConfig                  p_MeasConfig  := omit
+                                                      ) runs on NR_BASE_PTC
+  { //@sic R5-197222: added p_MeasConfig sic@
+    //@sic R5-198906: split functions sic@
+    //@sic R5s200819 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_CommonSteps1_12(p_SourceCellId,
+                                                         p_TargetCellId,
+                                                         p_RNTI_Value,
+                                                         p_RBConfig_KeyChange,
+                                                         p_RRCReconfiguration,
+                                                         p_RachProcedureConfig,
+                                                         p_DrbInfoList,
+                                                         p_UL_GrantConfig_SourceCell,
+                                                         p_UL_GrantConfig_TargetCell,
+                                                         p_RRCConnReconfigComplete,
+                                                         p_NCC,
+                                                         p_RACH_ConfigDedicated
+                                                         );
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_14(p_SourceCellId,
+                                                         p_TargetCellId,
+                                                         p_MeasConfig
+                                                         );
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps15_16(p_SourceCellId);
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraNR InterCell handover.
+   *            The function implements steps 1-16 of 38.523-3 7.3.5.3.1:Sequence of intra-NR inter-cell handover
+   *            Note: By default RACH-ConfigDedictaed is not included in RRCReconfiguration => PRACH CBRA procedure is applied
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_SIB1              (default value: omit)
+   * @param     p_SysInfo           (default value: omit)
+   * @param     p_MasterKeyUpdate   (default value: omit)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_RachProcedureConfig (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Steps1_12(NR_CellId_Type                       p_SourceCellId,
+                                                         NR_CellId_Type                       p_TargetCellId,
+                                                         RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                         boolean                              p_RBConfig_KeyChange := true,
+                                                         template (omit)  MeasConfig          p_MeasConfig  := omit,
+                                                         template (omit) SIB1                 p_SIB1 := omit,
+                                                         template (omit) SystemInformation    p_SysInfo := omit,
+                                                         template (omit) MasterKeyUpdate      p_MasterKeyUpdate := omit,
+                                                         template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                         template (omit) NR_RachProcedureConfig_Type p_RachProcedureConfig := omit  //@sic R5s240586 sic@
+                                                         ) runs on NR5GC_PTC
+  { //@sic R5s2008190 sic@
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig; //@sic R5s240586 sic@
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var NextHopChainingCount v_NCC;
+
+    if (not(isvalue(p_RachProcedureConfig))) { //@sic R5s240586 sic@
+      v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, p_RNTI_Value); //CBRA
+    }
+    else {
+      v_RachProcedureConfig := p_RachProcedureConfig;
+    }
+
+    if (isvalue(p_RACH_ConfigDedicated.uplink)){ //CFRA
+       v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CFRA(v_NR_PhysicalParameters);
+    }
+    if (isvalue(p_MasterKeyUpdate)){
+        v_NCC := valueof(p_MasterKeyUpdate.nextHopChainingCount);
+    } else {
+        v_NCC := tsc_NR_38508_NextHopChainingCount;
+    }
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO(p_TargetCellId,
+                                                                  p_RNTI_Value,
+                                                                  p_RBConfig_KeyChange,
+                                                                  p_MeasConfig,
+                                                                  p_SIB1,
+                                                                  p_SysInfo,
+                                                                  p_MasterKeyUpdate,
+                                                                  p_RACH_ConfigDedicated
+                                                                 );
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_CommonSteps1_12(p_SourceCellId,
+                                                         p_TargetCellId,
+                                                         p_RNTI_Value,
+                                                         p_RBConfig_KeyChange,
+                                                         v_RRCReconfiguration,
+                                                         v_RachProcedureConfig,
+                                                         v_DRBInfoList,
+                                                         -,
+                                                         -,
+                                                         -,
+                                                         v_NCC,
+                                                         p_RACH_ConfigDedicated );
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover steps 1 to 14
+   *            The function implements step 1-14 of 38.523-3 cl. 7.3.5.3.1
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RRCReconfiguration
+   * @param     p_RachProcedureConfig
+   * @param     p_DrbInfoList
+   * @param     p_UL_GrantConfig_SourceCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_CommonSteps1_12(NR_CellId_Type                               p_SourceCellId,
+                                                                NR_CellId_Type                               p_TargetCellId,
+                                                                RNTI_Value                                   p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                                boolean                                      p_RBConfig_KeyChange := true,
+                                                                template (value) DL_DCCH_Message             p_RRCReconfiguration,
+                                                                template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                                template (value) NR_DRBInfoList_Type         p_DrbInfoList,
+                                                                template (value) UL_GrantConfig_Type         p_UL_GrantConfig_SourceCell := cs_UL_GrantConfig_OnSR,
+                                                                template (value) UL_GrantConfig_Type         p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                                template (present) UL_DCCH_Message           p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete,
+                                                                NextHopChainingCount                         p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                                template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit
+                                                               ) runs on NR_BASE_PTC
+  { //@sic R5s200819 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps1_3(p_SourceCellId,
+                                                        p_TargetCellId,
+                                                        p_RBConfig_KeyChange,
+                                                        p_DrbInfoList
+                                                        );
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps4_9( p_SourceCellId,
+                                                         p_TargetCellId,
+                                                         p_RNTI_Value,
+                                                         p_RBConfig_KeyChange,
+                                                         p_RRCReconfiguration,
+                                                         p_RachProcedureConfig,
+                                                         p_UL_GrantConfig_SourceCell,
+                                                         p_UL_GrantConfig_TargetCell,
+                                                         p_NCC,
+                                                         p_RACH_ConfigDedicated);
+
+    // Step 10: Target Cell:    Receive RRCReconfigurationComplete
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetCellId, p_RRCConnReconfigComplete));
+
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps11_12(p_TargetCellId);  //@sic R5s210135 R5s210526 sic@
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover. Steps 1 to 3
+   *            The function implements step 2-12 of 38.523-3 cl. 7.3.5.3.1 with
+   *             1. configure C-RNTI based contention resolution in SS with minimal grant
+   *                i.e. the UE will have to raise SR to send additional/user data.
+   *             2. activate security at target cell according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   *             3. send the RRCReconfiguration to UE.
+   *             4. receive RRCReconfigurationComplete
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_DrbInfoList
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps1_3(NR_CellId_Type                                 p_SourceCellId,
+                                                               NR_CellId_Type                                 p_TargetCellId,
+                                                               boolean                                        p_RBConfig_KeyChange := true,
+                                                               template (value) NR_DRBInfoList_Type           p_DrbInfoList //DRB list to be established in the target Cell
+                                                               ) runs on NR_BASE_PTC
+  { //@sic R5-197222 sic@
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := f_NR5GC_GetRadioBearerList(p_DrbInfoList);
+
+    // Step 1: Target Cell: Configuration of DRBs
+    f_NR_SS_CommonRadioBearerConfig(p_TargetCellId, v_RadioBearerList);
+
+    // Step 2: Transfer of the PDCP Count for AM DRBs and SRBs (if applied) from source to target cell:
+    //    a)    Source Cell: Get PDCP COUNT.
+    //    b)    Target Cell: Set PDCP COUNT.
+    //    NOTE 1:   No further sending/receiving of DRB data before the HO is done.
+    //    NOTE 2:   For AM DRBs the PDCP count is maintained, for UM DRBs the PDCP count is reset. For SRBs, the PDCP count is maintained or reset depending on the RRCReconfiguration message content.
+    f_NR_SS_PdcpCount_Handover(p_SourceCellId, p_TargetCellId, v_RadioBearerList, p_RBConfig_KeyChange);
+
+    // Step 3: Inform the SS about the HO and about the source cell id.
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverInit_REQ(p_SourceCellId, p_TargetCellId));
+
+   }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover. Steps 4 to 10
+   *            The function implements step 2-12 of 38.523-3 cl. 7.3.5.3.1 with
+   *             1. configure C-RNTI based contention resolution in SS with minimal grant
+   *                i.e. the UE will have to raise SR to send additional/user data.
+   *             2. activate security at target cell according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   *             3. send the RRCReconfiguration to UE.
+   *             4. receive RRCReconfigurationComplete
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RRCReconfiguration
+   * @param     p_RachProcedureConfig
+   * @param     p_UL_GrantConfig_SourceCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps4_9(NR_CellId_Type                                 p_SourceCellId,
+                                                               NR_CellId_Type                                 p_TargetCellId,
+                                                               RNTI_Value                                     p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                               boolean                                        p_RBConfig_KeyChange := true,
+                                                               template (value) DL_DCCH_Message               p_RRCReconfiguration,
+                                                               template (value) NR_RachProcedureConfig_Type   p_RachProcedureConfig,
+                                                               template (value) UL_GrantConfig_Type           p_UL_GrantConfig_SourceCell := cs_UL_GrantConfig_OnSR,
+                                                               template (value) UL_GrantConfig_Type           p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                               NextHopChainingCount                           p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                               template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit
+                                                               )
+    runs on NR_BASE_PTC
+  { //@sic R5-197222 sic@
+    // Step 4: Target Cell: Configure RACH procedure either dedicated or C-RNTI based.
+    // Save new C-RNTI in cell configuration for p_TargetCellId
+    //@sic R5-204363: rename function to f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps4_9 and moved reception of RRCReconfigurationComplete outside sic@
+    f_NR_CellInfo_SetRNTI(p_TargetCellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_TargetCellId, p_RNTI_Value, -, tsc_NoCnfReq, tsc_FollowOnFlag);  //@sic R5s190795 R5-206369 sic@
+    f_NR_SS_RachProcedureConfigHO(p_TargetCellId, p_RachProcedureConfig, -, p_RACH_ConfigDedicated);
+
+    //Step 5: Target Cell:  Activate security.
+    if ((p_NCC > tsc_NR_38508_NextHopChainingCount) or p_RBConfig_KeyChange) { // @sic R5s190795 R5s200159 sic@
+      f_NR_SS_AS_ActivateSecurity_Current(p_TargetCellId, p_NCC);
+    } else {
+      f_NR_SS_AS_ActivateSecurity_NoRefresh(p_TargetCellId, cs_TimingInfo_Now);  //@sic R5s200102 sic@
+    }
+    // Step 6: Void
+
+    // Step 7:  Source Cell: Stop periodic TA
+    // NOTE 4:  Unless explicitly specified UL grant configuration keeps configured as per default at the source cell.
+    f_NR_ULGrantConfiguration_Common(p_SourceCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Stop, p_UL_GrantConfig_SourceCell);
+
+    // Step 8: Target Cell: Configure UL grant configuration ("OnSR", periodic TA is not started).
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, cs_TimingInfo_Now, -, -, p_UL_GrantConfig_TargetCell);
+
+    // Step 9: Source Cell: Send RRCReconfiguration
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_SourceCellId, cs_TimingInfo_Now, p_RRCReconfiguration));
+
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover. Steps 11 to 14
+   *            The function implements step 2-12 of 38.523-3 cl. 7.3.5.3.1 with
+   *             1. configure C-RNTI based contention resolution in SS with minimal grant
+   *                i.e. the UE will have to raise SR to send additional/user data.
+   *             2. activate security at target cell according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   *             3. send the RRCReconfiguration to UE.
+   *             4. receive RRCReconfigurationComplete
+   * @param     p_TargetCellId
+   * @param     p_TimingAdvance     (default value: tsc_NR_TA_Def)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps11_12( NR_CellId_Type   p_TargetCellId,
+                                                                  NR_TimingAdvanceIndex_Type p_TimingAdvance := tsc_NR_TA_Def ) runs on NR_BASE_PTC
+  { //@sic R5-197222 R5s210135 R5-253795 sic@
+
+    // Step 11: Target Cell:    Start periodic TA
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Start(-, p_TimingAdvance), -);
+
+    // Step 12: Target Cell:    Inform the SS about completion of the HO (e.g. to trigger PDCP STATUS REPORT PDU).
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverComplete_REQ(p_TargetCellId));
+
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraLTE InterCell handover. Steps 13 to 14
+   *            The function implements step 2-12 of 38.523-3 cl. 7.3.5.3.1 with
+   *             1. configure C-RNTI based contention resolution in SS with minimal grant
+   *                i.e. the UE will have to raise SR to send additional/user data.
+   *             2. activate security at target cell according to 36.508 cl. 4.6.4 Table 4.6.4-1
+   *                with keyChangeIndicator set to FALSE and nextHopChainingCount set to 0
+   *             3. send the RRCReconfiguration to UE.
+   *             4. receive RRCReconfigurationComplete
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_14(NR_CellId_Type                              p_SourceCellId,
+                                                                 NR_CellId_Type                              p_TargetCellId,
+                                                                 template (omit)  MeasConfig                 p_MeasConfig  := omit
+                                                                )
+    runs on NR_BASE_PTC
+  { //@sic R5s210135 sic@
+    var NR_MeasGapCtrl_Type    v_MeasGapCtrl;
+
+    // Step 13: Target Cell:    Re-configure RACH procedure as for initial access.
+    f_NR_SS_RachProcedureConfig_Def(p_TargetCellId);
+
+    // Step 14: Target Cell:    Configure measurement gap (if configured in the source cell or as provided in the RRCReconfiguration message)
+    //@sic R5-197222 R5s200309 change 2 sic@
+    if (isvalue(p_MeasConfig.measGapConfig)){ // MeasGap provided to UE in RRCReconfiguration
+       f_NR_SS_MeasGapCtrlConfig(p_TargetCellId, cs_NR_MeasGapCtrl_Config(p_MeasConfig.measGapConfig),cs_TimingInfo_Now);
+    } else {
+        v_MeasGapCtrl := f_NR_CellInfo_GetMeasGapCtrl(p_SourceCellId);
+        if (not(match(v_MeasGapCtrl, cs_NR_MeasGapCtrl_None))){  //Or MeasGap started in the source cell => to be continued in the target cell
+            f_NR_SS_MeasGapCtrlConfig(p_TargetCellId, v_MeasGapCtrl, cs_TimingInfo_Now);
+        }
+    }
+  }
+
+  /*
+   * @desc      Function for performing SS reconfiguration at IntraLTE InterCell handover.
+   *            The function implements step 15-16 of 38.523-3 cl. 7.3.5.1
+   * @param     p_SourceCellId
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps15_16(NR_CellId_Type p_SourceCellId) runs on NR_BASE_PTC
+  {
+    var IntegerList_Type v_DrbIdList := f_NR_GetActiveDRBs(p_SourceCellId);  //List of DRBs to release in the Source cell
+
+    // Step 15: Source Cell:    Reset SRBs and release DRBs.
+    f_NR_SS_SRBs_DRBs_Release(p_SourceCellId, cs_TimingInfo_Now, v_DrbIdList);
+    f_NR_SS_SRBs_DRBs_Config(p_SourceCellId, cs_TimingInfo_Now, omit); //@sic R5s200309 change 4 sic@
+
+    // Step 16: Source Cell:    Release MeasGapConfig configuration
+    // @sic R5-197222 sic@
+    f_NR_SS_MeasGapCtrlConfig(p_SourceCellId, cs_NR_MeasGapCtrl_None, cs_TimingInfo_Now);  //Function will do nothing if MeasGap is not started
+   }
+
+  /*
+   * @desc      Function for performing SS reconfiguration at IntraLTE InterCell handover.
+   *            The function implements step 15-16 of 38.523-3 cl. 7.3.5.1
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_MeasConfig        (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_16(NR_CellId_Type              p_SourceCellId,
+                                                                  NR_CellId_Type              p_TargetCellId,
+                                                                  template (omit)  MeasConfig  p_MeasConfig  := omit
+   ) runs on NR_BASE_PTC
+  {  //@sic R5s210135 sic@
+     f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_14( p_SourceCellId, p_TargetCellId, p_MeasConfig );
+     f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps15_16(p_SourceCellId);
+   }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraNR IntraCell handover. Steps 1 to 7
+   *            The function implements 38.523-3 cl 7.3.5.3.2 Sequence of intra-NR intra-cell handover
+   * @param     p_NR_CellId
+   * @param     p_RRCReconfiguration
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_NR_RadioBearerList
+   * @param     p_RachProcedureConfig
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_SetGetOfPDCPCount (default value: true)
+   * @param     p_UL_GrantConfig    (default value: cs_UL_GrantConfig_OnSR)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_HO_IntraCell_Step1_8(NR_CellId_Type                         p_NR_CellId,
+                                                       template (value) DL_DCCH_Message       p_RRCReconfiguration,
+                                                       boolean                                p_RBConfig_KeyChange := true,
+                                                       template (value) NR_RadioBearerList_Type   p_NR_RadioBearerList,
+                                                       template (value) NR_RachProcedureConfig_Type   p_RachProcedureConfig,
+                                                       RNTI_Value                             p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                       template (omit) MeasConfig             p_MeasConfig := omit,
+                                                       NextHopChainingCount                   p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                       template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                       boolean p_SetGetOfPDCPCount := true,
+                                                       template (omit) UL_GrantConfig_Type    p_UL_GrantConfig := cs_UL_GrantConfig_OnSR
+                                                       ) runs on NR_BASE_PTC return SubFrameTiming_Type
+  { //Added p_SetGetOfPDCPCount to be set to false in PDCP tc with TM mode
+    // @sic R5s220825: deleted p_TimingInfo sic@
+    // @sic R5s230904: added p_UL_GrantConfig sic@
+    var SubFrameTiming_Type v_Timing;
+    var IntegerList_Type v_DrbIdList := f_NR_GetActiveDRBs(p_NR_CellId);  // List of DRBs to release in the cell
+
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList;
+    var NR_SecurityParams_Type v_RRC_SecurityParams;
+
+    // Step 1. Before T: Get PDCP count for AM DRBs and SRBs (if applied).
+    // Not needed in PDCP tc with PDCP configured in TM mode
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_NR_CellId, p_NR_RadioBearerList, p_RBConfig_KeyChange); //@sic R5s220123 sic@
+    // @sic R5s191200 R5s201150 sic@
+
+   /* For intra cell HO the HO procedure and the SS configuration must be executed with timing info.
+    * This is to make sure SS reconfiguration is done properly and in time before UE access the new cell. */
+    v_Timing := f_NR_GetNextSendOccasion_DL(p_NR_CellId, tsc_NR_DelayBeforeIntraCellHO);     // @sic R5s220825 sic@
+
+    //Step 2 At T: Send RRCReconfiguration.
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_NR_CellId, cs_TimingInfo_NR(v_Timing), p_RRCReconfiguration));
+    /* Note: current implementation releases SRBs and reconfigures C-RNTI 5ms after sending the RRCConnectionReconfiguration
+       => RLC ACK is not taken into consideration */
+
+    //Step 3 At T + 5ms: Release SRBs and DRBs.
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(v_Timing, 5);   // add 5ms
+    f_NR_SS_SRBs_DRBs_Release(p_NR_CellId, cs_TimingInfo_NR(v_Timing), v_DrbIdList, tsc_NoCnfReq, tsc_FollowOnFlag);   //@sic R5-206369 sic@
+
+    // Step 4 At T + 5ms: Configure RACH procedure either dedicated or C-RNTI based.
+    // NOTE: Since the RACH procedure may require a new C-RNTI to be used it cannot be configured before sending out the RRCReconfiguration.
+    // NOTE 2: The FollowOnFlag is set to true in the ASPs reconfiguring the RadioBearerList (step 3) and C-RNTI (step 4).
+    f_NR_SS_C_RNTI_Config(p_NR_CellId, p_RNTI_Value, cs_TimingInfo_NR(v_Timing), tsc_NoCnfReq, tsc_FollowOnFlag); //@sic R5s190747 change 5.3 R5-206369 sic@
+    f_NR_SS_RachProcedureConfigHO(p_NR_CellId, p_RachProcedureConfig, cs_TimingInfo_NR(v_Timing), p_RACH_ConfigDedicated);
+    f_NR_CellInfo_SetRNTI(p_NR_CellId, p_RNTI_Value);
+
+    // Step 5 At T + 5ms: (Re-)configure measurement gap if provided in the RRCReconfiguration message.
+    // @sic R5-197222 sic@
+    if (isvalue(p_MeasConfig.measGapConfig)) {
+        f_NR_SS_MeasGapCtrlConfig(p_NR_CellId, cs_NR_MeasGapCtrl_Config(p_MeasConfig.measGapConfig), cs_TimingInfo_NR(v_Timing)); //compiler warning may be ignored due to check
+    }
+
+    // Step 6 At T + 10ms: (Re-) configure SRBs and DRBs.
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(v_Timing, 5);   // add 5ms
+    f_NR_SS_SRBs_DRBs_Config(p_NR_CellId, cs_TimingInfo_NR(v_Timing), p_NR_RadioBearerList);
+
+    // Step 7 At T + 10ms:  Restore the PDCP count for AM DRBs and SRBs (if applied).
+    //NOTE 2:   For AM DRBs the PDCP count is maintained while for UM DRBs the PDCP count is reset. For SRBs, the PDCP count is maintained or reset depending on the  RRCReconfiguration message content
+    // Not needed in PDCP tc with PDCP configured in TM mode
+    if (p_SetGetOfPDCPCount){
+        f_NR_SS_PdcpCount_Set(p_NR_CellId, v_NR_PdcpCountInfoList, cs_TimingInfo_NR(v_Timing)); // @sic R5s191200_r2 sic@
+    }
+   // Step 8 At T + 10ms: Re-establish security, disable TA transmission.
+   // NOTE 2:   For AM DRBs the PDCP count is maintained while for SRBs and UM DRBs the PDCP count is reset to 0.
+   if ((p_NCC > tsc_NR_38508_NextHopChainingCount) or p_RBConfig_KeyChange) { // @sic R5s191200 R5s200309 sic@
+      f_NR_SS_AS_ActivateSecurity_Current(p_NR_CellId, p_NCC, cs_TimingInfo_NR(v_Timing),-, v_NR_PdcpCountInfoList); //@sic R5s200754 R5s220123 sic@
+   } else {
+      v_RRC_SecurityParams := f_NR_Security_Get();
+      v_RRC_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetCurrent(p_NR_CellId, false, -, v_NR_PdcpCountInfoList); //@sic R5s220123 sic@
+      f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_NR_CellId,
+                                            v_RRC_SecurityParams.AS_Integrity,
+                                            v_RRC_SecurityParams.AS_Ciphering,
+                                            cs_TimingInfo_NR(v_Timing)); // @sic R5s191200_r2 sic@
+   }
+
+   // Disable TA transmission
+   f_NR_ULGrantConfiguration_Common(p_NR_CellId, cs_TimingInfo_NR(v_Timing), -, cs_NR_UplinkTimeAlignment_Stop, p_UL_GrantConfig);
+
+   return v_Timing;  // @sic R5s220825 sic@
+  }
+
+  /*
+   * @desc      Function for performing SS and UE configuration at IntraNR IntraCell handover. Steps 9 to 10
+   *            The function implements 38.523-3 cl 7.3.5.2
+   * @param     p_NR_CellId
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR5GC_508RRC_IntraNR_HO_IntraCell_Step9_10 (NR_CellId_Type p_NR_CellId
+                                                         )runs on NR_BASE_PTC
+  {
+    //Step 8 (after step 7) Receive RRCReconfigurationComplete.
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_NR_CellId, cr_38508_RRCReconfigurationComplete));
+
+    //Step 9 (after step 8) Re-configure RACH procedure as for initial access, enable TA transmissions.
+    //NOTE 4: The FollowOnFlag is set to true in the ASP reconfiguring RACH.
+    f_NR_SS_RachProcedureConfig_Def(p_NR_CellId, -, tsc_NoCnfReq, tsc_FollowOnFlag); //@sic R5-206369 sic@
+    // enable TA transmissions
+    f_NR_ULGrantConfiguration_Common(p_NR_CellId, -, -, cs_NR_UplinkTimeAlignment_Start, cs_UL_GrantConfig_OnSR);
+  }
+
+  /*
+   * @desc      Transmit Reconfiguration message and reconfigure SS for Intra NR intra cell handover
+   * @param     p_NR_CellId
+   * @param     p_DRBId
+   * @param     p_RLC_BearerConfigList
+   * @param     p_PDCP_Config
+   * @param     p_SS_Drb_ConfigList (default value: omit)
+   * @param     p_OmitRecoverPDCP   (default value: false)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_ReestablishPDCP   (default value: false)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_RLC_ReconfigurationHO(NR_CellId_Type p_NR_CellId,
+                                      DRB_Identity p_DRBId,
+                                      template (value) NR_RLC_BearerToAddModList_Type p_RLC_BearerConfigList,
+                                      template (value) PDCP_Config p_PDCP_Config,
+                                      template (omit) NR_RadioBearerList_Type p_SS_Drb_ConfigList:= omit,
+                                      boolean p_OmitRecoverPDCP := false,
+                                      template (omit) CellGroupConfig p_CellGroupConfig := omit,
+                                      boolean p_ReestablishPDCP := false
+                                      ) runs on NR5GC_PTC return SubFrameTiming_Type
+  { //@sic R5-194296 R5-204512 R5s221105: p_SS_Drb_Config updated to a list p_SS_Drb_ConfigList sic@
+     //@sic R5-231905: added p_ReestablishPDCP sic@
+     var SubFrameTiming_Type v_Timing;
+
+    v_Timing := f_NR_RLC_ReconfigurationHO_Steps1_8( p_NR_CellId, p_DRBId, p_RLC_BearerConfigList, p_PDCP_Config, p_SS_Drb_ConfigList, p_OmitRecoverPDCP, p_CellGroupConfig, p_ReestablishPDCP);
+    f_NR5GC_508RRC_IntraNR_HO_IntraCell_Step9_10(p_NR_CellId);
+
+    return v_Timing;
+  }
+
+  /*
+   * @desc      Transmit Reconfiguration message and reconfigure SS for Intra NR intra cell handover - steps 1 to 8
+   * @param     p_NR_CellId
+   * @param     p_DRBId
+   * @param     p_RLC_BearerConfigList
+   * @param     p_PDCP_Config
+   * @param     p_SS_Drb_ConfigList (default value: omit)
+   * @param     p_OmitRecoverPDCP   (default value: false)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_ReestablishPDCP   (default value: false)
+   * @param     p_TBS               (default value: tsc_NR_Msg4GrantHO_Def)
+   * @param     p_UL_GrantConfig    (default value: cs_UL_GrantConfig_OnSR)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_RLC_ReconfigurationHO_Steps1_8(NR_CellId_Type p_NR_CellId,
+                                               DRB_Identity p_DRBId,
+                                               template (value) NR_RLC_BearerToAddModList_Type p_RLC_BearerConfigList,
+                                               template (value) PDCP_Config p_PDCP_Config,
+                                               template (omit) NR_RadioBearerList_Type p_SS_Drb_ConfigList:= omit,
+                                               boolean p_OmitRecoverPDCP := false,
+                                               template (omit) CellGroupConfig p_CellGroupConfig := omit,
+                                               boolean p_ReestablishPDCP := false,
+                                               integer p_TBS := tsc_NR_Msg4GrantHO_Def,
+                                               template (omit) UL_GrantConfig_Type p_UL_GrantConfig := cs_UL_GrantConfig_OnSR
+                                              ) runs on NR5GC_PTC return SubFrameTiming_Type
+  { //@sic R5-194296 R5-204512 R5s221105: p_SS_Drb_Config updated to a list p_SS_Drb_ConfigList sic@
+    //@sic R5-231905: added p_ReestablishPDCP sic@
+    //@sic R5-232972: added p_TBS sic@
+    //@sic R5s230904: added p_UL_GrantConfig sic@
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (omit) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var template (value) NR_RadioBearerList_Type v_SS_Drb_ConfigList; //@sic R5s221105 sic@
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig;
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_NR_CellId);
+    var SubFrameTiming_Type v_Timing;
+
+    if (ispresent(p_CellGroupConfig)) { // @sic R5s191200 sic@
+      v_CellGroupConfig := p_CellGroupConfig; // compiler warning may be ignored due to check
+    } else {
+      v_CellGroupConfig := f_NR_GetCellGroupConfigHO (p_NR_CellId, p_RLC_BearerConfigList); //tsc_C_RNTI_Value3
+    }
+
+    v_RadioBearerConfig := f_NR5GC_GetExisting_RadioBearerConfig(false, p_PDCP_Config); // RBConfig_NoKeyChange
+    if (p_OmitRecoverPDCP) { // @sic R5s200180 sic@
+        v_RadioBearerConfig.drb_ToAddModList[0].recoverPDCP := omit;
+    }
+    if (p_ReestablishPDCP) { // @sic R5-231905 sic@
+        v_RadioBearerConfig.drb_ToAddModList[0].reestablishPDCP := true_;
+    }
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_CellGroupConfig)));
+    v_RRCReconfiguration := cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig, -, -, v_V1530Ext);
+    if (isvalue(p_SS_Drb_ConfigList)) { // @sic R5s190905_r1 R5s221105 sic@
+      v_SS_Drb_ConfigList := p_SS_Drb_ConfigList; // compiler warning may be ignored due to check
+    } else {
+      v_SS_Drb_ConfigList := {cs_NR_SS_RadioBearer_AM_Test(p_DRBId, f_NR_38508_SetSNFieldLengthAM())}; // size12 or size18 for RedCap  @sic R5-227518 sic@
+    }
+    v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, tsc_C_RNTI_Value3, p_TBS);
+
+    v_Timing := f_NR5GC_508RRC_IntraNR_HO_IntraCell_Step1_8(p_NR_CellId, v_RRCReconfiguration, false, v_SS_Drb_ConfigList, v_RachProcedureConfig, tsc_C_RNTI_Value3, -, -, -, -, p_UL_GrantConfig);  //@sic R5s221105 sic@
+
+    return v_Timing;
+  }
+
+  /*
+   * @desc      Handover procedure with CA as per 38.523-3 cl 7.3.5.3.4 Sequence of intra-NR inter-cell CA handover
+   * @param     p_SourcePCellId
+   * @param     p_SourceSCellId
+   * @param     p_TargetPCellId
+   * @param     p_TargetSCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_MasterKeyUpdate   (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_508RRC_IntraNR_CA_HO_InterCell(NR_CellId_Type                       p_SourcePCellId,
+                                                  NR_CellId_Type                       p_SourceSCellId,
+                                                  NR_CellId_Type                       p_TargetPCellId,
+                                                  template (omit) NR_CellId_Type        p_TargetSCellId,
+                                                  RNTI_Value                           p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                  boolean                              p_RBConfig_KeyChange := true,
+                                                  template (omit) MasterKeyUpdate      p_MasterKeyUpdate := omit
+                                               ) runs on NR5GC_PTC
+  {
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetPCellId);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, p_RNTI_Value); //CBRA
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var NextHopChainingCount v_NCC;
+    var template (omit) CellGroupConfig.sCellToAddModList v_SCellToAddModList := omit;
+    var template (omit) CellGroupConfig.sCellToReleaseList v_SCellToReleaseList := omit;
+    var template (omit) CellGroupConfig v_SCGConfig_SCell := omit;//@sic R5s201249 sic@
+
+    if (isvalue(p_MasterKeyUpdate)){
+        v_NCC := valueof(p_MasterKeyUpdate.nextHopChainingCount);
+    } else {
+        v_NCC := tsc_NR_38508_NextHopChainingCount;
+    }
+    if (isvalue(p_TargetSCellId)) {
+        //Set sCellToAddModList with p_TargetSCellId info
+        v_SCGConfig_SCell := f_NR_GetSCGConfig_SCellAdd(valueof(p_TargetSCellId),tsc_NR_SCellIndex_1);//@sic R5s201249 sic@
+        v_SCellToAddModList := v_SCGConfig_SCell.sCellToAddModList;
+        if ((p_SourceSCellId == p_TargetPCellId) or (p_SourceSCellId == valueof(p_TargetSCellId))) { //PCell becomes SCell or SCell is the same  @sic R5s210574 sic@
+          v_SCellToReleaseList := {tsc_NR_SCellIndex_1}; //@sic R5s210079 sic@
+        }
+    } else {
+        // Release the p_SourceSCellId
+        v_SCellToReleaseList := {tsc_NR_SCellIndex_1};
+    }
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO(p_TargetPCellId,
+                                                                  p_RNTI_Value,
+                                                                  p_RBConfig_KeyChange,
+                                                                  -, -, -,
+                                                                  p_MasterKeyUpdate,
+                                                                  -, -,
+                                                                  v_SCellToAddModList,
+                                                                  v_SCellToReleaseList
+                                                                 );
+    //Steps 1 to 18.1
+    f_NR5GC_508RRC_IntraNR_CA_HO_InterCell_Common(p_SourcePCellId,
+                                                  p_SourceSCellId,
+                                                  p_TargetPCellId,
+                                                  p_TargetSCellId,
+                                                  v_SCGConfig_SCell,
+                                                  p_RNTI_Value,
+                                                  p_RBConfig_KeyChange,
+                                                  v_RRCReconfiguration,
+                                                  v_RachProcedureConfig,
+                                                  v_DRBInfoList,
+                                                  -,
+                                                  -,
+                                                  -,
+                                                  v_NCC,
+                                                  -
+                                                );
+  }
+
+  /*
+   * @desc      Handover procedure with CA steps 1 to 18.1
+                As per 38.523-3 cl 7.3.5.3.4 Sequence of intra-NR inter-cell CA handover
+   * @param     p_SourcePCellId
+   * @param     p_SourceSCellId
+   * @param     p_TargetPCellId
+   * @param     p_TargetSCellId
+   * @param     p_SCGConfig_SCell
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RRCReconfiguration
+   * @param     p_RachProcedureConfig
+   * @param     p_DrbInfoList
+   * @param     p_UL_GrantConfig_SourceCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR5GC_508RRC_IntraNR_CA_HO_InterCell_Common(NR_CellId_Type                               p_SourcePCellId,
+                                                          NR_CellId_Type                               p_SourceSCellId,
+                                                          NR_CellId_Type                               p_TargetPCellId,
+                                                          template (omit) NR_CellId_Type               p_TargetSCellId,
+                                                          template (omit) CellGroupConfig              p_SCGConfig_SCell,
+                                                          RNTI_Value                                   p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                          boolean                                      p_RBConfig_KeyChange := true,
+                                                          template (value) DL_DCCH_Message             p_RRCReconfiguration,
+                                                          template (value) NR_RachProcedureConfig_Type p_RachProcedureConfig,
+                                                          template (value) NR_DRBInfoList_Type         p_DrbInfoList,
+                                                          template (value) UL_GrantConfig_Type         p_UL_GrantConfig_SourceCell := cs_UL_GrantConfig_OnSR,
+                                                          template (value) UL_GrantConfig_Type         p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                          template (present) UL_DCCH_Message           p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete,
+                                                          NextHopChainingCount                         p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                          template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit
+                                                      ) runs on NR_BASE_PTC
+  { //@sic R5s201249: added p_SCGConfig_SCell R5-213516: added MacBearerRouting sic@
+    var SubFrameTiming_Type v_Timing;
+    var SubFrameTiming_Type v_Timing1;
+    var SubFrameTiming_Type v_Timing2;
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := f_NR5GC_GetRadioBearerList(p_DrbInfoList);
+    var IntegerList_Type v_DrbIdList:= f_NR_GetActiveDRBs(p_SourcePCellId);
+    var template (value) TimingInfo_Type v_TimingInfo;  //@sic R5s201387 sic@
+    var NR_PdcpCountInfoList_Type v_PdcpCountInfoList := {}; //@sic R5s220816 sic@
+
+    v_Timing := f_NR_GetNextSendOccasion_DL(p_SourcePCellId, 700); // 700 ms // Time for schedule of DL RRC message
+    v_Timing1 := f_SubFrameTiming_AddMilliSeconds (v_Timing, 10);  // time for Target SCell-> PCell configuration SS configuration
+    v_Timing2 := f_SubFrameTiming_AddMilliSeconds (v_Timing, 20);  // time for Target PCell SS configuration
+
+    // 1. Source PCell: Stop periodic TA.
+    // NOTE 1: Unless explicitly specified UL grant configuration keeps configured as per default at the source cell.
+    f_NR_ULGrantConfiguration_Common(p_SourcePCellId, cs_TimingInfo_NR(v_Timing), -, cs_NR_UplinkTimeAlignment_Stop, p_UL_GrantConfig_SourceCell);
+
+    // 2. Target PCell: Configure target PCell for no RACH response transmission.
+    //Calculate T in the TargetPCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourcePCellId, cs_TimingInfo_NR(v_Timing), p_TargetPCellId);
+    f_NR_SS_RachProcedureConfig(p_TargetPCellId, cs_NR_RachProcedureConfig_NoResponse, v_TimingInfo);
+
+    // 3. Source PCell: Schedule the transmission of RRCReconfiguration message to UE requesting Handover to target PCell and SCell.
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_SourcePCellId, cs_TimingInfo_NR(v_Timing), p_RRCReconfiguration, crs_MacBearerRouting(p_SourcePCellId))); //@sic R5-213516 sic@
+
+   // At time T1 if target PCell is the same as source SCell, else at time "Now", steps 4-6:
+   if (p_TargetPCellId == p_SourceSCellId) { //@sic R5-223443 R5s220590 sic@
+        //Calculate T1 in the TargetPCell
+        v_TimingInfo := f_NR_TimingOtherCell(p_SourcePCellId, cs_TimingInfo_NR(v_Timing1), p_TargetPCellId);
+        // 4.1 Source PCell: Configure from PCell to normal cell: remove source SCell from the SCell list in the source PCell
+        // 5. Target PCell: Configuration of DRBs
+        f_NR_ReconfigurePCellToNormalCell( p_SourcePCellId, tsc_PCellIndex_0, v_TimingInfo, v_DrbIdList, true);  //@sic R5s220816 sic@
+        // 4.2 Target PCell: Configure from SCell to PCell.
+        f_NR_ReconfigSCellToNormalCell(p_TargetPCellId, v_RadioBearerList, v_TimingInfo);
+   } else {
+        // At time Now, steps 5-6:
+        // 5. Target PCell: Configuration of DRBs
+        f_NR_SS_CommonRadioBearerConfig(p_TargetPCellId, v_RadioBearerList); //@sic R5s201249 sic@
+   }
+
+    //6. Transfer of the PDCP Count for AM DRBs and SRBs (if applied) from source to target PCell:
+    //   a) Source PCell: Get PDCP COUNT.
+    //   b) Target PCell: Set PDCP COUNT.
+    //   NOTE 2: No further sending/receiving of DRB data before the HO is done.
+    //   NOTE 3: For AM DRBs the PDCP count is maintained, for UM DRBs the PDCP count is reset. For SRBs, the PDCP count is maintained or reset depending on the RRCReconfiguration message content.
+    if (p_TargetPCellId == p_SourceSCellId) {
+      v_PdcpCountInfoList := f_NR_SS_PdcpCount_Handover(p_SourcePCellId, p_TargetPCellId, v_RadioBearerList, p_RBConfig_KeyChange, cs_TimingInfo_NR(v_Timing1)); //@sic R5s240414 sic@
+    } else {
+      v_PdcpCountInfoList := f_NR_SS_PdcpCount_Handover(p_SourcePCellId, p_TargetPCellId, v_RadioBearerList, p_RBConfig_KeyChange); //@sic R5s201249, R5s240414 sic@
+    }
+
+   //At time T2, steps 7-12:
+    //7. Target PCell: Inform the SS about the HO and about the source PCell id.
+    f_NR_SS_PdcpHandoverCtrl(p_TargetPCellId, cas_NR_PdcpHandoverInit_REQ(p_SourcePCellId, p_TargetPCellId, cs_TimingInfo_NR(v_Timing2)));
+
+    //8. Target PCell: Configure RACH procedure either dedicated or C-RNTI based.
+    // NOTE 4: The FollowOnFlag is set to true in the ASP reconfiguring C-RNTI
+    f_NR_CellInfo_SetRNTI(p_TargetPCellId, p_RNTI_Value);
+    //Calculate T2 in the TargetPCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourcePCellId, cs_TimingInfo_NR(v_Timing2), p_TargetPCellId);
+    if (isvalue(p_TargetSCellId)) { //@sic R5s210079 sic@
+        //@sic R5s201249 sic@
+        f_NR_CellInfo_SetRNTI(valueof(p_TargetSCellId), p_RNTI_Value);
+        f_NR_SS_C_RNTI_Config(valueof(p_TargetSCellId), p_RNTI_Value, cs_TimingInfo_NR(v_Timing2)); //@sic R5s210389 sic@
+    }
+    f_NR_SS_C_RNTI_Config(p_TargetPCellId, p_RNTI_Value, cs_TimingInfo_NR(v_Timing2), tsc_NoCnfReq, tsc_FollowOnFlag);  //@sic R5-206369, R5s210389 sic@
+    f_NR_SS_RachProcedureConfigHO(p_TargetPCellId, p_RachProcedureConfig, v_TimingInfo, p_RACH_ConfigDedicated);
+
+    //9. Target PCell: Activate security.
+    if ((p_NCC > tsc_NR_38508_NextHopChainingCount) or p_RBConfig_KeyChange) { // @sic R5s190795 R5s200159 sic@
+      f_NR_SS_AS_ActivateSecurity_Current(p_TargetPCellId, p_NCC, v_TimingInfo, -, v_PdcpCountInfoList); //@sic R5s240414 sic@
+    } else {
+      f_NR_SS_AS_ActivateSecurity_NoRefresh(p_TargetPCellId, v_TimingInfo, v_PdcpCountInfoList);  //@sic R5s200102, R5s240414 sic@
+    }
+
+    //10. Target PCell: Configure UL grant configuration ("OnSR", periodic TA is not started).
+    f_NR_ULGrantConfiguration_Common(p_TargetPCellId, v_TimingInfo, -, -, p_UL_GrantConfig_TargetCell);
+
+    //11. Target PCell: Configure Target PCell as PCell.
+    //12. Target SCell: Configure Target SCell as SCell with new PCell association.
+    //NOTE 5: The FollowOnFlag is set to true in the ASP reconfiguring PCell.
+    if (isvalue (p_TargetSCellId)) {  //@sic R5s210079 sic@
+      f_NR_ConfigPCell_AddRelSCells(p_TargetPCellId, {valueof(p_TargetSCellId)}, tsc_PCellIndex_0, v_TimingInfo, p_RNTI_Value, -, tsc_NoCnfReq, tsc_FollowOnFlag);  //@sic R5-206369 sic@
+      //Calculate T2 in the TargetSCell
+      v_TimingInfo := f_NR_TimingOtherCell(p_SourcePCellId, cs_TimingInfo_NR(v_Timing2), valueof(p_TargetSCellId));
+      f_NR_ConfigSCell(valueof(p_TargetSCellId), p_SCGConfig_SCell, v_TimingInfo); //compiler warning may be ignored due to check
+    }
+
+   // After time T2 (without activation time):
+    // 13. Target PCell: Receive RRCReconfigurationComplete.
+    // when CA is not active , make sure there is no MAC Bearer Routing ( refer step 7-8 of the test case 8.1.4.1.7.1 )
+    if(not isvalue(p_TargetSCellId)) { //@sic R5s220590 sic@
+        SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetPCellId, p_RRCConnReconfigComplete));
+    } else {
+        SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetPCellId, p_RRCConnReconfigComplete, -, crs_MacBearerRouting(p_TargetPCellId))); //@sic R5-213516 sic@
+    }
+    //14. Target Pell: Start periodic TA.
+    f_NR_ULGrantConfiguration_Common(p_TargetPCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Start, -);
+
+    //15. Target Pell: Inform the SS about completion of the HO (e.g. to trigger PDCP STATUS REPORT PDU).
+    f_NR_SS_PdcpHandoverCtrl(p_TargetPCellId, cas_NR_PdcpHandoverComplete_REQ(p_TargetPCellId));
+
+    //16. Target PCell: Re-configure RACH procedure as for initial access.
+    f_NR_SS_RachProcedureConfig_Def(p_TargetPCellId);
+
+    //17. Source PCell: If source PCell is not target SCell
+    //17.1 Reset SRBs and release DRBs.
+    if (isvalue (p_TargetSCellId)) {  //@sic R5s210079 sic@
+        if (p_SourcePCellId != valueof(p_TargetSCellId)) {
+            //17.1  Reset SRBs and release DRBs.
+            f_NR_SS_SRBs_DRBs_Release(p_SourcePCellId, cs_TimingInfo_Now, v_DrbIdList);
+            f_NR_SS_SRBs_DRBs_Config(p_SourcePCellId, cs_TimingInfo_Now, omit);
+        }
+    }
+
+    //17a. Source PCell:    If target PCell is not the same as source SCell:
+    //17a.1 Configure from PCell to normal cell: remove source SCell from the SCell list in the source PCell
+    //@sic R5-223443 R5s220590 sic@
+    if (p_TargetPCellId != p_SourceSCellId) {
+        v_DrbIdList:= f_NR_GetActiveDRBs(p_SourcePCellId);  //@sic R5s220816 sic@
+        f_NR_ReconfigurePCellToNormalCell( p_SourcePCellId, tsc_PCellIndex_0, -, v_DrbIdList, false  );  //@sic R5s220816 sic@
+    }
+
+    //18. Source SCell: If source SCell is neither target PCell nor target SCell:
+    //18.1 Release DRBs
+    //@sic R5-223443 R5s220590 sic@
+    if (not(match(p_SourceSCellId, p_TargetPCellId)) and not match(p_SourceSCellId, p_TargetSCellId)) {
+        v_PdcpCountInfoList := f_NR_SS_PdcpCount_Get(p_SourceSCellId);  //@sic R5s220816 sic@
+        if(lengthof(v_PdcpCountInfoList) > 0) {   //@sic R5s220816 sic@
+            v_DrbIdList:= f_NR_GetActiveDRBs(p_SourceSCellId);
+            f_NR_SS_SRBs_DRBs_Release(p_SourceSCellId, cs_TimingInfo_Now, v_DrbIdList);
+        }
+    }
+  }
+
+  /*
+   * @desc      Function to generate RRCConnectionReconfiguration to be used for intra-NR inter-cell DAPS HO
+   *            NOTE: The first DRB is configured as DAPS DRB
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_MasterKeyUpdate   (default value: omit)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_PDCP_Config       (default value: cs_38508_PDCP_Config)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_DRB_Id            (default value: tsc_NR_DRB1)
+   * @param     p_RRCReconfiguration_v1540_IEs (default value: omit)
+   * @return    template (value) DL_DCCH_Message
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_RRCReconfiguration_IntraNR_HO_DAPS(NR_CellId_Type                                p_TargetCellId,
+                                                      RNTI_Value                                    p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                      template (omit) MasterKeyUpdate               p_MasterKeyUpdate := omit,
+                                                      template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                      template (value) PDCP_Config                   p_PDCP_Config := cs_38508_PDCP_Config,
+                                                      boolean                                       p_RBConfig_KeyChange := true,
+                                                      DRB_Identity                                  p_DRB_Id := tsc_NR_DRB1,
+                                                      template (omit) RRCReconfiguration_v1540_IEs  p_RRCReconfiguration_v1540_IEs := omit
+                                                     )
+    runs on NR5GC_PTC return template (value) DL_DCCH_Message
+  {
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (value) RRCReconfiguration_v1530_IEs v_RRCReconfiguration_v1530;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    //Get relevant info from NR5GC_Global and build RadioBearerConfig to be included in RRCReconfiguration message
+    var template (value) RadioBearerConfig  v_RadioBearerConfig := f_NR5GC_GetExisting_RadioBearerConfig(p_RBConfig_KeyChange, p_PDCP_Config, -, true); //  @sic R5-222040 sic@
+    //Get RLC-Config from NR5GC_Global and set ReestablishRLC according to parameter
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerToAddModList; //@sic R5s230334 sic@
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+
+    if (p_RBConfig_KeyChange == true)  {  //@sic R5s230334 sic@
+      v_RLC_BearerToAddModList := f_NR5GC_GetExisting_BearerToAddModList(); //Initialise RLC_BearerConfig with no re-establishment @sic R5-222040 sic@
+      //Configure the first DRB (DRB#n) as DAPS DRB
+      v_RadioBearerConfig.drb_ToAddModList[0].daps_Config_r16 := true_;
+      v_RadioBearerConfig.drb_ToAddModList[0].reestablishPDCP := omit; //  @sic R5-222040 sic@
+    } else {//@sic R5-222043 sic@
+      v_RLC_BearerToAddModList[0]:= v_ExistingDRBs[0].RLC_Config;
+      v_RLC_BearerToAddModList[0].reestablishRLC := omit;
+      //Configure the first DRB (DRB#n) as DAPS DRB
+      v_RadioBearerConfig.drb_ToAddModList[0].daps_Config_r16 := true_;
+      v_RadioBearerConfig.drb_ToAddModList[0].recoverPDCP := omit; //@sic R5-222043 sic@
+      v_RLC_BearerToAddModList[0].servedRadioBearer.drb_Identity := p_DRB_Id; //@sic R5s230148 sic@
+    }
+
+    //CellGroupCongfig with condition PCell_change
+    v_CellGroupConfig := f_NR_GetCellGroupConfigHO (p_TargetCellId,
+                                                    v_RLC_BearerToAddModList,
+                                                    p_RNTI_Value,
+                                                    p_RACH_ConfigDedicated);
+    // Set preambleTransMax acc. Table 8.1.4.3.1.3.3-4
+    v_CellGroupConfig.spCellConfig.reconfigurationWithSync.spCellConfigCommon.uplinkConfigCommon.initialUplinkBWP.rach_ConfigCommon.setup.rach_ConfigGeneric.preambleTransMax := n200; //@sic R5s221151 sic@
+    // Set tag-Config acc. Table 8.1.4.3.1.3.3-6
+    v_CellGroupConfig.mac_CellGroupConfig.tag_Config := omit; //@sic R5-241515 sic@
+
+    v_RRCReconfiguration_v1530 := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_CellGroupConfig)),
+                                                                     p_MasterKeyUpdate,
+                                                                     omit,
+                                                                     omit,
+                                                                     -,
+                                                                     p_RRCReconfiguration_v1540_IEs); //@sic R5-235354 sic@
+
+    v_RRCReconfiguration := cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig, -, -, v_RRCReconfiguration_v1530);
+
+    return v_RRCReconfiguration;
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 1-8
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_Timing            (by reference)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RRCReconfiguration_v1540_IEs (default value: omit)
+   * @return    NR_PdcpCountInfoList_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_RRCReconfiguration_SSConfig(NR_CellId_Type p_SourceCellId,
+                                                       NR_CellId_Type p_TargetCellId,
+                                                       out SubFrameTiming_Type p_Timing,  // timing based on Source Cell @sic R5s230320 sic@
+                                                       boolean p_RBConfig_KeyChange := true,
+                                                       template (omit) RRCReconfiguration_v1540_IEs p_RRCReconfiguration_v1540_IEs := omit) runs on NR5GC_PTC return NR_PdcpCountInfoList_Type
+  {
+    var template (value) RACH_ConfigGeneric v_RACH_ConfigGeneric;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := f_NR5GC_GetRadioBearerList(v_DRBInfoList);
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var template (omit) MasterKeyUpdate v_MasterKeyUpdate := omit;
+    var SubFrameTiming_Type v_Timing1;
+    var SubFrameTiming_Type v_Timing2;
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList; //@sic R5-230116 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_SRBs; //@sic R5-230116 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_DRB; //@sic R5-230116 sic@
+    var template (value) TimingInfo_Type v_TimingInfo; //@sic R5s230023 sic@
+
+    //@sic R5s230320 sic@: v_Timing1 and v_Timing2 moved after step 0
+
+    //Acc. Table 8.1.4.3.1.3.3-1
+    v_RACH_ConfigGeneric := f_NR_CellInfo_GetRACH_ConfigGeneric(p_SourceCellId, tsc_NR_BWP_Id);
+    // @sic R5s221151 sic@ Deleted "v_RACH_ConfigGeneric.preambleTransMax := n200;"
+    if (p_RBConfig_KeyChange == true)  { v_MasterKeyUpdate := cs_MasterKeyUpdate(false, tsc_NR_38508_NextHopChainingCount); }
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO_DAPS(p_TargetCellId,
+                                                                       -,
+                                                                       v_MasterKeyUpdate,
+                                                                       cs_NR_RACH_ConfigDedicated_Uplink(cs_38508_RACH_ConfigDedicated(v_RACH_ConfigGeneric, -, f_NR_CellInfo_GetSSB_Index(p_TargetCellId))),
+                                                                       -,
+                                                                       p_RBConfig_KeyChange,
+                                                                       -,
+                                                                       p_RRCReconfiguration_v1540_IEs); //@sic R5-235354 sic@
+    // Step 0. Source Cell:     Get PDCP COUNT for the DAPS DRB and SRBs
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_SourceCellId, v_RadioBearerList, p_RBConfig_KeyChange);   //TimingInfo_Now, IncrementSRB1:=true; @sic R5s230320 sic@
+
+    p_Timing := f_NR_GetNextSendOccasion_DL(p_SourceCellId, 700);
+    v_Timing1 := f_SubFrameTiming_AddMilliSeconds (p_Timing, 5);  // time for sending RRCReconfiguration
+    v_Timing2 := f_SubFrameTiming_AddMilliSeconds (p_Timing, 10); // time for COUNT tranfer and configuration in target cell
+
+    // Step 1. Target Cell: Configuration of DRBs
+    //v_RadioBearerList[0].Config.AddOrReconfigure.RlcBearer.Config.LogicalChannelId := valueof (v_RadioBearerList[0].Config.AddOrReconfigure.RlcBearer.Config.LogicalChannelId) + 1; //Configure DRB for DAPS, @sic R5s221151, R5s230023 sic@
+    //Calculate T in the TargetCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourceCellId, cs_TimingInfo_NR(p_Timing), p_TargetCellId); //@sic R5s230023 sic@
+    f_NR_SS_CommonRadioBearerConfig(p_TargetCellId, v_RadioBearerList, v_TimingInfo); //@sic R5s230023 sic@
+
+    // Step 2. Target Cell: Configuration of Target Cell for no RACH response transmission
+    f_NR_SS_RachProcedureConfig(p_TargetCellId, cs_NR_RachProcedureConfig_NoResponse, v_TimingInfo);
+
+    // Step 3. Source Cell: Send RRCReconfiguration
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_SourceCellId, cs_TimingInfo_NR(v_Timing1), v_RRCReconfiguration));
+
+    // Step 4. Transfer of the PDCP COUNT for the SRBs (if applied) from source to target cell
+    //    Target Cell: Set PDCP COUNT.
+    //    NOTE 2:   For SRBs, the PDCP COUNT is maintained or reset depending on the RRCReconfiguration message content. If maintained, the DL PDCP COUNT for SRB1 is incremented by 1 to consider the RRCReconfiguration message sent on step 3.
+    //Calculate T2 in the TargetCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourceCellId, cs_TimingInfo_NR(v_Timing2), p_TargetCellId); //@sic R5s230023 sic@
+    v_NR_PdcpCountInfoList_SRBs := substr(v_NR_PdcpCountInfoList,0,2);
+    if (p_RBConfig_KeyChange) { // Re-establish PDCP for SRBs -> Set count to 0  @sic R5s230362 sic@
+      v_NR_PdcpCountInfoList_SRBs[0].DL.Value := int2bit(0, 32);
+      v_NR_PdcpCountInfoList_SRBs[0].UL.Value := int2bit(0, 32);
+      v_NR_PdcpCountInfoList_SRBs[1].DL.Value := int2bit(0, 32);
+      v_NR_PdcpCountInfoList_SRBs[1].UL.Value := int2bit(0, 32);
+    }
+    f_NR_SS_PdcpCount_Set(p_TargetCellId, v_NR_PdcpCountInfoList_SRBs, v_TimingInfo);  //Set count for SRB1 and SRB2 @sic R5s230023 sic@
+
+    // Step 5. Target Cell: Inform the SS about the HO and about the source cell id.
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverInit_REQ(p_SourceCellId, p_TargetCellId));
+
+    // (Step 6. Target Cell: Activate security.
+    if (p_RBConfig_KeyChange) { //  RBConfig_KeyChange =true -> ActivateSecurity_Current
+      f_NR_SS_AS_ActivateSecurity_Current(p_TargetCellId, tsc_NR_38508_NextHopChainingCount, v_TimingInfo, -, v_NR_PdcpCountInfoList); //@sic R5s230362 sic@
+    } else { //@sic R5s230362 sic@
+      f_NR_SS_AS_ActivateSecurity_NoRefresh(p_TargetCellId, v_TimingInfo);
+    }
+    // Step 7. Target Cell: Configure UL grant configuration ("OnSR", periodic TA is not started).
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, v_TimingInfo, -, -, cs_UL_GrantConfig_OnSR);//@sic R5s230023 sic@
+
+    // Step 8. Target Cell: Start periodic TA
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, v_TimingInfo, -, cs_NR_UplinkTimeAlignment_Start, -);//@sic R5s230023 sic@
+
+    //return the DRB count to be used later in the procedure
+    v_NR_PdcpCountInfoList_DRB := substr(v_NR_PdcpCountInfoList,2,1);
+    return v_NR_PdcpCountInfoList_DRB;
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 9-10
+   * @param     p_CellId
+   * @param     p_StepNo            (default value: "")
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_CheckDataPath(NR_CellId_Type p_CellId,
+                                         charstring p_StepNo := "",
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NR5GC_PTC
+  {
+    var IntegerList_Type v_DrbList;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_DrbList := f_NR_GetDRBList_ForGivenPDUSession(oct2int(v_PDUSessionInfoList[0].SessionId)); // Get list of DRBs for the first PDU session
+
+    //DAPS DRB is the first DRB of the first PDU session
+    f_NR5GC_CheckDataPath(p_CellId, f_NR5GC_GetPdnIndex(v_PDUSessionInfoList[0]), dedicatedBearer, v_DrbList[0], p_StepNo,-,-,-,-,-, p_TimingInfo);
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 11-14
+   * @param     p_TargetCellId
+   * @param     p_StepNo            (default value: "")
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_RACHProcedure_RRCReconfigurationComplete(NR_CellId_Type p_TargetCellId,
+                                                                    charstring p_StepNo := "",
+                                                                    RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                                    template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit) runs on NR_BASE_PTC
+  {
+    // Step 11. Target Cell: Configure RACH procedure either dedicated or C-RNTI based
+    // Save new C-RNTI in cell configuration for p_TargetCellId
+    f_NR5GC_DAPS_HO_RACHProcedure(p_TargetCellId, p_RNTI_Value, p_RACH_ConfigDedicated);
+
+    // Step 12. Target Cell: Receive RRCReconfigurationComplete
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetCellId, cr_38508_RRCReconfigurationComplete));
+    if (p_StepNo != "") {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, p_StepNo);
+    }
+
+    // Step 13. Target Cell: Inform the SS about completion of the HO (e.g. to trigger PDCP STATUS REPORT PDU)
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverComplete_REQ(p_TargetCellId));
+
+    // Step 14. Target Cell: Re-configure RACH procedure as for initial access
+    f_NR_SS_RachProcedureConfig_Def(p_TargetCellId);
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 14A-14C
+   * @param     p_SourceCellId
+   * @param     p_StepNo            (default value: "")
+   * @param     p_TargetCellId
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_CheckDataPath_HARQFeedback(NR_CellId_Type p_SourceCellId,
+                                                      charstring p_StepNo := "",
+                                                      NR_CellId_Type p_TargetCellId) runs on NR5GC_PTC //@sic R5s221151 sic@
+  {
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var IntegerList_Type v_DrbList;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    timer t_Watchdog := 5.0;
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_DrbList := f_NR_GetDRBList_ForGivenPDUSession(oct2int(v_PDUSessionInfoList[0].SessionId)); // Get list of DRBs for the first PDU session
+    v_QosFlowId := f_NR_GetQosFlowIdentification_ForDRBId(v_DrbList[0]); //Get the QosFlow ID information from the DRB ID
+
+    // Configure SS to report reception of HARQ ACK or NACK
+    f_NR_SS_SystemIndCtrlConfig(p_SourceCellId, cds_NR_SystemIndCtrl_UL_HARQ(enable));
+
+    // Step 14A. Source Cell: Send one IP packet on the DAPS DRB (first DRB of the first PDU session)
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_SDUList(p_SourceCellId, v_QosFlowId, {v_IPData}));
+
+    interleave { // @sic R5s230320 sic@
+      // Step 14B. Source Cell: Check that the UE transmit a positive HARQ feedback
+      [] SYSIND.receive(car_NR_SYSTEM_UL_HARQ_IND(p_SourceCellId, ack)) {
+           f_NR_PreliminaryPass(__FILE__, __LINE__, p_StepNo);
+         }
+      // Step 14C. Target Cell: Receive loopbacked IP packet
+      [] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_SDUList(p_TargetCellId, v_QosFlowId, {v_IPData})) {} //@sic R5s221151 sic@
+    }
+    f_NR_SS_SystemIndCtrlConfig(p_SourceCellId, cds_NR_SystemIndCtrl_UL_HARQ(disable)); //@sic R5s230354 sic@
+
+    t_Watchdog.stop;
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 15-17
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_StepNo            (default value: "")
+   * @param     p_AdjustULcount     (default value: true)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_SourceRelease(NR_CellId_Type p_SourceCellId,
+                                         NR_CellId_Type p_TargetCellId,
+                                         charstring p_StepNo := "",
+                                         boolean p_AdjustULcount := true) runs on NR_BASE_PTC
+  { //@sic R5-230116 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_Source; //@sic R5s230320 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_Target; //@sic R5s230320 sic@
+
+    // Step 15. Target Cell: Send RRCReconfiguration (daps_SourceRelesase) to release the Source Cell)
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_TargetCellId, cs_TimingInfo_Now, cs_38508_RRCReconfiguration_DAPS_HO_ReleaseSource));
+
+    // Step 16. Target Cell: Receive RRCReconfigurationComplete)
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetCellId, cr_38508_RRCReconfigurationComplete));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, p_StepNo);
+
+    // Step 17. Transfer of the PDCP Count for DAPS DRB from source to target cell:
+    //    a)    Source Cell: Get PDCP COUNT.
+    //    b)    Target Cell: Set PDCP COUNT.
+    v_NR_PdcpCountInfoList_Source:=f_NR_SS_PdcpCount_Get(p_SourceCellId); //@sic R5s230320 sic@
+    v_NR_PdcpCountInfoList_Target:=f_NR_SS_PdcpCount_Get(p_TargetCellId); //@sic R5s230320 sic@
+    v_NR_PdcpCountInfoList_Target[2].DL.Value := v_NR_PdcpCountInfoList_Source[2].DL.Value; //@sic R5s230320 sic@
+    v_NR_PdcpCountInfoList_Target[2].UL.Value := v_NR_PdcpCountInfoList_Source[2].UL.Value; //@sic R5s230320 sic@
+
+
+    //if Steps 14A-14C of procedure 7.3.5.3.5 took place, the UL count needs to be adjusted
+    if (p_AdjustULcount) { //For DAPS DRB, the PDCP COUNT is maintained and incremented by one in UL to consider the data exchanged in steps 14A-14C.
+      v_NR_PdcpCountInfoList_Target[2].UL.Value := int2bit((bit2int(v_NR_PdcpCountInfoList_Source[2].UL.Value) + 1), 32); //@sic R5s230025, R5s230320 sic@
+    }
+    f_NR_SS_PdcpCount_Set(p_TargetCellId, v_NR_PdcpCountInfoList_Target, cs_TimingInfo_Now);
+  }
+
+  /*
+   * @desc      Table 8.1.4.3.1.3.2-1, Steps 9-10
+   * @param     p_CellId
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_CheckDataPath_NoReply(NR_CellId_Type p_CellId) runs on NR5GC_PTC
+  {
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var IntegerList_Type v_DrbList;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    timer t_Watchdog := 1.0;
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_DrbList := f_NR_GetDRBList_ForGivenPDUSession(oct2int(v_PDUSessionInfoList[0].SessionId)); // Get list of DRBs for the first PDU session
+    v_QosFlowId := f_NR_GetQosFlowIdentification_ForDRBId(v_DrbList[0]); //Get the QosFlow ID information from the DRB ID
+
+    // Send one IP packet on the DAPS DRB (first DRB of the first PDU session)
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_SDUList(p_CellId, v_QosFlowId, {v_IPData}));
+
+    t_Watchdog.start; //@sic R5s221151 sic@
+    // Check that the UE does not loopback the IP packet
+    alt {
+      [] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_SDUList(p_CellId, v_QosFlowId, ?))
+         {
+           t_Watchdog.stop;
+           f_SetVerdict(fail,__FILE__,__LINE__,"Unexpected Packet is received at Source cell");
+         }
+      [] t_Watchdog.timeout{};
+    }
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 19-20
+   * @param     p_SourceCellId
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_SourceRelease_SSConfig(NR_CellId_Type p_SourceCellId) runs on NR_BASE_PTC
+  {
+    var IntegerList_Type v_DrbIdList := f_NR_GetActiveDRBs(p_SourceCellId);  //List of DRBs to release in the Source cell
+
+    // Step 19. Source Cell: Stop periodic TA
+    f_NR_ULGrantConfiguration_Common(p_SourceCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Stop, cs_UL_GrantConfig_OnSR);
+
+    // Step 20. Source Cell: Reset SRBs and release DRBs.
+    f_NR_SS_SRBs_DRBs_Release(p_SourceCellId, cs_TimingInfo_Now, v_DrbIdList);
+    f_NR_SS_SRBs_DRBs_Config(p_SourceCellId, cs_TimingInfo_Now, omit);
+  }
+
+  /*
+   * @desc      TS 38.523-3, 7.3.5.3.5, Steps 1-8 adapted for PDCP
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_Timing
+   * @return    NR_PdcpCountInfoList_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_RRCReconfiguration_SSConfig_PDCP(NR_CellId_Type p_SourceCellId,
+                                                            NR_CellId_Type p_TargetCellId,
+                                                            SubFrameTiming_Type p_Timing) runs on NR5GC_PTC return NR_PdcpCountInfoList_Type //@sic R5s240100 sic@
+  {
+    var template (value) RACH_ConfigGeneric v_RACH_ConfigGeneric;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := f_NR5GC_GetRadioBearerList(v_DRBInfoList);
+    var template (value) DL_DCCH_Message v_RRCReconfiguration;
+    var SubFrameTiming_Type v_Timing1;
+    var SubFrameTiming_Type v_Timing2;
+    var template (value) TimingInfo_Type v_TimingInfo; //@sic R5s230023 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList; //@sic R5-230116 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_SRBs; //@sic R5-230116 sic@
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList_DRB; //@sic R5s240100 sic@
+    var boolean v_RBConfig_KeyChange := false; // without key change  @sic R5s230334 sic@
+
+    v_Timing1 := f_SubFrameTiming_AddMilliSeconds (p_Timing, 5);  // time for sending RRCReconfiguration
+    v_Timing2 := f_SubFrameTiming_AddMilliSeconds (p_Timing, 10);  // time for sending RRCReconfiguration
+
+    //Acc. Table 7.1.3.4.3.3.3-1
+    v_RACH_ConfigGeneric := f_NR_CellInfo_GetRACH_ConfigGeneric(p_SourceCellId, tsc_NR_BWP_Id); //@sic R5s230148 sic@
+    v_RRCReconfiguration := f_NR5GC_RRCReconfiguration_IntraNR_HO_DAPS(p_TargetCellId,
+                                                                       -,
+                                                                       -, // no master key update
+                                                                       cs_NR_RACH_ConfigDedicated_Uplink(cs_38508_RACH_ConfigDedicated(v_RACH_ConfigGeneric, -, f_NR_CellInfo_GetSSB_Index(p_TargetCellId))),
+                                                                       -,
+                                                                       v_RBConfig_KeyChange,
+                                                                       tsc_NR_DRB2); // without key change  @sic R5s230148 sic@
+    // Step 0. Source Cell:     Get PDCP COUNT for the DAPS DRB and SRBs
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_SourceCellId, v_RadioBearerList, v_RBConfig_KeyChange); // without key change  @sic R5s230334 sic@
+
+    //Calculate T in the TargetCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourceCellId, cs_TimingInfo_NR(p_Timing), p_TargetCellId); //@sic R5s230023 sic@
+    // Step 1. Target Cell: Configuration of DRBs
+    f_NR_SS_CommonRadioBearerConfig(p_TargetCellId, v_RadioBearerList, v_TimingInfo); //@sic R5s230148 sic@
+
+    // Step 2. Target Cell: Configuration of Target Cell for no RACH response transmission
+    f_NR_SS_RachProcedureConfig(p_TargetCellId, cs_NR_RachProcedureConfig_NoResponse, v_TimingInfo);
+
+    // Step 3. Source Cell: Send RRCReconfiguration
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_SourceCellId, cs_TimingInfo_NR(v_Timing1), v_RRCReconfiguration));
+
+    //Calculate T + 10  in the TargetCell
+    v_TimingInfo := f_NR_TimingOtherCell(p_SourceCellId, cs_TimingInfo_NR(v_Timing2), p_TargetCellId); //@sic R5s230023 sic@
+    // Step 4. set PDCP count
+    v_NR_PdcpCountInfoList_SRBs := substr(v_NR_PdcpCountInfoList,0,2);
+    f_NR_SS_PdcpCount_Set(p_TargetCellId, v_NR_PdcpCountInfoList_SRBs, v_TimingInfo);  //Set count for SRB1 and SRB2 @sic R5s230023 sic@
+
+    // Step 5. not needed for PDCP
+
+    // Step 6. Activate security (no refresh)
+    f_NR_SS_AS_ActivateSecurity_NoRefresh(p_TargetCellId, v_TimingInfo);
+
+    // Step 7. Target Cell: Configure UL grant configuration ("OnSR", periodic TA is not started
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, v_TimingInfo, -, -, cs_UL_GrantConfig_OnSR);
+
+    // Step 8. Target Cell: Start periodic TA
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, v_TimingInfo, -, cs_NR_UplinkTimeAlignment_Start, -);
+
+    //return the DRB count to be used later in the procedure
+    v_NR_PdcpCountInfoList_DRB := substr(v_NR_PdcpCountInfoList,2,1);
+    return v_NR_PdcpCountInfoList_DRB; //@sic R5s240100 sic@
+  }
+
+  /*
+   * @desc      R5w210214r1, 3.1, Step 8
+   * @param     p_TargetCellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_DAPS_HO_RACHProcedure(NR_CellId_Type p_TargetCellId,
+                                         RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                         template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit) runs on NR_BASE_PTC
+  {
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, p_RNTI_Value); //CBRA
+
+    if (isvalue(p_RACH_ConfigDedicated.uplink)){ //CFRA
+       v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CFRA(v_NR_PhysicalParameters);
+    }
+
+    // (R5w210214r1 Step 8. Target Cell: Configure RACH procedure either dedicated or C-RNTI based)
+    // Save new C-RNTI in cell configuration for p_TargetCellId
+    f_NR_CellInfo_SetRNTI(p_TargetCellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_TargetCellId, p_RNTI_Value, -, tsc_NoCnfReq);
+    f_NR_SS_RachProcedureConfigHO(p_TargetCellId, v_RachProcedureConfig, -, p_RACH_ConfigDedicated);
+  }
+
+  /*
+   * @desc      Returns the octetstring to be encoded for Conditional RRC Reconfiguration
+   * @param     p_TargetCellId
+   * @param     p_T304              (default value: ms1000)
+   * @return    octetstring
+   * @status    APPROVED (NR5GC)
+   */
+
+  function f_NR_GenerateCondRRCReconfig_r16_Octetstring(NR_CellId_Type p_TargetCellId,
+                                                        ReconfigurationWithSync.t304 p_T304 := ms1000 // @sic R5-231579 sic@
+                                                        ) runs on NR5GC_PTC return octetstring
+  {
+    var template (value) DL_DCCH_Message v_DL_DCCH_Message; // @sic R5s220271 sic@
+    var template (value) RRCReconfiguration v_CondRRCReconfig; // @sic R5s220271 sic@
+    var octetstring v_CondRRCReconfig_Octetstring;
+
+    v_DL_DCCH_Message := f_NR5GC_RRCReconfiguration_IntraNR_HO(p_TargetCellId, // @sic R5s220271 R5s220375 R5-231579 sic@
+                                                               -, -, -, -, -,
+                                                               cs_MasterKeyUpdate(false, tsc_NR_38508_NextHopChainingCount),
+                                                               -,-,-,-,-,-,
+                                                               p_T304);    // @sic R5s230308 sic@
+    v_CondRRCReconfig := v_DL_DCCH_Message.message_.c1.rrcReconfiguration; // @sic R5s220271 sic@
+    v_CondRRCReconfig_Octetstring := bit2oct(encvalue(v_CondRRCReconfig)); // String to be encoded
+    return v_CondRRCReconfig_Octetstring;
+   }
+
+   /*
+   * @desc      Function for generating conditional hanadover configuration defined as following step 1 to step 8.
+   * @desc      Step 1. Target Cell:        Configuration of DRBs.
+   * @desc      Step 2: Target Cell:        Configure RACH procedure either dedicated or C-RNTI based.
+   * @desc      Step 3. Source Cell:        Send RRCReconfiguration.
+   * @desc      Step 4. Source Cell:        Receive RRCReconfigurationComplete.
+   * @desc      Step 5: Transfer of the PDCP Count for AM DRBs and SRBs (if applied) from source to target cell:
+                     a) Source Cell:        Get PDCP COUNT.
+                     b) Target Cell:        Set PDCP COUNT.
+   * @desc      Step 6. Target Cell:        Inform the SS about the HO and about the source cell id.
+   * @desc      Step 7. Target Cell:        Activate security.
+   * @desc      Step 8. Target Cell:        Configure UL grant configuration ("OnSR", periodic TA is not started).
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_DrbInfoList
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_RACH_ConfigDedicated (default value: omit)
+   * @param     p_RRCReconfiguration (default value: omit)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @param     p_UL_GrantConfig_TargetCell (default value: cs_UL_GrantConfig_OnSR)
+   * @param     p_NCC               (default value: tsc_NR_38508_NextHopChainingCount)
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_CHO_RRCReconfiguration_SSConfig( NR_CellId_Type p_SourceCellId,
+                                                    NR_CellId_Type p_TargetCellId,
+                                                    template (value) NR_DRBInfoList_Type p_DrbInfoList,
+                                                    RNTI_Value p_RNTI_Value := tsc_C_RNTI_Value3,
+                                                    template (omit) ReconfigurationWithSync.rach_ConfigDedicated p_RACH_ConfigDedicated := omit,
+                                                    template (omit) DL_DCCH_Message p_RRCReconfiguration:=omit,
+                                                    template (present) UL_DCCH_Message p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete,
+                                                    template (value) UL_GrantConfig_Type p_UL_GrantConfig_TargetCell := cs_UL_GrantConfig_OnSR,
+                                                    NextHopChainingCount p_NCC := tsc_NR_38508_NextHopChainingCount,
+                                                    boolean p_RBConfig_KeyChange := true
+                                                  ) runs on NR_BASE_PTC
+  {
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList := f_NR5GC_GetRadioBearerList(p_DrbInfoList);
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, p_RNTI_Value);
+
+    if (isvalue(p_RACH_ConfigDedicated.uplink)){ //CFRA
+       v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_TargetCellId);
+       v_RachProcedureConfig := cs_NR_RachProcedureConfig_CFRA(v_NR_PhysicalParameters);
+    }
+
+    //Step 1. Target Cell:        Configuration of DRBs.
+    f_NR_SS_CommonRadioBearerConfig(p_TargetCellId, v_RadioBearerList);
+
+    //Step 2: Target Cell:        Configure RACH procedure either dedicated or C-RNTI based.
+    //Save new C-RNTI in cell configuration for p_TargetCellId.
+    f_NR_CellInfo_SetRNTI(p_TargetCellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_TargetCellId, p_RNTI_Value, -, -, -);
+    f_NR_SS_RachProcedureConfigHO(p_TargetCellId, v_RachProcedureConfig, -, p_RACH_ConfigDedicated);
+
+    //Step 3. Source Cell:        Send RRCReconfiguration.
+    //Step 4. Source Cell:        Receive RRCReconfigurationComplete.
+    if (ispresent(p_RRCReconfiguration)){
+      SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_SourceCellId, cs_TimingInfo_Now, p_RRCReconfiguration)); //compiler warning may be ignored due to check
+      SRB.receive(car_NR_SRB1_RrcPdu_IND(p_SourceCellId, p_RRCConnReconfigComplete));
+    }
+
+    //Step 5: Transfer of the PDCP Count for AM DRBs and SRBs (if applied) from source to target cell:
+    //        a) Source Cell:        Get PDCP COUNT.
+    //        b) Target Cell:        Set PDCP COUNT.
+    //NOTE 1: No further sending/receiving of DRB data before the Conditional handover is done.
+    //NOTE 2: For AM DRBs the PDCP count is maintained. For SRB3 (if applied) and UM DRBs, the PDCP count is maintained or reset depending on the RRCReconfiguration message content.
+    f_NR_SS_PdcpCount_Handover(p_SourceCellId, p_TargetCellId, v_RadioBearerList, true); // @sic R5s220271 sic@
+
+    //Step 6. Target Cell:        Inform the SS about the HO and about the source cell id.
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverInit_REQ(p_SourceCellId, p_TargetCellId));
+
+    //Step 7. Target Cell:        Activate security.
+    if ((p_NCC > tsc_NR_38508_NextHopChainingCount) or p_RBConfig_KeyChange) {
+      f_NR_SS_AS_ActivateSecurity_Current(p_TargetCellId, p_NCC);
+    } else {
+      f_NR_SS_AS_ActivateSecurity_NoRefresh(p_TargetCellId, cs_TimingInfo_Now);
+    }
+
+    //Step 8. Target Cell:        Configure UL grant configuration ("OnSR", periodic TA is not started).
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, cs_TimingInfo_Now, -, -, p_UL_GrantConfig_TargetCell);
+  }
+
+  /*
+   * @desc      Function for generating RRCReconfigurationComplete and completing the handover procedure as following step 10 to step 14.
+   * @desc      Step 9. Target Cell:         Receive RRCReconfigurationComplete.
+   * @desc      Step 10.Target Cell:         Stop periodic TA.
+   * @desc      Step 11.Target Cell:         Start periodic TA.
+   * @desc      Step 12.Target Cell:         Inform the SS about completion of the HO (e.g. to trigger PDCP STATUS REPORT PDU).
+   * @desc      Step 13.Target Cell:         Re-configure RACH procedure as for initial access.
+   * @desc      Step 14.Source Cell:         Reset SRBs and release DRBs.
+   * @param     p_SourceCellId
+   * @param     p_TargetCellId
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_CHO_RRCReconfigurationComplete( NR_CellId_Type p_SourceCellId,
+                                                   NR_CellId_Type p_TargetCellId,
+                                                   template (present) UL_DCCH_Message p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete
+                                                 ) runs on NR_BASE_PTC
+  {
+    var IntegerList_Type v_DrbIdList; // @sic R5s220537 sic@
+
+    //Step 9.Target Cell:         Receive RRCReconfigurationComplete.
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_TargetCellId, p_RRCConnReconfigComplete));
+    v_DrbIdList := f_NR_GetActiveDRBs(p_SourceCellId);  //List of DRBs to release in the Source cell // @sic R5s220537 sic@
+
+    //Step 10. Source Cell:        Stop periodic TA.
+    //NOTE 1: Unless explicitly specified UL grant configuration keeps configured as per default at the source cell.
+    f_NR_ULGrantConfiguration_Common(p_SourceCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Stop, cs_UL_GrantConfig_OnSR);
+
+    //Step 11.Target Cell:         Start periodic TA.
+    f_NR_ULGrantConfiguration_Common(p_TargetCellId, cs_TimingInfo_Now, -, cs_NR_UplinkTimeAlignment_Start, -);
+
+    //Step 12.Target Cell:         Inform the SS about completion of the HO (e.g. to trigger PDCP STATUS REPORT PDU).
+    f_NR_SS_PdcpHandoverCtrl(p_TargetCellId, cas_NR_PdcpHandoverComplete_REQ(p_TargetCellId));
+
+    //Step 13.Target Cell:         Re-configure RACH procedure as for initial access.
+    f_NR_SS_RachProcedureConfig_Def(p_TargetCellId);
+
+    //Step 14.Source Cell:         Reset SRBs and release DRBs.
+    f_NR_SS_SRBs_DRBs_Release(p_SourceCellId, cs_TimingInfo_Now, v_DrbIdList);
+    f_NR_SS_SRBs_DRBs_Config(p_SourceCellId, cs_TimingInfo_Now, omit);
+  }
+
+}

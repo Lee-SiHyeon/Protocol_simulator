@@ -1,0 +1,1205 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-12 15:37:11 +0200 (Thu, 12 Jun 2025) $
+// $Rev: 41486 $
+/******************************************************************************/
+
+module NBIOT_ESM_Testcases {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_NB_Parameters all;
+  import from LoopbackIP_PacketFilterTest all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_LoopBack all;
+  import from NBIOT_NASSteps all;
+  import from NBIOT_Parameters all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_SecurityFunctions all;
+  import from NBIOT_SecuritySteps all;
+  import from NBIOT_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      To trigger an additional PDN
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_PTI
+   * @param     p_AccessPointName
+   * @param     p_APN_String
+   * @param     p_EstablishmentCause (default value: cr_EstablishmentCause_NB_Any)
+   * @param     p_DeviceValue       (default value: omit)
+   * @param     p_NSLPI             (default value: -1)
+   * @return    NAS_UL_Message_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TriggerAdditionalPDN (NBIOT_CellId_Type p_CellId,
+                                         IOT_STATE_Type p_IOT_State,
+                                         template (present) ProcedureTransactionIdentifier p_PTI,
+                                         template (present) AccessPointName p_AccessPointName,
+                                         charstring p_APN_String,
+                                         template (present) EstablishmentCause_NB_r13 p_EstablishmentCause := cr_EstablishmentCause_NB_Any,
+                                         template B1_Type p_DeviceValue := omit,
+                                         integer p_NSLPI := -1) runs on NBIOT_PTC return NAS_UL_Message_Type
+  {
+    var EPS_BearerIdentity v_EpsBearerId2 := '6'H;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var template (present) B3_Type v_PDNType := (f_GetPdnType(), '101'B);
+    var template (present) NAS_UL_Message_Type v_PDNConnectivityReq_Expected;
+    var template HeaderCompressConfig v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny ifpresent;
+    var template DeviceProperties v_DevicePropertiesEMM := cr_DeviceProperties('D'H) ifpresent;
+    var template DeviceProperties v_DevicePropertiesESM := cr_DeviceProperties('C'H) ifpresent;
+    var NBIOT_SecurityParams_Type v_SecurityParams;
+    var NasCount_Type v_NasCountUL;
+    var NB_SRB_Identity_Type v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+
+    // Cause the UE to request connectivity to an additional PDN.
+    f_UT_RequestAdditionalPDNConnectivity(UT, hex2int(v_EpsBearerId2), p_APN_String, -, -, p_NSLPI);
+
+    if (pc_HCCPCIoT and pc_IP_PDN){
+      v_HeaderCompressConfigRX := cr_HeaderCompressConfigAny;
+    }
+    if (isvalue(p_DeviceValue)) {
+      v_DevicePropertiesEMM := cr_DeviceProperties('D'H, valueof(p_DeviceValue));
+      v_DevicePropertiesESM := cr_DeviceProperties('C'H, valueof(p_DeviceValue));
+    }
+    v_PDNConnectivityReq_Expected := cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach,
+                                                                      v_PDNType,
+                                                                      p_AccessPointName,
+                                                                      v_HeaderCompressConfigRX);
+    v_PDNConnectivityReq_Expected.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier := p_PTI;
+    v_PDNConnectivityReq_Expected.pDN_CONNECTIVITY_REQUEST.esmInfoTransferFlag := omit;
+    v_PDNConnectivityReq_Expected.pDN_CONNECTIVITY_REQUEST.deviceProperties := v_DevicePropertiesESM;
+    v_SecurityParams := f_NBIOT_Security_Get();
+    
+    //Step 2a1/2b1
+    v_NAS_Ind := f_NBIOT_RRC_ConnEst_DefWithNas(p_CellId,
+                                                p_EstablishmentCause,
+                                                cr_NAS_Indication (tsc_SHT_IntegrityProtected,  // @sic R5s170962 sic@
+                                                                   cr_CONTROL_PLANE_SERVICE_REQUEST(?, -, -, -, v_DevicePropertiesEMM)));
+    
+    if (p_IOT_State == USER_PLANE) {
+      //Step 2a2
+      // The SS establishes a DRB associated with the default EPS bearer context activated during the preamble.
+      // Activate security in AS with parameters from AKA performed in preamble
+      v_NasCountUL := v_NAS_Ind.SecurityProtection.NasCount;
+      v_SecurityParams := f_NBIOT_RRC_ActivateSecurity(p_CellId, v_SecurityParams, v_NasCountUL);
+      f_NBIOT_Security_Set(v_SecurityParams);
+      f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Est (p_CellId);
+    }
+    //Step 2a3/2b2
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                   v_SrbId,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_SERVICE_ACCEPT)));
+    //Step 2a4/2b3
+    SRB.receive (car_NB_SRB_NasPdu_IND(p_CellId,
+                                       v_SrbId,
+                                       cr_NAS_Indication (tsc_SHT_IntegrityProtected_Ciphered,  // @sic R5s170962 sic@
+                                                          v_PDNConnectivityReq_Expected))) -> value v_ReceivedAsp;
+    return v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg;
+  }
+
+  /*
+   * @desc      Repeated steps in 22.6.5 to activate and immediately deactivate a bearer
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_EpsBearerId
+   * @param     p_PTI
+   * @param     p_APN
+   * @param     p_PDNIndex
+   * @param     p_PcoFromUE
+   * @param     p_VerdictReqd       (default value: "")
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_5_ActivateAndDeactivateDefaultBearer(NBIOT_CellId_Type p_CellId,
+                                                           IOT_STATE_Type p_IOT_State,
+                                                           EPS_BearerIdentity p_EpsBearerId,
+                                                           ProcedureTransactionIdentifier p_PTI,
+                                                           template (value) AccessPointName p_APN,
+                                                           PDN_Index_Type p_PDNIndex,
+                                                           template (omit) ExtdProtocolConfigOptions p_PcoFromUE,
+                                                           charstring p_VerdictReqd := "") runs on NBIOT_PTC
+  {
+    var template (omit) HeaderCompressConfig v_HeaderCompressConfigTX := omit;
+    var NB_SRB_Identity_Type v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+    var integer v_DRB := tsc_DRB2; // @sic R5s180649 sic@
+    var NB_RadioBearerId_Type v_RB;
+    
+    v_RB := {Drb:= v_DRB}; // @sic R5s180574 sic@
+    
+    if (pc_HCCPCIoT and pc_IP_PDN){
+      v_HeaderCompressConfigTX := crs_HeaderCompressConfigZeros;
+    }
+    
+    if (p_IOT_State == CONTROL_PLANE) {
+      SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                     v_SrbId,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    cs_CIOT_ActivateDefEpsBearerContextRequest(p_EpsBearerId,
+                                                                                               p_PTI,
+                                                                                               p_APN,
+                                                                                               f_EUTRA_NB_GetPDNAddress(f_CheckExtdPCOforIPallocationViaNas(p_PcoFromUE), p_PDNIndex, pdnTypeAsSupportedByUE),
+                                                                                               valueof(f_GetDefaultExtdProtocolConfigOptions(p_PcoFromUE)),
+                                                                                               -,
+                                                                                               -,
+                                                                                               -,
+                                                                                               v_HeaderCompressConfigTX,
+                                                                                               cs_ControlPlaneInd,
+                                                                                               cs_ServingPLMNRateControl('FFFF'O)))));
+      SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                        v_SrbId,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cdr_CIOT_ActivateDefEpsBearerContextAccept(p_EpsBearerId))));
+      
+      if (p_VerdictReqd != "") {
+        f_NBIOT_PreliminaryPass (__FILE__, __LINE__, p_VerdictReqd);
+      }
+      
+      f_NBIOT_DelayForUserPlaneSignalling_CP(p_CellId);
+      
+      f_NBIOT_DeactivateEPS_BearerContext_CP (p_CellId, p_EpsBearerId);
+    } else { // UP
+      f_NBIOT_ActivateDefaultEpsBearerContext_UP(p_CellId,
+                                                 p_EpsBearerId,
+                                                 p_PTI,
+                                                 p_APN,
+                                                 f_EUTRA_NB_GetPDNAddress(f_CheckExtdPCOforIPallocationViaNas(p_PcoFromUE), p_PDNIndex, pdnTypeAsSupportedByUE),
+                                                 f_GetDefaultExtdProtocolConfigOptions(p_PcoFromUE),
+                                                 v_DRB); // @sic R5s180574 sic@
+      f_NBIOT_DelayForUserPlaneSignalling_UP(p_CellId, cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         cr_508_ActivateDefEpsBearerContextAccept(p_EpsBearerId)),
+                                            v_RB);  // @sic R5s180192 sic@
+      
+      f_NBIOT_DeactivateEPS_BearerContext_UP (p_CellId, p_EpsBearerId);
+    }
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1, p_IOT_State); // @sic R5s180399, R5s180649 DRB is always configured sic@
+  }
+
+  /*
+   * @desc      To deactivate an EPS bearer context in NBIOT UP
+   * @param     p_CellId
+   * @param     p_EpsBearerId
+   * @param     p_PTId_UE           (default value: tsc_PTI_Unassigned)
+   * @param     p_EsmCauseValue     (default value: tsc_ESM_Cause36_RegularDeactivation)
+   * @param     p_T3396             (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_DeactivateEPS_BearerContext_UP(NBIOT_CellId_Type p_CellId,
+                                                  EPS_BearerIdentity p_EpsBearerId,
+                                                  ProcedureTransactionIdentifier p_PTId_UE := tsc_PTI_Unassigned,
+                                                  B8_Type p_EsmCauseValue := tsc_ESM_Cause36_RegularDeactivation,
+                                                  template (omit) GPRS_Timer3 p_T3396 := omit)
+    runs on NBIOT_PTC
+  {
+    var EPS_BearerIdentity v_EpsBearerId := p_EpsBearerId;
+    var EUTRA_ASN1_DRB_Identity_Type v_DrbId := f_EUTRA_NB_EpsBearerAssociatedDRB(v_EpsBearerId);
+    var template (value) ESM_Cause v_EsmCause := cs_ESM_Cause_v(p_EsmCauseValue);
+    var template (value) NAS_MSG_RequestList_Type v_NasMsgList := {
+      cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_508_DeactivateEPSBearerCxtReq(v_EpsBearerId, p_PTId_UE, v_EsmCause, p_T3396))
+    };
+
+    // The SS transmits a DEACTIVATE EPS BEARER CONTEXT REQUEST.
+    SRB.send(cas_NB_SRB1_RrcNasPduList_REQ(p_CellId,
+                                           cs_TimingInfo_Now,
+                                           cs_RRCConnectionReconfiguration_NB_DrbRelease(tsc_RRC_TI_Def, v_DrbId),
+                                           v_NasMsgList));
+    interleave {
+      // receive RRCConnectionReconfigurationComplete
+      [] SRB.receive(car_NB_SRB_RrcPdu_IND(p_CellId,
+                                           tsc_SRB1,
+                                           cr_RRCConnectionReconfigurationComplete_NB(tsc_RRC_TI_Def))) {}
+      
+      // The UE transmits a DEACTIVATE EPS BEARER CONTEXT ACCEPT message.
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                           tsc_SRB1,
+                                           cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_508_DeactivateEPSBearerCxtAccept(v_EpsBearerId)))) {}
+    }
+    f_NBIOT_SS_Release_SingleDRB(p_CellId, v_DrbId);
+  }
+
+  /*
+   * @desc      To activate a default EPS bearer in NBIOT UP
+   * @param     p_CellId
+   * @param     p_DefaultEpsBearerId
+   * @param     p_EpsTI
+   * @param     p_AccessPointName
+   * @param     p_PDN_Address
+   * @param     p_PCO
+   * @param     p_DrbId             (default value: tsc_DRB2)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ActivateDefaultEpsBearerContext_UP(NBIOT_CellId_Type p_CellId,
+                                                      EPS_BearerIdentity p_DefaultEpsBearerId,
+                                                      template (value) ProcedureTransactionIdentifier p_EpsTI,
+                                                      template (value) AccessPointName p_AccessPointName,
+                                                      template (value) PDN_Address p_PDN_Address,
+                                                      template (omit)  ExtdProtocolConfigOptions p_PCO,
+                                                      EUTRA_ASN1_DRB_Identity_Type p_DrbId := tsc_DRB2) // @sic R5s180574 sic@
+    runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearerList_Type v_DRB_ToAddModList := { cs_NB_DRB_Config(p_DrbId) };
+    var template (value) NAS_DL_Message_Type v_ActDefaultEPSBearerCxtReq :=  cs_CIOT_ActivateDefEpsBearerContextRequest(p_DefaultEpsBearerId,
+                                                                                                                       p_EpsTI,
+                                                                                                                       p_AccessPointName,
+                                                                                                                       p_PDN_Address,
+                                                                                                                       p_PCO);
+    var template (value) NAS_MSG_Request_Type v_NAS_MSG_Request := cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_ActDefaultEPSBearerCxtReq);
+    
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_DRB_ToAddModList);
+    f_NBIOT_SS_RRC_RestartSecurity(p_CellId);
+    f_NBIOT_RRCConnectionReconfiguration_SingleDRB_Est(p_CellId, -, v_NAS_MSG_Request, p_DrbId);
+  }
+
+  /*
+   * @desc      Send MODIFY EPS BEARER CONTEXT REQUEST and receive corresponding MODIFY EPS BEARER CONTEXT ACCEPT
+   * @param     p_CellId
+   * @param     p_SrbId
+   * @param     p_EpsBearerId
+   * @param     p_TrafficFlowTemplate
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ModifyEPS_BearerContext(NBIOT_CellId_Type p_CellId,
+                                           NB_SRB_Identity_Type p_SrbId,
+                                           EPS_BearerIdentity p_EpsBearerId,
+                                           template (omit) TrafficFlowTemplate p_TrafficFlowTemplate)
+    runs on NBIOT_PTC
+  {
+    var ProcedureTransactionIdentifier v_EpsTi := tsc_PTI_Unassigned;
+
+    // The SS transmits a MODIFY EPS BEARER CONTEXT REQUEST message to add TFT to the default EPS bearer
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                   p_SrbId,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_508_ModifyEPSBearerCxtReq(p_EpsBearerId,
+                                                                               v_EpsTi,
+                                                                               cds_508_EPS_QoS_Default_1_tlv,
+                                                                               p_TrafficFlowTemplate))));
+    // UE transmits a MODIFY EPS BEARER CONTEXT ACCEPT message
+    SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId,
+                                      p_SrbId,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_508_ModifyEPSBearerCxtAccept(p_EpsBearerId))));
+  }
+
+  /*
+   * @desc      To build the TFTs used in 22.6.1 and 22.6.1a
+   * @param     p_IpTypeIsIPv4
+   * @param     p_IOT_State
+   * @param     p_ERSBearerID       (default value: tsc_EpsDefaultBearerId)
+   * @return    template (value) TrafficFlowTemplate
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_x_TFT(boolean p_IpTypeIsIPv4,
+                            IOT_STATE_Type p_IOT_State,
+                            HalfOctet_Type p_ERSBearerID := tsc_EpsDefaultBearerId) return template (value) TrafficFlowTemplate
+  {
+    var integer v_LengthCount := 0;
+    var template (value) TrafficFlowTemplate.packetFilterList v_PacketFilterList;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var IntegerList_Type v_FilterIdList;
+    var integer i;
+
+    if ((p_IOT_State == USER_PLANE) and (p_ERSBearerID == tsc_EpsDefaultBearerId)) {
+      v_FilterIdList := {5};
+    } else {
+      if (p_IpTypeIsIPv4) {
+        v_FilterIdList := {1, 2, 3};
+      } else {
+        v_FilterIdList := {1, 2, 3, 4};
+      }
+    }
+    for (i := 0; i < lengthof(v_FilterIdList); i := i + 1) {
+      f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, p_IpTypeIsIPv4, v_FilterIdList[i]);
+      v_PacketFilterList[i]  := v_PacketFilterByRef;
+      v_LengthCount := v_LengthCount + v_PacketFilterLengthByref;
+    }
+    
+    v_LengthCount := v_LengthCount + 1;
+
+    return cs_TrafficFlowTemplate(v_LengthCount, v_PacketFilterList);
+  }
+
+  /*
+   * @desc      send IP packet to the UE and receive loop-backed packet if required
+   * @param     p_CellId
+   * @param     p_RB_Id
+   * @param     p_IpPacket
+   * @param     p_Step
+   * @param     p_RecvPaket         (default value: true)
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NBIOT_IpPacket_SendRecv_UP(NBIOT_CellId_Type p_CellId,
+                                         NB_RadioBearerId_Type p_RB_Id,
+                                         octetstring p_IpPacket,
+                                         charstring p_Step,
+                                         boolean p_RecvPaket := true) runs on NBIOT_PTC
+  {
+    var boolean v_Success;
+    timer t_WatchDog := 5.0;
+
+    L2DATA.send(cas_NB_L2_DATA_REQ(cs_NB_ReqAspCommonPart_RB(p_CellId, p_RB_Id), cs_L2Data_Request_PdcpSdu(p_IpPacket)));
+    if (not p_RecvPaket) {
+      t_WatchDog.start;
+    }
+    alt {
+      [p_RecvPaket] L2DATA.receive(car_NB_L2_DATA_IND(cr_NB_IndAspCommonPart_RB(p_CellId, p_RB_Id), cr_L2Data_Indication_PdcpSdu(p_IpPacket))) {
+        v_Success := true;
+      }
+      [not p_RecvPaket] L2DATA.receive(car_NB_L2_DATA_IND(cr_NB_IndAspCommonPart_RB(p_CellId, ?), cr_L2Data_Indication_PdcpSdu(?))) {
+        v_Success := false;
+      }
+      [not p_RecvPaket] t_WatchDog.timeout {
+        v_Success := true;
+      }
+    }
+    if (v_Success) {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, p_Step);
+    } else {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, p_Step);
+    }
+  }
+
+  /*
+   * @desc      send IP packet to the UE and receive loop-backed packet if required (CP)
+   * @param     p_CellId
+   * @param     p_IpPacket
+   * @param     p_Step
+   * @param     p_RecvPaket         (default value: true)
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NBIOT_IpPacket_SendRecv_CP(NBIOT_CellId_Type p_CellId,
+                                         octetstring p_IpPacket,
+                                         charstring p_Step,
+                                         boolean p_RecvPaket := true) runs on NBIOT_PTC
+  {
+    var ProcedureTransactionIdentifier v_PTI := tsc_PTI_Unassigned;
+    var EPS_BearerIdentity v_EPSBearerId := tsc_EpsDefaultBearerId;
+    var boolean v_Success;
+    timer t_WatchDog := 5.0;
+
+    SRB.send(cas_NB_SRB_NasPdu_REQ(p_CellId,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_ESM_DATA_TRANSPORT(v_EPSBearerId, v_PTI, cs_UserDataContainer(p_IpPacket)))));
+    if (not p_RecvPaket) {
+      t_WatchDog.start;
+    }
+    alt {
+      [] SRB.receive(car_NB_SRB_NasPdu_IND(p_CellId, tsc_SRB1bis, cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered, cr_ESM_DATA_TRANSPORT(v_EPSBearerId, cr_UserDataContainer(-, p_IpPacket))))) { // @sic R5s170774 sic@
+        v_Success := p_RecvPaket;
+      }
+      [not p_RecvPaket] t_WatchDog.timeout {
+        v_Success := true;
+      }
+    }
+    if (v_Success) {
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, p_Step);
+    } else {
+      f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, p_Step);
+    }
+  }
+
+  /*
+   * @desc      creates datagram used in 22.6.1
+   * @param     p_IpTypeIsIPv4
+   * @param     p_Index
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_1_CreateDatagram(boolean p_IpTypeIsIPv4,
+                                       charstring p_Index) return octetstring
+  { // Index is packet number per prose
+    var charstring v_IPv4_SourceAddr := "192.168.0.1";
+    var charstring v_IPv4_DestAddr   := "172.168.8.1";
+    var charstring v_IPv6_SourceAddr := "fe80::1:1";
+    var charstring v_IPv6_DestAddr   := "2001:0ba0::0001:0001";
+    var UInt20_Type v_IPv6_FlowLabel := 10;
+    var UInt16_Type v_SourcePort;
+    var UInt16_Type v_DestPort;
+    var O1_Type v_TOS_TC;
+    var UInt8_Type v_Protocol;
+    var O4_Type v_IPSecSPI := '0F80F000'O;
+
+    // Create filter
+
+    select (p_Index) { // @sic R5-176884 sic@
+      case ("1", "2", "3", "4", "5", "1a", "2a", "3a") { // Filters #1, #2, #3, #4, #5, #14, #15 are derived from #13
+        v_Protocol   := tsc_IP_Protocol_UDP;
+        v_SourcePort := 60001;
+        v_DestPort   := 60350;
+        v_TOS_TC     := 'A9'O;
+      }
+      case ("6", "7", "8", "9", "4a") { // Filters #6, #7, #8, #9 are derived from #16
+        v_TOS_TC     := 'A2'O;
+        v_Protocol   := tsc_IP_Protocol_IPSec;
+        v_SourcePort := 60101;
+        v_DestPort   := 60451;
+      }
+      case ("10", "11", "12", "5a", "11a") { // Filters #10, #11, #12 are derived from #17 @sic R5s180387 sic@
+        v_TOS_TC     := 'B3'O;
+        v_Protocol   := tsc_IP_Protocol_TCP;
+        v_SourcePort := 60101;
+        v_DestPort   := 60451;
+        v_IPv6_FlowLabel := 5;
+      }
+      case ("13", "14") { // Filter #19 is derived from #18
+        v_TOS_TC     := 'AA'O;
+        v_Protocol   := tsc_IP_Protocol_TCP;
+        v_SourcePort := 60101;
+        v_DestPort   := 60451;
+      }
+      case else {
+        // out of supported range
+        FatalError(__FILE__, __LINE__, "unsupported packet id");
+      }
+    }
+
+    select (p_Index) {
+      case ("1", "6", "10") {         // Filter #1 derived from #13, Filter #6 derived from #16, Filter #10 derived from #17
+        v_IPv4_DestAddr   := "172.168.9.1";
+        v_IPv6_DestAddr   := "2001:0bb0::0001:0001";
+      }
+      case ("2", "7") {             // Filter #2 derived from #13, Filter #7 derived from #16
+        v_Protocol   := tsc_IP_Protocol_TCP;
+      }
+      case ("3") {                // Filter #3 derived from #13
+        v_SourcePort := 60101;
+      }
+      case ("4") {                // Filter #4 derived from #13
+        v_DestPort   := 60451;
+      }
+      case ("11") {         // Filter #9 derived from #16, Filter #11 derived from #17 @sic R5-181352 sic@
+        v_TOS_TC     := 'E9'O;
+      }
+      case ("8") {                // Filter #8 derived from #16
+        v_IPSecSPI := '0F90F000'O;
+      }
+      case ("11a") {               // Filter #12 derived from #17 @sic R5-176884, R5-181352 sic@
+        v_IPv6_FlowLabel := 10;
+      }
+      case ("2a") {               // Filter #14 derived from #13
+        v_SourcePort := 60002;
+      }
+      case ("3a") {               // Filter #15 derived from #13
+        v_DestPort   := 60351;
+      }
+      case ("14") {               // Filter #19 derived from #18
+        v_IPv4_DestAddr   := "172.168.9.1";
+        v_IPv6_DestAddr   := "2001:0ba1::0001:0001";
+      }
+    }
+
+    return f_PacketFilterTest_CreateDatagram(p_IpTypeIsIPv4,
+                                             v_Protocol,
+                                             v_IPv4_SourceAddr,
+                                             v_IPv4_DestAddr,
+                                             v_IPv6_SourceAddr,
+                                             v_IPv6_DestAddr,
+                                             v_IPv6_FlowLabel,
+                                             v_SourcePort,
+                                             v_DestPort,
+                                             v_IPSecSPI,
+                                             v_TOS_TC);
+  }
+
+  /*
+   * @desc      creates datagram used in 22.6.1a
+   * @param     p_IpTypeIsIPv4
+   * @param     p_Index_22_6_1a
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_1a_CreateDatagram(boolean p_IpTypeIsIPv4,
+                                        charstring p_Index_22_6_1a) return octetstring
+  { /* PROSE different for CP and UP */
+    var charstring v_Index_22_6_1;
+    select (p_Index_22_6_1a) { // @sic R5-176884 - this has deleted some of the filters from 22.6.1 which are still used in 22.6.1a! sic@
+      case ("1")  { v_Index_22_6_1 := "1a"; }
+      case ("2")  { v_Index_22_6_1 := "2a"; }
+      case ("3")  { v_Index_22_6_1 := "3a"; }
+      case ("4")  { v_Index_22_6_1 := "4a"; }
+      case ("5")  { v_Index_22_6_1 := "5a"; }
+      case ("6")  { v_Index_22_6_1 := "1";  }
+      case ("7")  { v_Index_22_6_1 := "6";  }
+      case ("8")  { v_Index_22_6_1 := "7";  }
+      case ("9")  { v_Index_22_6_1 := "8";  }
+      case ("10") { v_Index_22_6_1 := "10"; }
+      case ("11") { v_Index_22_6_1 := "11a"; } // @sic R5-181352 sic@
+      case else { FatalError(__FILE__, __LINE__, "unsupported packet id"); }
+    }
+    return fl_TC_22_6_1_CreateDatagram(p_IpTypeIsIPv4, v_Index_22_6_1);
+  }
+
+  /*
+   * @desc      Steps 1 - 14 of TC_22_6_1
+   * @param     p_CellId
+   * @param     p_PDN_TypeToBeUsed
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_1_Step1_14(NBIOT_CellId_Type p_CellId,
+                                 PDN_TypeToBeUsed_Type p_PDN_TypeToBeUsed) runs on NBIOT_PTC
+  {
+    var template (omit) TrafficFlowTemplate v_TrafficFlowTemplate := omit;
+    var boolean v_IpTypeIsIPv4 := (p_PDN_TypeToBeUsed == forceIPv4only);
+    var octetstring v_IpPacket;
+    var integer N;
+    var IntegerList_Type v_Nmax7_8;
+    var IntegerList_Type v_Nmax9_10;
+    
+    f_UT_SwitchOnUE(UT, false);
+    
+    //@siclog "Step 1" siclog@
+    f_NBIOT_InitialRegistration(p_CellId, USER_PLANE, NORMAL, STATE2A_NB_TESTLOOP_ModeB, p_PDN_TypeToBeUsed); // @sic R5s170774 sic@
+    
+    //@siclog "Step 2" siclog@
+    f_NBIOT_CloseUE_TestLoopModeB(p_CellId);
+    
+    select (p_PDN_TypeToBeUsed) { // @sic R5-181352 sic@
+      case (forceIPv4only) {
+        v_Nmax7_8 := {5, 9, 13};
+        v_Nmax9_10 := {4, 6, 7, 8, 14};
+      }
+      case (forceIPv6only) {
+        v_Nmax7_8 := {5, 9, 12, 13};
+        v_Nmax9_10 := {4, 6, 7, 8, 10, 11, 14};
+      }
+    }
+
+    //@siclog "Step 3 - 4" siclog@
+    for (N := 1; N <= 3; N := N + 1) { // @sic R5s170774, R5-181352 sic@
+      v_IpPacket := fl_TC_22_6_1_CreateDatagram(v_IpTypeIsIPv4, int2str(N));
+      fl_NBIOT_IpPacket_SendRecv_UP(p_CellId, tsc_NB_RbId_DRB1, v_IpPacket, "Step 4");
+    }
+    
+    //@siclog "Step 5 - 6" siclog@
+    v_TrafficFlowTemplate := fl_TC_22_6_x_TFT(v_IpTypeIsIPv4, USER_PLANE, tsc_EpsDefaultBearerId);
+    v_TrafficFlowTemplate.iei := '36'O;
+    f_NBIOT_ModifyEPS_BearerContext(p_CellId, tsc_SRB1, tsc_EpsDefaultBearerId, v_TrafficFlowTemplate);
+    
+    //@siclog "Step 7 - 8" siclog@
+    for (N := 0; N < lengthof(v_Nmax7_8); N := N + 1) { // @sic R5-181352, R5s180264 sic@
+      v_IpPacket := fl_TC_22_6_1_CreateDatagram(v_IpTypeIsIPv4, int2str(v_Nmax7_8[N]));
+    }
+    fl_NBIOT_IpPacket_SendRecv_UP(p_CellId, tsc_NB_RbId_DRB1, v_IpPacket, "Step 8");
+    
+    //@siclog "Step 9 - 10" siclog@
+    for (N := 0; N < lengthof(v_Nmax9_10); N := N + 1) { // @sic R5-181352, R5s180264 sic@
+      v_IpPacket := fl_TC_22_6_1_CreateDatagram(v_IpTypeIsIPv4, int2str(v_Nmax9_10[N]));
+    }
+    fl_NBIOT_IpPacket_SendRecv_UP(p_CellId, tsc_NB_RbId_DRB1, v_IpPacket, "Step 10", false);
+    
+    //@siclog "Step 11 - 14" siclog@
+    // open test loop, deactivate test mode
+    f_NBIOT_OpenUE_TestLoopMode_Deactivate_TestMode(p_CellId, tsc_SRB1);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.6.1
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_6_1_NBIOT() runs on NBIOT_PTC
+  { // NB-IoT / UE routing of uplink packets / User Plane/ UE requested PDN disconnect procedure accepted by the network
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var boolean v_IPv4 := pc_IPv4;
+    var boolean v_IPv6 := pc_IPv6;
+    var PDN_TypeToBeUsed_Type v_PDN_TypeToBeUsed;
+    var EPS_BearerIdentity v_EpsBearerId2 := '6'H;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var PDN_CONNECTIVITY_REQUEST v_PDNConnReq;
+    var octetstring v_APN_Value := tsc_APN1; // APN-1(New PDN name), different from default
+    var ProcedureTransactionIdentifier v_PTId_UE;
+    var template (value) AccessPointName v_AccessPointName;
+    var template (omit) ExtdProtocolConfigOptions v_Pco;
+    var PDN_Address v_PDN_Address2;
+    
+    f_NBIOT_Init(c1, USER_PLANE);
+    
+    // Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, USER_PLANE);
+    
+    f_NBIOT_Preamble(nbiot_Cell1, USER_PLANE);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, USER_PLANE, RRC_CONNECTED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    while (v_IPv4 or v_IPv6) {
+      if (v_IPv4) {
+        v_PDN_TypeToBeUsed := forceIPv4only;
+        v_IPv4 := false;
+      } else {
+        v_PDN_TypeToBeUsed := forceIPv6only;
+        v_IPv6 := false;
+      }
+      //@siclog "Step 1 - 14" siclog@
+      fl_TC_22_6_1_Step1_14(v_CellId, v_PDN_TypeToBeUsed);
+      //@siclog "Step 15" siclog@
+      if (v_IPv6) {
+        // The UE is brought into state Switched OFF (state 1) according to 36.508
+        f_NBIOT_UE_Detach_SwitchOffUe(v_CellId, USER_PLANE, RRC_CONNECTED);
+      }
+    }
+    
+    //@siclog "Step 16a1-16a2A Void" siclog@
+      
+      //@siclog "Step 16a3" siclog@
+    if (pc_NB_MultiDRB) {
+      f_UT_RequestAdditionalPDNConnectivity(UT, hex2int(v_EpsBearerId2), tsc_APN1_String);
+      
+      //@siclog "Step 16a4 - 16a5" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(v_CellId, // @sic R5s180192 sic@
+                                        tsc_SRB1, // @sic R5s180192 sic@
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cr_PDNConnReqAdditionalPDN(f_GetPdnType(), cr_AccessPointName(v_APN_Value)))))-> value v_ReceivedAsp;  /* @sic R5-176884 sic@ */
+      v_PDNConnReq := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.pDN_CONNECTIVITY_REQUEST;
+      
+      // Get Procedure transaction identifier assigned by the UE
+      v_PTId_UE := v_PDNConnReq.procedureTransactionIdentifier;
+      v_AccessPointName := cs_AccessPointName(v_APN_Value);
+      v_Pco := v_PDNConnReq.extdProtocolConfigurationOptions;
+      
+      //@siclog "Step 16a6 - 16a8" siclog@
+      v_PDN_Address2 := f_EUTRA_NB_GetPDNAddress(f_CheckExtdPCOforIPallocationViaNas(v_Pco), PDN_2);
+      f_NBIOT_ActivateDefaultEpsBearerContext_UP(v_CellId,
+                                                 v_EpsBearerId2,
+                                                 v_PTId_UE,  // use value as defined by the UE
+                                                 v_AccessPointName,
+                                                 v_PDN_Address2,
+                                                 f_GetDefaultExtdProtocolConfigOptions(v_Pco));
+      f_NBIOT_DelayForUserPlaneSignalling_UP(v_CellId, cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         cr_508_ActivateDefEpsBearerContextAccept(v_EpsBearerId2)),
+                                            tsc_NB_RbId_DRB2);  // @sic R5s180192 sic@
+      //@siclog "Step 16a9 Void" siclog@
+      
+      //@siclog "Step 16a10" siclog@
+      f_UT_DeactivateBearer(UT, hex2int(v_EpsBearerId2));
+      
+      //@siclog "Step 16a11 - 16a13" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(v_CellId, // @sic R5s180192 sic@
+                                        tsc_SRB1, // @sic R5s180192 sic@
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cr_PDNDisconnectReq(cr_LinkedId(hex2bit(v_EpsBearerId2))))))-> value v_ReceivedAsp; // @sic R5-176884 sic@
+      
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 16a12");
+
+      //@siclog "Step 16a14 - 16a15" siclog@
+      v_PTId_UE := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.pDN_DISCONNECT_REQUEST.procedureTransactionIdentifier;
+      f_NBIOT_DeactivateEPS_BearerContext_UP(v_CellId, v_EpsBearerId2, v_PTId_UE);
+    }
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble(v_CellId, USER_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      Steps 1 - 12 of TC_22_6_1a
+   * @param     p_CellId
+   * @param     p_PDN_TypeToBeUsed
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_1a_Step1_12(NBIOT_CellId_Type p_CellId,
+                                  PDN_TypeToBeUsed_Type p_PDN_TypeToBeUsed) runs on NBIOT_PTC
+  {
+    var template (value) TrafficFlowTemplate v_TrafficFlowTemplate;
+    var boolean v_IpTypeIsIPv4 := (p_PDN_TypeToBeUsed == forceIPv4only);
+    var octetstring v_IpPacket;
+    var integer N;
+    var integer v_Nmax1;
+    var integer v_Nmax2;
+    
+    f_UT_SwitchOnUE(UT, false);
+    
+    //@siclog "Step 1" siclog@
+    f_NBIOT_InitialRegistration(p_CellId, CONTROL_PLANE, NORMAL, STATE2A_NB_TESTLOOP_ModeI, p_PDN_TypeToBeUsed);    // NOTE: RRC connection is not released
+    
+    //@siclog "Step 2" siclog@
+    f_NBIOT_CloseUE_TestLoopModeI(p_CellId); // @sic R5-172854 sic@
+    
+    //@siclog "Step 3 - 4" siclog@
+    v_TrafficFlowTemplate := fl_TC_22_6_x_TFT(v_IpTypeIsIPv4, CONTROL_PLANE);
+    v_TrafficFlowTemplate.iei := '36'O;
+    f_NBIOT_ModifyEPS_BearerContext(p_CellId, tsc_SRB1bis, tsc_EpsDefaultBearerId, v_TrafficFlowTemplate);
+    
+    select (p_PDN_TypeToBeUsed) {
+      case (forceIPv4only) {
+        v_Nmax1 := 4;
+        v_Nmax2 := 9;
+      }
+      case (forceIPv6only) {
+        v_Nmax1 := 5;
+        v_Nmax2 := 11;
+      }
+    }
+    //@siclog "Step 5 - 6" siclog@
+    for (N := 1; N <= v_Nmax1; N := N + 1) { // @sic R5s170767 sic@
+      v_IpPacket := fl_TC_22_6_1a_CreateDatagram(v_IpTypeIsIPv4, int2str(N));
+      fl_NBIOT_IpPacket_SendRecv_CP(p_CellId, v_IpPacket, "Step 6");
+    }
+    //@siclog "Step 7 - 8" siclog@
+    for (N := 6; N <= v_Nmax2; N := N + 1) { // @sic R5s170767, R5s180387 sic@
+      v_IpPacket := fl_TC_22_6_1a_CreateDatagram(v_IpTypeIsIPv4, int2str(N));
+      fl_NBIOT_IpPacket_SendRecv_CP(p_CellId, v_IpPacket, "Step 8", false);
+    }
+    //@siclog "Step 9 - 12" siclog@
+    // open test loop, deactivate test mode
+    f_NBIOT_OpenUE_TestLoopMode_Deactivate_TestMode(p_CellId, tsc_SRB1bis);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.6.1a
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_6_1a_NBIOT() runs on NBIOT_PTC
+  {  // NB-IoT / UE routing of uplink packets / Control Plane
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell1;
+    var boolean v_IPv4 := pc_IPv4;
+    var boolean v_IPv6 := pc_IPv6;
+    var PDN_TypeToBeUsed_Type v_PDN_TypeToBeUsed;
+    
+    //@sic R5-235472, R5-235331, R5-237126 sic@
+    f_NBIOT_Init(c1, USER_PLANE); // even though this is a CONTROL_PLANE test, set this flag to USER_PLANE to force the UE to configure a PDN
+    // Create and configure all cells
+    f_NBIOT_CellConfig_Def(v_CellId, CONTROL_PLANE);
+    
+    f_NBIOT_Preamble(nbiot_Cell1, CONTROL_PLANE);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    
+    f_NBIOT_TestBody_Set(true);
+    
+    while (v_IPv4 or v_IPv6) {
+      if (v_IPv4) {
+        v_PDN_TypeToBeUsed := forceIPv4only;
+        v_IPv4 := false;
+      } else {
+        v_PDN_TypeToBeUsed := forceIPv6only;
+        v_IPv6 := false;
+      }
+      //@siclog "Step 1 - 12" siclog@
+      fl_TC_22_6_1a_Step1_12(v_CellId, v_PDN_TypeToBeUsed);
+      //@siclog "Step 13" siclog@
+      if (v_IPv6) {
+        // The UE is brought into state Switched OFF (state 1) according to 36.508
+        f_NBIOT_UE_Detach_SwitchOffUe(v_CellId, CONTROL_PLANE, RRC_CONNECTED);
+      }
+    }
+    
+    //@siclog "Step 14" siclog@
+    f_NBIOT_RRC_ConnectionRelease(v_CellId, CONTROL_PLANE);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    f_NBIOT_Postamble(v_CellId, CONTROL_PLANE, N1_IDLE);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.6.2
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_6_2_NBIOT() runs on NBIOT_PTC
+  { //NB-IoT / UE requested bearer resource modification accepted by the network / Default EPS bearer context
+    
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) PacketFilter v_PacketFilterByRef;
+    var integer v_PacketFilterLengthByref;
+    var ProcedureTransactionIdentifier v_EpsPti; // @sic R5s180388 sic@
+    
+    //Added for TFT
+    var template (value) TrafficFlowTemplate v_TrafficFlowTemplate;
+    
+    f_NBIOT_Init(c1, USER_PLANE); //The init function is called with USER_PLANE so that the preamble doesnt happen without PDN connectivity.
+    
+    //Create and configure cell
+    f_NBIOT_CellConfig_Def(nbiot_Cell50, CONTROL_PLANE);
+    
+    /* Preamble to enter UE in State 2-NB, Attach Connected Mode */
+    f_NBIOT_Preamble(nbiot_Cell50, CONTROL_PLANE);
+    f_NBIOT_TestBody_Set(true);
+    
+    //Create a TFT for Step 3 and to be used for CGCMOD
+    f_Get_PacketFilter_10_9_1(v_PacketFilterByRef, v_PacketFilterLengthByref, (f_GetPdnType()==tsc_PdnType_IPv4), 1);
+    v_TrafficFlowTemplate := cs_TrafficFlowTemplate(v_PacketFilterLengthByref+1, {v_PacketFilterByRef}); // @sic R5-176045 sic@ // @sic R5s180417 sic@
+    v_TrafficFlowTemplate.iei := '36'O;
+    v_TrafficFlowTemplate.tftOperationCode := '001'B; // @sic R5-176045 sic@
+    
+    //@siclog "Step 1" siclog@
+    //Cause the UE to request bearer resource modification of default EPS bearer associated with first PDN connectivity
+    f_UT_RequestModifyDefaultBearer(UT, hex2int(tsc_EpsDefaultBearerId), f_ConvertEPSQoS_ForATCommand (cds_508_EPS_QoS_Default_1_tlv), v_TrafficFlowTemplate); // @sic R5-192186 sic@
+    
+    //@siclog "Step 2" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cdr_BearerResourceModReq(?, // @sic R5s180417 sic@
+                                                                                tsc_EpsDefaultBearerId,
+                                                                                omit,
+                                                                                cr_Tft(-) )))) -> value v_ReceivedAsp; // @sic R5-184091 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    v_EpsPti :=  v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.bEARER_RESOURCE_MODIFICATION_REQUEST.procedureTransactionIdentifier; // @sic R5s180388 sic@
+    
+    //@siclog "Step 3" siclog@
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50, // @sic R5s180388 sic@
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  cs_508_ModifyEPSBearerCxtReq(tsc_EpsDefaultBearerId,
+                                                                               v_EpsPti,
+                                                                               cds_508_EPS_QoS_Default_1_tlv,
+                                                                               v_TrafficFlowTemplate))));
+    // UE transmits a MODIFY EPS BEARER CONTEXT ACCEPT message
+    //@siclog "Step 4" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50, // @sic R5s180388 sic@
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_508_ModifyEPSBearerCxtAccept(tsc_EpsDefaultBearerId, ?))));
+
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble(nbiot_Cell50, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.6.3
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_6_3_NBIOT() runs on NBIOT_PTC
+  { //NB-IoT / UE requested bearer resource modification error handling (Resource modification not accepted by the network) / Expiry of timer T3481/ Default EPS bearer context
+
+    var template (value) TrafficFlowTemplate v_TrafficFlowTemplate;
+    var NB_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) NAS_DL_Message_Type v_BearerResourceAllocRej;
+    var template (value) ESM_Cause v_EsmCause111 := cs_ESM_Cause_v ('01101111'B); // Protocol error unspecified
+    var template (value) ESM_Cause v_EsmCause47 := cs_ESM_Cause_v ('00101111'B); // PTI mismatch // @sic R5-176876 sic@
+    var template (value) NAS_DL_Message_Type v_ModifyEPSBearerCxtReq;
+    var float v_T3481 := f_NBIOT_SetTimerToleranceMin(nasTimer, 188.0);
+    var float v_T3481_Fifth_Expiry := f_NBIOT_SetTimerToleranceMax(nasTimer, 188.0); // @sic R5-184092 sic@
+    var template (present) ProcedureTransactionIdentifier v_AnyPti := ?;
+    var ProcedureTransactionIdentifier v_EpsPti := '01'O;
+    var integer i;
+    
+    f_NBIOT_Init(c1, USER_PLANE); //The init function is called with USER_PLANE so that the preamble doesnt happen without PDN connectivity.
+    
+    //Create and configure cell
+    f_NBIOT_CellConfig_Def(nbiot_Cell50, CONTROL_PLANE);
+    
+    /* Preamble to enter UE in State 2-NB, Attach Connected Mode */
+    f_NBIOT_Preamble(nbiot_Cell50, CONTROL_PLANE);
+    
+    //Create a TFT for Step 3 and to be used for CGCMOD
+    v_TrafficFlowTemplate := f_EUTRA_NB_Get_508_TrafficFlowTemplate(1, tsc_EpsDefaultBearerId, f_GetPdnType());
+    v_TrafficFlowTemplate.iei := '36'O;
+    v_TrafficFlowTemplate.packetFilterList[0].precedence := int2bit(0, 8);
+    
+    //@siclog "Step 1" siclog@
+    //Cause the UE to request bearer resource modification of default EPS bearer associated with first PDN connectivity
+    f_UT_RequestModifyDefaultBearer(UT, hex2int(tsc_EpsDefaultBearerId), f_ConvertEPSQoS_ForATCommand(cds_508_EPS_QoS_Default_1_tlv), v_TrafficFlowTemplate); // @sic R5-192186 sic@
+    
+    //@siclog "Step 2" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cdr_BearerResourceModReq(?,                 // @sic R5s190000 sic@
+                                                                                tsc_EpsDefaultBearerId,
+                                                                                omit,
+                                                                                cr_Tft)))) -> value v_ReceivedAsp;
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    
+    v_EpsPti :=  v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.bEARER_RESOURCE_MODIFICATION_REQUEST.procedureTransactionIdentifier;
+    v_BearerResourceAllocRej := cs_508_BearerResourceModificationReject(v_EpsPti, v_EsmCause111);
+    //@siclog "Step 3" siclog@
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  v_BearerResourceAllocRej)));
+    //@siclog "Step 4" siclog@
+    f_Delay (0.5);
+    
+    v_ModifyEPSBearerCxtReq := cs_ModifyEPSBearerCxtReq_AllParams (tsc_EpsDefaultBearerId,
+                                                                   v_EpsPti, // @sic R5-176876 sic@
+                                                                   cds_508_EPS_QoS_Default_1_tlv,
+                                                                   omit,
+                                                                   omit,
+                                                                   omit,
+                                                                   omit,
+                                                                   f_Get_508_PFI(), // @sic R5-115618 sic@
+                                                                   omit,
+                                                                   omit,
+                                                                   omit,  // @sic R5s160711 Baseline Moving sic@
+                                                                   omit, // @sic R5-180551 sic@
+                                                                   omit,
+                                                                   omit, // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+                                                                   omit);
+    //@siclog "Step 5" siclog@
+    // The SS transmits a MODIFY EPS BEARER CONTEXT REQUEST message to add TFT to the default EPS bearer
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  v_ModifyEPSBearerCxtReq)));
+    
+    //@siclog "Step 6" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_508_ModifyEPSBearerCxtReject (tsc_EpsDefaultBearerId,
+                                                                                         v_EsmCause47,
+                                                                                         v_AnyPti)))); // @sic R5-176876 sic@ // @sic R5s180416 sic@ // @sic R5-184092 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    
+    f_Delay (0.5);
+    //@siclog "Step 6A" siclog@
+    //Cause the UE to request bearer resource modification of default EPS bearer associated with first PDN connectivity
+    f_UT_RequestModifyDefaultBearer(UT, hex2int(tsc_EpsDefaultBearerId), f_ConvertEPSQoS_ForATCommand (cds_508_EPS_QoS_Default_1_tlv), v_TrafficFlowTemplate); // @sic R5-176876, R5-192186 sic@
+    
+    //@siclog "Step 7" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cdr_BearerResourceModReq(?,           // @sic R5s190127 sic@
+                                                                                  tsc_EpsDefaultBearerId,
+                                                                                  omit,
+                                                                                  cr_Tft(-))))) -> value v_ReceivedAsp;
+    
+    //@siclog "Step 8 - 15" siclog@
+    for (i :=0; i < 4; i := i + 1) {
+      f_Delay(v_T3481);
+      //@siclog "Step 9" siclog@
+      SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                        tsc_SRB1bis,
+                                        cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                          cdr_BearerResourceModReq(?,           // @sic R5s190127 sic@
+                                                                                  tsc_EpsDefaultBearerId,
+                                                                                  omit,
+                                                                                  cr_Tft(-))))) -> value v_ReceivedAsp;
+      f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step " & int2str((i*2)+9));
+    }
+    
+    v_ModifyEPSBearerCxtReq.mODIFY_EPS_BEARER_CONTEXT_REQUEST.procedureTransactionIdentifier := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.bEARER_RESOURCE_MODIFICATION_REQUEST.procedureTransactionIdentifier; // @sic R5-184092 sic@
+    
+    //@siclog "Step 15a" siclog@
+    //Wait for the fifthe expiry of T3481.
+    f_Delay(v_T3481_Fifth_Expiry); // @sic R5-184092 sic@
+    //@siclog "Step 16" siclog@
+    // The SS transmits a MODIFY EPS BEARER CONTEXT REQUEST message to add TFT to the default EPS bearer
+    SRB.send(cas_NB_SRB_NasPdu_REQ(nbiot_Cell50,
+                                   tsc_SRB1bis,
+                                   cs_TimingInfo_Now,
+                                   cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                  v_ModifyEPSBearerCxtReq)));
+    
+    //@siclog "Step 17" siclog@
+    SRB.receive(car_NB_SRB_NasPdu_IND(nbiot_Cell50,
+                                      tsc_SRB1bis,
+                                      cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_ModifyEPSBearerCxtReject (tsc_EpsDefaultBearerId,
+                                                                                       v_EsmCause47,
+                                                                                       v_AnyPti)))); // @sic R5-176876 sic@ // @sic R5s180416 sic@ // @sic R5-184092 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 17");
+    
+    // Postamble
+    f_NBIOT_TestBody_Set(false);
+    f_NBIOT_Postamble(nbiot_Cell50, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.6.5
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_6_5_NBIOT() runs on NBIOT_PTC
+  { /* NB-IoT / UE requested PDN connectivity procedure not accepted / UE
+     * requested PDN connectivity accepted Dual Priority T3396 override UE
+     * requested PDN connectivity accepted / T3346 override */
+    
+    var IOT_STATE_Type v_IOT_State := CONTROL_PLANE;
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var template (present) NAS_UL_Message_Type v_AttachReq;
+    var template (present) B3_Type v_PDNTypeExpected := (f_GetPdnType(), '101'B);
+    
+    if ((pc_S1_U_DataTransfer or pc_NB_User_Plane_CIoT_Optimisation) and pc_NB_MultiDRB) { // @sic R5-203070 sic@
+      v_IOT_State := USER_PLANE;
+    }
+    f_NBIOT_Init(c1, USER_PLANE); // even if this is run in CONTROL_PLANE test, set this flag to USER_PLANE to force the UE to configure a PDN
+    
+    // Create and configure cell
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, v_IOT_State);
+    
+    //Equip UE with a USIM containing default values except for those shown in TC 22.6.5
+    f_UT_USIM_Insert(UT, "36.523-1 Table 22.6.5.3.1-1");
+    
+    // First switch cell back on
+    f_NBIOT_SetCellPower(nbiot_Cell1, tsc_ServingCellRS_EPRE);
+
+    // Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+
+    v_AttachReq := cr_CIOT_ATTACH_REQUEST(cr_AdditionalUpdateType_CIOT);
+    v_AttachReq.aTTACH_REQUEST.deviceProperties := cr_DeviceProperties('D'H, '1'B);
+    
+    // Receive RRC Connection Setup Complete with NAS
+    v_NAS_Ind := f_NBIOT_RRC_ConnEst_DefWithNas(nbiot_Cell1,
+                                                cr_EstablishmentCause_NB_Any,
+                                                cr_NAS_IndicationWithPiggybacking((tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected),
+                                                                                  v_AttachReq,
+                                                                                  cr_CIOT_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach, v_PDNTypeExpected)));
+    f_NBIOT_InitialRegistration_Step5_14(nbiot_Cell1, v_IOT_State, STATE3_NB_IDLEUPDATED, v_NAS_Ind);
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1, v_IOT_State); // @sic R5s180399 sic@
+    f_NBIOT_TestBody_Set(true);
+
+    fl_TC_22_6_5_Body (v_IOT_State);
+    
+    f_NBIOT_TestBody_Set(false);
+    
+    f_NBIOT_Postamble(nbiot_Cell1, v_IOT_State, N1_IDLE);
+  }
+
+  /*
+   * @desc      test body of TC_22_6_5
+   * @param     p_IOT_State
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_TC_22_6_5_Body(IOT_STATE_Type p_IOT_State) runs on NBIOT_PTC
+  {
+    var EPS_BearerIdentity v_EpsBearerId2 := '6'H;
+    var NB_SRB_Identity_Type v_SrbId := f_NBIOT_GetSrb1Id(p_IOT_State);
+    var NAS_UL_Message_Type v_PDNConnectivityReq_Rxd;
+    var ProcedureTransactionIdentifier v_PTI;
+    timer t_T3346 := f_NBIOT_SetTimerToleranceMax(nasTimer, 300.0); // @sic R5s170962 sic@
+    
+    //@siclog "Step 1 - 2b3" siclog@
+    v_PDNConnectivityReq_Rxd := f_NBIOT_TriggerAdditionalPDN (nbiot_Cell1, p_IOT_State, ?, cr_AccessPointName (tsc_APN1), tsc_APN1_String); // @sic R5s170962 sic@
+    v_PTI := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+    //@siclog "Step 3" siclog@
+    SRB.send (cas_NB_SRB_NasPdu_REQ (nbiot_Cell1,
+                                     v_SrbId,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_PdnConnectReject('0'H, // no EPS bearer assigned
+                                                                    v_PTI, // @sic R5s170962 sic@
+                                                                    cs_ESM_Cause_v (tsc_EmmCause_ProtocolErrorUnspecified), -, -,
+                                                                    omit))));
+    //@siclog "Step 4" siclog@
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1, p_IOT_State); // @sic R5s180399, R5s180574, R5s180649 DRB is always configured sic@
+
+    //@siclog "Step 5 - 6b3" siclog@
+    v_PDNConnectivityReq_Rxd := f_NBIOT_TriggerAdditionalPDN (nbiot_Cell1, p_IOT_State, ?, cr_AccessPointName (tsc_APN2), tsc_APN2_String); // @sic R5s170962 sic@
+    v_PTI := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step 6a4/6b3");
+
+    //@siclog "Step 8 - 12" siclog@
+    fl_TC_22_6_5_ActivateAndDeactivateDefaultBearer(nbiot_Cell1,
+                                                 p_IOT_State,
+                                                 v_EpsBearerId2,
+                                                 v_PTI, // @sic R5s170962 sic@
+                                                 cs_AccessPointName (tsc_APN2), // @sic R5s180389 sic@
+                                                 PDN_2,
+                                                 v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions,
+                                                 "Step 8");
+  
+    //@siclog "Step 13 - 15b3" siclog@
+    v_PDNConnectivityReq_Rxd := f_NBIOT_TriggerAdditionalPDN (nbiot_Cell1, p_IOT_State, ?, cr_AccessPointName (tsc_APN1), tsc_APN1_String, delayTolerantAccess_v1330, '1'B); // @sic R5s170962 sic@
+    v_PTI := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+
+    //@siclog "Step 16" siclog@
+    SRB.send (cas_NB_SRB_NasPdu_REQ (nbiot_Cell1,
+                                     v_SrbId,
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_PdnConnectReject('0'H, // no EPS bearer assigned
+                                                                    v_PTI, // @sic R5s170962 sic@
+                                                                    cs_ESM_Cause_v ('00011010'B),
+                                                                    cs_GprsTimer3 ('37'O, tsc_Gprs3TimerUnit_1min, '00101'B), // 5mins
+                                                                    -,
+                                                                    omit))));
+    t_T3346.start;
+    //@siclog "Step 17" siclog@
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1, p_IOT_State); // @sic R5s180399, R5s180574, R5s180649 DRB is always configured sic@
+    
+    //@siclog "Step 18 - 19b3" siclog@
+    v_PDNConnectivityReq_Rxd := f_NBIOT_TriggerAdditionalPDN (nbiot_Cell1, p_IOT_State, ?, cr_AccessPointName (tsc_APN1), tsc_APN1_String, -, '0'B, 1); // @sic R5s170962 sic@
+    v_PTI := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+    t_T3346.stop;
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step 19a4/19b3");
+    
+    //@siclog "Step 20 - 25" siclog@
+    fl_TC_22_6_5_ActivateAndDeactivateDefaultBearer(nbiot_Cell1,
+                                                 p_IOT_State,
+                                                 v_EpsBearerId2,
+                                                 v_PTI, // @sic R5s170962 sic@
+                                                 cs_AccessPointName (tsc_APN1), // @sic R5s180389 sic@
+                                                 PDN_1,
+                                                 v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions);
+
+    f_UT_RequestAdditionalPDNConnectivity(UT, hex2int(v_EpsBearerId2), tsc_APN2_String, -, -, -1); // @sic R5s170962, R5s190422 sic@
+    //@siclog "Step 26 - 28" siclog@
+    f_NBIOT_RRC_ConnEst_DefWithNas(nbiot_Cell1,
+                                                delayTolerantAccess_v1330,
+                                                cr_NAS_Indication (tsc_SHT_IntegrityProtected, // @sic R5s170962 sic@
+                                                                   cr_CONTROL_PLANE_SERVICE_REQUEST(?, -, -, -, cr_DeviceProperties('D'H, '1'B))));
+    //@siclog "Step 29" siclog@
+    SRB.send (cas_NB_SRB_NasPdu_REQ (nbiot_Cell1,
+                                     tsc_SRB1bis,   // @sic R5s191063 sic@
+                                     cs_TimingInfo_Now,
+                                     cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                cs_508_SERVICE_REJECT(tsc_Cause_Congestion,
+                                                                      -,
+                                                                      cs_GPRS_Timer2_3_IEI ('5F'O, tsc_GprsTimerUnit_1min, '00101'B))))); // 5mins
+
+    t_T3346.start;
+    
+    //@siclog "Step 30" siclog@
+    // Even though SRB1bis must be used to send the Release message, SRB1 was re-configured at the last RRC Release, so must be released here too
+    f_NBIOT_RRC_ConnectionRelease (nbiot_Cell1, p_IOT_State, -, -, -, tsc_SRB1bis); // @sic R5s180399, R5s180574, R5s180649 sic@
+
+    //@siclog "Step 31 - 32b3" siclog@
+    v_PDNConnectivityReq_Rxd := f_NBIOT_TriggerAdditionalPDN (nbiot_Cell1, p_IOT_State, ?, cr_AccessPointName (tsc_APN1), tsc_APN1_String, -, '0'B, 1); // @sic R5s170962 sic@
+    v_PTI := v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.procedureTransactionIdentifier;
+    t_T3346.stop;
+    f_NBIOT_PreliminaryPass (__FILE__, __LINE__, "Step 32a3/32b3");
+
+    //@siclog "Step 33 - 38" siclog@
+    fl_TC_22_6_5_ActivateAndDeactivateDefaultBearer(nbiot_Cell1,
+                                                 p_IOT_State,
+                                                 v_EpsBearerId2,
+                                                 v_PTI, // @sic R5s170962 sic@
+                                                 cs_AccessPointName (tsc_APN1),  // @sic R5s180389 sic@
+                                                 PDN_1,
+                                                 v_PDNConnectivityReq_Rxd.pDN_CONNECTIVITY_REQUEST.extdProtocolConfigurationOptions);
+  }
+
+}

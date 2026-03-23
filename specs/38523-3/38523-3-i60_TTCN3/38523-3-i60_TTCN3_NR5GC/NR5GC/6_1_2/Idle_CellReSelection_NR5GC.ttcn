@@ -1,0 +1,3071 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-11-25 15:12:05 +0100 (ma., 25 nov. 2025) $
+// $Rev: 42206 $
+/******************************************************************************/
+module Idle_CellReSelection_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EUTRA_NR_Parameters all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_FrequencyInit_SA all;
+  import from NR_NoiseGenerator all;
+  import from NR_Parameters all;
+  import from NR_RRC_Templates all;
+  import from NR_SysInfo_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  const PLMN_Identity tsc_NR_HPLMN_003_31 :=  { mcc := {0,0,3}, mnc := {3,1} };              /* @status    APPROVED (NR5GC) */
+
+  const bitstring tsc_BitSIB4_SchedulingInfoList := '01000000000000000000000000000000'B;     /* @status    APPROVED (NR5GC) */
+
+  /*
+   * @desc      After receving RRCSystemInfoRequest message in step 2 of test case 6.1.2.11 the SS ignores the reception of subsequent RRCSystemInfoRequest messages
+   * @param     p_NR_CellId
+   * @status    APPROVED (NR5GC)
+   */
+  altstep a_NR_AddDefault_IgnoreSysInfoReq(NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC
+  {
+    [] SRB.receive(car_NR_SRB0_RrcPdu_IND(p_NR_CellId, cr_38508_RRCSystemInfoRequest))
+      {
+        repeat;
+      };
+  };
+
+  /*
+   * @desc      Set RedCap_InterFreqCarrierFreqInfo_v1700 contents stored in SIB4 in the cell array with setting on InterFreqCarrierFreqInfo_v1700.redCapAccessAllowed_r17
+   * @param     p_NR_CellId
+   * @param     p_RedCapAccessAllowed (default value: true)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_CellInfo_SetSIB4_RedCap_AccessAllowed(NR_CellId_Type p_NR_CellId, boolean p_RedCapAccessAllowed := true) runs on NR_BASE_PTC
+  { // @sic R5s230293 R5-235781 R5s230864 sic@
+    var NR_CellInfo_Type v_NR_CellInfo := f_NR_CellInfo_Get(p_NR_CellId);
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList:=f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(p_NR_CellId);// @sic R5s230804 sic@
+    var integer v_SIB4_SI_Index := f_NR_GetSIB4_SI_Index(v_NR_CellInfo.Sysinfo.NR_SysinfoCombination);
+    var integer i;// @sic R5s230804 sic@
+    if (p_RedCapAccessAllowed) {
+      for (i:=0; i<lengthof(v_InterFreqCarrierFreqList); i:=i+1) {// @sic R5s230804 sic@
+          v_NR_CellInfo.Sysinfo.BcchInfo.SIs[v_SIB4_SI_Index].message_.c1.systemInformation.criticalExtensions.systemInformation.sib_TypeAndInfo[0].sib4.interFreqCarrierFreqList_v1700[i] := valueof(cs_InterFreqCarrierFreqInfo_v1700_Def(true_));// @sic R5s230804 sic@
+      }
+    }
+    else {
+      for (i:=0; i<lengthof(v_InterFreqCarrierFreqList); i:=i+1) {// @sic R5s230804 sic@
+          v_NR_CellInfo.Sysinfo.BcchInfo.SIs[v_SIB4_SI_Index].message_.c1.systemInformation.criticalExtensions.systemInformation.sib_TypeAndInfo[0].sib4.interFreqCarrierFreqList_v1700[i] := valueof(cs_InterFreqCarrierFreqInfo_v1700_Def);// @sic R5s230804 sic@
+      }
+    }
+    f_NR_CellInfo_Set(p_NR_CellId, v_NR_CellInfo);
+  }
+
+  /*
+   * @desc      Mobility Registration procedure with specific values on RegistrationAcceptMsg
+   * @param     p_NR_CellId
+   * @param     p_EPLMNs            (default value: omit)
+   * @param     p_ReleaseConnection (default value: rrcConnectionRelease)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_MobilityRegistrationWithRegistrationAcceptMsg (NR_CellId_Type p_NR_CellId,
+                                                                  template (omit) PLMN_List p_EPLMNs := omit,
+                                                                  RRCConnectionReleaseRequired_Type p_ReleaseConnection := rrcConnectionRelease) runs on NR5GC_PTC
+  { // @sic R5-211330 R5s210440 R5s210736 sic@
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (p_NR_CellId);
+    var PLMN_Identity v_ASN_PLMN := f_NR_CellInfo_GetPLMN (p_NR_CellId);
+    var TrackingAreaCode v_TAC := f_NR_CellInfo_GetTAC (p_NR_CellId);
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    var template (value) NG_MobileIdentity v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    var template (value) NG_TrackingAreaIdList v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+
+    // Steps 1 - 3
+    // RRC Connection Setup
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (p_NR_CellId, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    // Mobility Registration procedure steps 4 to 6
+    // Step 4: Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   p_EPLMNs,
+                                                   cs_NSSAI_SSTs('15'O));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(p_NR_CellId, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // Step 5
+    f_NR5GC_Registration_Complete(p_NR_CellId); // only SRB1
+    // Step 6
+    if (p_ReleaseConnection == rrcConnectionRelease) {
+      // Release RRC to enter RRC_IDLE
+      f_NR_RRCRelease(p_NR_CellId);
+    }
+  }
+
+  /*
+   * @desc      Set SIB16 in the cell with two elements in sliceInfoList_r17
+   * @param     p_NR_CellId
+   * @param     p_Dl_ImplicitCarrierFreq_1
+   * @param     p_NSAG_ID_r17_1
+   * @param     p_NSAG_CellReselectionPriority_r17_1 (default value: 4)
+   * @param     p_Dl_ImplicitCarrierFreq_2
+   * @param     p_NSAG_ID_r17_2
+   * @param     p_NSAG_CellReselectionPriority_r17_2 (default value: 4)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_CellInfo_SetSIB16_2Entries(NR_CellId_Type p_NR_CellId,
+                                           FreqPrioritySlicing_r17.dl_ImplicitCarrierFreq_r17 p_Dl_ImplicitCarrierFreq_1,
+                                           NSAG_ID_r17    p_NSAG_ID_r17_1,
+                                           template (omit) CellReselectionPriority p_NSAG_CellReselectionPriority_r17_1 := 4,
+                                           FreqPrioritySlicing_r17.dl_ImplicitCarrierFreq_r17 p_Dl_ImplicitCarrierFreq_2,
+                                           NSAG_ID_r17    p_NSAG_ID_r17_2,
+                                           template (omit) CellReselectionPriority p_NSAG_CellReselectionPriority_r17_2 := 4
+                                           ) runs on NR_BASE_PTC
+  {
+    f_NR_CellInfo_SetSIB16_FreqPriorityListSlicing_r17(p_NR_CellId, {cs_FreqPrioritySlicing_r17_Def(p_Dl_ImplicitCarrierFreq_1, {cs_SliceInfo_r17_1Entry(p_NSAG_ID_r17_1,p_NSAG_CellReselectionPriority_r17_1)}),
+                                                                     cs_FreqPrioritySlicing_r17_Def(p_Dl_ImplicitCarrierFreq_2, {cs_SliceInfo_r17_1Entry(p_NSAG_ID_r17_2,p_NSAG_CellReselectionPriority_r17_2)})});
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.3a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_3a_NR5GC() runs on NR5GC_PTC
+  {// Intra frequency reselection not allowed
+
+    f_NR5GC_Init(NR_4); // System Simulator: System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR Cells.
+
+    // Create and configure cell - NR Cell 1, NR Cell 11 and NR Cell 12 have different tracking areas according to TS 38.508-1 Table 4.4.2-3.
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -78, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5s240456 sic@
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell12, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1 according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+    f_TC_6_1_2_3a_NR5GC_TestBody();
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell12, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_3a_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.3a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_3a_NR5GC_TestBody() runs on NR5GC_PTC
+  { //@sic R5-247539 R5-256176 sic@
+    var integer v_T0_Cell1_RS_EPRE_FR1 := tsc_NR_NonSuitableCellSSS_EPRE_FR1;
+    var integer v_T0_Cell11_RS_EPRE_FR1 := -78;
+    var integer v_T0_Cell12_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T0_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableCellSSS_EPRE_FR2;
+    var integer v_T0_Cell11_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var integer v_T0_Cell12_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    v_CellPowerList_AtT0:={
+      cs_NR_CellPower(nr_Cell1, v_T0_Cell1_RS_EPRE_FR1, v_T0_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell11, v_T0_Cell11_RS_EPRE_FR1, v_T0_Cell11_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell12, v_T0_Cell12_RS_EPRE_FR1, v_T0_Cell12_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 0" siclog@
+    // SS changes MIB according to Table 6.1.2.3a.3.3-1
+    f_NR_CellInfo_SetMIB_CellBarred_intraFreqReselection(nr_Cell1, barred, notAllowed);
+
+    // @siclog "Step 0Aa1" siclog@
+    // EXCEPTION: IF pc_supportOfRedCap_r17 OR pc_supportOfERedCap_r18 THEN Step 0Aa1 is performed
+    // SS changes SIB1 according to Table 6.1.2.3a.3.3-2
+    if (pc_supportOfRedCap_r17){ // @sic R5s240634 sic@
+        f_NR_CellInfo_SetSIB1_RedCap_ConfigCommonSIB_r17(nr_Cell1, barred, barred);
+        f_NR_CellInfo_SetSIB1_intraFreqReselectionRedCap_r17(nr_Cell1, notAllowed);
+    }
+    else if (pc_supportOfERedCap_r18){ //pc_supportOfRedCap_r17 and pc_supportOfERedCap_r18 are mutually exclusive
+        f_NR_CellInfo_SetSIB1_intraFreqReselection_eRedCap_r18(nr_Cell1, notAllowed);
+    }
+
+    // @siclog "Step 1" siclog@
+    // SS transmits Short Message on PDCCH addressed to P-RNTI using Short Message field in DCI format 1_0. Bit 1 of Short Message field is set to 1 to indicate the SysInfo Modification
+    f_NR_ModifySysinfo(nr_Cell1);  //@sic R5s240456 sic@ - Modify Sysinfo in SS and wait until it is activated
+
+    // @siclog "Step 1a" siclog@
+    // Wait for 2.1* modification period second for the SS to transmit modified system information. (Note 1)
+    f_NR_WaitModificationPeriods(nr_Cell1);
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 12?
+    f_NR5GC_MobilityRegistration (nr_Cell12);
+
+  }//end of f_TC_6_1_2_3a_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_4_NR5GC() runs on NR5GC_PTC
+  { // Cell Reselection for interband operation
+    //@sic R5-233445 sic@
+    var ARFCN_ValueNR v_SSB_Freq_Cell1;
+    var ARFCN_ValueNR v_SSB_Freq_Cell10;
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR cells
+
+    // Table 6.1.2.4.3.3-2: SIB2 of NR Cell 1 and NR Cell10
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell1, 1);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell10, 5);
+
+     // Table 6.1.2.4.3.3-3: SIB4 of NR Cell 1 and NR Cell 10
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, f_NR_InitInterFreqCarrierFreqNeighbourCell(nr_Cell1, nr_Cell10)); // @sic R5s200518 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell10, f_NR_InitInterFreqCarrierFreqNeighbourCell(nr_Cell10, nr_Cell1));
+
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell1, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell10, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell1, 0, 10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell10, 0, 10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell1, 0, 7);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell10, 0, 7);
+    v_SSB_Freq_Cell1 := f_NR_CellInfo_GetFrequencySSB(nr_Cell1);
+    v_SSB_Freq_Cell10 := f_NR_CellInfo_GetFrequencySSB(nr_Cell10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_DL_CarrierFreq(nr_Cell1, 0, v_SSB_Freq_Cell10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_DL_CarrierFreq(nr_Cell10, 0, v_SSB_Freq_Cell1);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell10, -78, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10);
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2); // Table 6.1.2.4.3.2-1/2
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_4_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell10, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_4_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_4_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell10);
+
+    // @siclog "Step 1" siclog@
+    // The SS changes NR Cell 10 SS/PBCH EPRE level according to the row "T1" in table 6.1.2.4.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell10, -78, -82);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 41[FR1]/137[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) { // @sic R5-201113 R5-247542 sic@
+       f_Delay(41.0);
+    }
+    else{
+       f_Delay(137.0);
+    }
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 10?
+    f_NR5GC_CheckRRCIdle(nr_Cell10);
+
+  }//end of f_TC_6_1_2_4_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_5_NR5GC() runs on NR5GC_PTC
+  { // Cell reselection for interband operation using Pcompensation / Between FDD and TDD
+    //@sic R5-233445 sic@
+    var ARFCN_ValueNR v_SSB_Freq_Cell1;
+    var ARFCN_ValueNR v_SSB_Freq_Cell10;
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR cells
+
+
+    // Table 6.1.2.5.3.3-2: SIB1 of NR Cell 1
+    f_NR_CellInfo_SetSIB1_PMax(nr_Cell1, 33);
+
+    // Table 6.1.2.5.3.3-3: SIB2 of NR Cell 1 and NR Cell10
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell1, 5);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell10, 1);
+    f_NR_CellInfo_SetSIB2_ThreshServingLowP(nr_Cell1, 9); // @sic R5-201449 sic@
+
+     // Table 6.1.2.5.3.3-4: SIB4 of NR Cell 1 and NR Cell 10
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, f_NR_InitInterFreqCarrierFreqNeighbourCell(nr_Cell1, nr_Cell10));     // @sic R5s200381 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell10, f_NR_InitInterFreqCarrierFreqNeighbourCell(nr_Cell10, nr_Cell1));
+
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell1, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell10, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell1, 0, 14);  // @sic R5-201449 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell10, 0, 14);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_LowP(nr_Cell1, 0, 6);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_LowP(nr_Cell10, 0, 6);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell1, 0, 7);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell10, 0, 7);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_P_Max(nr_Cell1, 0, 33);
+    v_SSB_Freq_Cell1 := f_NR_CellInfo_GetFrequencySSB(nr_Cell1);
+    v_SSB_Freq_Cell10 := f_NR_CellInfo_GetFrequencySSB(nr_Cell10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_DL_CarrierFreq(nr_Cell1, 0, v_SSB_Freq_Cell10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_DL_CarrierFreq(nr_Cell10, 0, v_SSB_Freq_Cell1);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell10, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10);
+
+    // NR Cell 1 is set to NR FDD mode and NR Cell 10 is set to NR TDD mode
+    if (not f_NR_CellInfo_GetIsFDD(nr_Cell1)) {
+       f_SetVerdictInconc(__FILE__, __LINE__, "Pre-test conditions not met: NR Cell 1 is not set to NR FDD mode");
+    }
+    if (f_NR_CellInfo_GetIsFDD(nr_Cell10)) {
+       f_SetVerdictInconc(__FILE__, __LINE__, "Pre-test conditions not met: NR Cell 10 is not set to NR TDD mode");
+    }
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2); // Table 6.1.2.5.3.2-1/2
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_5_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell10, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_5_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_5_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    // @siclog "Step 1" siclog@
+    // The SS changes NR Cell 10 SS/PBCH EPRE level according to the row "T1" in table 6.1.2.5.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell10, -80, -82);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 34 seconds to allow UE to recognise the change.
+    f_Delay(41.0); // @sic R5-245499 sic@
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 10?
+    f_NR5GC_CheckRRCIdle(nr_Cell10);
+
+  }//end of f_TC_6_1_2_5_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.7
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_7_NR5GC() runs on NR5GC_PTC
+  { // Cell reselection / Equivalent PLMN
+    // @sic R5-201793 R5-233445 sic@
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T0 := {  // @sic R5-198879 sic@
+      cs_NR_CellPower (nr_Cell11, -78, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell12, -89, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell13, -100, tsc_NR_NonSuitableCellSSS_EPRE_FR2)
+    };
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR cells
+
+     // Table 6.1.2.7.3.3-4/5: SystemInformationBlockType4 for Cell 12 and 13
+    v_InterFreqCarrierFreqList := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell3); // @sic R5s200281 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell12, v_InterFreqCarrierFreqList); // SIB4 on NR Cell 12 updated with frequency list from SIB4 of nr_Cell3
+    v_InterFreqCarrierFreqList := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell6);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell13, v_InterFreqCarrierFreqList); // SIB4 on NR Cell 13 updated with frequency list from SIB4 of nr_Cell6
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell12, 0, omit);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell13, 0, omit);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    //Set Sys info and cell info for cell 2 & 4 to be used @ creation
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_001_11); //PLMN1
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_21); //PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell13, tsc_NR_HPLMN_003_31); //PLMN3
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+    f_NR_CellConfig_Def(nr_Cell13);
+
+    //Set the UE in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select_WithSwitchOnOff (UT);
+    f_NR5GC_ProvideSNPNData(); // @sic R5-225300 sic@
+
+    //@sic R5s200370 sic@
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);  // set initial power level conditions for preamble
+
+    // The UE is registered on PLMN1 (NR Cell 11) using the procedure described in TS 38.508-1 clause 4.5.2.2 except that the REGISTRATION ACCEPT message indicates PLMN3 in the Equivalent PLMN list as described in Table 6.1.2.7.3.3-1.
+    //The UE is in state Registered, Idle Mode (State 1N-A) on NR Cell 11 according to 38.508-1;
+    f_NR5GC_SwitchOnAndResetIMS();
+    f_NR5GC_Registration (nr_Cell11,
+                          -,Initial_NoSecurity,
+                          cs_PLMN_List_1PLMN(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell13)))  // Table 6.1.2.7.3.3-1
+                          );
+
+    f_NR5GC_RRC_Idle_Steps16_20 (nr_Cell11);  // @sic R5s200751 R5s200941 sic@
+    f_NR_RRCRelease(nr_Cell11); // procedure done on preamble so release connection to complete
+
+    f_NR_TestBody_Set(true);
+    f_NR_SetCellPowerList(v_CellPowerList_T0);
+
+    f_TC_6_1_2_7_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell13, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_7_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.7
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_7_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-233445 sic@
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T0 := {
+      cs_NR_CellPower (nr_Cell11, -78, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell12, -89, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell13, -100, tsc_NR_NonSuitableCellSSS_EPRE_FR2)
+    };
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T1 := {
+      cs_NR_CellPower (nr_Cell11, tsc_NR_NonSuitableCellSSS_EPRE_FR1, tsc_NR_NonSuitableOffCellSSS_EPRE)
+    };
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T2 := {
+      cs_NR_CellPower (nr_Cell11, -78, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell12, -100, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell13, -89, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2)
+    };
+    var float v_T_Seconds := 100.0;
+    timer t_IdleMode_GenericTimer := 360.0;
+
+    if (not f_NR_CellInfo_GetIsFR1(nr_Cell11)){
+        v_T_Seconds := 300.0;
+    }
+    // @siclog "Step 1" siclog@
+    // Check: Does the UE transmit an RRCSetupRequest message within T seconds? (Note 1)
+    // Note 1:  In Steps 1 and 6, wait T seconds to  ensure that the UE has detected, measured and evaluated the neighbour inter-frequency NR cells is provided, see TS 38.133 clause 4.2.2.4, where in T = 100sec for FR1 and 300sec for FR2
+    f_NR_CheckNoRRCSetupReq(nr_Cell11, v_T_Seconds);
+
+    // @siclog "Step 2" siclog@
+    // SS adjusts cell levels according to row T1 of table 6.1.2.7.3.2-1 for FR1 (or table 6.1.2.7.3.2-2 for FR2)
+    f_NR_SetCellPowerList(v_CellPowerList_T1);
+
+    //Start the Idle Mode Generic timer for Step 3
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 13?
+    // NOTE: The UE performs a "REGISTRATION REQUEST procedure with type "mobility registration updating" with PLMN1 and PLMN2 listed as an Equivalent PLMN in the REGISTRATION
+    // ACCEPT message; the RRC connection is released
+    f_NR5GC_MobilityRegistration(nr_Cell13, -,-,-,-, -, cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11)),
+                                                                            f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell12)))); //Table 6.1.2.7.3.3-2
+    //Restart the Idle Mode Generic timer for step 4
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 4" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 12?
+    // NOTE: The UE performs a "REGISTRATION REQUEST procedure with type "mobility registration updating" with PLMN1 and PLMN3 listed as an Equivalent PLMN in the REGISTRATION ACCEPT message; the RRC connection is released
+    f_NR5GC_MobilityRegistration(nr_Cell12,-,-,-,-,-,
+                                 cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11)),
+                                                     f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell13)))); // Table 6.1.2.7.3.3-3
+
+    //Stop the Idle Mode Generic timer since Mobiliy has happened
+    t_IdleMode_GenericTimer.stop;
+
+    // @siclog "Step 5" siclog@
+    // SS adjusts cell levels according to row T0 of table 6.1.2.7.3.2-1 for FR1 (or table 6.1.2.7.3.2-2 for FR2)
+    f_NR_SetCellPowerList(v_CellPowerList_T0); // set initial power level conditions
+
+    // @siclog "Step 6" siclog@
+    // Check: Does the UE transmit an RRCSetupRequest message within T seconds? (Note 1)
+    f_NR_CheckNoRRCSetupReq(nr_Cell11, v_T_Seconds);
+
+    // @siclog "Step 7" siclog@
+    // SS adjusts cell levels according to row T2 of table 6.1.2.7.3.2-1 for FR1 (or table 6.1.2.7.3.2-2 for FR2)
+    f_NR_SetCellPowerList(v_CellPowerList_T2);
+
+    //Restart the Idle Mode Generic timer for step 8
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 8" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.3-1 indicate that the UE is camped on NR Cell 13?
+    // NOTE: The UE performs a REGISTRATION REQUEST procedure with type "mobility registration updating" with PLMN1 and PLMN2 listed as an Equivalent PLMN in the REGISTRATION ACCEPT message; the RRC connection is released. (Note 2)
+    // Note 2:  In Step 8, the UE moves to Cell 13 because no reselection priority is defined for Cell 11, see Table 6.1.2.7.3.3-4
+    f_NR5GC_MobilityRegistration(nr_Cell13, -,-,-,-, -, cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11)),
+                                                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell13)))); //Table 6.1.2.7.3.3-2
+    //Stop the Idle Mode Generic timer since Mobiliy has happened
+    t_IdleMode_GenericTimer.stop;
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+  }//end of f_TC_6_1_2_7_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.8
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_8_NR5GC() runs on NR5GC_PTC
+  { // @sic R5s200610 R5-201793 R5-233445 sic@
+    // Cell reselection / Equivalent PLMN / Single Frequency operation
+    var integer v_T0_Cell1_RS_EPRE_FR1 := -78;
+    var integer v_T0_Cell1_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var integer v_T0_Cell2_RS_EPRE_FR1 := -84;
+    var integer v_T0_Cell2_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var integer v_T0_Cell4_RS_EPRE_FR1 := -90;
+    var integer v_T0_Cell4_RS_EPRE_FR2 := tsc_NR_NonSuitableCellSSS_EPRE_FR2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+
+    v_CellPowerList_AtT0 :={ // @sic R5-198879 sic@
+      cs_NR_CellPower(nr_Cell1, v_T0_Cell1_RS_EPRE_FR1, v_T0_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T0_Cell2_RS_EPRE_FR1, v_T0_Cell2_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, v_T0_Cell4_RS_EPRE_FR1, v_T0_Cell4_RS_EPRE_FR2)
+    };
+
+    f_NR5GC_Init(NR_3); // System information combination NR-3 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR cells
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell2, -82, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell4, -82, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    //Set Sys info and cell info for cell 2 & 4 to be used @ creation
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_Def);    //PLMN1
+    f_NR_CellInfo_SetPLMN(nr_Cell2, tsc_NR_HPLMN_002_11); //PLMN2
+    f_NR_CellInfo_SetPLMN(nr_Cell4, tsc_NR_HPLMN_003_21); //PLMN3
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell4);
+
+    //Set the UE in Automatic PLMN selection mode.
+    f_UT_AutomaticPLMN_Select_WithSwitchOnOff (UT);
+
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // The UE is registered on PLMN1 (NR Cell 1) using the procedure described in TS 38.508-1 clause 4.5.2.2 except that the REGISTRATION ACCEPT message indicates PLMN3 in the Equivalent PLMN list as described in Table 6.1.2.8.3.3-1.
+    // The UE is in state Registered, Idle Mode (State 1N-A) on NR Cell 1
+    f_NR5GC_SwitchOnAndResetIMS();
+    f_NR5GC_Registration (nr_Cell1,
+                          -,Initial_NoSecurity,
+                          cs_PLMN_List_1PLMN(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell4)))  // Table 6.1.2.8.3.3-1
+                          );
+
+    f_NR5GC_RRC_Idle_Steps16_20 (nr_Cell1);  // @sic R5s200751 sic@
+    f_NR_RRCRelease(nr_Cell1); // procedure done on preamble so release connection to complete
+
+    f_NR_TestBody_Set(true);
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0); // set initial power level conditions for preamble
+
+    f_TC_6_1_2_8_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell4, STATE_CONNECTED_3A_T3540, tsc_NR_RbId_SRB1); // @sic R5s200944 sic@
+  } //end of f_TC_6_1_2_8_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.8
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_8_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-211330 R5s210440 R5-233445 sic@
+    var integer v_T1_T2_Cell1_RS_EPRE_FR1 := tsc_NR_NonSuitableCellSSS_EPRE_FR1;
+    var integer v_T1_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+
+    var integer v_T1_Cell2_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T1_Cell2_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var integer v_T2_Cell2_RS_EPRE_FR1 := -82;
+    var integer v_T2_Cell2_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+
+    var integer v_T1_Cell4_RS_EPRE_FR1 := -82;
+    var integer v_T1_Cell4_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var integer v_T2_Cell4_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T2_Cell4_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var float v_T_Seconds := 100.0;
+    timer t_IdleMode_GenericTimer := 360.0;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell1, v_T1_T2_Cell1_RS_EPRE_FR1, v_T1_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T1_Cell2_RS_EPRE_FR1, v_T1_Cell2_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, v_T1_Cell4_RS_EPRE_FR1, v_T1_Cell4_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, v_T1_T2_Cell1_RS_EPRE_FR1, -120),
+      cs_NR_CellPower(nr_Cell2, v_T2_Cell2_RS_EPRE_FR1, v_T2_Cell2_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, v_T2_Cell4_RS_EPRE_FR1, v_T2_Cell4_RS_EPRE_FR2)
+    };
+
+    if (not f_NR_CellInfo_GetIsFR1(nr_Cell1)){
+        v_T_Seconds := 300.0;
+    }
+
+    // @siclog "Step 1" siclog@
+    // Check: Does the UE send an RRCSetupRequest within the next T seconds?
+    // Note: The wait period of T seconds is to ensure that the UE has detected, measured and evaluated the neighbour inter-frequency NR cells is provided, see TS 38.133 clause 4.2.2.4, where in T = 100sec for FR1 and 300sec for FR2
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, v_T_Seconds);
+
+    // @siclog "Step 2" siclog@
+    // SS adjusts cell levels according to row T1 of table 6.1.2.8.3.2-1 for FR1 (or table 6.1.2.8.3.2-2 for FR2).
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //Start the Idle Mode Generic timer for step 3
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.5 indicate that the UE is camped on NR Cell 4?
+    // NOTE: The UE performs a Registration procedure for mobility registration update with PLMN1 and PLMN2 listed as an Equivalent PLMN in the REGISTRATION ACCEPT message.
+    f_NR5GC_MobilityRegistrationWithRegistrationAcceptMsg(nr_Cell4,
+                                                          cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                              f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2)))); // Table 6.1.2.8.3.3-2
+
+    //Re-start the Idle Mode Generic timer for step 5
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 4" siclog@
+    // SS adjusts cell levels according to row T2 of table 6.1.2.8.3.2-1 for FR1 (or table 6.1.2.8.3.2-2 for FR2).
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 5" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.5 indicate that the UE is camped on NR Cell 2?
+    // NOTE: The UE performs a Registration procedure for mobility registration update with PLMN1 and PLMN3 listed as an Equivalent PLMN in the REGISTRATION ACCEPT message.
+    f_NR5GC_MobilityRegistrationWithRegistrationAcceptMsg(nr_Cell2,
+                                                          cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                              f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell4)))); // Table 6.1.2.8.3.3-3
+
+     //Re-start the Idle Mode Generic timer for step 7
+    t_IdleMode_GenericTimer.start;
+
+    // @siclog "Step 6" siclog@
+    // SS adjusts cell levels according to row T1 of table 6.1.2.8.3.2-1 for FR1 (or table 6.1.2.8.3.2-2 for FR2)
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 7" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.5 indicate that the UE is camped on NR Cell 4, 'connected without release'?
+    // NOTE: The UE performs a Registration procedure for mobility registration update with PLMN1 and PLMN2 listed as an Equivalent PLMN in the REGISTRATION ACCEPT message.
+    f_NR5GC_MobilityRegistrationWithRegistrationAcceptMsg(nr_Cell4,
+                                                          cs_PLMN_List_2PLMNs(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)), // Table 6.1.2.8.3.3-2
+                                                                              f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell2))),
+                                                          noRrcConnectionRelease);
+
+    //Stop the Idle Mode Generic timer
+    t_IdleMode_GenericTimer.stop;
+
+  }//end of f_TC_6_1_2_8_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.9
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_9_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection using Qhyst, Qoffset and Treselection
+    var template (omit) SI_SchedulingInfo v_SI_SchedulingInfo;
+    var PhysCellId v_PhysCellId;
+
+    f_NR5GC_Init(NR_3);
+
+    // Table 6.1.2.9.3.3-1: SIB1 of NR Cell 1 (preamble and all steps)
+    v_SI_SchedulingInfo := f_NR_GetSIB1_SiSchedulingInfo(nr_Cell1);
+    v_SI_SchedulingInfo.schedulingInfoList  := cs_NR_SI_SchedulingInfo_List2(cs_NR_SchedulingInfoDef(tsc_SIB2_Periodicity, {cs_NR_SIB_TypeInfoDef(sibType2)}),
+                                                                             cs_NR_SchedulingInfoDef(tsc_SIB3_Periodicity, {cs_NR_SIB_TypeInfoDef(sibType3)}));
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(nr_Cell1, valueof(v_SI_SchedulingInfo));
+
+    v_PhysCellId := f_NR_CellInfo_GetPhysicalCellId(nr_Cell2);
+    f_NR5GC_CellInfo_SetSIB3(nr_Cell1, cs_38508_SIB3_Def({cs_IntraFreqNeighCellInfoDef(v_PhysCellId, dB0)})); // @sic R5s200970 sic@
+
+    // Table 6.1.2.9.3.3-3: SIB2 of NR Cell 1
+    f_NR_CellInfo_SetSIB2_Q_Hyst(nr_Cell1, dB24);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_9_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell11, STATE_CONNECTED_3A_T3540, tsc_NR_RbId_SRB1); // @sic R5s200970 sic@
+  } //end of f_TC_6_1_2_9_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.9
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_9_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-201209 R5-205365 R5s200504 R5s200970 R5-210630 R5-221431 sic@
+    //Power levels NR_Cell1
+    var integer v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T3_T4_T7_T8_Cell1_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var integer v_T3_T4_T7_T8_Cell1_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    //Power levels NR_Cell2
+    var integer v_T1_T2_T5_T6_Cell2_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T3_T4_T7_Cell2_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T1_T2_T5_T6_Cell2_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var integer v_T3_T4_T7_Cell2_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var integer v_T8_Cell2_RS_EPRE_FR1_FR2 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+
+    //Power levels NR_Cell11
+    var integer v_T8_Cell11_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T8_Cell11_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T9_Cell11_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T9_Cell11_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1_T2_T5_T6;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3_T4_T7;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT8;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT9;
+
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell2);
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var float v_TReselectionNR := 7.0;
+
+    v_CellPowerList_AtT1_T2_T5_T6:={
+      cs_NR_CellPower(nr_Cell1, v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR1, v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T1_T2_T5_T6_Cell2_RS_EPRE_FR1, v_T1_T2_T5_T6_Cell2_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT3_T4_T7:={
+      cs_NR_CellPower(nr_Cell1, v_T3_T4_T7_T8_Cell1_RS_EPRE_FR1, v_T3_T4_T7_T8_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T3_T4_T7_Cell2_RS_EPRE_FR1, v_T3_T4_T7_Cell2_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT8:={
+      cs_NR_CellPower(nr_Cell2, v_T8_Cell2_RS_EPRE_FR1_FR2, v_T8_Cell2_RS_EPRE_FR1_FR2),
+      cs_NR_CellPower(nr_Cell11, v_T8_Cell11_RS_EPRE_FR1, v_T8_Cell11_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT9:={
+      cs_NR_CellPower(nr_Cell1, v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR1, v_T1_T2_T5_T6_T9_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell11, v_T9_Cell11_RS_EPRE_FR1, v_T9_Cell11_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // SS re-adjusts the SSS levels according to row "T1" in table 6.1.2.9.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1_T2_T5_T6);
+
+    // @siclog "Step 1A" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds, the SS transmits a Paging message on NR Cell 2
+    if (v_IsFR1) {
+       f_Delay(34.0);
+    }
+    else{
+       f_Delay(130.0);
+    }
+    f_NR_Paging_Def(nr_Cell2, RRC_IDLE);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE send an NR: RRCSetup Request on NR Cell 2 within the next 10 seconds ?
+    f_NR_CheckNoRRCSetupReq(nr_Cell2, 10.0);
+
+    // @siclog "Step 2A" siclog@
+    // SS resets Qhysts NR Cell 1 according to row "T2" in table 6.1.2.9.3.2-1/2, The ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1
+    f_NR_CellInfo_SetSIB2_Q_Hyst(nr_Cell1, dB0); // Table 6.1.2.9.3.3-4: SIB2 of NR Cell 1
+    f_NR_IncrementValueTag(nr_Cell1, sibType2);
+
+    // @siclog "Step 3" siclog@
+    // SS notifies UE of the system information change on NR Cell 1 by send Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell1); // @sic R5s200156 Ch. 3.1  sic@
+
+    // @siclog "Step 4 - Void" siclog@
+
+    // @siclog "Step 5A" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds.
+    if (v_IsFR1) {
+       f_Delay(8.0);
+    }
+    else {
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 5" siclog@
+    // Wait for 2.1* modification period to allow the new system information to take effect
+    f_NR_WaitModificationPeriods (nr_Cell1); //@sic R5s200145 sic@
+
+    // @siclog "Step 6" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 2?
+    f_NR5GC_CheckRRCIdle(nr_Cell2);
+
+    // @siclog "Step 7" siclog@
+    // SS re-adjusts SSS levels according to rows "T3" in table 6.1.2.9.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3_T4_T7);
+
+    // @siclog "Step 8" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) {
+       f_Delay(8.0);
+    }
+    else {
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 9" siclog@
+    // The test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 1.
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+    // @siclog "Step 9A" siclog@
+    // SS changes Qoffsets,n NR Cell 1 according to rows "T4" in table 6.1.2.9.3.2-1/2. The ValueTag of SIB3 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1.
+    f_NR5GC_CellInfo_SetSIB3_QOffsetCell(nr_Cell1, 0, dB24);
+    f_NR_IncrementValueTag(nr_Cell1, sibType3);
+
+    // @siclog "Step 10" siclog@
+    // SS notifies UE of the system information change on NR Cell 1 by send Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell1); //Modify Sysinfo in SS acc. to Table 6.1.2.9.3.3-5: SIB3 of NR Cell 1
+
+    // @siclog "Step 11 - Void" siclog@
+
+    // @siclog "Step 12" siclog@
+    // Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods (nr_Cell1);     //@sic R5s200145 sic@
+
+    // @siclog "Step 13" siclog@
+    // SS re-adjusts SSS levels according to row "T5" in table 6.1.2.9.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1_T2_T5_T6);
+
+    // @siclog "Step 14" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds to allow UE to recognise the change.
+    if (f_NR_CellInfo_GetIsFR1(nr_Cell1)) {
+       f_Delay(8.0);
+    }
+    else {
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 15" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is still camped on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+    // @siclog "Step 15A" siclog@
+    // SS resets Qoffset(s,n NR Cell1) according to row "T6" in table 6.1.2.9.3.2-1/2, The ValueTag of SIB3 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1.
+    f_NR5GC_CellInfo_SetSIB3_QOffsetCell(nr_Cell1, 0, dB0);
+    f_NR_IncrementValueTag(nr_Cell1, sibType3);
+
+    // @siclog "Step 16" siclog@
+    // SS notifies UE of the system information change on NR Cell 1 by send Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell1); //Modify Sysinfo in SS
+
+    // @siclog "Step 17 - Void" siclog@
+    // @siclog "Step 18" siclog@
+    // Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods (nr_Cell1);
+
+    // @siclog "Step 18A" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds.
+    if (v_IsFR1) {
+       f_Delay(8.0);
+    }
+    else {
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 19" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 2?
+    f_NR5GC_CheckRRCIdle(nr_Cell2);
+
+    // @siclog "Step 20" siclog@
+    // SS re-adjusts SSS levels according to rows "T7" in table 6.1.2.9.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3_T4_T7);
+
+    // @siclog "Step 21" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) {
+       f_Delay(8.0);
+    }
+    else {
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 22" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+    // @siclog "Step 22A" siclog@
+    // SS changes TreselectionNR Cell 1 according to rows "T8" in table 6.1.2.9.3.2-1/2, The ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR(nr_Cell1, 7);
+    f_NR_IncrementValueTag(nr_Cell1, sibType2);
+
+    // @siclog "Step 23" siclog@
+    // SS sends notification of the system information change on NR Cell 1 by send Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell1); //Modify Sysinfo in SS
+
+    // @siclog "Step 24 - Void" siclog@
+    // @siclog "Step 25" siclog@
+    // SS re-adjusts cell power levels according to rows "T8" in table 6.1.2.9.3.2-1/2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT8);
+
+    // @siclog "Step 26" siclog@
+    // Wait for 41[FR1]/137[FR2] seconds to allow UE to detect Cell 11
+     if (f_NR_CellInfo_GetIsFR1(nr_Cell11)) { // @sic R5-252921 sic@
+       f_Delay(41.0);
+    }
+    else {
+       f_Delay(137.0);
+    }
+
+    // @siclog "Step 27" siclog@
+    // SS re-adjusts SSS levels according to rows "T9" in table 6.1.2.9.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT9);
+
+    // @siclog "Step 28" siclog@
+    // Check: Does the UE send an NR: RRCSetupRequest on NR Cell 11 within Timer=TreselectionNR from step 27?
+    f_NR_CheckNoRRCSetupReq(nr_Cell11, v_TReselectionNR, -, "Step28: UE sent an RRCSetupRequest on NR Cell 11 within TReselectionNR"); //@sic R5s201387 sic@
+
+    // @siclog "Step 29" siclog@
+    // SS waits for Timer=TreselectionNR Cell 11 expires after step 27
+
+    // @siclog "Step 30" siclog@
+    // Check: Does the UE send an NR: RRCsetupRequest on NR Cell 11?
+    f_NR_RRC_SetupRequest_Def(nr_Cell11);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.9 Step 30");
+
+    // @siclog "Step 31-34" siclog@
+    // Steps 2 to 5 of the generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 are performed on NR Cell 11.
+    f_NR_RRCSetup_Def (nr_Cell11);
+    // UE shall establish SRB1 acc. to 38.331 cl. 5.3.3.1 - UE enters RRC_CONNECTED state
+    // receive RRC Connection Setup Complete with piggy-backed NAS message on SRB1 (DCCH):
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell11,
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                          -);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.9 Step 31-34");
+    }
+
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell11, v_GMM_MobilityInfo, -, -, noRrcConnectionRelease);
+
+
+  }//end of f_TC_6_1_2_9_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.11
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_11_NR5GC() runs on NR5GC_PTC
+  {// Area Specific SIBs using systemInformationAreaID
+
+    f_NR5GC_Init(NR_2);  // System information combination NR-2 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR Cells
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -80, -82);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell6);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1 according to 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_11_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell6, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_11_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.11
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_11_NR5GC_TestBody() runs on NR5GC_PTC
+  { //@sic R5-202603 R5-225373 R5s221232 R5s240098 sic@
+    var integer v_T1_Cell1_RS_EPRE_FR1 := -95;
+    var integer v_T1_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableCellSSS_EPRE_FR2;
+    var integer v_T1_Cell3_RS_EPRE_FR1 := -80;
+    var integer v_T2_Cell1_RS_EPRE_FR1 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var integer v_T2_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var integer v_T2_Cell3_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T2_Cell6_RS_EPRE_FR1 := -80;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList := f_NR_InitInterFreqCarrierFreqNeighbourCell(nr_Cell1, nr_Cell3, nr_Cell6);
+    var template SI_SchedulingInfo v_SI_SchedulingInfo;
+    var template (omit) NR_BcchToPdschConfig_Type v_NR_BcchToPdschConfig; //@sic R5s200703 sic@
+    var template (value) SSB_MTC v_SSB_MTC;
+    var default v_Default;
+    timer t_WaitTime := 5.0;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell1, v_T1_Cell1_RS_EPRE_FR1, v_T1_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T1_Cell3_RS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, v_T2_Cell1_RS_EPRE_FR1, v_T2_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T2_Cell3_RS_EPRE_FR1, -91),
+      cs_NR_CellPower(nr_Cell6, v_T2_Cell6_RS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+
+    // @siclog "Step 0" siclog@
+    // The SS changes SIB1 as specified as Table 6.1.2.11.3.3-1 in nr_Cell1 and nr_Cell3.
+    // Table 6.1.2.11.3.3-1: SIB1 of NR cell 1 and NR cell 3 (All steps in Table 6.1.2.11.3.2-3)
+    v_SI_SchedulingInfo := f_NR_GetSIB1_SiSchedulingInfo(nr_Cell1);
+    v_SI_SchedulingInfo.schedulingInfoList[1] := cs_NR_SchedulingInfoDef(tsc_SIB4_Periodicity, {cs_NR_SIB_TypeInfoDef_AreaScope(sibType4)}, notBroadcasting);
+    v_SI_SchedulingInfo.systemInformationAreaID := '000000000000000000000011'B;
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(nr_Cell1, valueof(v_SI_SchedulingInfo));
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(nr_Cell3, valueof(v_SI_SchedulingInfo));
+
+    v_NR_BcchToPdschConfig := f_NR_InitialiseBcchToPdschConfig(nr_Cell3); // @sic R5s221121 Ch. 2 sic@
+    f_NR_SS_ConfigureSysinfo(nr_Cell3, -, v_NR_BcchToPdschConfig);
+
+    f_NR_SS_RachProcedureConfig(nr_Cell1, cs_NR_RachProcedureConfig_CBRA_Msg4Based(f_NR_CellInfo_GetPhysicalParameters(nr_Cell1), cs_NR_RachProcedureMsg4WithNoRrcMsg)); // @sic R5s221121 Ch. 1 sic@
+
+    //@siclog "Step 0A" siclog@
+    //The SS notifies the UE of change of System Information on NR Cell 1 by send Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell1);  //@sic R5s201015 sic@
+
+    //Make cellArray ready for step 3 with SIB4 in nr_Cell1
+    v_SI_SchedulingInfo := f_NR_GetSIB1_SiSchedulingInfo(nr_Cell1);  //Store SIB1 in a variable because it will be changed in f_NR_SetSysinfoCombinationToNR_4
+    f_NR_SetSysinfoCombinationToNR_4(nr_Cell1, cs_38508_SIB4_Def(v_InterFreqCarrierFreqList));
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, v_InterFreqCarrierFreqList);
+    // Set SIB4 as per Table 6.1.2.11.3.3-4: SystemInformation (Step 3, Table 6.1.2.11.3.2-3)
+
+    v_SSB_MTC := f_NR_GetSSB_MTC_InterFreqOdd(nr_Cell1, nr_Cell3);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell1, 0, v_SSB_MTC.periodicityAndOffset);  //@sic R5s201015 R5s210501 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell1, 1, v_SSB_MTC.periodicityAndOffset);
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(nr_Cell1, valueof(v_SI_SchedulingInfo)); //Set back SIB1 scheduling
+
+    // @siclog "Step 1 - Void" siclog@
+    // @siclog "Step 2" siclog@
+    // UE sends RRCSystemInfoRequest message to NR Cell 1 to request SIB4.
+    SRB.receive(car_NR_SRB0_RrcPdu_IND(nr_Cell1, cr_38508_RRCSystemInfoRequest(tsc_BitSIB4_SchedulingInfoList)));  // Table 6.1.2.11.3.3-3: RRCSystemInfoRequest: Bit corresponds to SIB4 in schedulingInfoList
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.11 Step 2");
+
+    v_Default := activate(a_NR_AddDefault_IgnoreSysInfoReq(nr_Cell1));
+    // EXCEPTION: After receving RRCSystemInfoRequest message in step 2, the SS ignores the reception of subsequent RRCSystemInfoRequest.
+
+    // @siclog "Step 3" siclog@
+    // NR Cell 1 starts broadcasting SystemInformation message which including SIB4.
+    v_NR_BcchToPdschConfig := f_NR_InitialiseBcchToPdschConfig(nr_Cell1, true); //@sic R5s200703 sic@
+    // Force SIB4 broadcasting even if its status is notBroadcasting
+    f_NR_SS_ConfigureSysinfo(nr_Cell1, cs_TimingInfo_Now, v_NR_BcchToPdschConfig, true);  //@sic R5s220880 Ch. 2.4 sic@
+
+    // @siclog "Step 3A" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels and according to row "T1" in table 6.1.2.11.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 4" siclog@
+    // Wait 34s to let UE to perform inter-frequency cell reselection to NR Cell 3 (Note 1)
+    f_Delay(34.0);
+
+    deactivate(v_Default);
+
+    // @siclog "Step 4A" siclog@
+    t_WaitTime.start;
+    alt {
+      [] SRB.receive(car_NR_SRB0_RrcPdu_IND(nr_Cell3, cr_38508_RRCSystemInfoRequest(tsc_BitSIB4_SchedulingInfoList)))
+      {
+         f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4A: UE send RRCSystemInfoRequest message on NR Cell 3 to request SIB4 in the next 5s");
+      }
+      [] t_WaitTime.timeout
+      {// do nothing
+      }
+    }
+
+    // @siclog "Step 4B" siclog@
+    // The test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+    // @siclog "Step 5" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels and according to row "T2" in table 6.1.2.11.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 6 - Void" siclog@
+    // @siclog "Step 6A" siclog@
+    // Wait 34s to let UE to perform inter-frequency cell reselection to NR Cell 6 (Note 1)
+    f_Delay(34.0);
+
+    // @siclog "Step 7" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 6?
+    f_NR5GC_CheckRRCIdle(nr_Cell6);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.11 Step 7");
+
+  }//end of f_TC_6_1_2_11_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.12
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_12_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection using cell status and cell reservations / cellReservedForOtherUse
+    var template (omit) SIB1.cellAccessRelatedInfo.cellReservedForOtherUse v_Sib1_cellReservedForOtherUse := true_;
+
+    f_NR5GC_Init(NR_2);  // System information combination NR-2 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR Cells
+
+    // Table 6.1.2.12.3.3-1: SIB1 for NR Cell 11
+    f_NR_CellInfo_SetSIB1_CellReservedForOtherUse(nr_Cell11, valueof(v_Sib1_cellReservedForOtherUse));
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, -88, -91);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_12_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A); // @sic R5s191172 sic@
+  } //end of f_TC_6_1_2_12_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.12
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_12_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var integer v_T1_Cell11_RS_EPRE_FR1 := -80;
+    var integer v_T1_Cell11_RS_EPRE_FR2 := -82;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell11, v_T1_Cell11_RS_EPRE_FR1, v_T1_Cell11_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels and according to row "T1" in table 6.1.2.12.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE initiate a random access procedure on NR Cell 11 within the next 120s?
+    f_NR_CheckNoRRCSetupReq(nr_Cell11, 120.0);
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that check UE is in state NR RRC_IDLE on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+  }//end of f_TC_6_1_2_12_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.13
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_13_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection using cell status and cell reservations / Access Identity 0, 1, 2 and 12 to 14 - cellReservedForOperatorUse
+   // @sic R5-197020 R5-204416 R5-205366 R5s240278 sic@
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR Cells
+
+    f_NR_CellInfo_SetTAC (nr_Cell12, int2bit(2,24)); // NR Cell 1 and NR Cell 12 with different tracking areas
+
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_Def);
+    f_NR_CellInfo_SetCellReservedForOperatorUse(nr_Cell12, -, reserved ); // Table 6.1.2.13.3.3-1: SIB1 for NR Cell 12
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell12, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell12);
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, -88, -91);
+    //f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A); // @sic R5-241498 sic@
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_13_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell12, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_13_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.13
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_13_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-241498 R5-246573 sic@
+    var integer v_T1_Cell12_RS_EPRE_FR1 := -80;
+    var integer v_T1_Cell12_RS_EPRE_FR2 := -82;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    timer t_Wait_300 := 300.0;
+    timer t_Wait_180 := 180.0;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell12, v_T1_Cell12_RS_EPRE_FR1, v_T1_Cell12_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.13.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    t_Wait_300.start;
+    t_Wait_180.start;
+    
+    // @siclog "Step 1A" siclog@
+    // Wait for 34s for FR1 or 130s for FR2 for the UE to detect and receive system information of NR Cell 12. (Note 1)
+    // NOTE 1: The wait time for reception of system information on a newly detected inter frequency cell is selected to cover Tdetect,NR_Inter (25*1280ms=32s for FR1 and 25*4*1280ms=128s for FR2) + TSI-NR (1.28s for FR1 and FR2) = 33.28s rounded up to 34s for FR1 and 129.28s rounded up to 130s for FR2.
+    if (f_NR_CellInfo_GetIsFR1(nr_Cell12))
+    {
+      f_Delay(34.0);
+    }
+    else
+    {
+      f_Delay(130.0);
+    }
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE initiate a random access procedure on NR Cell 12 within the next 180s from Step 1?
+    alt {
+        []SYSIND.receive(car_NR_PRACH_Preamble_IND(nr_Cell12, cr_TimingInfo_Any, ?))
+        {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+        }
+        []t_Wait_180.timeout
+        {
+            // do nothing
+        }
+    };
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that check UE is in state NR RRC_IDLE on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+    // @siclog "Step 4" siclog@
+    // The SS changes the SIB1 of NR Cell 12 according to Table 6.1.2.13.3.3-1 to set the cellReservedForOperatorUse as notReserved and adjusts the NR Cells power levels according to row "T2" in table 6.1.2.13.3.2-1/2.
+    f_NR_CellInfo_SetCellReservedForOperatorUse(nr_Cell12); // Table 6.1.2.13.3.3-1: SIB1 for NR Cell 12
+    f_NR_ModifySysinfo(nr_Cell12, false); // @sic R5s240278 sic@ - Modify Sysinfo in SS
+
+    // @siclog "Step 5" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 12 after 300 seconds from Step 1?
+    // NOTE: The UE shall exclude the barred cell 12 as a candidate for cell selection/reselection for 300 seconds after Step 1.
+    t_Wait_300.timeout; // reselection shall not happen before expiry of 300s timer
+    f_NR5GC_MobilityRegistration (nr_Cell12);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.13 Step 5");
+
+
+  }//end of f_TC_6_1_2_13_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.14
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_14_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection using cell status and cell reservations / Access Identity 11 or 15  - cellReservedForOperatorUse
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR Cells
+
+    //NR Cell 1 and NR Cell 3 are HPLMN
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_Def);
+    f_NR_CellInfo_SetPLMN(nr_Cell3, tsc_NR_HPLMN_Def);
+
+    f_NR_CellInfo_SetTAC (nr_Cell3, int2bit(2,24));  // NR Cell 1 and NR Cell 3 in different tracking areas
+
+    f_NR_CellInfo_SetCellReservedForOperatorUse(nr_Cell3, -, reserved ); // Table 6.1.2.14.3.3-1: SIB1 for NR Cell 3
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // The UE is equipped with a USIM containing default values and USIM Configuration 17
+    f_UT_USIM_Insert (UT, "38.508-1, USIM containing default values and USIM Configuration 17"); // @sic R5-205192 sic@
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1 (serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A, -, -, -, -, '0101'B); // @sic R5s210189 Ch. 1 sic@
+    f_NR_SetCellPower (nr_Cell1, -88, -91);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_14_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell3, STATE_CONNECTED_3A_T3540); // @sic R5s201031 sic@
+  } //end of f_TC_6_1_2_14_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.14
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_14_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var integer v_T1_Cell3_RS_EPRE_FR1 := -80;
+    var integer v_T1_Cell3_RS_EPRE_FR2 := -82;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell3, v_T1_Cell3_RS_EPRE_FR1, v_T1_Cell3_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.14.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the test result of test steps 1 to 5 of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_InitialOrMobilityRegistration(nr_Cell3,
+                                          -, -, -, -,
+                                          noRrcConnectionRelease);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2: UE is now camped on NR Cell 3");
+  }//end of f_TC_6_1_2_14_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.15 and clause 6.1.2.15a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_15and15a_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NG_NAS_MSG_Indication_Type v_NasInd;
+    //Power levels
+    var integer v_T1_Cell11_RS_EPRE_FR1 := -78;  //@sic R5-201477 sic@
+    var integer v_T1_Cell11_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell11, v_T1_Cell11_RS_EPRE_FR1, v_T1_Cell11_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // SS adjusts the SS/PBCH EPRE level of NR Cell 1 and NR Cell 11 according to row "T1" in table 6.1.2.15.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the UE transmit an RRCSetupRequest message on NR Cell 11?
+    f_NR_RRC_SetupRequest_Def(nr_Cell11);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.15 Step 2");
+
+    // @siclog "Step 3" siclog@
+    //The SS transmits an RRCSetup message.
+    f_NR_RRCSetup_Def (nr_Cell11);
+
+    // @siclog "Step 4" siclog@
+    // Check: Does the UE transmit an RRCSetupComplete message indicating the HPLMN (second PLMN in the list)?
+    //Note: this message contains an REGISTRATION REQUEST message indicating "mobility registration updating" to update the registration of the actual tracking area according to default message contents.
+    v_NasInd := f_NR_RRCSetupComplete_Def(nr_Cell11,
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def, 2),
+                                          tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_NasInd.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.15 Step 4");
+    }
+
+    // @siclog "Step 5-7" siclog@
+    // Steps 4 to 6 of the registration procedure described in TS 38.508-1 Table 4.9.5.2.2-1 are performed on NR Cell 11.
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell11, v_GMM_MobilityInfo);
+
+  }//end of f_TC_6_1_2_15and15a_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.15
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_15_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection in shared network environment
+
+    f_NR5GC_Init(NR_3); // System information combination NR-3 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR Cells
+
+    // Set Sys info and cell info for cell 1 & 11 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_001_02);          // Table 6.1.2.15.3.3-2: SIB1s for NR Cell 11
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_Def, 0, 1);
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_Def);           // Table 6.1.2.15.3.3-1: SIB1 for NR Cell 1
+
+    f_NR_CellInfo_SetTAC (nr_Cell11, int2bit(2,24));  // NR Cell 1 and NR Cell 11 in different tracking areas
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -75, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1 according to 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2); // update for T0 due to Table 6.1.2.15.3.2-2 (FR2)
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_15and15a_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_15_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.15a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_15a_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection in shared network environment / Cells broadcasting multiple PLMN IDs with unique TAC's, RAN areas, and cell identities
+    //@sic R5s230031 R5s230154 sic@
+    var template (value) PLMN_IdentityInfoList v_PLMN_IdentityInfoList;
+    var NR_CellInfo_Type v_NR_CellInfo;
+
+    f_NR5GC_Init(NR_3); // System information combination NR-3 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR Cells
+
+    // Set Sys info and cell info for cell 1 & 11 to be used
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_Def);           // Table 6.1.2.15a.3.3-1: SIB1 for NR Cell 1
+
+    v_PLMN_IdentityInfoList := { cs_NR_PLMN_IdentityInfo(tsc_NR_HPLMN_001_02,
+                                                         int2bit(2,24),
+                                                         2,
+                                                         '00000000000000000000000110'B & '0000001011'B),
+                                 cs_NR_PLMN_IdentityInfo(tsc_NR_HPLMN_Def,
+                                                         int2bit(3,24), // TAI ID
+                                                         1,
+                                                         '00000000000000000000000101'B & '0000001010'B)};
+    f_NR_CellInfo_SetPLMNIdentityInfo_List (nr_Cell11,
+                                            v_PLMN_IdentityInfoList );// Table 6.1.2.15a.3.3-2: SIB1s for NR Cell 11
+
+    v_NR_CellInfo := f_NR_CellInfo_Get(nr_Cell11); // NAS Parameters aligned to HPLMN_Def PLMN Identity
+    v_NR_CellInfo.NAS_Parameters.TrackingAreaCode := int2bit(3,24);
+    v_NR_CellInfo.NAS_Parameters.Ranac := 1;
+    v_NR_CellInfo.NAS_Parameters.CellIdentity := '00000000000000000000000101'B & '0000001010'B ;
+    f_NR_CellInfo_Set(nr_Cell11, v_NR_CellInfo);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell11, -78, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1 according to 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2); // update for T0 due to Table 6.1.2.15a.3.2-2 (FR2)
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_15and15a_NR5GC_TestBody(); // Acc. to cl. 6.1.2.15a.3.2,  Test procedure sequence is same as TC 6.1.2.15.3.2
+
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_15a_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.16
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_16_NR5GC() runs on NR5GC_PTC
+  { // Inter-frequency cell reselection (equal priority)
+
+    f_NR5GC_Init(NR_5); // System information combination NR-5 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR Cells
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, -82);
+
+    // NR Cell 1, NR Cell 2 and NR Cell 3 have different tracking areas.
+    f_NR_CellInfo_SetTAC ( nr_Cell2, int2bit(2,24));
+    f_NR_CellInfo_SetTAC ( nr_Cell3, int2bit(4,24));
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // Preamble: the UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1according to 38.508-1 Table 4.4A.2-1.
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, -88, -91);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_16_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell3, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_16_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.16
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_16_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T0 := {
+      cs_NR_CellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower (nr_Cell3, -78, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS adjusts the SS/PBCH EPRE levels according to row "T0" in table 6.1.2.16.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_T0);
+
+    // @siclog "Step 2" siclog@
+    // Check: Does the test result of of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_InitialOrMobilityRegistration(nr_Cell3);
+
+
+  }//end of f_TC_6_1_2_16_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.17
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_17_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection / Cell-specific reselection parameters provided by the network in a neighbouring cell list
+
+    f_NR5GC_Init(NR_3); // System information combination NR-3 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR Cells
+
+    f_NR_CellInfo_SetTAC (nr_Cell2, int2bit(2,24));  // NR Cell 1 and NR Cell 2, 4 in different tracking areas
+    f_NR_CellInfo_SetTAC (nr_Cell4, int2bit(4,24));  // NR Cell 1 and NR Cell 2, 4 in different tracking areas
+
+    // Table 6.1.2.17.3.3-1: SIB3 for NR Cell 1
+    /* @sic R5s221179 BASELINE MOVING 2022 rel-17 sic@ */
+    f_NR5GC_CellInfo_SetSIB3(nr_Cell1, cs_38508_SIB3_Def({cs_IntraFreqNeighCellInfoDef(f_NR_CellInfo_GetPhysicalCellId(nr_Cell2), dB_24)}));  //@sic R5s191130 sic@
+
+    // Table 6.1.2.17.3.3-2: SIB3 for NR Cell 2
+    f_NR5GC_CellInfo_SetSIB3_IntraFreqExcludedCellList(nr_Cell2, 0, f_NR_CellInfo_GetPhysicalCellId(nr_Cell4));
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell4);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1according to 38.508-1 Table 4.4A.2-1.
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_17_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell2, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_17_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.17
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_17_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    //Power levels
+    var integer v_T1_Cell2_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T1_Cell2_RS_EPRE_FR2 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2;
+    var integer v_T2_Cell1_RS_EPRE_FR1 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var integer v_T2_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var integer v_T3_Cell4_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1; //@sic R5s191130 Ch. 2 sic@
+    var integer v_T3_Cell4_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell2, v_T1_Cell2_RS_EPRE_FR1, v_T1_Cell2_RS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, v_T2_Cell1_RS_EPRE_FR1, v_T2_Cell1_RS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT3:={
+      cs_NR_CellPower(nr_Cell4, v_T3_Cell4_RS_EPRE_FR1, v_T3_Cell4_RS_EPRE_FR2)
+    };
+
+
+    // @siclog "Step 1" siclog@
+    // The SS adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.17.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2-6" siclog@
+    // Check: Does the test result of test steps 1 to 5 of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 2?
+    f_NR5GC_MobilityRegistration (nr_Cell2,
+                                  -, -, -, -,
+                                  noRrcConnectionRelease);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.17 Steps 2-6");
+
+    // @siclog "Step 7" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels according to row "T2" in table 6.1.2.17.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 8" siclog@
+    // Wait for 1 second to allow UE to recognise the change.
+    f_Delay(1.0);
+
+    // @siclog "Step 9" siclog@
+    // The SS transmits an RRCRelease message to release RRC connection and move to RRC_IDLE.
+    f_NR_RRCRelease(nr_Cell2);
+
+    // @siclog "Step 10" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels according to row "T3" in table 6.1.2.17.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+
+    // @siclog "Step 11" siclog@
+    // Check: Does the UE initiate a random access procedure on NR Cell 4 within the next 120s?
+    f_NR_CheckNoRRCSetupReq(nr_Cell4, 120.0);
+
+  }//end of f_TC_6_1_2_17_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.18
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_18_NR5GC() runs on NR5GC_PTC
+  {// Cell reselection, Sintrasearch, Snonintrasearch
+
+    // NR Cell 2 and NR Cell 3 uses System information combination NR-4 as defined in TS 38.508-1 Table 4.4.3.1.2-1 is used in NR cells.
+    f_NR5GC_Init(NR_4);
+
+    // NR Cell 1 uses System information combination NR-3 as defined in TS 38.508-1 Table 4.4.3.1.2-1 is used in NR cells.
+    f_NR_SetSysinfoCombinationToNR_3(nr_Cell1, cs_38508_SIB3_Def);
+
+    // Table 6.1.2.18.3.3-2: SIB2 of NR Cell 1, NR Cell 2 and NR Cell 3
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell1, 5);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell2, 1);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell3, 1);
+    f_NR_CellInfo_SetSIB2_S_NonIntraSearchP(nr_Cell1, 10);
+    f_NR_CellInfo_SetSIB2_S_NonIntraSearchP(nr_Cell2, 10);
+    f_NR_CellInfo_SetSIB2_S_NonIntraSearchP(nr_Cell3, 10);
+    f_NR_CellInfo_SetSIB2_S_IntraSearchP(nr_Cell1, 10);
+    f_NR_CellInfo_SetSIB2_S_IntraSearchP(nr_Cell2, 10);
+    f_NR_CellInfo_SetSIB2_S_IntraSearchP(nr_Cell3, 10);
+
+    // Table 6.1.2.18.3.3-3: SIB4 of NR Cell 2 and NR Cell 3
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell2, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell3, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell3, 0, 7);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell2, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell3, 0, 5);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // Preamble: The UE is in NR RRC Idle mode (state 1N-A) on NR Cell 1according to 38.508-1 Table 4.4A.2-1.
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_18_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_18_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.18
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_18_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-201115 R5-201340 R5-221431 R5-250524 sic@
+    var integer v_T1_Cell1_RS_EPRE_FR1 := -102;
+    var integer v_T1_Cell2_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T1_Cell3_RS_EPRE_FR1 := -118;
+    var integer v_T2_Cell1_RS_EPRE_FR1 := -118;
+    var integer v_T2_Cell2_RS_EPRE_FR1 := -102;
+    var integer v_T2_Cell3_RS_EPRE_FR1 := tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1;
+    var integer v_T4_Cell1_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T4_Cell2_RS_EPRE_FR1 := -118;
+    var integer v_T4_Cell3_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT4;
+    
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell2);
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell1, v_T1_Cell1_RS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T1_Cell2_RS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T1_Cell3_RS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, v_T2_Cell1_RS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T2_Cell2_RS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T2_Cell3_RS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT4:={
+      cs_NR_CellPower(nr_Cell1, v_T4_Cell1_RS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, v_T4_Cell2_RS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T4_Cell3_RS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS re-adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.18.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) {
+      f_Delay(34.0);
+    } else {
+      f_Delay(130.0);
+    }
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 2?
+    f_NR5GC_CheckRRCIdle(nr_Cell2);
+
+    // @siclog "Step 4" siclog@
+    // The SS re-adjusts the SSS levels according to row "T2" in table 6.1.2.18.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 5" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+    if (v_IsFR1) {
+      f_Delay(34.0);
+    } else {
+      f_Delay(130.0);
+    }
+
+    // @siclog "Step 6" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+    // @siclog "Step 6A" siclog@
+    // The SS changes the SnonIntraSearch for NR Cell 3 according to row "T3" in table 6.1.2.18.3.2-1/2
+    // The ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 3.
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchP(nr_Cell3, 1); // Table 6.1.2.18.3.3-6: SIB2 of NR Cell 3
+    f_NR_IncrementValueTag(nr_Cell3, sibType2);
+
+    // @siclog "Step 7" siclog@
+    // The SS notifies the UE of change of System Information on NR Cell 3 by sending Short Message on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell3); //Modify Sysinfo in SS
+    // @siclog "Step 8 - Void" siclog@
+
+    // @siclog "Step 9" siclog@
+    // Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods (nr_Cell3);
+
+    // @siclog "Step 10" siclog@
+    // The SS re-adjusts the SSS levels according to row "T4" in table 6.1.2.18.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT4);
+
+    // @siclog "Step 11" siclog@
+    // Wait for 120 seconds to allow UE to recognise the change.
+    f_Delay(120.0); // @sic R5s206312 sic@
+
+    // @siclog "Step 12" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+  }//end of f_TC_6_1_2_18_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.19
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_19_NR5GC() runs on NR5GC_PTC
+  { // Speed-dependent cell reselection
+
+    // System information combination NR-1 as defined in TS 38.508-1 clause 4.4.3.1.3 is used in NR cell
+    f_NR5GC_Init(NR_2);
+
+    // Table 6.1.2.19.3.3-1: SystemInformationBlockType2 for NR Cell 1, NR Cell 2, and NR Cell 4
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR(nr_Cell1, 7);
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR(nr_Cell2, 7);
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR(nr_Cell4, 7);
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR_SF(nr_Cell1, cs_T_ReselectionEUTRA_SF);
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR_SF(nr_Cell2, cs_T_ReselectionEUTRA_SF);
+    f_NR_CellInfo_SetSIB2_T_ReselectionNR_SF(nr_Cell4, cs_T_ReselectionEUTRA_SF);
+    f_NR_CellInfo_SetSIB2_SpeedStateReselectionPars(nr_Cell1, cs_SpeedStateReselectionParsNR(-,-,3,3));
+    f_NR_CellInfo_SetSIB2_SpeedStateReselectionPars(nr_Cell2, cs_SpeedStateReselectionParsNR(-,-,3,3));
+    f_NR_CellInfo_SetSIB2_SpeedStateReselectionPars(nr_Cell4, cs_SpeedStateReselectionParsNR(-,-,3,3));
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell4);
+
+    // The UE is in NR RRC_IDLE state (state 1N-A with PDU session inactive) as defined in TS 38.508-1, table 4.4A.2-1 on NR Cell 1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_19_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell4, STATE_IDLE_1A); // @sic R5s210072 sic@
+  } //end of f_TC_6_1_2_19_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.19
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_19_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-201341 R5s201037 R5-204405 R5s201423 sic@
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+
+    timer t_WaitRRCSetupRequest;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell2, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT3:={
+      cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell4, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS changes the power level setting according to the row "T1"
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 40s for FR1 or 136s for FR2 for the UE to perform cell reselection procedure. (Note 1, Note 5)
+     if (f_NR_CellInfo_GetIsFR1(nr_Cell2)) {
+       f_Delay(40.0);
+    }
+    else {
+       f_Delay(136.0);
+    }
+
+    // @siclog "Step 3" siclog@
+    // The SS changes the power level setting according to the row "T2".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 4" siclog@
+    // Wait for 14s for FR1 or 33s for FR2 for the UE to perform cell reselection procedure. (Note 2, Note 6)
+     if (f_NR_CellInfo_GetIsFR1(nr_Cell4)) {
+       f_Delay(14.0);
+    }
+    else {
+       f_Delay(33.0);
+    }
+
+    // @siclog "Step 5" siclog@
+    // The SS changes the power level setting according to the row "T3".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+
+    // @siclog "Step 6" siclog@
+    // Wait for 14s for FR1 or 33s for FR2 for the UE to perform cell reselection procedure. (Note 3, Note 6)
+     if (f_NR_CellInfo_GetIsFR1(nr_Cell1)) {
+       f_Delay(14.0);
+    }
+    else {
+       f_Delay(33.0);
+    }
+
+    // @siclog "Step 7-8 Void" siclog@
+
+    // @siclog "Step 9" siclog@
+    // The SS changes the TAC of NR Cell 2 to 2.
+    f_NR_CellInfo_SetTAC (nr_Cell2, int2bit(2,24));
+    f_NR_ModifySysinfo(nr_Cell2, false); //Modify Sysinfo in SS without Paging
+    
+    // @siclog "Step 9A" siclog@
+    // Wait for 2.1* modification period second for the SS to transmit modified system information
+    f_NR_WaitModificationPeriods (nr_Cell2);  // @sic R5-253073 sic@
+
+    // @siclog "Step 10" siclog@
+    // The SS changes the power level setting according to the row "T1".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 11" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 2 within 3s? (Note 7)
+    f_NR_CheckNoRRCSetupReq(nr_Cell2, 3.0);
+
+
+    if (f_NR_CellInfo_GetIsFR1(nr_Cell2)) {
+       t_WaitRRCSetupRequest.start(f_NR_SetTimerToleranceMin(nr_Cell2, nonProtocolTimer, 6.0));
+    }
+    else {
+       t_WaitRRCSetupRequest.start(f_NR_SetTimerToleranceMin(nr_Cell2, nonProtocolTimer, 27.0));
+    }
+    // @siclog "Step 12" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 2 within 6s for FR1 and 27s for FR2 after step 11? (Note 8, Note 9)
+    alt { //@sic R5s201466 sic@
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell2, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+      {
+         t_WaitRRCSetupRequest.stop;
+         f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.19 Step 12: UE sent an RRCSetupRequest on NR Cell 4 within the expected time");
+      }
+      [] t_WaitRRCSetupRequest.timeout
+      {
+         f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.2.19 Step 12");
+      }
+    }
+
+    // @siclog "Step 13-17" siclog@
+    // Steps 2 to 6 of the mobility registration updating procedure described in TS 38.508-1 Table 4.9.5.2.2-1 are performed on NR Cell 2
+    f_NR5GC_MobilityRegistration(nr_Cell2);
+
+    // @siclog "Step 18 - Void" siclog@
+
+    // @siclog "Step 19" siclog@
+    // The SS changes the power level setting according to the row "T2".
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 20/25 - Void" siclog@
+
+    // @siclog "Step 26" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 4 within 2s? (Note 12)
+    f_NR_CheckNoRRCSetupReq(nr_Cell4, 2.0);
+
+    if (f_NR_CellInfo_GetIsFR1(nr_Cell4)) {
+       t_WaitRRCSetupRequest.start(f_NR_SetTimerToleranceMin(nr_Cell4, nonProtocolTimer, 7.0));
+    }
+    else {
+       t_WaitRRCSetupRequest.start(f_NR_SetTimerToleranceMin(nr_Cell4, nonProtocolTimer, 26.0));
+    }
+    // @siclog "Step 27" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 4 within 7s for FR1 and 26s for FR2 after step 26? (Note 13)
+    alt { //@sic R5s201466 sic@
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell4, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))))
+      {
+         t_WaitRRCSetupRequest.stop;
+         f_NR_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.1.2.19 Step 27: UE sent an RRCSetupRequest on NR Cell 1 within the expected time");
+      }
+      [] t_WaitRRCSetupRequest.timeout
+      {
+         f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.1.2.19 Step 27");
+      }
+    }
+
+    // @siclog "Steps 28-32" siclog@
+    // Steps 2 to 6 of the mobility registration updating procedure described in TS 38.508-1 Table 4.9.5.2.2-1 are performed on NR Cell 4.
+    f_NR5GC_MobilityRegistration(nr_Cell4);
+
+  }//end of f_TC_6_1_2_19_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.20
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_20_NR5GC() runs on NR5GC_PTC
+  {// Inter-frequency cell reselection according to cell reselection priority provided by SIBs
+   // @sic R5s200031 R5-201208 sic@
+    var boolean v_IsFR1 := true;
+    var ReselectionThreshold v_ThreshX_HighP := 10; //Value on FR1
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList_Cell;
+    var template (value) SSB_MTC v_SSB_MTC;
+
+    f_NR5GC_Init(NR_4);  // System information combination NR-4 as defined in TS 38.508-1 Table 4.4.3.1.2-1 is used in NR cells.
+    v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+
+    if (not v_IsFR1){
+        v_ThreshX_HighP := 9; // Assign value on FR2 as per Table 6.1.2.20.3.3-3
+    }
+
+    // Table 6.1.2.20.3.3-3: SIB4 of NR Cell 1, NR Cell 3 and NR Cell 6
+    v_InterFreqCarrierFreqList_Cell := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, {v_InterFreqCarrierFreqList_Cell[1], v_InterFreqCarrierFreqList_Cell[0]});
+    v_InterFreqCarrierFreqList_Cell := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell3);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell3, {v_InterFreqCarrierFreqList_Cell[1]});
+    v_InterFreqCarrierFreqList_Cell := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell6);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell6, {v_InterFreqCarrierFreqList_Cell[1]});
+
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell1, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell3, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell3, 0, v_ThreshX_HighP);
+    v_SSB_MTC := f_NR_GetSSB_MTC_InterFreqOdd(nr_Cell1, nr_Cell3);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell1, 0, v_SSB_MTC.periodicityAndOffset);  //@sic R5s201015 R5s210501 sic@
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell3, 0, v_SSB_MTC.periodicityAndOffset);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_PeriodicityAndOffset(nr_Cell6, 0, v_SSB_MTC.periodicityAndOffset);
+
+    // Table 6.1.2.20.3.3-2: SIB2 of NR Cell 6
+    f_NR_CellInfo_SetSIB2_ThreshServingLowP(nr_Cell6, 10);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell6, 5);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, -82);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -78, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell6);
+
+    // Preamble: The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2); // update for T0 due to Table 6.1.2.20.3.2-2 (FR2)
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_20_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell3, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_20_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.20
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_20_NR5GC_TestBody() runs on NR5GC_PTC
+  { //Power levels NR_Cell1
+    var integer v_T2_T3_Cell1_RS_EPRE_FR1 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var integer v_T2_T3_Cell1_RS_EPRE_FR2 := tsc_NR_NonSuitableOffCellSSS_EPRE;
+
+    //Power levels NR_Cell3
+    var integer v_T1_T3_Cell3_RS_EPRE_FR1 := -78;
+    var integer v_T1_T3_Cell3_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+
+    //Power levels NR_Cell6
+    var integer v_T2_Cell6_RS_EPRE_FR1 := -78;
+    var integer v_T2_Cell6_RS_EPRE_FR2 := tsc_NR_ServingCellSSS_EPRE_FR2;
+    var integer v_T3_Cell6_RS_EPRE_FR1 := -98;
+    var integer v_T3_Cell6_RS_EPRE_FR2 := tsc_NR_NonSuitableCellSSS_EPRE_FR2;
+
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell3, v_T1_T3_Cell3_RS_EPRE_FR1, v_T1_T3_Cell3_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, v_T2_T3_Cell1_RS_EPRE_FR1, v_T2_T3_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell6, v_T2_Cell6_RS_EPRE_FR1, v_T2_Cell6_RS_EPRE_FR2)
+    };
+
+    v_CellPowerList_AtT3:={
+      cs_NR_CellPower(nr_Cell6, v_T3_Cell6_RS_EPRE_FR1, v_T3_Cell6_RS_EPRE_FR2)
+    };
+
+    // @siclog "Step 1" siclog@
+    // The SS changes NR Cell 3 SS PBCH SSS EPRE level according to the row "T1" in table 6.1.2.20.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 66[FR1]/258[FR2] seconds to allow UE to recognise the change
+    if (v_IsFR1) {
+       f_Delay(66.0);
+    }
+    else{
+       f_Delay(258.0);
+    }
+
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+    // @siclog "Step 4" siclog@
+    // The SS changes NR Cell 1 and NR Cell 6 SSS levels according to the row "T2" in table 6.1.2.20.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    // @siclog "Step 5" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) {
+       f_Delay(34.0);
+    }
+    else{
+       f_Delay(130.0);
+    }
+
+    // @siclog "Step 6" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 6?
+    f_NR5GC_CheckRRCIdle(nr_Cell6);
+
+    // @siclog "Step 7" siclog@
+    // The SS changes NR Cell 6 SSS level according to the row "T3" in table 6.1.2.20.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+
+    // @siclog "Step 8" siclog@
+    // Wait for 8[FR1]/27[FR2] seconds to allow UE to recognise the change
+    if (v_IsFR1) {
+       f_Delay(8.0);
+    }
+    else{
+       f_Delay(27.0);
+    }
+
+    // @siclog "Step 9" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+  }//end of f_TC_6_1_2_20_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.21
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_21_NR5GC() runs on NR5GC_PTC
+  { // Cell reselection, SIntra SearchQ and SnonIntraSearchQ
+    // @sic R5-203372 R5-225372 sic@
+    var boolean v_IsFR1;
+
+    // System information combination NR-4 as defined in TS 38.508-1 Table 4.4.3.1.2-1, and message contents defined in clause 4.6.1 and clause 4.6.2 with QBASED condition is used in NR cells.
+    f_NR5GC_Init(NR_4);
+
+    // Table 6.1.2.21.3.3-3: SIB4 of NR Cell 2 and NR Cell 3 (preamble and all steps)
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell2, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell3, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell3, 0, 7);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_Q (nr_Cell3, 0, valueof(cs_InterFreqCarrierFreqInfo_ThreshX_Q(20,5)));
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell2, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell3, 0, 1);
+
+
+    // Table 6.1.2.21.3.3-2: SIB2 of NR Cell 1, NR Cell 2 and NR Cell 3 (preamble and all steps)
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchQ(nr_Cell1, 20);
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchQ(nr_Cell2, 20);
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchQ(nr_Cell3, 20);
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchP(nr_Cell1, 0);
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchP(nr_Cell2, 0);
+    f_NR_CellInfo_SetSIB2_SnonIntraSearchP(nr_Cell3, 0);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell1, 5);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell2, 1);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell3, 1);
+    f_NR_CellInfo_SetSIB2_SIntraSearchP(nr_Cell1, 0);
+    f_NR_CellInfo_SetSIB2_SIntraSearchP(nr_Cell2, 0);
+    f_NR_CellInfo_SetSIB2_SIntraSearchP(nr_Cell3, 0);
+    f_NR_CellInfo_SetSIB2_SIntraSearchQ(nr_Cell1, 20);
+    f_NR_CellInfo_SetSIB2_SIntraSearchQ(nr_Cell2, 20);
+    f_NR_CellInfo_SetSIB2_SIntraSearchQ(nr_Cell3, 20);
+
+    //Set maximum cell power level for the Cells to be used
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -80, -80);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell2, -80, -80);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -80, -80);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // NR Cell 1, NR Cell 2 and NR Cell 3 are configured to operate in FR1 bands as defined in TS 38.508-1 clause 6.2.3
+    v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell1);
+    if (not v_IsFR1) {// NR Cell 1 and NR Cell 11 are configured to operate in FR1 bands as defined in TS 38.508-1 clause 6.2.3.
+        f_NR_SetVerdictFailOrInconc (__FILE__, __LINE__, "Test Case 6.1.2.21: NR Cells shall operate in FR1 bands");
+    }
+
+    // The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1.
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+    f_TC_6_1_2_21_NR5GC_TestBody();
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_21_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.21
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_21_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-203372 R5-225372 R5-250934 sic@
+   var template (value) NR_CellPowerList_Type v_CellPowerList_T1 := {
+     cs_NR_CellPower (nr_Cell1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1),
+     cs_NR_CellPower (nr_Cell2, -80, -80),
+     cs_NR_CellPower (nr_Cell3, -118, -118)
+   };
+   var template (value) NR_CellPowerList_Type v_CellPowerList_T2 := {
+     cs_NR_CellPower (nr_Cell1, -118, -118),
+     cs_NR_CellPower (nr_Cell2, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1),
+     cs_NR_CellPower (nr_Cell3, -80, -80)
+   };
+   var template (value) NR_CellPowerList_Type v_CellPowerList_T3 := {
+     cs_NR_CellPower (nr_Cell2, -118, -118)
+   };
+   var template (value) NR_CellPowerList_Type v_CellPowerList_T4 := {
+     cs_NR_CellPower (nr_Cell1, -80, -80)
+   };
+   var integer v_Noc := -94;
+   var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell2);
+   var template (value) NR_CellNoiseLevelList_Type v_CellNoiseList;
+
+   // @siclog "Step 1" siclog@
+   // The SS re-adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.21.3.2-1
+   f_NR_SetCellPowerList(v_CellPowerList_T1);
+   v_CellNoiseList := {cs_CellNoiseLevel(nr_Cell1, v_Noc),cs_CellNoiseLevel(nr_Cell2, v_Noc),cs_CellNoiseLevel(nr_Cell3, v_Noc)};
+   f_NR_ConfigureAndActivateVNG_MultipleCells(v_CellNoiseList);
+
+   // @siclog "Step 2" siclog@
+   // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+   // @siclog "Step 3" siclog@
+   // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 2?
+   f_NR5GC_CheckRRCIdle(nr_Cell2);
+
+   // @siclog "Step 4" siclog@
+   //The SS re-adjusts the SSS levels according to row "T2" in table 6.1.2.21.3.2-1
+   f_NR_SetCellPowerList(v_CellPowerList_T2);
+
+   // @siclog "Step 5" siclog@
+   // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+   v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+   if (v_IsFR1) { // FR1
+     f_Delay(34.0);
+   } else { // FR2
+     f_Delay(130.0);
+   }
+
+   // @siclog "Step 6" siclog@
+   // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+   f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+   // @siclog "Step 6A - 7 (Void) - 8" siclog@
+   // The SS re-adjusts the SSS levels according to row "T3" in table 6.1.2.21.3.2-1
+   // The SS changes the SnonIntraSearchQ for NR Cell 3 according to row "T3" in table 6.1.2.21.3.2-1/2, The ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 3.
+   f_NR_CellInfo_SetSIB2_SnonIntraSearchQ(nr_Cell3, 2); // Table 6.1.2.21.3.3-6: SIB2 of NR Cell 3
+   f_NR_IncrementValueTag(nr_Cell3, sibType2);
+   f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_Q(nr_Cell3, 0, valueof(cs_InterFreqCarrierFreqInfo_ThreshX_Q(5,5)));
+   f_NR_IncrementValueTag(nr_Cell3, sibType4);
+   f_NR_SetCellPowerList(v_CellPowerList_T3);
+
+   // @siclog "Step 8A" siclog@
+   // The SS notifies the UE of change of System Information on NR Cell 3 by send Short Message on PDCCH using P-RNTI.
+   f_NR_ModifySysinfo(nr_Cell3); //Modify Sysinfo in SS
+
+   // @siclog "Step 9" siclog@
+   // Wait for 2.1* modification period to allow the new system information to take effect.
+   f_NR_WaitModificationPeriods (nr_Cell3);
+
+   // @siclog "Step 10" siclog@
+   // The SS re-adjusts the SSS levels according to row "T4" in table 6.1.2.21.3.2-1
+   f_NR_SetCellPowerList(v_CellPowerList_T4);
+
+   // @siclog "Step 11" siclog@
+   // Wait for 120 seconds to allow UE to recognise the change.
+   f_Delay(120.0); // @sic R5s206313 sic@
+
+   // @siclog "Step 12" siclog@
+   // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 1?
+   f_NR5GC_CheckRRCIdle(nr_Cell1);
+   f_NR_DeactivateVNG(nr_Cell1);
+   f_NR_DeactivateVNG(nr_Cell2);
+   f_NR_DeactivateVNG(nr_Cell3);
+
+ }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.22
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_22_NR5GC() runs on NR5GC_PTC
+  { // Inter-frequency cell reselection based on common priority information with parameters ThreshX,HighQ, ThreshX,LowQ and ThreshServing,LowQ
+
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1  Table 4.4.3.1.2-1, and message contents defined in clause 4.6.1 and clause 4.6.2 with QBASED condition is used in NR cells.
+    // Noc=-145dBm/SCS equals to VNG disabled
+
+    // Table 6.1.2.22.3.3-3: SIB4 of NR Cell 1 and NR Cell 3 (preamble and all steps)
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell1, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_T_ReselectionNR(nr_Cell3, 0, 1);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_HighP(nr_Cell1, 0, 10);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_CellReselectionPriority(nr_Cell1, 0, 5);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_QRxLevMin(nr_Cell1, 0, -50);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_QRxLevMin(nr_Cell3, 0, -50);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_QQualMin(nr_Cell1, 0, -20);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_QQualMin(nr_Cell3, 0, -20);
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_Q (nr_Cell1, 0, valueof(cs_InterFreqCarrierFreqInfo_ThreshX_Q(4,5)));
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_Q(nr_Cell3, 0, valueof(cs_InterFreqCarrierFreqInfo_ThreshX_Q(5,2)));
+
+    // Table 6.1.2.22.3.3-2: SIB2 of NR Cell 1 and NR Cell 3 (preamble and all steps)
+    f_NR_CellInfo_SetSIB2_ThreshServingLowP(nr_Cell3, 1);
+    f_NR_CellInfo_SetSIB2_ThreshServingLowQ(nr_Cell1, 4);
+    f_NR_CellInfo_SetSIB2_ThreshServingLowQ(nr_Cell3, 4);
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell3, 5);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+
+    // The UE is in state 1N-A on NR Cell 1(serving cell) according to TS 38.508-1 Table 4.4A.2-1
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+    f_TC_6_1_2_22_NR5GC_TestBody();
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_22_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.22
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_22_NR5GC_TestBody() runs on NR5GC_PTC
+  { // @sic R5-201128 R5-250935 sic@
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T1 := {
+      cs_NR_CellPower (nr_Cell3, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+    var template (value) NR_CellPowerList_Type v_CellPowerList_T2 := {
+      cs_NR_CellPower (nr_Cell3, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2)
+    };
+    var float v_Wait10s := 10.0;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell3);
+
+    // @siclog "Step 1" siclog@
+    // The SS changes NR Cell 3 SS/PBCH EPRE level according to the row "T1" in table 6.1.2.22.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_T1);
+
+    // @siclog "Step 2" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (v_IsFR1) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+    // @siclog "Step 4" siclog@
+    // The SS changes the SSS level according to the row "T2" in table 6.1.2.22.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_T2);
+
+    // @siclog "Step 5" siclog@
+    // Wait for 8 seconds to allow UE to recognise the change.
+    f_Delay(8.0);
+
+    // @siclog "Step 6" siclog@
+    // The SS transmits a Paging message on NR Cell 1
+    f_NR_Paging_Def(nr_Cell1, RRC_IDLE);
+
+    // @siclog "Step 6A" siclog@
+    // Check: Does the UE send an RRCSetup Request on NR Cell 1 within the next 10s ?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, v_Wait10s, -, "Step 6A: UE sent an RRCSetupRequest on NR Cell 1 within 10s"); //@sic R5s201387 sic@
+
+    // @siclog "Step 7" siclog@
+    // The SS changes threshServingLowQ of NR Cell 3 according to the row "T3" in table 6.1.2.22.3.2-1/2.
+    f_NR_CellInfo_SetSIB2_ThreshServingLowQ(nr_Cell3, 26); // Table 6.1.2.22.3.3-6: SIB2 of NR Cell 3
+    // The ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 3.
+    f_NR_IncrementValueTag(nr_Cell3, sibType2);  // Table 6.1.2.22.3.3-4: SIB1 of NR Cell 3
+
+    // The SS changes threshX-HighQ of NR Cell 1 according to the row "T3" in table 6.1.2.22.3.2-1/2.
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreq_ThreshX_Q(nr_Cell1, 0, valueof(cs_InterFreqCarrierFreqInfo_ThreshX_Q(20,5))); //Table 6.1.2.22.3.3-9: SIB4 of NR Cell 1
+    // The ValueTag of SIB4 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1.
+    f_NR_IncrementValueTag(nr_Cell1, sibType4);  // Table 6.1.2.22.3.3-7: SIB1 of NR Cell 1
+
+    // The SS notifies the UE of change of System Information on NR Cell 3 and cell1 by send SM on PDCCH using P-RNTI.
+    f_NR_ModifySysinfo(nr_Cell3); //Modify Sysinfo in SS
+    f_NR_ModifySysinfo(nr_Cell1,false); //Modify Sysinfo in SS
+
+    // @siclog "Step 8" siclog@
+    // Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods (nr_Cell3); //@sic R5s200145 sic@
+
+    // @siclog "Step 9" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4-1 indicate that the UE is camped on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+
+  }//end of f_TC_6_1_2_22_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.23
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_23_NR5GC() runs on NR5GC_PTC
+  { // Cell reselection/ MFBI
+
+    var template (value) MultiFrequencyBandListNR_SIB v_MultiFrequencyBandListNR_SIB1;
+    var template (value) MultiFrequencyBandListNR_SIB v_MultiFrequencyBandListNR_SIB4;
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList_Cell1;
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList_Cell2;
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList_Cell10;
+
+    f_NR5GC_Init_MFBI(NR_4);
+
+    v_MultiFrequencyBandListNR_SIB1 := {
+      cs_38508_NR_MultiBandInfo(px_NR_OverlappingNotSupportedBand_MFBI),
+      cs_38508_NR_MultiBandInfo(px_NR_PrimaryBand)
+    };
+
+    v_MultiFrequencyBandListNR_SIB4 := {
+      cs_38508_NR_MultiBandInfo(px_NR_PrimaryBand)
+    };
+
+    // Table 6.1.2.23.3.3-2: SIB1 for NR Cell 1, NR Cell 2 and NR Cell 3
+    f_NR_CellInfo_SetSIB1_FrequencyBandlist(nr_Cell1, valueof(v_MultiFrequencyBandListNR_SIB1));
+    f_NR_CellInfo_SetSIB1_FrequencyBandlist(nr_Cell2, valueof(v_MultiFrequencyBandListNR_SIB1));
+    f_NR_CellInfo_SetSIB1_FrequencyBandlist(nr_Cell3, valueof(v_MultiFrequencyBandListNR_SIB1));
+    //@sic R5-217683 sic@
+    f_NR_CellInfo_SetSIB1_FrequencyBandlistUL(nr_Cell1, valueof(v_MultiFrequencyBandListNR_SIB1));
+    f_NR_CellInfo_SetSIB1_FrequencyBandlistUL(nr_Cell2, valueof(v_MultiFrequencyBandListNR_SIB1));
+    f_NR_CellInfo_SetSIB1_FrequencyBandlistUL(nr_Cell3, valueof(v_MultiFrequencyBandListNR_SIB1));
+    //@sic R5s201305 sic@
+    f_NR_CellInfo_SetMFBI_Band(nr_Cell1, px_NR_PrimaryBand);
+    f_NR_CellInfo_SetMFBI_Band(nr_Cell2, px_NR_PrimaryBand);
+    f_NR_CellInfo_SetMFBI_Band(nr_Cell3, px_NR_PrimaryBand);
+
+    // Table 6.1.2.23.3.3-3: SIB4 for NR Cell 1 and NR Cell 2
+    v_InterFreqCarrierFreqList_Cell1 := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell1);
+    v_InterFreqCarrierFreqList_Cell1[0].frequencyBandList := v_MultiFrequencyBandListNR_SIB4;
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, v_InterFreqCarrierFreqList_Cell1);
+
+    v_InterFreqCarrierFreqList_Cell2 := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell2);
+    v_InterFreqCarrierFreqList_Cell2[0].frequencyBandList := v_MultiFrequencyBandListNR_SIB4;
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell2, v_InterFreqCarrierFreqList_Cell2);
+
+    // Table 6.1.2.23.3.3-4: SIB4 for NR Cell 3 and NR Cell 10
+    v_InterFreqCarrierFreqList_Cell10 := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell10);
+    v_InterFreqCarrierFreqList_Cell10[0].frequencyBandList := v_MultiFrequencyBandListNR_SIB4;
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell10, v_InterFreqCarrierFreqList_Cell10); // @sic R5-202606 sic@
+
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -80, -82);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -80, -82);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell10, -80, -82);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell2);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell10);
+
+    // Preamble: UE is in state Switched OFF (state 0N-B).
+    // @sic R5-202606, R5s200826, R5s201305 sic@
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0B);
+    // Check that the px_NR_OverlappingNotSupportedBand_MFBI band is not supported by UE
+    f_NR5GC_CheckIfSupportedBand(px_NR_OverlappingNotSupportedBand_MFBI); //@sic R5-243585 sic@
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_23_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_23_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.23
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_23_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT3;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT4;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT5;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell1, -88, -91)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, -94, -91),
+      cs_NR_CellPower(nr_Cell2, -88, -82)
+    };
+    v_CellPowerList_AtT3:={
+      cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell2, -94, -91),
+      cs_NR_CellPower(nr_Cell3, -80, -82)
+    };
+    v_CellPowerList_AtT4:={
+      cs_NR_CellPower(nr_Cell2, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell3, -94, -91),
+      cs_NR_CellPower(nr_Cell10, -80, -82)
+    };
+    v_CellPowerList_AtT5:={
+      cs_NR_CellPower(nr_Cell1, -80, -82),
+      cs_NR_CellPower(nr_Cell3, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell10, -94, -91)
+    };
+
+    //@siclog "Step 1" siclog@
+    //The SS changes the SS/PBCH EPRE level according to row "T1" in table 6.1.2.23.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    //@siclog "Step 2" siclog@
+    //The UE is switched on.
+    f_NR5GC_SwitchOnAndResetIMS();
+
+    //@siclog "Step 3-22a1" siclog@
+    //Steps 1 to 20a1 of the registration procedure described in TS 38.508-1 Table 4.5.2.2-2 are performed on NR Cell 1.
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 22a1");
+
+    //@siclog "Step 23" siclog@
+    //Wait 1 second.
+    f_Delay(1.0);
+
+    //@siclog "Step 24" siclog@
+    //The SS changes the SS/PBCH EPRE level according to row "T2" in table 6.1.2.23.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    //@siclog "Step 24A" siclog@
+    //Wait for 34s for FR1 or 130s for FR2 for the UE to perform cell reselection procedure.
+    //Note 1: The wait time for reselection to a newly detected intra frequency cell is selected to cover Tdetect,NR_Intra (25*1280ms=32s for FR1 and 25*4*1280ms=128s for FR2) + TSI-NR (1.28s for FR1 and FR2) = 33.28s rounded up to 34s for FR1 and 129.28s rounded up to 130s for FR2.
+    if (f_NR_IsBandFR1(px_NR_PrimaryBand)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 25" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 clause 4.9.4 indicate that the UE is camped on NR Cell 2?
+    f_NR5GC_CheckRRCIdle(nr_Cell2);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 25");
+
+    //@siclog "Step 26-48a1" siclog@
+    //Void
+
+    //@siclog "Step 49" siclog@
+    //The SS changes the SS/PBCH EPRE level according to row "T3" in table 6.1.2.23.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT3);
+
+    //@siclog "Step 50" siclog@
+    //Wait for 34s for FR1 or 130s for FR2 for the UE to perform cell reselection procedure.
+    //Note 2: The wait time for reselection to a newly detected inter frequency cell is selected to cover Tdetect,NR_Inter (25*1280ms=32s for FR1 and 25*4*1280ms=128s for FR2) + TSI-NR (1.28s for FR1 and FR2) = 33.28s rounded up to 34s for FR1 and 129.28s rounded up to 130s for FR2.
+    if (f_NR_IsBandFR1(px_NR_PrimaryBand)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 51" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 clause 4.9.4 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 51");
+
+    //@siclog "Step 52" siclog@
+    //Void
+
+    //@siclog "Step 53" siclog@
+    //The SS changes the SS/PBCH EPRE level according to row "T4" in table 6.1.2.23.3.2-1/2
+    f_NR_SetCellPowerList(v_CellPowerList_AtT4);
+
+    //@siclog "Step 54-74a1" siclog@
+    //Void
+
+    //@siclog "Step 75" siclog@
+    //Wait for 34s for FR1 or 130s for FR2 for the UE to perform cell reselection procedure.
+    //Note 2: The wait time for reselection to a newly detected inter frequency cell is selected to cover Tdetect,NR_Inter (25*1280ms=32s for FR1 and 25*4*1280ms=128s for FR2) + TSI-NR (1.28s for FR1 and FR2) = 33.28s rounded up to 34s for FR1 and 129.28s rounded up to 130s for FR2.
+    if (f_NR_IsBandFR1(px_NR_PrimaryBand)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 75A" siclog@
+    //The test result of generic test procedure in TS 38.508-1 clause 4.9.4 indicates that the UE is camped on NR Cell 10.
+    f_NR5GC_CheckRRCIdle(nr_Cell10);
+
+    //@siclog "Step 76" siclog@
+    //The SS changes the SS/PBCH EPRE level according to row "T5" in table 6.1.2.23.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT5);
+
+    //@siclog "Step 76A" siclog@
+    //Wait for 34s for FR1 or 130s for FR2 for the UE to perform cell reselection procedure.
+    //Note 2: The wait time for reselection to a newly detected inter frequency cell is selected to cover Tdetect,NR_Inter (25*1280ms=32s for FR1 and 25*4*1280ms=128s for FR2) + TSI-NR (1.28s for FR1 and FR2) = 33.28s rounded up to 34s for FR1 and 129.28s rounded up to 130s for FR2.
+    if (f_NR_IsBandFR1(px_NR_PrimaryBand)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 77" siclog@
+    //Check: Does the test result of generic test procedure in TS 38.508-1 clause 4.9.4 indicate that the UE is camped on NR Cell 1 belonging to the MFBI band (px_NR_PrimaryBand)?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 77");
+  }//end of f_TC_6_1_2_23_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.24
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_24_NR5GC() runs on NR5GC_PTC
+  { // Slice-based cell reselection / Reseletion priorities provided by SIB16
+    //  @sic R5-234721 R5-237335 R5s240055 R5-241497 sic@*/
+    var integer v_T0_Cell1_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T0_Cell1_RS_EPRE_FR2 := tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2;
+    var integer v_T0_CellOff := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+
+    v_CellPowerList_AtT0 :={
+      cs_NR_CellPower(nr_Cell1, v_T0_Cell1_RS_EPRE_FR1, v_T0_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T0_CellOff, v_T0_CellOff),
+      cs_NR_CellPower(nr_Cell6, v_T0_CellOff, v_T0_CellOff)
+    };
+
+    f_NR5GC_Init(NR_30); // System information combination NR-30 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR cells
+
+    // Table 6.1.2.24.3.3.3-2: SIB16 for NR Cell 1
+    f_NR_CellInfo_SetSIB16_2Entries(nr_Cell1,0, '00000001'B, 5, 1, '00000010'B);
+    // Table 6.1.2.24.3.3.3-3: SIB16 for NR Cell 3
+    f_NR_CellInfo_SetSIB16_2Entries(nr_Cell3,0, '00000010'B, 4, 2, '00000010'B, 6);
+    // Table 6.1.2.24.3.3.3-4: SIB16 for NR Cell 6
+    f_NR_CellInfo_SetSIB16_FreqPriorityListSlicing_r17(nr_Cell6, {cs_FreqPrioritySlicing_r17_Def(0, {cs_SliceInfo_r17_1Entry('00000010'B,6)})});
+
+    // Table 6.1.2.24.3.2-1/2: : Time instances of cell power level and parameter changes for FR1/FR2
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell6);
+
+    // Preamble: UE is in state Switched OFF (state 0N-B)
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0B);
+
+    f_NR_TestBody_Set(true);
+    // Table 6.1.2.24.3.2-1: Time instances of cell power level and parameter changes
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0);
+
+    f_TC_6_1_2_24_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell6, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_24_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.24
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_24_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var PLMN_Identity v_ASN_PLMN;
+    var NAS_PlmnId v_PLMN;
+    var NG_NAS_GutiParameters_Type v_GutiParams;
+    var template (value) NG_MobileIdentity v_GUTIToSend;
+    var TrackingAreaCode v_TAC;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) NSAG_Info v_NsagInfo;
+    var FreqBandIndicatorNR v_FreqBandIndicatorNR;
+    var template (value) NSSAI_LV v_NSSAI_1 := cs_NSSAI_LV('04'O, {cs_S_NSSAI_SST1eMBB, cs_S_NSSAI_SST2_URLLC});
+    var template (value) NSSAI_LV v_NSSAI_2 := cs_NSSAI_LV('04'O, {cs_S_NSSAI_SST3_MIoT, cs_S_NSSAI_SST4_V2X});
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell3, -78, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE),
+      cs_NR_CellPower(nr_Cell3, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell6, -78, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+
+    //@siclog "Step 1" siclog@
+    //The UE is switched on.
+    f_NR5GC_SwitchOnAndResetIMS();
+
+    //@siclog "Step 2" siclog@
+    // Steps 2 to 13 of the generic procedure for NR RRC_IDLE specified in TS 38.508-1 subclause 4.5.2 are performed.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_Secure)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                nr_Cell1, v_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                TESTMode_OFF,
+                                Initial_Secure);
+
+    //@siclog "Step 14" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message
+    v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1);
+    v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    v_TAC := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+
+    v_NsagInfo := cs_NSAG_2Elements(cs_NSAG_InfoElement('01'O,   //  @sic R5-241497  sic@
+                                                        v_NSSAI_1,
+                                                        '02'O,
+                                                        v_TAIList.lvPart),
+                                     cs_NSAG_InfoElement('02'O,
+                                                         v_NSSAI_2,
+                                                         '03'O,
+                                                         v_TAIList.lvPart));
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   omit,
+                                                   -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, v_NsagInfo);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 15-20a1" siclog@
+    // Steps 15 to 20a1 of the generic procedure for NR RRC_IDLE specified in TS 38.508-1 subclause 4.5.2 are performed.
+    f_NR5GC_RRC_Idle_Steps15_20(nr_Cell1, TESTMode_OFF);
+
+    //@siclog "Step 21" siclog@
+    //The SS changes NR Cell 3 SSS level according to the row "T1" in table 6.1.2.24.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    v_FreqBandIndicatorNR := f_NR_CellInfo_GetBandIndicator(nr_Cell3);
+    //@siclog "Step 22" siclog@
+    // Wait for 66[FR1]/258[FR2] seconds to allow UE to recognise the change.
+    if (f_NR_IsBandFR1(v_FreqBandIndicatorNR)) { // FR1
+      f_Delay(66.0);
+    } else { // FR2
+      f_Delay(258.0);
+    }
+
+    //@siclog "Step 23" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+
+    //@siclog "Step 24" siclog@
+    // The SS changes NR Cell 1, NR Cell 3 and NR Cell 6 SSS levels according to the row "T2" in table 6.1.2.24.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    v_FreqBandIndicatorNR := f_NR_CellInfo_GetBandIndicator(nr_Cell6);
+    //@siclog "Step 25" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (f_NR_IsBandFR1(v_FreqBandIndicatorNR)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 26" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 6?
+    f_NR5GC_CheckRRCIdle(nr_Cell6);
+
+  }//end of f_TC_6_1_2_24_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.25
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_25_NR5GC() runs on NR5GC_PTC
+  { // Slice-based cell reselection / Re-derive reselection priority for frequency
+    // @sic R5s240129 Ch. 1 sic@
+    var integer v_T0_Cell1_RS_EPRE_FR1 := tsc_NR_ServingCellSSS_EPRE_FR1;
+    var integer v_T0_Cell1_RS_EPRE_FR2 := tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2;
+    var integer v_T0_CellOff := tsc_NR_NonSuitableOffCellSSS_EPRE;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT0;
+    var PhysCellId v_PhysCellId_3;
+    var PhysCellId v_PhysCellId_6;
+
+    v_CellPowerList_AtT0 :={
+      cs_NR_CellPower(nr_Cell1, v_T0_Cell1_RS_EPRE_FR1, v_T0_Cell1_RS_EPRE_FR2),
+      cs_NR_CellPower(nr_Cell3, v_T0_CellOff, v_T0_CellOff),
+      cs_NR_CellPower(nr_Cell6, v_T0_CellOff, v_T0_CellOff)
+    };
+
+    f_NR5GC_Init(NR_30); // System information combination NR-30 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR cells
+    v_PhysCellId_3 := f_NR_CellInfo_GetPhysicalCellId(nr_Cell3);
+    v_PhysCellId_6 := f_NR_CellInfo_GetPhysicalCellId(nr_Cell6);
+    // Table 6.1.2.25.3.3.3-2: SIB16 for NR Cell 1
+     f_NR_CellInfo_SetSIB16_FreqPriorityListSlicing_r17(nr_Cell1, {cs_FreqPrioritySlicing_r17_Def(0, {cs_SliceInfo_r17_1Entry('00000001'B,5)}),
+                                                                  cs_FreqPrioritySlicing_r17_Def(1, {cs_SliceInfo_r17_1Entry_sliceExcludedCellListNR('00000010'B,4, cs_SliceListNR_r17_sliceExcludedCellListNR_1Entry(v_PhysCellId_3))}),
+                                                                  cs_FreqPrioritySlicing_r17_Def(2, cs_SliceInfoList_r17_2Entries_2ndExcluded('00000001'B,5,'00000010'B, 4, cs_SliceListNR_r17_sliceExcludedCellListNR_1Entry(v_PhysCellId_6)))});
+    // Table 6.1.2.25.3.3.3-3: SIB16 for NR Cell 3
+
+    f_NR_CellInfo_SetSIB16_FreqPriorityListSlicing_r17(nr_Cell3, {cs_FreqPrioritySlicing_r17_Def(0,
+                                                                                                 cs_SliceInfoList_r17_2Entries_2ndExcluded('00000001'B, 6,
+                                                                                                                                           '00000010'B, 4, cs_SliceListNR_r17_sliceExcludedCellListNR_1Entry(v_PhysCellId_3)))});
+    // Table 6.1.2.25.3.3.3-4: SIB16 for NR Cell 6
+
+   f_NR_CellInfo_SetSIB16_FreqPriorityListSlicing_r17(nr_Cell6, {cs_FreqPrioritySlicing_r17_Def(0,
+                                                                                                 cs_SliceInfoList_r17_2Entries_2ndExcluded('00000001'B, 4,
+                                                                                                                                           '00000010'B, 4, cs_SliceListNR_r17_sliceExcludedCellListNR_1Entry(v_PhysCellId_6)))});
+
+    // Table 6.1.2.25.3.2-1/2: : Time instances of cell power level and parameter changes for FR1/FR2
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell3, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell6, -78, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell6);
+
+    // Preamble: UE is in state Switched OFF (state 0N-B)
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0B);
+
+    f_NR_TestBody_Set(true);
+
+    // Table 6.1.2.25.3.2-1: Time instances of cell power level and parameter changes
+    f_NR_SetCellPowerList(v_CellPowerList_AtT0);
+
+    f_TC_6_1_2_25_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell6, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_25_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.25
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_25_NR5GC_TestBody() runs on NR5GC_PTC
+  { /* @sic R5-237332 R5s240129 sic@ */
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT2;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var PLMN_Identity v_ASN_PLMN;
+    var NAS_PlmnId v_PLMN;
+    var NG_NAS_GutiParameters_Type v_GutiParams;
+    var template (value) NG_MobileIdentity v_GUTIToSend;
+    var TrackingAreaCode v_TAC;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) NSAG_Info v_NsagInfo;
+    var FreqBandIndicatorNR v_FreqBandIndicatorNR;
+    var template (value) NSSAI_LV v_NSSAI_1 := cs_NSSAI_LV('04'O, {cs_S_NSSAI_SST1eMBB, cs_S_NSSAI_SST2_URLLC});
+    var template (value) NSSAI_LV v_NSSAI_2 := cs_NSSAI_LV('04'O, {cs_S_NSSAI_SST3_MIoT, cs_S_NSSAI_SST4_V2X});
+    timer t_Watchdog := 60.0;
+
+    v_CellPowerList_AtT1:={
+      cs_NR_CellPower(nr_Cell3, -78, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+    v_CellPowerList_AtT2:={
+      cs_NR_CellPower(nr_Cell6, -78, tsc_NR_ServingCellSSS_EPRE_FR2)
+    };
+
+    //@siclog "Step 1" siclog@
+    //The UE is switched on.
+    f_NR5GC_SwitchOnAndResetIMS();
+
+    //@siclog "Step 2" siclog@
+    // Steps 2 to 13 of the generic procedure for NR RRC_IDLE specified in TS 38.508-1 subclause 4.5.2 are performed.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_Secure)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                nr_Cell1, v_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                TESTMode_OFF,
+                                Initial_Secure);
+
+    //@siclog "Step 14" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message
+    v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1);
+    v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    v_TAC := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+
+    v_NsagInfo := cs_NSAG_2Elements(cs_NSAG_InfoElement('01'O,
+                                                        v_NSSAI_1,
+                                                        '03'O,
+                                                        v_TAIList.lvPart),
+                                    cs_NSAG_InfoElement('02'O,
+                                                        v_NSSAI_2,
+                                                        '02'O,
+                                                        v_TAIList.lvPart));
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   omit,
+                                                   -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, v_NsagInfo);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 15-20a1" siclog@
+    // Steps 15 to 20a1 of the generic procedure for NR RRC_IDLE specified in TS 38.508-1 subclause 4.5.2 are performed.
+    f_NR5GC_RRC_Idle_Steps15_20(nr_Cell1, TESTMode_OFF);
+
+    //@siclog "Step 21" siclog@
+    // The SS changes NR Cell 3 power level according to the row "T1" in table 6.1.2.25.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+
+    v_FreqBandIndicatorNR := f_NR_CellInfo_GetBandIndicator(nr_Cell3);
+    //@siclog "Step 22" siclog@
+    // Wait for 66[FR1]/258[FR2] seconds to allow UE to recognise the change.
+    if (f_NR_IsBandFR1(v_FreqBandIndicatorNR)) { // FR1
+      f_Delay(66.0);
+    } else { // FR2
+      f_Delay(258.0);
+    }
+
+    t_Watchdog.start;
+    //@siclog "Step 23-24" siclog@
+    // Step 1 and 2 of the generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 3 within 60s?
+    f_NR_Paging_Def(nr_Cell3, RRC_IDLE); // Step 23 - Page UE
+    if (f_NR_RRC_SetupRequest_Common(nr_Cell3, t_Watchdog)) { // Step 24 - Check: Does the UE transmit an RRCSetupRequest message on the cell specified in the test case within 60s?
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 24");
+    }
+
+    //@siclog "Step 25" siclog@
+    // The SS changes NR Cell 6 power level according to the row "T2" in table 6.1.2.25.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT2);
+
+    v_FreqBandIndicatorNR := f_NR_CellInfo_GetBandIndicator(nr_Cell6);
+    //@siclog "Step 26" siclog@
+    // Wait for 34[FR1]/130[FR2] seconds to allow UE to recognise the change.
+    if (f_NR_IsBandFR1(v_FreqBandIndicatorNR)) { // FR1
+      f_Delay(34.0);
+    } else { // FR2
+      f_Delay(130.0);
+    }
+
+    //@siclog "Step 27" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is camped on NR Cell 6?
+    f_NR5GC_CheckRRCIdle(nr_Cell6);
+
+  }//end of f_TC_6_1_2_25_NR5GC_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.27
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_27_NR5GC() runs on NR5GC_PTC
+  { //Cell reselection / inter-frequency / RedCap
+    //@sic R5-230435 sic@
+    f_NR5GC_Init(NR_4); // System information combination NR-4 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR cells
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell23, -78, -82);
+    f_NR5GC_CellInfo_SetSIB4_RedCap_AccessAllowed(nr_Cell1, false);//@sic R5-231532 sic@
+    // Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell23);
+    // NR Cell 1 and NR Cell 23 have different tracking areas according to TS 38.508-1 Table 4.4.2-3
+    // Preamble: UE is in state 1N-A on NR Cell 1(serving cell) according to 38.508-1
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_6_1_2_27_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell23, STATE_IDLE_1A);
+  } //end of f_TC_6_1_2_27_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 6.1.2.27
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_6_1_2_27_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NR_CellPowerList_Type v_CellPowerList_AtT1;
+    v_CellPowerList_AtT1:={
+       cs_NR_CellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2),
+       cs_NR_CellPower(nr_Cell23, -78, -82)
+    };
+
+    // @siclog "Step 1" siclog@
+    //The SS adjusts the SS/PBCH EPRE levels according to row "T1" in table 6.1.2.27.3.2-1/2.
+    f_NR_SetCellPowerList(v_CellPowerList_AtT1);
+    //@siclog "Step 2" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 23 within the next 60 s?
+    f_NR_CheckNoRRCSetupReq(nr_Cell23, 60.0);
+    // @siclog "Step 3" siclog@
+    // The SS changes SIB 4 of NR Cell 1 according to Table 6.1.2.27.3.3-1. The ValueTag of SIB4 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1.
+    f_NR5GC_CellInfo_SetSIB4_RedCap_AccessAllowed(nr_Cell1);
+    f_NR_IncrementValueTag(nr_Cell1, sibType4);//@sic R5-230435 sic@
+    // @siclog "Step 4" siclog@
+    //The SS transmits a Short message on PDCCH using P-RNTI indicating a systemInfoModification.
+    f_NR_ModifySysinfo(nr_Cell1); //Modify Sysinfo in SS
+    //@siclog "Step 5" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 Table 4.9.5.2.2-1 indicate that the UE is camped on NR Cell 23?
+    f_NR5GC_MobilityRegistration (nr_Cell23);
+  }//end of f_TC_6_1_2_27_NR5GC_TestBody
+
+}

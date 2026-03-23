@@ -1,0 +1,1318 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-02-25 14:26:44 +0100 (Wed, 25 Feb 2026) $
+// $Rev: 42966 $
+/******************************************************************************/
+
+module NR5GC_RRCSteps {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_NR_Parameters all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NEDC_CommonFrequencyFunctions all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_RRC_Templates all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CA_CommonFunctions all;
+  import from NR_CapabilityFunctions all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_DC_CommonFunctions all;
+  import from NR_NTN_Configuration all;
+  import from NR_Parameters all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+  import from TestcaseProperties all;
+
+  const integer tsc_NR_DelayBeforeIntraCellHO := 300;             /* delay before an intra cell handover
+                                                                     @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_NR_DelayAfterRRCRelease := 920;     /* 80ms + 840ms; 80ms to cope with local release and 840ms to let the UE camp on the cell again
+                                                                     @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  type enumerated   INACTIVE_FollowOnState {FollowedByResume, NotFollowedByResume, ResumeNoSecurity}; /* How UE will leave RRC INACTIVE state - by sending (or not) RRCResumeRequest on same or different cell (so no security needed here)
+                                                                                                         @status    APPROVED (NR5GC, NR5GC_IRAT, POS) */
+
+  type enumerated SRBs_AlreadyConfigured {SRB1,   /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+                                          SRB1_2,
+                                          NONE};
+
+  template (value) NR_DRBInfo_Type cs_NewDRBInfo(integer p_DRB_Id,
+                                                 integer p_PDUSessionId,
+                                                 boolean p_DefaultDRB,
+                                                 SDAP_Config p_SDAP_Config,
+                                                 RLC_BearerConfig p_RLC_Config,
+                                                 NR_RadioBearer_Type p_SS_Config,
+                                                 boolean p_IMS := false) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    DRB_Id          := p_DRB_Id,
+    PDUSessionId    := p_PDUSessionId,
+    DefaultDRB      := p_DefaultDRB,
+    DC_SCG          := false,         // @sic R5-204475 sic@ SCG never identified initially
+    SDAP_Config     := p_SDAP_Config,
+    RLC_Config      := p_RLC_Config,
+    SS_Config       := p_SS_Config,
+    IMS             := p_IMS
+  };
+
+  /*
+   * @desc      RRC setup procedure, the NAS message is not checked inside the function. It is returned to be checked outside.
+   * @param     p_NR_CellId
+   * @param     p_RRC_TI
+   * @param     p_EstablishmentCause
+   * @param     p_ExpectedSecurityStatus (default value: tsc_SHT_IntegrityProtected)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @param     p_SelectedPLMN_Identity (default value: ?)
+   * @param     p_Ng_5G_S_TMSI_Value (default value: *)
+   * @param     p_RRCSetupComplete_v1610_IEs (default value: *)
+   * @param     p_StartUL_Grant     (default value: true)
+   * @return    NG_NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_ConnEst_DefWithNas(NR_CellId_Type p_NR_CellId,
+                                       RRC_TransactionIdentifier p_RRC_TI,
+                                       template (present) EstablishmentCause p_EstablishmentCause,
+                                       template (present) SecurityHeaderType p_ExpectedSecurityStatus := tsc_SHT_IntegrityProtected,
+                                       template InitialUE_Identity p_InitialUE_Identity := ?,
+                                       template(present) RRCSetupComplete_IEs.selectedPLMN_Identity p_SelectedPLMN_Identity := ?,
+                                       template RRCSetupComplete_IEs.ng_5G_S_TMSI_Value p_Ng_5G_S_TMSI_Value:= *,
+                                       template RRCSetupComplete_v1610_IEs p_RRCSetupComplete_v1610_IEs := *,
+                                       boolean p_StartUL_Grant := true
+                                       )
+    runs on NR_BASE_PTC return NG_NAS_MSG_Indication_Type
+  { //@sic R5s210839: added p_StartUL_Grant sic@
+    var NG_NAS_MSG_Indication_Type v_NasInd;
+
+    // receive RRC Connection Request on SRB0 (CCCH) and switch on UL grant:
+    f_NR_RRC_SetupRequest_Def(p_NR_CellId, p_EstablishmentCause, p_InitialUE_Identity, p_StartUL_Grant);
+
+    // send RRC Connection Setup on SRB0 (CCCH) and switch on UL grant assignments:
+    f_NR_RRCSetup_Def (p_NR_CellId);
+
+    // UE shall establish SRB1 acc. to 38.331 cl. 5.3.3.1
+    // UE enters RRC_CONNECTED state
+
+    // receive RRC Connection Setup Complete with piggy-backed NAS message on SRB1 (DCCH):
+    v_NasInd := f_NR_RRCSetupComplete_Def(p_NR_CellId,
+                                          cr_38508_RRCSetupComplete(p_RRC_TI, p_SelectedPLMN_Identity,- , p_Ng_5G_S_TMSI_Value, p_RRCSetupComplete_v1610_IEs),
+                                          p_ExpectedSecurityStatus
+                                          );
+    return v_NasInd;
+  }
+
+  /*
+   * @desc      Wait for RRC Setup Request sent by the UE; straight forward case without watchdog timer
+   * @param     p_NR_CellId
+   * @param     p_EstablishmentCause (default value: cr_NR_EstablishmentCause_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @param     p_StartUL_Grant     (default value: true)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_SetupRequest_Def(NR_CellId_Type p_NR_CellId,
+                                     template (present) EstablishmentCause p_EstablishmentCause := cr_NR_EstablishmentCause_Any,
+                                     template InitialUE_Identity p_InitialUE_Identity := ? ,
+                                     boolean p_StartUL_Grant := true
+                                     ) runs on NR_BASE_PTC
+  { //@sic R5s210839: added p_StartUL_Grant sic@
+    timer t_Dummy; // timer which is not started
+    f_NR_RRC_SetupRequest_Common(p_NR_CellId, t_Dummy, p_EstablishmentCause, p_InitialUE_Identity, p_StartUL_Grant);
+  }
+
+  /*
+   * @desc      Common function to wait for RRC Setup Request sent by the UE;
+   *            when a running timer is handed over, this is used as watchdog.
+   * @param     p_NR_CellId
+   * @param     p_Timer
+   * @param     p_EstablishmentCause (default value: cr_NR_EstablishmentCause_Any)
+   * @param     p_InitialUE_Identity (default value: ?)
+   * @param     p_StartUL_Grant     (default value: true)
+   * @return    boolean
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_SetupRequest_Common(NR_CellId_Type p_NR_CellId,
+                                        timer p_Timer,
+                                        template  EstablishmentCause p_EstablishmentCause := cr_NR_EstablishmentCause_Any,
+                                        template InitialUE_Identity p_InitialUE_Identity := ?,
+                                        boolean p_StartUL_Grant := true
+                                        ) runs on NR_BASE_PTC return boolean
+  { /* common procedure to receive the initial RRC setup request for an expected RRC connection establishment procedure;
+       when RRC setup is not explicitly sent from TTCN but is preconfigured at the SS to be sent together with the contention resolution,
+       the default UL grant configuration is configured at the SS */
+    //@sic R5s210839: added p_StartUL_Grant sic@
+    var boolean v_TimerIsRunning := p_Timer.running;
+    var template (omit)  NR_UplinkTimeAlignment_Synch_Type v_PUCCH_Synch;
+
+    if (not f_NR_EarlyContentionResolution() and p_StartUL_Grant) {
+      v_PUCCH_Synch := cs_NR_UplinkTimeAlignment_Stop;  /* No automatic UL time alignment:
+                                                           if the SS would send MAC PDU with TA while the UE waits for contention resolution, it will consider contention resolutions as being fail
+                                                           => in case of automatic handling of the RRCConnectionSetup in Msg4 (RRCConnectionSetup) UL time alignment shall be started not before RRCConnectionSetupComplete has been received */
+      f_NR_ULGrantConfiguration_Start(p_NR_CellId, -, -, -, v_PUCCH_Synch, -, -, tsc_NoCnfReq ); //@sic R5s200161 sic@
+    } // else: UL grant configuration is done just before sending of RRCSetup
+    alt {
+      [] SRB.receive(car_NR_SRB0_RrcPdu_IND(p_NR_CellId, cr_38508_RRCSetupRequest(p_EstablishmentCause, p_InitialUE_Identity)))
+        {
+          p_Timer.stop;       /* NOTE: acc. to ES 201 873-1 cl. 23.3 the timer can be stopped even if it has not been started before */
+          return true;
+        }
+      [v_TimerIsRunning] p_Timer.timeout
+        {
+        }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      Send default RRCsetup as specified in 38.508-1 Table 4.6.1-4F: RRCSetup
+   * @param     p_NR_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RRC_TI            (default value: tsc_NR_RRC_TI_Def)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCSetup_Def(NR_CellId_Type p_NR_CellId,
+                             template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                             RRC_TransactionIdentifier p_RRC_TI := tsc_NR_RRC_TI_Def) runs on NR_BASE_PTC
+  {
+    if (f_NR_EarlyContentionResolution()) {
+      // switch on UL grant assignments
+      f_NR_ULGrantConfiguration_Start(p_NR_CellId);
+
+      SRB.send(cas_NR_SRB0_RrcPdu_REQ(p_NR_CellId,
+                                      p_TimingInfo,
+                                      f_NR_38508_RRCSetup(p_NR_CellId, p_RRC_TI)));
+    } // else nothing to do as SS is preconfigured in CBRA
+  }
+
+  /*
+   * @desc      To receive RRCSetupComplete
+   * @param     p_NR_CellId
+   * @param     p_ExpectedRRCSetupComplete
+   * @param     p_ExpectedSecurityStatus (default value: tsc_SHT_IntegrityProtected)
+   * @param     p_RoutingInfoSUL    (default value: omit)
+   * @return    NG_NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCSetupComplete_Def(NR_CellId_Type p_NR_CellId,
+                                     template(present) UL_DCCH_Message p_ExpectedRRCSetupComplete,
+                                     template (present) SecurityHeaderType p_ExpectedSecurityStatus := tsc_SHT_IntegrityProtected,
+                                     template (omit) NR_RoutingInfoSUL_Type p_RoutingInfoSUL := omit)
+    runs on NR_BASE_PTC return NG_NAS_MSG_Indication_Type
+  {
+    var NG_NAS_MSG_Indication_Type v_DedicatedNAS_Message;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+
+    SRB.receive(car_NR_SRB1_RrcNasPdu_IND(p_NR_CellId, p_ExpectedRRCSetupComplete, cr_NG_NAS_IndWithPiggybacking(p_ExpectedSecurityStatus), p_RoutingInfoSUL)) -> value v_ReceivedAsp;
+    v_DedicatedNAS_Message := v_ReceivedAsp.Signalling.Nas[0];
+
+    if (not f_NR_EarlyContentionResolution()) {  // UL time alignment needs to be started here as contention resolution now has been done
+      f_NR_SS_CommonCellConfig(p_NR_CellId, cas_NR_UplinkTimeAlignment_REQ(p_NR_CellId, -, cs_NR_UplinkTimeAlignment_Start));
+    }
+    return v_DedicatedNAS_Message;
+  }
+
+  /*
+   * @desc      RRC connection release acc. to 38.331 cl. 5.3.8
+   * @param     p_NR_CellId
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCRelease(NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC return SubFrameTiming_Type
+  { //@sic R5-243537 added return v_TimingRRCRelease => time at which RRCRelease is sent sic@
+    var SubFrameTiming_Type v_TimingRRCRelease;
+
+    v_TimingRRCRelease := f_NR_RRCRelease_Common(p_NR_CellId, cs_38508_RRCRelease (tsc_NR_RRC_TI_Def));
+    return v_TimingRRCRelease;
+  }
+
+  /*
+   * @desc      RRC release acc. to 38.331 cl. 5.3.8 and 38.523-3 cl 7.3.5.2
+   * @param     p_NR_CellId
+   * @param     p_RRCRelease
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_NR_RadioBearerList (default value: omit)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCRelease_Common(NR_CellId_Type p_NR_CellId,
+                                  template (value) DL_DCCH_Message p_RRCRelease,
+                                  template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                  template (omit) NR_RadioBearerList_Type p_NR_RadioBearerList := omit
+                                  ) runs on NR_BASE_PTC return SubFrameTiming_Type
+  { //@sic R5-243537 added return v_TimingAtT => time at which RRCRelease is sent sic@
+    var SubFrameTiming_Type v_TimingAtT;   // time T: sending of RRCConnectionRelease acc. to 38.523-3 clause 7.3.5.2
+    var SubFrameTiming_Type v_TimingNow;
+    var integer v_MilliSecondsDelay := tsc_NR_DelayBeforeIntraCellHO;
+    var integer v_Duration;
+    var integer v_NTN_UE_gNB_RTT := f_NR_CellInfo_GetNTN_UE_gNB_RTT(p_NR_CellId);   //@sic R5-242320 sic@
+
+    timer t_Timer;
+
+    if (f_TimingInfo_IsNow(p_TimingInfo)) {
+      v_TimingAtT := f_NR_GetNextSendOccasion_DL(p_NR_CellId, v_MilliSecondsDelay + v_NTN_UE_gNB_RTT); //@sic R5-242320 sic@
+      v_Duration := v_MilliSecondsDelay + v_NTN_UE_gNB_RTT; //@sic R5-242320 sic@
+    } else { // dedicated timing info is given
+      v_TimingAtT := valueof(p_TimingInfo.SubFrame);   //It is assumed that there is no need to handle slot in the duration
+      v_TimingNow := f_NR_GetCurrentTiming(p_NR_CellId);
+      v_Duration := f_SubFrameTiming_Duration(v_TimingNow, v_TimingAtT);
+    }
+    v_Duration := v_Duration + tsc_NR_DelayAfterRRCRelease;
+    t_Timer.start (int2float(v_Duration) / 1000.0);
+
+    /* Step 1: At T:    Send RRCRelease */
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_NR_CellId, cs_TimingInfo_NR(v_TimingAtT), p_RRCRelease)); //@sic R5s190306 sic@
+
+    f_NR_RRCRelease_Local(p_NR_CellId, v_TimingAtT, p_NR_RadioBearerList);
+
+    alt {
+      [] t_Timer.timeout {}
+      [] SRB.check(receive(car_NR_SRB0_RrcPdu_IND_AnyCell(cr_38508_RRCSetupRequest(-)))) {
+        // there is an RRCConnectionRequest sent by the UE which can be received by TTCN-3 in a sub-sequent function
+        t_Timer.stop;
+      }
+    }
+    return v_TimingAtT;
+  }
+
+  /*
+   * @desc     Reconfigure SS during RRC release acc. to 38.523-3 clauses 7.3.5.2
+   * @param     p_NR_CellId
+   * @param     p_TimingAtT
+   * @param     p_NR_RadioBearerList (default value: omit)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCRelease_Local(NR_CellId_Type p_NR_CellId,
+                                 SubFrameTiming_Type p_TimingAtT,
+                                 template (omit) NR_RadioBearerList_Type p_NR_RadioBearerList := omit
+                                 ) runs on NR_BASE_PTC return SubFrameTiming_Type
+  { /* NOTE: the function schedules all steps to release and reconfigure the SRBs and (default) DRB
+     *       => this will in fact happen in the future */
+    // @sic R5s190984: added p_CnfFlag sic@
+    // @sic R5s210839: added SubFrameTiming_Type return type and deleted p_CnfFlag sic@
+    var SubFrameTiming_Type v_Timing := p_TimingAtT;
+    var IntegerList_Type v_DrbIdList := f_NR_GetActiveDRBs(p_NR_CellId);
+
+    /* Step 1 At T: Send RRCRelease(done already), stop UL grants */
+    f_NR_ULGrantConfiguration_Stop(p_NR_CellId, cs_TimingInfo_NR(v_Timing));
+
+    /* Step 2 at T+5ms: release security */
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 5);
+    f_NR_SS_RRC_ReleaseSecurity(p_NR_CellId, cs_TimingInfo_NR(v_Timing));
+
+    /* Step 3 at T+10ms: Release DRX configuration at the SS. */
+    //@sic R5-197222 sic@
+     v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 10);
+    f_NR_SS_DrxCtrlConfig(p_NR_CellId, cs_NR_DrxCtrl_None, cs_TimingInfo_NR(v_Timing));
+
+    /* Step 4: At T + 15ms: Release measurement gap configuration at the SS. */
+    //@sic R5-197222 sic@
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 15);
+    f_NR_SS_MeasGapCtrlConfig(p_NR_CellId, cs_NR_MeasGapCtrl_None, cs_TimingInfo_NR(v_Timing));
+
+    /* Step 5 at T+55ms: Release SRBs and DRBs */
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 55);
+    f_NR_SS_SRBs_DRBs_Release(p_NR_CellId, cs_TimingInfo_NR(v_Timing), v_DrbIdList);
+
+    /* Step 6 at T+60ms: Configure SRBs */
+    // DRBs to be reconfigure during RRCReconfiguration
+    v_Timing := f_SubFrameTiming_AddMilliSeconds(p_TimingAtT, 60);
+    f_NR_SS_SRBs_DRBs_Config(p_NR_CellId, cs_TimingInfo_NR(v_Timing), p_NR_RadioBearerList); //@sic R5s190109 change 23 sic@
+
+    return v_Timing;  //@sic R5s210839 sic@
+  }
+
+  /*
+   * @desc      Send UECapabilityEnquiry message and receives UECapabilityInformation message.
+   *            The received UE Capabilities are decoded and stored in the structure for the Mobile Info.
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_Capability(NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC
+  { // @sic R5s250519 sic@
+    var NR_SRB_COMMON_IND v_ReceivedAspForUeCapabilityInfo;
+    var integer v_NRBandInd := f_NR_CellInfo_GetBandIndicator(p_NR_CellId);
+    var template (omit) FreqBandIndicatorNR v_MFBI_Band := f_NR_CellInfo_GetMFBI_Band(p_NR_CellId);
+    var UE_NR_Capability v_NrCapability;
+    var integer i;
+    var boolean v_Found1stBand := false;
+    var boolean v_Found2ndBand := false;
+    var template (value) FreqBandInformation v_FirstBand := cs_NR_BandInformationNR(f_NR_CellInfo_GetBandIndicator(p_NR_CellId)); // @sic R5s200933 sic@
+    var template (value) FreqBandInformation v_SecondaryBand;
+    var template (value) FreqBandList v_FreqBandList := { v_FirstBand };
+    var octetstring v_EncodeCapRequestNR;
+    var boolean v_CA_InterBand := false;
+    var boolean v_NR_DC_Band := false;
+    var template (omit) octetstring v_Enquiry_v1560 := omit;
+    var octetstring v_EncodeCapRequestEUTRANR;
+    var template (value) DL_DCCH_Message v_DL_DCCH_Message;
+    var integer v_EUTRA_Band;
+    var boolean v_NEDC_Band := false;
+    var UE_MRDC_Capability v_NrCapability_MRDC;
+
+    if (isvalue (v_MFBI_Band)) { // @sic R5s200826 R5s201305 R5s250353 sic@
+      v_NRBandInd := valueof(v_MFBI_Band);
+      v_FreqBandList[0].bandInformationNR.bandNR := v_NRBandInd;
+    }
+
+    if (f_GetTestcaseAttrib_NR_CA(testcasename())) {    //@sic R5-204397 sic@
+       if (f_NR_GetCA_CombinationType(px_NR_CA_BandCombination) == CA_InterBand) {
+          //For CA interBand includes 2 entries as per 38.508-1 Table 4.6.4-21: FreqBandList
+          v_CA_InterBand := true;       // @sic R5-204397 sic@
+          v_SecondaryBand := cs_NR_BandInformationNR(f_NR_GetCA_SecondaryBand(px_NR_CA_BandCombination));
+          v_FreqBandList := { v_FirstBand, v_SecondaryBand };
+       }
+    }
+    if (f_GetTestcaseAttrib_NR_DC(testcasename())) {   // @sic R5-215679 sic@
+      v_NR_DC_Band := true;
+      v_SecondaryBand := cs_NR_BandInformationNR(f_NR_GetNR_DC_SecondaryBand (px_NR_DC_BandCombination));
+      v_FreqBandList := { v_FirstBand, v_SecondaryBand };
+      // Table 4.6.1-31: UECapabilityEnquiry with condition NR-DC - Include UE-CapabilityRequestFilterCommon with consition NR-DC
+      v_Enquiry_v1560 :=  bit2oct(encvalue( cs_UECapabilityEnquiry_v1560_Def(cs_UE_CapabilityRequestFilterCommon)));  //@sic R5s253066 sic@
+    }
+    if (f_GetTestcaseAttrib_NEDC(testcasename())) {   // @sic R5-221422 sic@
+        v_NEDC_Band := true;
+        v_EUTRA_Band := f_NEDC_GetEUTRA_Band(px_NEDC_BandCombination);
+        v_FreqBandList := { v_FirstBand };
+        v_EncodeCapRequestEUTRANR := bit2oct(encvalue( cs_38508_UECapabilityRequestFilterNR( {cs_NR_BandInformationEUTRA(v_EUTRA_Band), v_FirstBand})));
+    }
+    v_EncodeCapRequestNR := bit2oct(encvalue( cs_38508_UECapabilityRequestFilterNR(v_FreqBandList) ));
+
+    // @sic R5-213580 R5-221422 sic@
+    if (v_NEDC_Band) {
+        v_DL_DCCH_Message := cs_38508_UECapabilityEnquiryMultipleEntries (tsc_NR_RRC_TI_Def, {cs_UE_CapabilityRAT_Request( nr, v_EncodeCapRequestNR), cs_UE_CapabilityRAT_Request(eutra_nr, v_EncodeCapRequestEUTRANR)}, v_Enquiry_v1560);
+    } else {
+        v_DL_DCCH_Message := cs_38508_UECapabilityEnquiry(tsc_NR_RRC_TI_Def, nr, v_EncodeCapRequestNR, v_Enquiry_v1560);
+    }
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_NR_CellId, -, v_DL_DCCH_Message)); // @sic R5s200933 R5-210414 R5-221422 sic@
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_NR_CellId, cr_38508_UECapabilityInformationAny(tsc_NR_RRC_TI_Def)))
+      -> value v_ReceivedAspForUeCapabilityInfo;
+
+    // Decode and store the UE-CapabilityRAT-Container
+    if (v_NEDC_Band) { //@sic R5-221422 sic@
+        if (v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[0].rat_Type == nr) {
+            // First entry is nr, second enry is eutra_nr
+            v_NrCapability := f_NR_DecodeNrCapMsg(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[0].ue_CapabilityRAT_Container);
+            v_NrCapability_MRDC := f_NR_DecodeNrCapMsg_MRDC(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[1].ue_CapabilityRAT_Container);
+        } else {
+            // First entry is eutra_nr, second enry is nr
+            v_NrCapability_MRDC := f_NR_DecodeNrCapMsg_MRDC(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[0].ue_CapabilityRAT_Container);
+            v_NrCapability := f_NR_DecodeNrCapMsg(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[1].ue_CapabilityRAT_Container);
+        }
+    } else {
+        v_NrCapability := f_NR_DecodeNrCapMsg(v_ReceivedAspForUeCapabilityInfo.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.ueCapabilityInformation.ue_CapabilityRAT_ContainerList[0].ue_CapabilityRAT_Container);
+    }
+    f_NR_MobileInfo_NRCap_Set(v_NrCapability);
+    // Check the UE release
+    f_NR_CheckReleaseIndicator(v_NrCapability.accessStratumRelease);
+
+    select (v_NrCapability.accessStratumRelease) {
+      case (rel15, rel16, rel17, rel18) {  // @sic R5s201387 BASELINE MOVING 2020 R5s221179 BASELINE MOVING 2022 rel-17 R5s240531 BASELINE MOVING 2024 rel-18 sic@
+      }
+      case else{
+        FatalError (__FILE__, __LINE__, "accessStratumRelease not yet considered");
+      }
+    }
+    for (i := 0; i < lengthof(v_NrCapability.rf_Parameters.supportedBandListNR); i := i+1) { // @sic R5-190783 sic@
+            if (match(v_NrCapability.rf_Parameters.supportedBandListNR[i].bandNR, v_NRBandInd)) {
+                v_Found1stBand := true;
+                break;
+            }
+        }
+    if (v_CA_InterBand) { // @sic R5-204397 sic@
+      for (i := 0; i < lengthof(v_NrCapability.rf_Parameters.supportedBandListNR); i := i+1) { // @sic R5-190783 sic@
+        if (match(v_NrCapability.rf_Parameters.supportedBandListNR[i].bandNR, v_SecondaryBand.bandInformationNR.bandNR)) {
+          v_Found2ndBand := true;
+          break;
+        }
+      }
+    }
+    if (v_NR_DC_Band) { // @sic R5-215679 sic@
+      for (i := 0; i < lengthof(v_NrCapability.rf_Parameters.supportedBandListNR); i := i+1) { // @sic R5-190783 sic@
+        if (match(v_NrCapability.rf_Parameters.supportedBandListNR[i].bandNR, v_SecondaryBand.bandInformationNR.bandNR)) {
+          v_Found2ndBand := true;
+          break;
+        }
+      }
+    }
+    if (v_NEDC_Band) { //@sic R5-221422 sic@
+    // Check MRDC capabilities
+        for (i := 0; i < lengthof(v_NrCapability_MRDC.rf_ParametersMRDC.appliedFreqBandListFilter); i := i+1) {
+          if (match(v_NrCapability_MRDC.rf_ParametersMRDC.appliedFreqBandListFilter[i].bandInformationEUTRA.bandEUTRA, v_EUTRA_Band ) and
+              match(v_NrCapability_MRDC.rf_ParametersMRDC.appliedFreqBandListFilter[i].bandInformationNR.bandNR, v_NRBandInd)) {
+            v_Found2ndBand := true;
+            break;
+          }
+        }
+    }
+    if (not v_Found1stBand or ((v_NR_DC_Band or v_CA_InterBand or v_NEDC_Band) and not v_Found2ndBand)) { // @sic R5s190109, R5-204397, R5-215679 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "NR Freq Band Ind must match value sent");
+    }
+  }
+
+  /*
+   * @desc      Returns list of NR DRB To Add/Mod from current DRB List
+   * @param     p_DRBInfo
+   * @param     p_DRBToAddModList
+   * @return    template (value) DRB_ToAddMod
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function fl_NR_ExistingDRB_GetDRBToAddMod(NR_DRBInfo_Type p_DRBInfo,
+                                             template (omit) DRB_ToAddModList p_DRBToAddModList) return template (value) DRB_ToAddMod
+  {
+    var DRB_ToAddModList v_DRBToAddModList;
+    var integer i;
+
+    if (isvalue(p_DRBToAddModList)) {
+      v_DRBToAddModList := valueof(p_DRBToAddModList);
+      for (i := 0; i < lengthof(v_DRBToAddModList); i := i + 1) {
+        if (v_DRBToAddModList[i].drb_Identity == p_DRBInfo.DRB_Id) {
+          return v_DRBToAddModList[i];
+        }
+      }
+    }
+    return cs_38508_NRDRB_ToAddMod(p_DRBInfo.SDAP_Config, p_DRBInfo.DRB_Id, cs_38508_PDCP_Config);
+  }
+
+  /*
+   * @desc      Returns list of NR RLC bearer configuration from current DRB List
+   * @param     p_DRBInfo
+   * @param     p_RLCConfigList
+   * @return    RLC_BearerConfig
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function fl_NR_ExistingDRB_GetRlcBearerConfig(NR_DRBInfo_Type p_DRBInfo,
+                                                template (omit) NR_RLC_BearerToAddModList_Type p_RLCConfigList) return RLC_BearerConfig
+  {
+    var NR_RLC_BearerToAddModList_Type v_RLCConfigList;
+    var integer i;
+
+    if (isvalue(p_RLCConfigList)) {
+      v_RLCConfigList := valueof(p_RLCConfigList);
+      for (i := 0; i < lengthof(v_RLCConfigList); i := i + 1) {
+        if (match(p_DRBInfo.RLC_Config.servedRadioBearer.drb_Identity, v_RLCConfigList[i].servedRadioBearer.drb_Identity)) {
+          return v_RLCConfigList[i];
+        }
+      }
+    }
+    return p_DRBInfo.RLC_Config;
+  }
+
+  /*
+   * @desc      Returns Radio Bearer list within current DRBs
+   * @param     p_DRBInfo
+   * @param     p_SS_Drb_Config
+   * @return    NR_RadioBearer_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function fl_NR_ExistingDRB_GetRadioBearerList(NR_DRBInfo_Type p_DRBInfo,
+                                                template (omit) NR_RadioBearerList_Type p_SS_Drb_Config) return NR_RadioBearer_Type
+  {
+    var NR_RadioBearerList_Type v_SS_Drb_Config;
+    var integer i;
+
+    if (isvalue(p_SS_Drb_Config)) {
+      v_SS_Drb_Config := valueof(p_SS_Drb_Config);
+      for (i := 0; i < lengthof(v_SS_Drb_Config); i := i + 1) {
+        if (ischosen(v_SS_Drb_Config[i].Id.Drb) and (v_SS_Drb_Config[i].Id.Drb == p_DRBInfo.DRB_Id)) {
+          return v_SS_Drb_Config[i];
+        }
+      }
+    }
+    return p_DRBInfo.SS_Config;
+  }
+
+  /*
+   * @desc      Send RRC Reconfiguration message with an optional piggybacked NAS message to reconfigure existing DRBs
+   *            To move from RRC_IDLE to RRC_CONNECTED
+   * @param     p_NR_CellId
+   * @param     p_NASMsg
+   * @param     p_RLCConfigList     (default value: omit)
+   * @param     p_MACConfig         (default value: omit)
+   * @param     p_DRBToAddMod       (default value: omit)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SS_Drb_Config     (default value: omit)
+   * @param     p_ReceiveForRRCreconfigurationComplete (default value: true)
+   * @param     p_SRBs              (default value: SRB1)
+   * @param     p_NR_RoutingInfoSUL (default value: omit)
+   * @param     p_NrofHARQ_ProcessesForPDSCH (default value: omit)
+   * @param     p_SCellConfig       (default value: omit)
+   * @param     p_SecurityParams (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCReconfigExistingDRBs(NR_CellId_Type p_NR_CellId,
+                                        template (omit) NG_NAS_MSG_RequestList_Type p_NASMsg,
+                                        template (omit) NR_RLC_BearerToAddModList_Type p_RLCConfigList := omit,
+                                        template (omit) MAC_CellGroupConfig p_MACConfig := omit,
+                                        template (omit) DRB_ToAddModList p_DRBToAddMod := omit,
+                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                        template (omit) NR_RadioBearerList_Type p_SS_Drb_Config := omit,
+                                        boolean p_ReceiveForRRCreconfigurationComplete := true,
+                                        SRBs_AlreadyConfigured p_SRBs := SRB1,
+                                        template (omit) NR_RoutingInfoSUL_Type p_NR_RoutingInfoSUL := omit,
+                                        template (omit) PDSCH_ServingCellConfig.nrofHARQ_ProcessesForPDSCH  p_NrofHARQ_ProcessesForPDSCH := omit,
+                                        template (omit) NR_SCellToAddModList_Type p_SCellConfig := omit,
+                                        template (omit) NR_SecurityParams_Type p_SecurityParams := omit) runs on NR5GC_PTC
+  { // Split function in 2 so can re-use for L2 reconfig without NAS message @sic R5-196745 sic@
+    // Split again so list of DRBs can be built elsewhere @sic R5-199103 sic@
+    // @sic R5-203533: added p_NrofHARQ_ProcessesForPDSCH sic@
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var NR_RadioBearerList_Type v_SS_Config;
+
+    f_NR_BuildRRCReconfigExistingDRBs (v_RadioBearerConfig, v_CellGroupConfig, v_SS_Config, p_NR_CellId, p_RLCConfigList, p_MACConfig, p_DRBToAddMod, p_TimingInfo, p_SS_Drb_Config, p_SRBs, p_SCellConfig);
+    f_ReconfigureDRBs( p_NR_CellId,
+                       p_NASMsg,
+                       v_RadioBearerConfig,
+                       v_CellGroupConfig,
+                       v_SS_Config,
+                       -,
+                       p_TimingInfo,
+                       p_ReceiveForRRCreconfigurationComplete,
+                       p_NR_RoutingInfoSUL,
+                       p_NrofHARQ_ProcessesForPDSCH,
+                       p_SecurityParams); // @sic R5s210277 sic@
+  }
+
+  /*
+   * @desc      Send RRC Reconfiguration message with an optional piggybacked NAS message
+   *            and Configure SS to reconfigure either new or existing DRBs
+   *            ** Only to be called from common functions **
+   * @param     p_NR_CellId
+   * @param     p_NASMsg
+   * @param     p_RadioBearerConfig
+   * @param     p_CellGroupConfig
+   * @param     p_SS_Config
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB1)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_ReceiveForRRCreconfigurationComplete (default value: true)
+   * @param     p_NR_RoutingInfoSUL (default value: omit)
+   * @param     p_NrofHARQ_ProcessesForPDSCH (default value: omit)
+   * @param     p_SecurityParams    (default value: omit)
+   * @param     p_MacBearerRoutingCA (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_ReconfigureDRBs(NR_CellId_Type p_NR_CellId,
+                             template (omit) NG_NAS_MSG_RequestList_Type p_NASMsg,
+                             template (value) RadioBearerConfig p_RadioBearerConfig,
+                             template (value) CellGroupConfig p_CellGroupConfig,
+                             template (value) NR_RadioBearerList_Type p_SS_Config,
+                             NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB1,
+                             template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                             boolean p_ReceiveForRRCreconfigurationComplete := true,
+                             template (omit) NR_RoutingInfoSUL_Type p_NR_RoutingInfoSUL := omit,
+                             template (omit) PDSCH_ServingCellConfig.nrofHARQ_ProcessesForPDSCH  p_NrofHARQ_ProcessesForPDSCH := omit,
+                             template (omit) NR_SecurityParams_Type p_SecurityParams := omit,
+                             template (omit) MacBearerRouting_Type p_MacBearerRoutingCA := omit
+                             ) runs on NR_BASE_PTC
+  { // Split function so list of DRBs can be built elsewhere @sic R5-199103 sic@
+    // @sic R5-203533: added p_NrofHARQ_ProcessesForPDSCH sic@
+    // @sic R5-213516: added p_MacBearerRoutingCA sic@
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+
+    if (isvalue(p_NrofHARQ_ProcessesForPDSCH)) {
+      if (not isvalue(p_CellGroupConfig.spCellConfig)) {
+        p_CellGroupConfig.spCellConfig := cs_NR_SpCellConfigDef(omit, omit, omit, cs_NR_ServingCellConfigDef); //@sic R5s211668 R5s220052 sic@
+      }
+      p_CellGroupConfig.spCellConfig.spCellConfigDedicated.pdsch_ServingCellConfig := cs_NR_Pdsch_ServingCellConfigSetup(cs_NR_PDSCH_ServingCellConfigDef(-, -, p_NrofHARQ_ProcessesForPDSCH));
+      f_NR_SS_CommonCellConfig(p_NR_CellId, cads_NR_PDSCH_Config_REQ(p_NR_CellId, p_TimingInfo, cs_NR_PDSCH_CellLevelConfigDef(p_CellGroupConfig.spCellConfig.spCellConfigDedicated.pdsch_ServingCellConfig.setup)));//compiler warning may be ignored due to previous check
+    }
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(p_CellGroupConfig)));
+
+    //Reconfigure DRB in SS - existing DRBs are not reconfigured during release
+    f_NR_SS_CommonRadioBearerConfig(p_NR_CellId, p_SS_Config, p_TimingInfo);
+
+    // Configure PDCP security
+    if (isvalue(p_SecurityParams)){ // @sic R5s210277 sic@
+      v_SecurityParams := valueof(p_SecurityParams);
+    } else {
+      v_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetCurrent(p_NR_CellId, false);  // @sic R5s190382, R5s210277 sic@
+    }
+    f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_NR_CellId,
+                                          v_SecurityParams.AS_Integrity,
+                                          v_SecurityParams.AS_Ciphering);
+    // Send message to UE
+    f_NR_SendRRCReconfiguration (p_NR_CellId, p_SRB, p_RadioBearerConfig, v_V1530Ext, p_NASMsg, -, p_TimingInfo, p_ReceiveForRRCreconfigurationComplete, p_NR_RoutingInfoSUL, p_MacBearerRoutingCA);
+  }
+
+  /*
+   * @desc      Builds the RRC Reconfiguration message to reconfigure existing DRBs
+   *            To move from RRC_IDLE to RRC_CONNECTED
+   * @param     p_RadioBearerConfig (by reference)
+   * @param     p_CellGroupConfig   (by reference)
+   * @param     p_SS_Config         (by reference)
+   * @param     p_NR_CellId
+   * @param     p_RLCConfigList     (default value: omit)
+   * @param     p_MACConfig         (default value: omit)
+   * @param     p_DRBToAddMod       (default value: omit)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SS_Drb_Config     (default value: omit)
+   * @param     p_SRBs              (default value: SRB1)
+   * @param     p_SCellConfig       (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_BuildRRCReconfigExistingDRBs( out template (value) RadioBearerConfig p_RadioBearerConfig,
+                                              out template (value) CellGroupConfig p_CellGroupConfig,
+                                              out NR_RadioBearerList_Type p_SS_Config,
+                                              NR_CellId_Type p_NR_CellId,
+                                              template (omit) NR_RLC_BearerToAddModList_Type p_RLCConfigList := omit,
+                                              template (omit) MAC_CellGroupConfig p_MACConfig := omit,
+                                              template (omit) DRB_ToAddModList p_DRBToAddMod := omit,
+                                              template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                              template (omit) NR_RadioBearerList_Type p_SS_Drb_Config := omit,
+                                              SRBs_AlreadyConfigured p_SRBs := SRB1,
+                                              template (omit) NR_SCellToAddModList_Type p_SCellConfig := omit
+                                              ) runs on NR5GC_PTC
+  {
+    var template (value) DRB_ToAddModList v_DRBToAddModList;
+    var template (omit) SRB_ToAddModList v_SRBToAddModList := omit;
+    var integer v_NoOfDRBs := f_NR5GC_MobileInfo_GetNoOfDRBs();
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();   //@sic R5s190109 change 42 sic@
+    //v_CellGroupConfig initialise as per default - rlc_BearerToAddModList, mac_CellGroupConfig updated further down
+    var integer i := 0;
+    var integer j := 0; // for CellGroupConfig
+    var template (omit) integer v_ChAccPriority := f_NR_SharedAccessChAccPriority(p_NR_CellId); //SharedAccess @sic R5-243536 sic@
+    var template (omit) RLC_Config_v1700 v_RLC_Config_v1700 := f_NR_RLC_Config_v1700(); //@sic R5-256933 sic@
+    if (v_NoOfDRBs == 0) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "No DRBs to be configured");
+    }
+
+    p_CellGroupConfig := f_NR_GetCellgroupConfig_DRB (p_NR_CellId, {v_ExistingDRBs[0].DRB_Id}, false); //@sic R5s190109 change 42 sic@
+
+    // normally, will configure SRB2 when moving to RRC_CONNECTED, so need to add radiobearer and RLC data to message to UE
+    // SS is always configured for SRBs, so don't need to doing anything here
+    if (p_SRBs != SRB1_2) { // @sic R5-198923 sic@
+      if (p_SRBs == NONE) { // @sic R5-198923 sic@
+        v_SRBToAddModList[i] := cs_NR_SRB_ToAddMod(tsc_SRB1);
+        p_CellGroupConfig.rlc_BearerToAddModList[j] := valueof(cs_38508_RLC_BearerConfig_SRB(tsc_SRB1,-,-,-,v_RLC_Config_v1700));  //@sic R5-256933 sic@
+        p_CellGroupConfig.spCellConfig.reconfigurationWithSync := cs_NR_ReconfigurationWithSyncDef(f_NR_GetServingCellConfigCommon(p_NR_CellId),
+                                                                               tsc_C_RNTI_Value3,
+                                                                               -, //  p_T304 := ms1000,
+                                                                               omit);
+        i := i + 1;
+        j := j + 1;
+      }
+      v_SRBToAddModList[i] := cs_NR_SRB_ToAddMod(tsc_SRB2);
+      p_CellGroupConfig.rlc_BearerToAddModList[j] := valueof(cs_38508_RLC_BearerConfig_SRB(tsc_SRB2, -, v_ChAccPriority, -, v_RLC_Config_v1700)); //SharedAccess: @sic R5-243536, R5-256933 sic@
+      j := j + 1;
+    }
+
+    // Build DRBToAddModList (for message to UE) and SS config (DRBs not reconfigured automatically at RRC_IDLE)
+    for (i:=0;  i < lengthof(v_ExistingDRBs); i :=i+1) { // @sic R5s190374 sic@
+      v_DRBToAddModList[i] := fl_NR_ExistingDRB_GetDRBToAddMod(v_ExistingDRBs[i], p_DRBToAddMod);
+      p_CellGroupConfig.rlc_BearerToAddModList[j] := fl_NR_ExistingDRB_GetRlcBearerConfig(v_ExistingDRBs[i], p_RLCConfigList);
+      // Update RLC_Config in the DRB list entry   @sic R5s191055 sic@
+      v_ExistingDRBs[i].RLC_Config := fl_NR_ExistingDRB_GetRlcBearerConfig(v_ExistingDRBs[i], p_RLCConfigList);
+      j := j + 1;
+      p_SS_Config[i] := fl_NR_ExistingDRB_GetRadioBearerList(v_ExistingDRBs[i], p_SS_Drb_Config);
+      // Update SS_Config in the DRB list entry    @sic R5s191055 sic@
+      v_ExistingDRBs[i].SS_Config := fl_NR_ExistingDRB_GetRadioBearerList(v_ExistingDRBs[i], p_SS_Drb_Config);
+    }
+    f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);  //@sic R5s191055 sic@
+
+    p_CellGroupConfig.mac_CellGroupConfig := p_MACConfig; // @sic R5s190374 sic@
+    if (isvalue (p_MACConfig)) {
+      // use new, passed in value
+      f_NR_SS_ServingCellConfig(p_NR_CellId,
+                                p_TimingInfo,
+                                cs_NR_ServingCellConfig_SpCell(cs_NR_SS_SpCellConfig(omit, omit, p_MACConfig, omit)));
+    }
+    if (isvalue(p_SCellConfig)) {  //Set SCell only in UE RRCReconfiguration message - no SS reconfiguration
+        p_CellGroupConfig.sCellToAddModList := p_SCellConfig
+    }
+    // Build RadioBearerConfig message
+    p_RadioBearerConfig := cs_38508_RadioBearerConfigDef(v_SRBToAddModList,
+                                                         v_DRBToAddModList,
+                                                         -,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+  }
+
+  /*
+   * @desc      function to build the new list of DRBs configured in the SS
+   * @param     p_NewDRBList
+   * @param     p_SS_Config
+   * @param     p_CellGroupConfig
+   * @return    NR_DRBInfoList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_BuildDRBNewDRBList (DRB_ToAddModList p_NewDRBList,
+                                   NR_RadioBearerList_Type p_SS_Config,
+                                   CellGroupConfig p_CellGroupConfig) return NR_DRBInfoList_Type
+ {
+    var NR_DRBInfoList_Type v_NewDRBInfoList;
+    var RLC_BearerConfig v_RLC_Config;
+    var integer v_PDN_Id;
+    var boolean v_DefaultDRB := false;
+    var integer i;
+    var integer j;
+
+    // Store info for new DRB(s)
+    for (j := 0; j < lengthof(p_SS_Config); j :=j+1) { // @sic R5s190888 sic@
+    if (ischosen (p_NewDRBList[j].cnAssociation.sdap_Config)) {
+      v_PDN_Id := p_NewDRBList[j].cnAssociation.sdap_Config.pdu_Session;
+      v_DefaultDRB := p_NewDRBList[j].cnAssociation.sdap_Config.defaultDRB;
+    } else { // only the 2 options in the ASN.1
+      v_PDN_Id := p_NewDRBList[j].cnAssociation.eps_BearerIdentity;
+    }
+    // Get corresponding RLC config for this DRB
+    for (i:=0;  i < lengthof(p_CellGroupConfig.rlc_BearerToAddModList); i :=i+1) {
+      if (ischosen(p_CellGroupConfig.rlc_BearerToAddModList[i].servedRadioBearer.drb_Identity)) {
+        if (match(p_NewDRBList[j].drb_Identity, p_CellGroupConfig.rlc_BearerToAddModList[i].servedRadioBearer.drb_Identity)) {
+          v_RLC_Config := p_CellGroupConfig.rlc_BearerToAddModList[i];
+          break;
+        }
+      }
+    }
+    // Store: DRB id, Session Id, default flag, SDAP config, RLC config and SS config for every DRB
+    v_NewDRBInfoList[j] :=  valueof(cs_NewDRBInfo(p_NewDRBList[j].drb_Identity, v_PDN_Id, v_DefaultDRB, p_NewDRBList[j].cnAssociation.sdap_Config, v_RLC_Config, p_SS_Config[j]));
+    }
+    return v_NewDRBInfoList;
+ }
+
+  /*
+   * @desc      Send RRC Reconfiguration message with an optional piggybacked NAS message to add (a) new DRB(s)
+   *            This function also configures the SS with the new DRB(s)
+   * @param     p_NR_CellId
+   * @param     p_RadioBearerConfig
+   * @param     p_SS_Config
+   * @param     p_CellGroupConfig
+   * @param     p_NAS_Msg
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB1)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_ReceiveForRRCreconfigurationComplete (default value: true)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCReconfigNewDRBWithSSConfig(NR_CellId_Type p_NR_CellId,
+                                              template (value) RadioBearerConfig p_RadioBearerConfig,
+                                              template (value) NR_RadioBearerList_Type p_SS_Config,
+                                              template (value) CellGroupConfig p_CellGroupConfig,
+                                              template (omit) NG_NAS_MSG_RequestList_Type p_NAS_Msg,
+                                              NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB1,
+                                              template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                              boolean p_ReceiveForRRCreconfigurationComplete := true) runs on NR5GC_PTC
+  { // Split function so (list of) DRBs can be built elsewhere @sic R5-199103 sic@
+    var IntegerList_Type v_RemovedDRBList := {};
+    var integer v_NoOfDRBs := f_NR5GC_MobileInfo_GetNoOfDRBs();
+    var NR_DRBInfoList_Type v_ExistingDRBs;
+    var NR_DRBInfoList_Type v_NewDRBInfoList := {};    //@sic R5s200468 sic@
+    var NR_RadioBearerList_Type v_SS_Config := valueof(p_SS_Config);
+    var integer i;
+
+    if (ispresent (p_RadioBearerConfig.drb_ToAddModList)) {
+      v_NewDRBInfoList := f_BuildDRBNewDRBList (valueof(p_RadioBearerConfig.drb_ToAddModList), v_SS_Config, valueof(p_CellGroupConfig)); //  @sic R5-196745 sic@
+    }
+
+    if (v_NoOfDRBs > 0) {
+      v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+      v_ExistingDRBs := f_NR_DRBInfo_AddListOfEntries (v_ExistingDRBs, v_NewDRBInfoList);
+    } else {
+      v_ExistingDRBs := v_NewDRBInfoList;
+    }
+
+    // Remove DRBs about to be released
+    if (ispresent (p_RadioBearerConfig.drb_ToReleaseList)) {
+      v_RemovedDRBList := valueof (p_RadioBearerConfig.drb_ToReleaseList);
+      for (i:= 0; i < lengthof(v_RemovedDRBList); i := i+1 ) {
+        v_ExistingDRBs := f_NR_DRBInfo_RemoveEntry (v_ExistingDRBs, v_RemovedDRBList[i]);
+      }
+    }
+    // Store updated DRB information
+    f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);
+
+    // Use function to actually send the RRC message and configure the DRBs  @sic R5-199103 sic@
+    f_ReconfigureDRBs (p_NR_CellId, p_NAS_Msg, p_RadioBearerConfig, p_CellGroupConfig, v_SS_Config, p_SRB, p_TimingInfo, p_ReceiveForRRCreconfigurationComplete);
+  }
+
+  /*
+   * @desc      Send RRC Reconfiguration message and piggybacked NAS message to release DRB(s)
+   *            This function also releases the DRB(s) in the SS
+   *      NOTE: Do NOT use this function to configure any DRBs
+   * @param     p_NR_CellId
+   * @param     p_DRBIdList
+   * @param     p_NAS_Msg
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @return    NR_SRB_COMMON_IND
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_RRCReconfigReleaseDRBs(NR_CellId_Type p_NR_CellId,
+                                       IntegerList_Type p_DRBIdList,
+                                       template (value) NG_NAS_MSG_Request_Type p_NAS_Msg,
+                                       template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NR5GC_PTC return NR_SRB_COMMON_IND
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) NR_RLC_BearerToReleaseList_Type v_RLC_BearerToReleaseList;
+    var template (value) DRB_ToReleaseList v_DRB_ToReleaseList;
+    var integer v_NoOfDRBs := f_NR5GC_MobileInfo_GetNoOfDRBs();
+    var NR_DRBInfoList_Type v_ExistingDRBs;
+    var template (value) NR_RadioBearerList_Type v_SS_Config;
+    var NR_DRBInfo_Type v_DRBInfo;
+    var integer i;
+
+    if (v_NoOfDRBs <= 0) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Trying to release DRBs not configured");
+    } else {
+      v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    }
+
+    // Build RRC command for all the DRBs linked to this PDU Session
+    for (i := 0; i < lengthof(p_DRBIdList); i := i+1) {
+      v_DRBInfo := valueof(f_NR_GetDRBInfo_FromId(p_DRBIdList[i]));
+      v_DRB_ToReleaseList[i] := v_DRBInfo.DRB_Id;
+      v_RLC_BearerToReleaseList[i] := v_DRBInfo.RLC_Config.logicalChannelIdentity;
+      v_SS_Config[i] := cs_NR_SS_RadioBearer_Release(cs_NR_RadioBearerId_DRB(v_DRBInfo.DRB_Id));
+      v_ExistingDRBs := f_NR_DRBInfo_RemoveEntry (v_ExistingDRBs, p_DRBIdList[i]);
+    }
+
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(omit, omit, v_DRB_ToReleaseList);
+    v_CellGroupConfig := cs_38508_CellGroupConfig(f_NR_CellInfo_Get_CellGroupId(p_NR_CellId), omit, v_RLC_BearerToReleaseList);  //@sic R5s201387 sic@
+
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(v_CellGroupConfig)));
+
+    // Store updated DRB information
+    f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);
+
+    // Send message to UE
+    f_NR_SendRRCReconfiguration (p_NR_CellId, tsc_NR_RbId_SRB1, v_RadioBearerConfig, v_V1530Ext, {p_NAS_Msg}, -, p_TimingInfo, false);
+
+    // wait for RRC and NAS msgs in either order
+    interleave {
+        []SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId,
+                                            tsc_NR_RbId_SRB1,
+                                            cr_38508_RRCReconfigurationComplete)) {}
+        []SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                            tsc_NR_RbId_SRB2,
+                                            cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp{}
+    }
+
+    // Now sure UE has released, we can now release SS
+    f_NR_SS_CommonRadioBearerConfig(p_NR_CellId, v_SS_Config);
+
+    // return NAS complete message for checking in calling function
+    return v_ReceivedAsp;
+  }
+
+  /*
+   * @desc      Activation of Initial security at SS[SRB 1, 2] and at the UE
+   *            (38.331 cl. 5.3.4       Initial security activation)
+   *            The parameter p_UL_NAS_Count shall be the NAS count of
+   *            if [AUTN procedure is executed]
+   *            then: The UL NAS Count of NAS SMC Complete, of the NAS SMC procedure executed after AUTN Proc.
+   *            else
+   *            then: The UL NAS count of the NAS UL message[which shall be security protected] received which triggered the RRC Connection establishment
+   *            i.e. Registration Req[ in special cases], Service Req etc.
+   * @param     p_NR_CellId
+   * @param     p_NasCountUL
+   * @param     p_NR_RoutingInfoSUL (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_ActivateSecurity(NR_CellId_Type p_NR_CellId,
+                                     NasCount_Type p_NasCountUL,
+                                     template (omit) NR_RoutingInfoSUL_Type p_NR_RoutingInfoSUL := omit)
+    runs on NR_BASE_PTC
+  {
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+
+    v_SecurityParams := f_NR_Authentication_InitAS (v_SecurityParams, p_NasCountUL);
+
+    // Read PDCP SQN for SRB1 and calculate Ciphering Activation times
+    v_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetInitial(p_NR_CellId);         /* note: this works only when timing info is now */
+
+    f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_NR_CellId,
+                                          v_SecurityParams.AS_Integrity,
+                                          v_SecurityParams.AS_Ciphering);
+
+    // send SECURITY MODE COMMAND
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_NR_CellId,
+                                    -,
+                                    cs_38508_RRCSecurityModeCommand(tsc_NR_RRC_TI_Def,
+                                                                    cs_38508_SecurityAlgorithmConfig(v_SecurityParams.AS_Ciphering.Algorithm,
+                                                                                                     v_SecurityParams.AS_Integrity.Algorithm))));
+
+    // receive SECURITY MODE COMPLETE
+    SRB.receive(car_NR_SRB1_RrcPdu_IND(p_NR_CellId, cr_38508_RRCSecurityModeComplete(tsc_NR_RRC_TI_Def), p_NR_RoutingInfoSUL));
+    f_NR_Security_Set(v_SecurityParams);
+  }
+
+  /*
+   * @desc      RRC connection release to bring UE to RRC_INACTIVE state acc. to 38.508-1 Table 4.5.3.2-1: NR RRC_INACTIVE step 20
+   *            NOTE: p_NR_TargetRRCResume_CellId: this parameter shall be set when the RRCResume message is transmitted on another cell than p_NR_CellId
+   * @param     p_NR_CellId
+   * @param     p_FollowedByRRCResume (default value: FollowedByResume)
+   * @param     p_PLMN_Identity     (default value: omit)
+   * @param     p_RRCRelease_v1540  (default value: omit)
+   * @param     p_SDT_Config        (default value: omit)
+   * @param     p_ReestablishSDT_DRB (default value: false)
+   * @param     p_NR_RachProcedureConfig (default value: omit)
+   * @param     p_RAN_ExtendedPagingCycleConfig_r18 (default value: omit)
+   * @param     p_NR_TargetRRCResume_CellId (default value: omit)
+   * @param     p_SrsPosInactiveEnh (default value: omit)
+   * @param     p_T380              (default value: omit)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_InactiveDef(NR_CellId_Type p_NR_CellId,
+                                INACTIVE_FollowOnState p_FollowedByRRCResume := FollowedByResume,
+                                template (omit) PLMN_Identity p_PLMN_Identity := omit,
+                                template (omit) RRCRelease_v1540_IEs p_RRCRelease_v1540 := omit,
+                                template (omit) SuspendConfig.sdt_Config_r17 p_SDT_Config := omit,
+                                boolean p_ReestablishSDT_DRB := false,
+                                template (omit) NR_RachProcedureConfig_Type p_NR_RachProcedureConfig := omit,
+                                template (omit) SuspendConfig.ran_ExtendedPagingCycleConfig_r18  p_RAN_ExtendedPagingCycleConfig_r18 := omit,
+                                template (omit) NR_CellId_Type p_NR_TargetRRCResume_CellId := omit,
+                                template (omit) SuspendConfig.srs_PosRRC_InactiveEnhanced_r18 p_SrsPosInactiveEnh := omit,
+                                template (omit) PeriodicRNAU_TimerValue p_T380 := omit
+                                ) runs on NR5GC_PTC return SubFrameTiming_Type
+  { //@sic R5-195325 R5s250346 sic@
+    //@sic R5-243537 added return v_TimingRRCRelease => time at which RRCRelease is sent sic@
+    //@sic Added p_ReestablishSDT_DRB and p_NR_RachProcedureConfig for SDT tc sic@
+    //@sic R5s240440: added p_FollowedByRRCResume and p_NR_TargetRRCResume_CellId sic@
+    //@sic R5s250008: deleted p_ActivateSecurity sic@
+    var CellIdentity v_CellIdentity := f_NR_CellInfo_GetCellIdentity(p_NR_CellId);
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(p_NR_CellId);
+    var template (omit) NR_RadioBearerList_Type v_RadioBearerList := omit;
+    var template (value) NR_DRBInfoList_Type v_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var SubFrameTiming_Type v_TimingRRCRelease;
+    var RNTI_Value_Type v_RNTI_Value_Type := f_NR_CellInfo_GetRNTI(p_NR_CellId);
+    var NR_CellId_Type v_RACHReconfigurationCell := p_NR_CellId;  //Cell on which RACH needs to be reconfigured - cell on which RRCResume is transmitted
+
+    if (isvalue(p_NR_TargetRRCResume_CellId)) { v_RACHReconfigurationCell := valueof(p_NR_TargetRRCResume_CellId);}
+    if (p_ReestablishSDT_DRB) {
+        v_RadioBearerList := f_NR5GC_GetRadioBearerList(v_DRBInfoList);   //For SDT: reconfigure all DRBs -> to ensure UE uses only the SDT-DRB
+    }
+    if (isvalue(p_NR_RachProcedureConfig)) {
+        f_NR_SS_RachProcedureConfig(v_RACHReconfigurationCell, p_NR_RachProcedureConfig); // compiler warning may be ignored due to check
+    } else if (p_FollowedByRRCResume != NotFollowedByResume) {  // @sic R5s250008 sic@
+        //@sic R5s240440 sic@
+        /* Configure RACH procedure to a list with 2 RACH:
+           - RACH procedure contention-based with UE Contention Resolution Identity MAC CE and with a new C-RNTI => To send RRCReseumeRequest
+           - RACH procedure with contention-based with C-RNTI based contention resolution => In case UE use RACH procedure to send RLC ACK for RRCResume
+         */
+        f_NR_SS_RachProcedureConfig(v_RACHReconfigurationCell, cs_NR_RachProcedureConfig_RRCResume(v_NR_PhysicalParameters, v_RNTI_Value_Type, tsc_NR_Msg4GrantHO_Def));
+    }
+    v_TimingRRCRelease := f_NR_RRCRelease_Common (p_NR_CellId, cs_38508_RRCRelease ( tsc_NR_RRC_TI_Def,
+                                                               cs_38508_SuspendConfig(cs_RAN_NotificationAreaInfo_1Cell (v_CellIdentity, p_PLMN_Identity), p_SDT_Config, p_RAN_ExtendedPagingCycleConfig_r18, p_SrsPosInactiveEnh, p_T380),
+                                                               -, -, -,
+                                                               p_RRCRelease_v1540
+                                                               ),
+                            -,
+                            v_RadioBearerList);
+    if (p_FollowedByRRCResume == FollowedByResume){ //@sic R5s250008 sic@
+        //Activate security at SS side in advance so that SS is ready to send RRCResume message
+        // Only SRBs are configured - so security is activated on SRBs
+        // When DRBs are configured then security is also started on DRBs
+        //@sic R5s190505 change 2 sic@
+        f_NR_SS_AS_ActivateSecurity_Current(v_RACHReconfigurationCell, tsc_NR_38508_NextHopChainingCount);  //@sic R5s250008 sic@
+    }
+    return v_TimingRRCRelease;
+  }
+
+  /*
+   * @desc      RRC resume procedure, the NAS message is not checked inside the function. It is returned to be checked outside.
+   * @param     p_NR_CellId
+   * @param     p_RRC_TI
+   * @param     p_ShortI_RNTI       (default value: ?)
+   * @param     p_ResumeCause       (default value: mt_Access)
+   * @return    template (omit) NG_NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_Resume_DefWithNas (NR_CellId_Type p_NR_CellId,
+                                       RRC_TransactionIdentifier p_RRC_TI,
+                                       template (present) ShortI_RNTI_Value    p_ShortI_RNTI := ?,
+                                       template (present) ResumeCause p_ResumeCause := mt_Access
+                                       )
+    runs on NR5GC_PTC  return template (omit) NG_NAS_MSG_Indication_Type
+  { //@sic R5-195325 sic@
+    var template (omit) NG_NAS_MSG_Indication_Type v_NasInd;
+
+    // receive RRC Resume Request on SRB0 (CCCH) and switch on UL grant:
+    f_NR_RRC_ResumeRequest_Def(p_NR_CellId, p_ShortI_RNTI, p_ResumeCause);
+
+    // send RRC Connection Setup on SRB0 (CCCH) and switch on UL grant assignments:
+    f_NR_SendRRCResume_Def(p_NR_CellId, -, p_RRC_TI);
+
+    // receive RRC Connection Setup Complete with piggy-backed NAS message on SRB1 (DCCH):
+    v_NasInd := f_NR_RRCResumeComplete_Def(p_NR_CellId);
+
+    return v_NasInd;
+  }
+
+  /*
+   * @desc      Wait for RRC Resume Request sent by the UE; straight forward case without watchdog timer
+   * @param     p_NR_CellId
+   * @param     p_ShortI_RNTI       (default value: ?)
+   * @param     p_ResumeCause       (default value: mt_Access)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_ResumeRequest_Def(NR_CellId_Type p_NR_CellId,
+                                      template (present) ShortI_RNTI_Value    p_ShortI_RNTI := ?,
+                                      template (present) ResumeCause p_ResumeCause := mt_Access) runs on NR_BASE_PTC
+  {
+    timer t_Dummy; // timer which is not started
+    f_NR_RRC_ResumeRequest_Common(p_NR_CellId, t_Dummy, p_ShortI_RNTI, p_ResumeCause);
+  }
+
+  /*
+   * @desc      Common function to wait for RRC Resume Request sent by the UE;
+   *            when a running timer is handed over, this is used as watchdog.
+   * @param     p_NR_CellId
+   * @param     p_Timer
+   * @param     p_ShortI_RNTI       (default value: ?)
+   * @param     p_ResumeCause       (default value: mt_Access)
+   * @return    boolean
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRC_ResumeRequest_Common(NR_CellId_Type p_NR_CellId,
+                                        timer p_Timer,
+                                        template (present) ShortI_RNTI_Value    p_ShortI_RNTI := ?,
+                                        template (present) ResumeCause p_ResumeCause := mt_Access
+                                        )
+    runs on NR_BASE_PTC return boolean
+  { /* common procedure to receive the initial RRC resume request for an expected RRC connection establishment procedure;
+       when RRC setup is not explicitly sent from TTCN but is preconfigured at the SS to be sent together with the contention resolution,
+       the default UL grant configuration is configured at the SS */
+    var boolean v_TimerIsRunning := p_Timer.running;
+
+    alt {
+      [] SRB.receive(car_NR_SRB0_RrcPdu_IND(p_NR_CellId, cr_38508_RRCResumeRequest(p_ShortI_RNTI, p_ResumeCause)))
+        {
+          p_Timer.stop;
+          return true;
+        }
+      [v_TimerIsRunning] p_Timer.timeout
+      {
+      }
+    }
+    return false;
+  }
+
+  /*
+   * @desc      Get CellGroupConfig as per 38.508-1 Table 4.6.3-19: CellGroupConfig with condition RESUME
+   * @param     p_NR_CellId
+   * @return    template (value) CellGroupConfig
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+    function f_NR_GetSCGConfigResume(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return template (value) CellGroupConfig
+  {
+    //@sic R5-204386 sic@
+    var template (value) NR_RLC_BearerToAddModList_Type v_NR_RLC_BearerToAddModList;
+    var integer i;
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) SpCellConfig v_SpCellConfig;
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR_GetMCGsDRBInfoList();  //@sic R5-217765 sic@
+    var NR_UplinkBWP_Type v_NR_UplinkBWP := f_NR_CellInfo_GetUplinkBWP (p_NR_CellId, tsc_NR_BWP_Id);
+
+
+    v_NR_RLC_BearerToAddModList[0] := cs_NR_BearerConfigDef(f_NR_LogicalChannelId_SRB(tsc_SRB2), omit, omit, cs_38508_LogicalChannelConfig_SRB(tsc_SRB2), true_);
+    for (i:= 0; i < lengthof(v_ExistingDRBs); i :=i+1) {
+        //@sic R5s201359 sic@
+        v_NR_RLC_BearerToAddModList[i+1] := cs_NR_BearerConfigDef(f_NR_LogicalChannelId_DRB(v_ExistingDRBs[i].DRB_Id), omit, omit, omit, true_);
+    }
+    v_NR_UplinkBWP.Dedicated.R15.pusch_Config := omit;
+    v_SpCellConfig := f_NR_GetSpCellConfigDef(p_NR_CellId, cs_NR_ServingCellConfigDef(omit, 0, omit, cs_NR_UplinkConfigDef(v_NR_UplinkBWP.Dedicated.R15, omit)));
+    v_SCGConfig := cs_38508_CellGroupConfig(f_NR_CellInfo_Get_CellGroupId(p_NR_CellId), v_NR_RLC_BearerToAddModList, -, -, -, v_SpCellConfig);
+
+    return v_SCGConfig;
+  }
+
+  /*
+   * @desc      Send default RRCResume as specified in 38.508-1 Table 4.6.1-17: RRCResume
+   * @param     p_NR_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RRC_TI            (default value: tsc_NR_RRC_TI_Def)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_RadioBearerConfig (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_RRCResume_v1560_IEs (default value: omit)
+   * @param     p_MacBearerRoutingCA (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_SendRRCResume_Def( NR_CellId_Type                    p_NR_CellId,
+                                   template (value) TimingInfo_Type  p_TimingInfo := cs_TimingInfo_Now,
+                                   RRC_TransactionIdentifier         p_RRC_TI := tsc_NR_RRC_TI_Def,
+                                   template (omit) CellGroupConfig   p_CellGroupConfig := omit,
+                                   template (omit) RadioBearerConfig p_RadioBearerConfig := omit,
+                                   template (omit) MeasConfig        p_MeasConfig := omit,
+                                   template (omit) RRCResume_v1560_IEs p_RRCResume_v1560_IEs := omit,
+                                   template (omit) MacBearerRouting_Type p_MacBearerRoutingCA := omit
+                                  ) runs on NR5GC_PTC
+  { //@sic R5-201646: added p_RadioBearerConfig sic@
+    //@sic R5-204441: added p_MeasConfig sic@
+    //@sic R5-241544: for SDT added v_RrcResume sic@
+    //@sic R5s240525: added p_MacBearerRoutingCA sic@
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var template (value) NR_RadioBearerList_Type v_SS_Config := f_NR5GC_GetRadioBearerList(v_ExistingDRBs);
+    var template (value) DL_DCCH_Message v_RrcResume := f_NR_38508_Get_RRCResume_Def(p_NR_CellId, p_RRC_TI, p_CellGroupConfig, p_RadioBearerConfig, p_MeasConfig, p_RRCResume_v1560_IEs);
+
+    // Reconfigure SS - set DcchDtch on CSS with DCI format 1_0 to send RRCResume
+    //@sic R5s240461 sic@
+    f_NR_SS_ReconfigSStoCSS_DCI1_0(p_NR_CellId);
+
+    // Switch on UL grant assignments
+    f_NR_ULGrantConfiguration_Start(p_NR_CellId);
+
+    // Refresh security keys and activate security => moved to the function bringing UE to Inactive state to give time to SS to configure security parameters
+
+    //@sic R5s210578 sic@
+    //Reconfigure DRB in SS - existing DRBs are not reconfigured during release
+    f_NR_SS_CommonRadioBearerConfig(p_NR_CellId, v_SS_Config, p_TimingInfo);
+    //Activate security on newly configured DRB @sic R5s200102 sic@
+    f_NR_SS_AS_ActivateSecurity_NoRefresh(p_NR_CellId, p_TimingInfo);
+
+    //@sic R5s210578 sic@
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(p_NR_CellId, p_TimingInfo, v_RrcResume, p_MacBearerRoutingCA));  //@sic R5-204441, R5s191051: added p_CellGroupConfig as a temporary solution sic@
+  }
+
+  /*
+   * @desc      To Get the RRCResume acc to 38.508-1 Table 4.6.1-17: RRCResume
+   * @param     p_NR_CellId
+   * @param     p_RRC_TI            (default value: tsc_NR_RRC_TI_Def)
+   * @param     p_CellGroupConfig   (default value: omit)
+   * @param     p_RadioBearerConfig (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_RRCResume_v1560_IEs (default value: omit)
+   * @return    template
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_38508_Get_RRCResume_Def( NR_CellId_Type                   p_NR_CellId,
+                                         RRC_TransactionIdentifier        p_RRC_TI := tsc_NR_RRC_TI_Def,
+                                         template (omit) CellGroupConfig   p_CellGroupConfig := omit,
+                                         template (omit) RadioBearerConfig p_RadioBearerConfig := omit,
+                                         template (omit) MeasConfig        p_MeasConfig := omit,
+                                         template (omit) RRCResume_v1560_IEs p_RRCResume_v1560_IEs := omit
+                                        ) runs on NR5GC_PTC return  template (value) DL_DCCH_Message
+  { //@sic R5-241544: for SDT tc sic@
+    var template (value) DL_DCCH_Message v_RrcResume;
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var template (omit) octetstring v_EncodedSCG_Config := omit;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (omit) DRB_ToAddModList v_DRB_ToAddModList := omit;
+    var integer i;
+
+    if (isvalue (p_CellGroupConfig)) {
+        v_EncodedSCG_Config := bit2oct(encvalue(p_CellGroupConfig));
+    } else {
+        v_CellGroupConfig := f_NR_GetSCGConfigResume(p_NR_CellId);
+        v_EncodedSCG_Config := bit2oct(encvalue(v_CellGroupConfig));
+    }
+    if ((isvalue (p_RadioBearerConfig))) { //compiler warning may be ignored due to check
+        v_RadioBearerConfig := p_RadioBearerConfig;
+    } else {
+        //Set RadioBearerConfig as per 38.508-1 Table 4.6.3-132: RadioBearerConfig with condition RESUME
+        //@sic R5-204386 sic@
+        for (i:= 0; i < lengthof(v_ExistingDRBs); i :=i+1) {
+            v_DRB_ToAddModList[i] := cs_NR_DRB_ToAddMod(omit, v_ExistingDRBs[i].DRB_Id, true_, -, omit);
+        }
+        v_RadioBearerConfig := cs_38508_RadioBearerConfigDef( {cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB2)}, v_DRB_ToAddModList);
+    }
+    v_RrcResume := cs_38508_RRCResume(p_RRC_TI, v_EncodedSCG_Config, v_RadioBearerConfig, p_MeasConfig, p_RRCResume_v1560_IEs);
+    return v_RrcResume;
+  }
+
+  /*
+   * @desc      To receive RRCResumeComplete
+   * @param     p_NR_CellId
+   * @param     p_ExpectedRRCResumeComplete (default value: cr_38508_RRCResumeComplete)
+   * @return    template (omit) NG_NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_RRCResumeComplete_Def(NR_CellId_Type p_NR_CellId,
+                                     template(present) UL_DCCH_Message p_ExpectedRRCResumeComplete := cr_38508_RRCResumeComplete)
+    runs on NR_BASE_PTC return  template (omit) NG_NAS_MSG_Indication_Type
+  {
+    var template (omit) NG_NAS_MSG_Indication_Type v_DedicatedNAS_Message := omit; //@sic R5s191051 change 4 sic@
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+
+    //The UE transmits an RRCResumeComplete message.
+    alt { // @sic R5s200403 sic@
+      [] SRB.receive(car_NR_SRB1_RrcPdu_IND(p_NR_CellId, p_ExpectedRRCResumeComplete)) -> value v_ReceivedAsp{}
+      [] SRB.receive(car_NR_SRB1_RrcNasPdu_IND(p_NR_CellId, p_ExpectedRRCResumeComplete, ?)) -> value v_ReceivedAsp{
+           v_DedicatedNAS_Message := v_ReceivedAsp.Signalling.Nas[0];
+         }
+    }
+    // Reconfigure SS - set DcchDtch on USS with DCI format 1_1
+    //@sic R5s240461 sic@
+    f_NR_SS_ReconfigSStoUSS_DCI1_1(p_NR_CellId);
+    // Reconfigure RACH procedure as for initial access.  @sic R5s240440 sic@
+    f_NR_SS_RachProcedureConfig_Def(p_NR_CellId);
+
+    return v_DedicatedNAS_Message;
+  }
+
+  /*
+   * @desc To retrieve SS_Config NR_RadioBearerList_Type from the list of DRBs NR_DRBInfoList_Type
+   * @param     p_DrbInfoList
+   * @param     p_ExcludeSCG_DRB    (default value: false)
+   * @return    template (value) NR_RadioBearerList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR5GC_GetRadioBearerList(template (value) NR_DRBInfoList_Type  p_DrbInfoList,
+                                      boolean p_ExcludeSCG_DRB := false
+                                      ) return template (value) NR_RadioBearerList_Type
+  {
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList;
+    var integer i;
+    var integer k := 0;  // @sic R5s211604 sic@
+
+    for (i:= 0; i < lengthof(p_DrbInfoList); i:=i+1) {
+        if (not(p_ExcludeSCG_DRB and valueof(p_DrbInfoList[i].DC_SCG)== true)) { // @sic R5s221096 sic@
+            v_RadioBearerList[k] :=  p_DrbInfoList[i].SS_Config;
+            k:=k+1;
+        }
+    }
+    return v_RadioBearerList;
+  }
+
+    /*
+   * @desc      To extract just the MCGs from a list of DRBs
+   * @param     p_ListOfDRBs        (default value: omit)
+   * @return    NR_DRBInfoList_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_GetMCGsDRBInfoList (template (omit) NR_DRBInfoList_Type p_ListOfDRBs := omit) runs on NR5GC_PTC return NR_DRBInfoList_Type
+  {
+    var NR_DRBInfoList_Type v_ExistingDRBs;
+    var NR_DRBInfoList_Type v_MCGList := {};
+    var integer i;
+    var integer j := 0;
+
+    if (isvalue(p_ListOfDRBs)) { // only check a specific list
+      v_ExistingDRBs := valueof(p_ListOfDRBs);
+    } else { // check all configured DRBs
+      v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    }
+    for (i:= 0; i < lengthof(v_ExistingDRBs); i := i+1) {
+      if (not v_ExistingDRBs[i].DC_SCG) {
+          v_MCGList[j] := v_ExistingDRBs[i];
+          j := j+1;
+      }
+    }
+    return v_MCGList;
+  }
+
+}

@@ -1,0 +1,178 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-06-18 11:30:22 +0200 (Wed, 18 Jun 2025) $
+// $Rev: 41494 $
+/******************************************************************************/
+
+module NasEmu_Main_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from EPS_NAS_MsgContainers all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from NasEmu_AspTypes_EUTRA all;
+  import from NasEmu_Common all;
+  import from NasEmu_Common4G5G all;
+  import from NasEmu_Component_EUTRA all;
+
+  template (present) SRB_COMMON_REQ car_EUTRA_SignallingAspFromTC :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    Common := ?,
+    Signalling := {
+      Rrc := *,
+      Nas := *
+    }
+  };
+
+  template (value) SRB_COMMON_IND cas_EUTRA_SignallingAspToTC_Init(template (value) IndAspCommonPart_Type p_Common) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    Common := p_Common,
+    Signalling := {
+      Rrc := omit,
+      Nas := omit
+    }
+  };
+
+  template (present) EUTRA_RRC_PDU_IND car_EUTRA_PduFromSYS  :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    Common := ?,
+    RrcPdu := ?
+  };
+
+  template (value) EUTRA_RRC_PDU_REQ cas_EUTRA_PduToSYS(template (value) ReqAspCommonPart_Type p_Common,
+                                                        template (value) RRC_MSG_Request_Type  p_RRC_MSG_Request) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    Common := p_Common,
+    RrcPdu := p_RRC_MSG_Request
+  };
+
+  template (value) RRC_MSG_Request_Type cs_EUTRA_RRC_MSG_RequestDCCH(template (value) DL_DCCH_Message p_DcchRrcPdu) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    Dcch := p_DcchRrcPdu
+  };
+
+  template (value) DL_DCCH_Message cs_DLInformationTransfer(RRC_TransactionIdentifier p_RRC_TI,
+                                                            template (value) DedicatedInfoNAS  p_NAS_DedicatedInformation)  :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN) */
+    message_ := {
+      c1 := {
+        dlInformationTransfer := {
+          rrc_TransactionIdentifier := p_RRC_TI,
+          criticalExtensions := {
+            c1 := {
+              dlInformationTransfer_r8 := {
+                dedicatedInfoType := {
+                  dedicatedInfoNAS := p_NAS_DedicatedInformation
+                },
+                nonCriticalExtension := omit
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  /*
+   * @desc      Handling of ASPs coming from the test cases;
+   *            if the ASP contains a NAS PDU this will be encoded, ciphered
+   *            and either added to the given RRC PDU (piggybacking)
+   *            or packed into a DLInformationTransfer PDU
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_AspFromTestcaseHandler_EUTRA(inout NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_EUTRA_PTC
+  { /* @sic R5s160711 BASELINE MOVING 2016 - NBIOT: p_NasSecurityByRef  sic@ */
+    var SRB_COMMON_REQ v_AspFromTC;
+    var ReqAspCommonPart_Type v_ReqAspCommonPart;
+    var NAS_MSG_Request_Type v_NasPduFromTC;
+    var template (value) RRC_MSG_Request_Type v_RrcPduToSYS;
+    var template (value) DL_DCCH_Message v_DL_DCCH_Message;
+    var DedicatedInfoNAS v_NAS_DedicatedInformation[maxDRB];   // we use an array as long as this is an inline type definition in ASN.1
+    var integer v_NoOfNasPdus := 0;
+    var boolean v_RrcPduIsPresent;
+    var boolean v_NasPduIsPresent;
+    var integer I;
+
+    [] TC_SRB.receive(car_EUTRA_SignallingAspFromTC) -> value v_AspFromTC {
+
+      v_ReqAspCommonPart := v_AspFromTC.Common;
+      v_RrcPduIsPresent := ispresent(v_AspFromTC.Signalling.Rrc);
+      v_NasPduIsPresent := ispresent(v_AspFromTC.Signalling.Nas);
+
+      if (v_NasPduIsPresent) {
+        // Note: in case of RRCConnectionReconfiguration there may be more than one NAS PDUs
+        v_NoOfNasPdus := lengthof(v_AspFromTC.Signalling.Nas);       // Note: per ASN.1 definition length is restricted to maxDRB
+        for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+          v_NasPduFromTC := v_AspFromTC.Signalling.Nas[I];
+          v_NAS_DedicatedInformation[I] := f_EncodeAndCipherNasPdu(p_NasSecurityByRef, v_NasPduFromTC);   // encode NAS PDU; apply NAS security (if reqired)
+        }
+      }
+
+      if (v_RrcPduIsPresent) {
+        // ******* RRC PDU (containing RRC control information)
+
+        v_RrcPduToSYS := v_AspFromTC.Signalling.Rrc;
+
+        if (v_NasPduIsPresent) {
+          // ***** NAS PDU BEING PIGGY BACKED
+          if (not ischosen(v_RrcPduToSYS.Dcch)) {
+            // ***** SRB0
+            f_NasEmulationError(__FILE__, __LINE__, "no piggy-backing possible for CCCH message");
+            return;     /* don't send anything */
+
+          } else {
+            // ***** SRB1/2
+            v_DL_DCCH_Message := v_RrcPduToSYS.Dcch;  /* extract RRC message;
+                                                         Note: since v_RrcPduToSYS is a union v_RrcPduToSYS.Dcch is never omit */
+
+            if (ischosen(v_DL_DCCH_Message.message_.c1.rrcConnectionReconfiguration)) {     /* RRC message is RRCConnectionReconfiguration */
+              // *** RRC CONNECTION RECONFIGURATION:
+              for (I:=0; I < v_NoOfNasPdus; I:= I + 1) {
+                v_DL_DCCH_Message.message_.c1.rrcConnectionReconfiguration.criticalExtensions.c1.rrcConnectionReconfiguration_r8.dedicatedInfoNASList[I] :=
+                  v_NAS_DedicatedInformation[I];
+              }
+
+            } else if (ischosen(v_DL_DCCH_Message.message_.c1.dlInformationTransfer)) {     /* RRC message is DLInformationTransfer */
+              // *** DL INFORMATION TRANSFER:
+              if (v_NoOfNasPdus > 1) {
+                f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+                return;     /* don't send anything */
+              } else {
+                v_DL_DCCH_Message.message_.c1.dlInformationTransfer.criticalExtensions.c1.dlInformationTransfer_r8.dedicatedInfoType.dedicatedInfoNAS :=
+                  v_NAS_DedicatedInformation[0];
+              }
+
+            } else {
+              // *** OTHER RRC PDU:
+              f_NasEmulationError(__FILE__, __LINE__, "RRC message can not carry piggy-backed NAS PDU");
+              return;    /* don't do anything else */
+            }
+            v_RrcPduToSYS := cs_EUTRA_RRC_MSG_RequestDCCH(v_DL_DCCH_Message);
+          }
+        }
+      } else {
+        // ******* NAS PDU only:
+        if (not v_NasPduIsPresent) {
+          f_NasEmulationError(__FILE__, __LINE__, "neither RRC nor NAS PDU to be sent");
+          return;     /* don't send anything */
+        } else {
+          if (v_NoOfNasPdus > 1) {
+            f_NasEmulationError(__FILE__, __LINE__, "too many NAS PDUs (shall be a maximun of 1 PDU for DLInformationTransfer)");
+            return;     /* don't send anything */
+          } else {
+            v_RrcPduToSYS := cs_EUTRA_RRC_MSG_RequestDCCH(cs_DLInformationTransfer(tsc_RRC_TI_Def, v_NAS_DedicatedInformation[0]));
+          }
+        }
+      }
+      SYS_SRB.send(cas_EUTRA_PduToSYS(v_ReqAspCommonPart, v_RrcPduToSYS));
+    }
+  }
+
+}

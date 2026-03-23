@@ -1,0 +1,296 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-03-05 10:22:06 +0100 (Thu, 05 Mar 2026) $
+// $Rev: 43210 $
+/******************************************************************************/
+
+module NAS_AuxiliaryDefsAndFunctions {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+
+  /*
+   * @desc      Function used to check whether the UE requests in its PCO an address allocation via NAS signalling
+   *            If the UE does not send PCO, then address assignment shall be via DHCP. TS 36.508 table 4.7.3-6.
+   * @param     p_Pco
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_CheckExtdPCOforIPallocationViaNas(template (omit) ExtdProtocolConfigOptions p_Pco) return boolean
+  {
+    var ExtdProtocolConfigOptions v_Pco;
+    var integer i;
+
+    if (isvalue(p_Pco)) {
+      v_Pco := valueof (p_Pco);
+      if (ispresent(v_Pco.pco)) { // @sic R5s170233 sic@
+        for (i := 0; i < lengthof(v_Pco.pco); i := i + 1 ) {
+          if(v_Pco.pco[i].protocolID == '000B'O) { // TS 24.008 clause 10.5.6.3
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  /*
+   * @desc      Common function to build up ProtocolConfigOptions
+   * @param     p_ProtocolContainers
+   * @return    template (value) ExtdProtocolConfigOptions
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NAS_ExtdProtocolConfigOptionsTX(template (omit) NAS_ExtdProtocolConfigOptions_Type  p_ProtocolContainers) return template (value) ExtdProtocolConfigOptions
+  {
+    var integer v_Length := 1;   // there are at least ext, spare, configProtocol
+    var integer i;
+
+    if (isvalue(p_ProtocolContainers)) { // @sic R5s170233 sic@
+      for (i:=0; i < lengthof(p_ProtocolContainers); i:=i+1) {
+        v_Length := v_Length + oct2int(valueof(p_ProtocolContainers[i].protocolLength)) + 3; // 2 octets for protocolID and 1 octet for protocolLength
+      }
+    }
+    return cs_ExtdPCO(int2oct(v_Length, 2), p_ProtocolContainers);
+  }
+
+  /*
+   * @desc      wrapper for f_GetDefaultExtdProtocolConfigOptionList
+   * @param     p_Pco
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @return    template (value) ExtdProtocolConfigOptions
+   * @status    APPROVED (NBIOT)
+   */
+  function f_GetDefaultExtdProtocolConfigOptions(template (omit) ExtdProtocolConfigOptions p_Pco,
+                                             PDN_Index_Type p_PdnIndex := PDN_1) return template (value) ExtdProtocolConfigOptions
+  {
+    var template (omit) NAS_ExtdProtocolConfigOptions_Type v_ProtocolContainerList := omit;  // @sic R5s170233 sic@
+    var ExtdProtocolConfigOptions v_ProtocolConfigOptionsRX;
+    
+    if (isvalue(p_Pco)) {
+      v_ProtocolConfigOptionsRX := valueof(p_Pco);
+      if (ispresent(p_Pco.pco)) { // @sic R5s170233 sic@
+        v_ProtocolContainerList := f_NAS_GetExtdProtocolConfigOptionList(v_ProtocolConfigOptionsRX.pco, -, p_PdnIndex); // @sic R5-200649, R5s200643 sic@
+      }
+    }
+    
+    return f_NAS_ExtdProtocolConfigOptionsTX(v_ProtocolContainerList);
+  }
+
+  /*
+   * @desc      Function used to check whether the UE requests a P-CSCF address or DNS server address in its PCO
+   *            If the UE does not support IMS, or doesn't request a P-CSCF address, the function returns the default PCO, PPP
+   * @param     p_ConfigOptionsRX
+   * @param     p_IgnoreIM_CN_SubsystemSignalingFlag (default value: true)
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @return    template (omit) NAS_ExtdProtocolConfigOptions_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NAS_GetExtdProtocolConfigOptionList(NAS_ExtdProtocolConfigOptions_Type p_ConfigOptionsRX,
+                                                 boolean p_IgnoreIM_CN_SubsystemSignalingFlag := true,
+                                                 PDN_Index_Type p_PdnIndex := PDN_1)
+    return template (omit) NAS_ExtdProtocolConfigOptions_Type
+  { /* @sic R5s170515 change 1: "template (omit)" for return type sic@ */
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);   // @sic R5-200649 sic@
+    var template (omit) NAS_ExtdProtocolConfigOptions_Type v_ProtocolContainerList := omit;
+    var integer v_PcoCnt := 0;
+    var O2_Type v_ProtocolId;
+    var octetstring v_Contents;
+    var integer i;
+    
+    for (i := 0; i < lengthof(p_ConfigOptionsRX); i := i + 1) {
+      
+      v_ProtocolId := p_ConfigOptionsRX[i].protocolID;
+      v_Contents := ''O;
+      
+      select (v_ProtocolId) {  // See 24.008 Table 10.5.154
+        case ('0002'O) {            // IM CN Subsystem Signalling Flag, reply with an empty container
+          if (not p_IgnoreIM_CN_SubsystemSignalingFlag) {
+            v_ProtocolContainerList[v_PcoCnt] := cs_ProtocolContainer_Common(v_ProtocolId);
+            v_PcoCnt := v_PcoCnt + 1;
+            continue;
+          }
+        }
+        case ('0003'O) {       // DNS Server IPv6 address
+          v_Contents := f_Convert_IPv6Addr2OctString(v_PDN_AddressInfo.DNS_ServerAddressIPv6);
+        }
+        case ('000D'O) {       // DNS Server IPv4 address
+          v_Contents := f_Convert_IPv4Addr2OctString(v_PDN_AddressInfo.DNS_ServerAddressIPv4);
+        }
+      }
+      
+      if (lengthof(v_Contents) > 0) {
+        v_ProtocolContainerList[v_PcoCnt] := cs_ProtocolContainer(v_ProtocolId, v_Contents);
+        v_PcoCnt := v_PcoCnt + 1;
+      }
+    }
+    return v_ProtocolContainerList; // @sic R5-200649, R5s200643 sic@
+  }
+
+  /*
+   * @desc      Convert from IMSI, IMEI or IMEISV of type hexstring to octetstring (to be used in f_Imsi2MobileIdentity, f_Imei2MobileIdentity and f_Imeisv2MobileIdentity)
+   * @param     p_MobileId
+   * @return    octetstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_R10_R11, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_ImsiImei2Octetstring(hexstring p_MobileId) return octetstring
+  {
+    var integer v_Length := lengthof(p_MobileId);
+    var integer v_Odd := (v_Length rem 2);
+    var octetstring v_Other := '00'O;
+    var integer I;
+    var integer K;
+    
+    if (v_Odd == 0) {                   // If length is even
+      v_Length := v_Length + 1;
+      p_MobileId := p_MobileId & 'F'H;          // add '1111' on to the end of the IMSI
+    }
+    
+    // Reverse each pair of digits
+    // First digit is not included as it is treated differently
+    K:=0;
+    for (I:=1; I < v_Length - 1; I:=I+2) {
+      v_Other[K] := hex2oct(p_MobileId[I+1] & p_MobileId[I]);
+      K := K + 1;
+    }
+    
+    return v_Other;
+  }
+
+  /*
+   * @desc      Convert from IMSI of type hexstring to NAS MobileIdentity
+   * @param     p_IMSI
+   * @return    template (value) MobileIdentity
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_R10_R11, LTE_IRAT, NBIOT, NR5GC_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_Imsi2MobileIdentity(hexstring p_IMSI) return template (value) MobileIdentity
+  {
+    var integer v_ImsiLength := lengthof(p_IMSI);
+    var integer v_Odd := (v_ImsiLength rem 2);
+    var octetstring v_Other  := f_ImsiImei2Octetstring (p_IMSI);  // @sic R5s100092 sic@
+    var B4_Type v_FirstDigit := hex2bit(p_IMSI[0]);
+    var B1_Type v_OddEvenInd := int2bit(v_Odd, 1);
+    
+    return cds_MobileIdentityImsi_lv(v_FirstDigit, v_OddEvenInd, v_Other);
+  }
+
+  /*
+   * @desc      Convert from IMEI of type hexstring to NAS MobileIdentity
+   *            When transmitted by the MS the CD/SD bit is set to 0.
+   * @param     p_IMEI
+   * @param     p_NAS_IdType        (default value: tsc_IdType_IMEI)
+   * @return    template (present) MobileIdentity
+   * @status    APPROVED (LTE, LTE_A_R10_R11, NBIOT)
+   */
+  function f_Imei2MobileIdentity(hexstring p_IMEI,
+                                 NAS_IdType p_NAS_IdType := tsc_IdType_IMEI) return template (present) MobileIdentity // @sic R5s130758 sic@
+  {
+    var integer v_ImeiLength := lengthof(p_IMEI);
+    var integer v_Odd := (v_ImeiLength rem 2);
+    var octetstring v_Other  := f_ImsiImei2Octetstring (substr(p_IMEI, 0, (v_ImeiLength - 1)) & '0'H);  // @sic R5s160006 sic@
+    var B4_Type v_FirstDigit := hex2bit(p_IMEI[0]);
+    var B1_Type v_OddEvenInd := int2bit(v_Odd, 1);
+    
+    return cr_MobileIdentityImei(v_FirstDigit, v_OddEvenInd, v_Other, p_NAS_IdType); // @sic R5s130758 sic@
+  }
+
+  /*
+   * @desc      Convert from IMEISV of type hexstring to NAS MobileIdentity
+   * @param     p_IMEISV
+   * @return    template (present) MobileIdentity
+   * @status    APPROVED (LTE, NBIOT)
+   */
+  function f_Imeisv2MobileIdentity(hexstring p_IMEISV) return template (present) MobileIdentity
+  { // @sic R5-131832 sic@
+    var integer v_ImeiLength := lengthof(p_IMEISV);
+    var integer v_Odd := (v_ImeiLength rem 2);
+    var octetstring v_Other  := f_ImsiImei2Octetstring (p_IMEISV);
+    var B4_Type v_FirstDigit := hex2bit(p_IMEISV[0]);
+    var B1_Type v_OddEvenInd := int2bit(v_Odd, 1);
+    
+    return cr_MobileIdentityImeisv(v_FirstDigit, v_OddEvenInd, v_Other);
+  }
+
+  /*----------------------------------------------------------------------------
+   * @desc      Extract UE security capabilities from IEs and store for use later
+   * @param     p_UeNetworkCapability
+   * @param     p_MsNetworkCapability
+   * @return    UE_SecurityCapability
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_EPS_FillNAS_SecurityCapability_Common(UE_NetworkCap p_UeNetworkCapability,
+                                                        template (omit) MS_NetworkCap p_MsNetworkCapability) return UE_SecurityCapability
+  { /* @sic R5s110014, R5-190717 Renamed to be re-used by NR sic@ */
+    var UE_SecurityCapability v_SecurityCapability;
+    var MS_NetworkCap v_MS_NetworkCap;
+    var B8_Type v_GEA := '00000000'B;
+    var integer v_Length := 2;
+    
+    v_SecurityCapability.eeaCap := bit2oct(p_UeNetworkCapability.eeaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    v_SecurityCapability.eiaCap := bit2oct(p_UeNetworkCapability.eiaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    
+    if (ispresent(p_UeNetworkCapability.ueaCap)) {
+      v_SecurityCapability.ueaCap := bit2oct(p_UeNetworkCapability.ueaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+      v_Length := v_Length + 2; // if octet 5 is present, 6 will be too @sic R5s100485 sic@
+      if (ispresent(p_UeNetworkCapability.uiaCap)) {
+        v_SecurityCapability.uiaCap := bit2oct(p_UeNetworkCapability.uiaCap) and4b '7F'O; // @sic R5s100520, R5s180271 Baseline Moving 2018 Phase 1 sic@
+      } else {
+        v_SecurityCapability.uiaCap := '00'O; // @sic R5s100485 sic@
+      }
+    } else {
+      v_SecurityCapability.ueaCap := omit;
+      v_SecurityCapability.uiaCap := omit; // @sic R5s100184 sic@
+    }
+
+    if (isvalue (p_MsNetworkCapability)) {
+      v_MS_NetworkCap := valueof(p_MsNetworkCapability);
+      if (v_MS_NetworkCap.gea1 == '1'B) {
+        v_GEA := v_GEA or4b '01000000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea2 == '1'B) {
+        v_GEA := v_GEA or4b '00100000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea3 == '1'B) {
+        v_GEA := v_GEA or4b '00010000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea4 == '1'B) {
+        v_GEA := v_GEA or4b '00001000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea5 == '1'B) {
+        v_GEA := v_GEA or4b '00000100'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea6 == '1'B) {
+        v_GEA := v_GEA or4b '00000010'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea7 == '1'B) {
+        v_GEA := v_GEA or4b '00000001'B; // error corrected in delivery
+      }
+      v_Length := v_Length + 1;
+      v_SecurityCapability.geaCap := bit2oct (v_GEA); // Now store the completed GEA octet
+      if (v_Length == 3) { // UE didn't report any UTRAN capabilities, so set them to 0 @sic R5s100485 sic@
+        v_Length := 5;
+        v_SecurityCapability.ueaCap := '00'O;
+        v_SecurityCapability.uiaCap := '00'O;
+      }
+    } else {// MS Network Capability not present @sic R5s100184 sic@
+      v_SecurityCapability.geaCap := omit;
+      // if UE included UTRAN capabilities but they're all zero
+      if (v_SecurityCapability.ueaCap == '00'O and v_SecurityCapability.uiaCap == '00'O) { // @sic R5s130107 sic@
+        v_SecurityCapability.ueaCap := omit;
+        v_SecurityCapability.uiaCap := omit;
+        v_Length := 2;
+      }
+    }
+    
+    v_SecurityCapability.iel := int2oct (v_Length, 1);  // Now store the length
+    
+    return v_SecurityCapability;
+  }
+
+}

@@ -1,0 +1,262 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2022-12-16 15:51:38 +0100 (Fri, 16 Dec 2022) $
+// $Rev: 35129 $
+/******************************************************************************/
+
+module V2X_CommunicationCBR_Testcases_SideLink {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from EUTRA_PC5_RRC_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EUTRA_AuxiliaryFunctions all;
+  import from EUTRA_Parameters all;
+  import from SideLinkUE_ASP_TypeDefs all;
+  import from SideLink_CommonFunctions all;
+  import from SideLink_Component all;
+  import from SideLink_CoordMsg all;
+  import from SideLink_V2X_CommonFunctions all;
+  import from SidelinkUE_Common_TypeDefs all;
+  import from V2X_CommonFunctions all;
+
+  /*
+   * @desc      Returns the corresponding integer to the size of subchannel being used
+   * @param     p_SizeSubchannel
+   * @return    integer
+   * @status    APPROVED (LTE_A_PRO)
+   */
+  function f_Convert_SizeOfSubchannelToInteger( SL_SizeSubchannel_r14_Type p_SizeSubchannel) return integer
+  {
+    select (p_SizeSubchannel) {
+      case (n4) { return 4;  }
+      case (n5) { return 5;  }
+      case (n8) { return 8;  }
+      case (n9) { return 9;  }
+      case (n10) { return 10; }
+      case (n12) { return 12; }
+      case (n15) { return 15; }
+      case (n16) { return 16; }
+      case (n18) { return 18; }
+      case (n20) { return 20; }
+      case (n25) { return 25; }
+      case (n30) { return 30; }
+      case (n48) { return 48; }
+      case (n50) { return 50; }
+      case (n72) { return 72; }
+      case (n75) { return 75; }
+      case (n96) { return 96; }
+      case (n100) { return 100; }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid Subchannel size");
+        return 0;
+      }
+    }
+  };
+
+  /*
+   * @desc      Cumulate the number of subchannels UE used to perform sidelink transmission in 1 second, SSUE receives V2X communication data on STCH - UE Tx
+   * @param     p_SSUE_Id
+   * @return    integer
+   * @status    APPROVED (LTE_A_PRO)
+   */
+  function f_SL_ReceiveCommData_Cr_Calculate_V2X(SS_UE_Id_Type p_SSUE_Id
+                                    ) runs on SideLink_PTC return integer
+  {
+    var SL_DATA_IND v_SL_DATA_IND;
+    var SL_SizeSubchannel_r14_Type v_SizeSubchannel := f_V2X_ReturnSL_SizeSubchannel(50);// ChBandwidth = 10
+    var integer v_Subchannel_Size;
+    var integer v_Subchannel_Count := 0;
+    var integer v_PRB_PSCCH := 2;//@sic R5s190072 sic@
+    timer t_Watchdog := 1.0;
+    
+    v_Subchannel_Size := f_Convert_SizeOfSubchannelToInteger (v_SizeSubchannel);
+   
+    t_Watchdog.start;
+      
+    //The number of subchannels UE used in 1 second received by SS UE
+    alt {
+      [] DATA.receive(car_SL_CommData_IND(p_SSUE_Id, tsc_SLRB1, cr_SL_CommDataRx(-, ?))) -> value v_SL_DATA_IND
+        {
+          v_Subchannel_Count := v_Subchannel_Count + (v_SL_DATA_IND.U_Plane.FreqDomainSchedul.Nprb + v_PRB_PSCCH) / v_Subchannel_Size; //@sic R5s190072 sic@
+          repeat;
+        }
+      [] t_Watchdog.timeout {}
+        
+    }
+    return v_Subchannel_Count;
+  }
+
+  /*
+   * @desc   V2X sidelink communication / pre-configured authorisation / utilisation of the pre-configured resources / CBR measurement
+   * @status    APPROVED (LTE_A_PRO)
+   */
+   function f_TC_24_1_16_SideLink() runs on SideLink_PTC
+  {
+    var SideLink_Coordination_MSG v_SideLink_OutOfCoverage;
+    var SL_SizeSubchannel_r14_Type v_SizeSubchannel := f_V2X_ReturnSL_SizeSubchannel(f_ConvertDL_BandwidthToInteger(px_eSecondaryBandChannelBandwidth));
+
+    // Wait for coordination with EUTRA PTC
+    v_SideLink_OutOfCoverage := f_SideLink_WaitForCoordMsg(EUTRA, cmr_SideLink_OutOfCoverageInfo);
+
+    f_SideLink_SendCoordMsg(EUTRA);
+    f_SideLink_TestBody_Set(true);
+
+   //@sic R5s180543 sic@
+
+    //Configure SS-UE1 Tx and congestion using tsc_V2X_BITMAP_6, UE synchronizes on GNSS
+    f_SSUE_V2X_Config( ss_UE_Id1,
+                       UTC_Synchronised,
+                       v_SideLink_OutOfCoverage,
+                       SSUE_Rx,
+                       tsc_V2X_BITMAP_6
+                       );
+
+    activate(a_SidelinkUE_STCH_Reception(ss_UE_Id1));
+    f_SideLink_WaitForCoordMsg(EUTRA);
+    f_CheckCommDataReception_V2X(ss_UE_Id1, "Step 5", cs_SL_CommResourcePoolV2X (tsc_V2X_BITMAP_6, v_SizeSubchannel), UTC_Synchronised);
+
+    //Reconfigure SS-UE1 to Tx congestion
+    f_SSUE_CommonReConfigV2X(ss_UE_Id1,
+                             cs_TimingUTC_Now,
+                             -,
+                             cs_V2X_CommConfig(cs_V2X_CommRxConfigRelease, cs_V2X_CommTxConfigAddReconfigForCongestion(tsc_V2X_BITMAP_6, v_SizeSubchannel)),
+                             -,
+                             true
+                             );
+
+
+    //@siclog "Step 6" siclog@
+    //SS-UE is reconfigured to achieve 30% congestion continuously in consecutive timeframes according to the transmission pattern shown in Table 24.1.16.3.1-1
+    f_SSUE_CommonConfig(ss_UE_Id1, cas_SSUE_ConfigCongestion(ss_UE_Id1, cs_TimingOC_Now, cs_SubchannelOffsetConfigContinuous30));
+
+    //@siclog "Step 7" siclog@
+    //Wait for 1.1 sec to allow the UE to measure the congestion.
+    f_Delay(1.1);
+
+    f_SideLink_SendCoordMsg(EUTRA);
+    f_SideLink_WaitForCoordMsg(EUTRA);
+    
+    //@siclog "Step 10" siclog@
+    //SS-UE is reconfigured to achieve 60% congestion continuously in consecutive timeframes according to the transmission pattern shown in Table 24.1.16.3.1-2.
+    f_SSUE_CommonConfig(ss_UE_Id1, cas_SSUE_ConfigCongestion(ss_UE_Id1, cs_TimingOC_Now, cs_SubchannelOffsetConfigContinuous60));
+
+    //@siclog "Step 11" siclog@
+    //Wait for 1.1 sec to allow the UE to measure the congestion.
+    f_Delay(1.1);
+    
+    f_SideLink_SendCoordMsg(EUTRA);
+    f_SideLink_WaitForCoordMsg(EUTRA);
+
+    f_SideLink_TestBody_Set(false);
+    //Release SS-UE1
+    f_SSUE_ReleaseAll();
+    
+  };
+
+  /*
+   * @desc   V2X Sidelink Communication/ Pre-configured authorisation / Utilisation of the pre-configured resources / CBR measurement/Transmission based on CR limit
+   * @status    APPROVED (LTE_A_PRO)
+   */
+   function f_TC_24_1_19_SideLink() runs on SideLink_PTC
+  {
+    var SideLink_Coordination_MSG v_SideLink_OutOfCoverage;
+    var integer v_Cr_Count;
+    var default v_DefaultRef;
+
+    // Wait for coordination with EUTRA PTC
+    v_SideLink_OutOfCoverage := f_SideLink_WaitForCoordMsg(EUTRA, cmr_SideLink_OutOfCoverageInfo);
+
+    f_SideLink_SendCoordMsg(EUTRA);
+    f_SideLink_TestBody_Set(true);
+
+    //Configure SS-UE1 in Rx for UE Tx using Preconfigured information, UTC Synchronised
+    f_SSUE_V2X_Config(ss_UE_Id1,
+                      UTC_Synchronised,
+                      v_SideLink_OutOfCoverage,
+                      SSUE_Rx,
+                      tsc_V2X_BITMAP_6 // According to 36.508 Table 4.6.3-20K
+                      );
+    
+    f_SideLink_WaitForCoordMsg(EUTRA); //Wait for GNSS to be started @sic R5s190072 sic@
+    f_SideLink_SendCoordMsg(EUTRA);
+   
+    //@siclog "Step 6" siclog@
+    //Wait for 1.1 sec to allow the UE to measure the congestion.
+    f_Delay(1.1);
+
+    // SS-UE1 activate the default function to receive the STCH data
+    v_DefaultRef := activate(a_SidelinkUE_STCH_Reception(ss_UE_Id1));
+
+    f_SideLink_WaitForCoordMsg(EUTRA);//@sic R5s190072 sic@
+    f_SideLink_SendCoordMsg(EUTRA); //@sic R5s191080 sic@
+
+    //@siclog "Step 7" siclog@
+    //Check: Does the UE transmit data on the V2X sidelink communication utilizing 100 subchannels in 1 sec
+    //@sic R5s190072 sic@
+    v_Cr_Count := f_SL_ReceiveCommData_Cr_Calculate_V2X(ss_UE_Id1);
+    if (v_Cr_Count == 100) {
+      f_SideLink_PreliminaryPass(__FILE__, __LINE__, "Test Case 24.1.19 Step 7");
+    }
+    else {
+      f_SideLink_SetVerdictFailOrInconc(__FILE__, __LINE__, "No. of utlized subchannels is not equal to 100");  //@sic R5s180543 sic@
+    }
+
+    //Stop the default
+    deactivate(v_DefaultRef);
+
+    f_SideLink_WaitForCoordMsg(EUTRA);//@sic R5s191080 sic@
+    f_SideLink_SendCoordMsg(EUTRA);
+        
+    //@siclog "Step 9" siclog@
+    //Configure SS-UE2 Tx and congestion using tsc_V2X_BITMAP_6, UE synchronises on GNSS
+    f_SSUE_V2X_Config( ss_UE_Id2,
+                       UTC_Synchronised,
+                       v_SideLink_OutOfCoverage,
+                       SSUE_TxCongestion,
+                       -,//@sic R5s190072 sic@
+                       tsc_V2X_BITMAP_6
+                       );
+ 
+    //SS-UE2 is reconfigured to achieve 65% congestion continuously in consecutive timeframes according to the transmission pattern shown in Table 24.1.19.3.1-1.
+    f_SSUE_CommonConfig(ss_UE_Id2, cas_SSUE_ConfigCongestion(ss_UE_Id2, cs_TimingOC_Now, cs_SubchannelOffsetConfigContinuous65));
+
+    f_SideLink_WaitForCoordMsg(EUTRA);
+    f_SideLink_SendCoordMsg(EUTRA);//@sic R5s190072 sic@
+    
+    //@siclog "Step 11" siclog@
+    //Wait for 1.1 sec to allow the UE to measure the congestion.
+    f_Delay(1.1);
+    
+    // SS-UE1 activate the default function to receive the STCH data
+    v_DefaultRef := activate(a_SidelinkUE_STCH_Reception(ss_UE_Id1));
+
+     f_SideLink_SendCoordMsg(EUTRA); //@sic R5s190346 sic@
+     f_SideLink_WaitForCoordMsg(EUTRA); //@sic R5s190072 sic@
+
+    //@siclog "Step 12" siclog@
+    //Check: Does the UE transmit data on the V2X sidelink communication utilizing 50 subchannels in 1 sec
+    //@sic R5s190072 sic@
+    v_Cr_Count := f_SL_ReceiveCommData_Cr_Calculate_V2X(ss_UE_Id1);
+    if (v_Cr_Count <= 50) {
+      f_SideLink_PreliminaryPass(__FILE__, __LINE__, "Test Case 24.1.19 Step 12");
+    }
+    else {
+      f_SideLink_SetVerdictFailOrInconc(__FILE__, __LINE__, "No. of utlized subchannels is not equal to 50");  //@sic R5s180543 sic@
+    }
+
+
+    f_SideLink_SendCoordMsg(EUTRA);
+    f_SideLink_WaitForCoordMsg(EUTRA);
+
+    f_SideLink_TestBody_Set(false);
+    //Release SS-UE1 and SS-UE2
+    f_SSUE_ReleaseAll();
+    
+  }
+
+}

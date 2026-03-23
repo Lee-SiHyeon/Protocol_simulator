@@ -1,0 +1,301 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-11-12 11:44:25 +0100 (Sun, 12 Nov 2023) $
+// $Rev: 37276 $
+/******************************************************************************/
+
+module MCX_SRTP_Configuration {
+
+  import from CommonDefs all;
+  import from IMS_Component all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Templates all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_SecurityFunctions all;
+  import from MCX_SecurityParameters all;
+  import from SRTP_ASP_TypeDefs all;
+
+  type enumerated MCX_CS_ID_Type {                              /* @status    APPROVED (MCX) */
+    PCK_MCPTT_Initiator   (0),   // 33.180 E.3.2
+    PCK_MCPTT_Receiver    (1),   // 33.180 E.3.2
+    PCK_MCVideo_Initiator (2),   // 33.180 E.3.2
+    PCK_MCVideo_Receiver  (3),   // 33.180 E.3.2
+    GMK_MCPTT             (4),   // 33.180 E.2.2
+    GMK_MCVideo           (5),   // 33.180 E.2.2
+    CSK_MCPTT             (6),   // 33.180 E.4.2
+    MuSiK_MCPTT           (7),   // 33.180 E.4.2
+    CSK_MCVideo           (8),   // 33.180 E.4.2
+    MuSiK_MCVideo         (9)    // 33.180 E.4.2
+  };
+
+  template (value) SRTP_SecurityProfile_Type cs_SRTP_SecurityProfile_Base :=
+  { /* 33.180 Table E.2.2-1, Table E.3.2-1, Table E.4.2-1 */
+    /* @status    APPROVED (MCX) */
+    EncryptionAlgorithm := AES_GCM,
+    SessionEncryptionKeyLength := 16,
+    AuthenticationAlgorithm := omit,
+    SessionSaltKeyLength := 12,
+    PRF := AES_CM,
+    KeyDerivationRate := 0,
+    ROC_TransmissionRate := omit,
+    SRTP_AuthenticationTagLength := omit,
+    SRTCP_AuthenticationTagLength := omit,
+    AEAD_AuthenticationTagLength := 16
+  };
+
+  template (value) SRTP_SecurityProfile_Type cds_SRTP_SecurityProfile_GMK modifies cs_SRTP_SecurityProfile_Base :=
+  { /* 33.180 Table E.2.2-1 */
+    /* @status    APPROVED (MCX) */
+    AuthenticationAlgorithm := RCCm3,
+    ROC_TransmissionRate := 1,
+    SRTP_AuthenticationTagLength := 4,
+    SRTCP_AuthenticationTagLength := 0
+  };
+
+  template (value) SRTP_SecurityProfile_Type cds_SRTP_SecurityProfile_PCK modifies cs_SRTP_SecurityProfile_Base := {};  /* 33.180 Table E.3.2-1
+                                                                                                                           @status    APPROVED (MCX) */
+
+  template (value) SRTP_SecurityProfile_Type cds_SRTP_SecurityProfile_CSK modifies cs_SRTP_SecurityProfile_Base := {};  /* 33.180 Table E.4.2-1
+                                                                                                                           @status    APPROVED (MCX) */
+
+  template (value) SRTP_KeyInfo_Type cs_SRTP_KeyInfo(octetstring p_MasterKey,
+                                                     octetstring p_MasterSalt,
+                                                     octetstring p_MKI) :=
+  { /* @status    APPROVED (MCX) */
+    MasterKey := p_MasterKey,
+    MasterSalt := p_MasterSalt,
+    MKI := p_MKI
+  };
+
+  template (value) SRTP_Config_Type cs_SRTP_Config(template (value) SRTP_KeyInfo_Type p_KeyInfo,
+                                                   template (value) SRTP_SecurityProfile_Type p_SecurityProfile) :=
+  { /* @status    APPROVED (MCX) */
+    KeyInfo := p_KeyInfo,
+    SecurityProfile := p_SecurityProfile
+  };
+
+  template (value) SRTP_Connection_Type cs_SRTP_Connection(template (value) IP_Connection_Type p_Connection,
+                                                           O4_Type p_LocalSSRC,
+                                                           template (omit) SRTP_Config_Type p_SRTP_Config) :=
+  { /* @status    APPROVED (MCX) */
+    Connection := p_Connection,
+    LocalSSRC := p_LocalSSRC,
+    SRTP_Config := p_SRTP_Config
+  };
+
+  template (value) SRTP_CTRL_REQ cas_SRTP_CTRL_REQ(template (value) SRTP_ConnectionTable_Type p_SRTP_ConnectionTable) := { Config := p_SRTP_ConnectionTable };  /* @status    APPROVED (MCX) */
+
+  template (present) SRTP_CTRL_IND car_SRTP_CTRL_IND_Confirm := { Confirm := true };                                                                            /* @status    APPROVED (MCX) */
+
+  template (present) SRTP_CTRL_IND car_SRTP_CTRL_IND_Any := ?;                                                                                                  /* @status    APPROVED (MCX) */
+
+  /*
+   * @desc      function P of RFC 3830 clause 4.1.2 using PRF-HMAC-SHA-256 Pseudo-Random Function
+   * @param     p_S
+   * @param     p_Label
+   * @param     p_M
+   * @return    bitstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIKEY_KeyCalculation_P(bitstring p_S,
+                                     octetstring p_Label,
+                                     integer p_M) return bitstring
+  {
+    var octetstring v_A_i := p_Label;    // A_0 initialised with the label
+    var bitstring v_Result := ''B;
+    var integer i;
+    
+    for (i := 0; i < p_M; i := i + 1) {
+      v_A_i := bit2oct(fx_KeyDerivationFunction(tsc_KDF_HMAC_SHA_256, p_S, v_A_i));
+      v_Result := v_Result & fx_KeyDerivationFunction(tsc_KDF_HMAC_SHA_256, p_S, v_A_i & p_Label);
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      PRF according to RFC RFC 3830 clause 4.1.2 using PRF-HMAC-SHA-256 Pseudo-Random Function:
+   *            PRF-HMAC-SHA-256 shall be used for key derivation according to 33.180 clauses 7.4.1 and 7.4.2;
+   *            it is specified in RFC 6043 to be the same as in RFC 3830 clause 4.1.2 but using HMAC-SHA-256
+   *            instead of HMAC-SHA-1 and 256 instead of 160 in the calculation
+   * @param     p_InKey
+   * @param     p_Label
+   * @param     p_OutKeyLen
+   * @return    octetstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MIKEY_PRF_SHA256(bitstring p_InKey,
+                               octetstring p_Label,
+                               integer p_OutKeyLen) return octetstring
+  {
+    var integer v_InKeyLen := lengthof(p_InKey);
+    var integer n := (v_InKeyLen + 255) / 256;  // inkey_len / 256, rounded up to the nearest integer
+    var integer m := (p_OutKeyLen + 255) / 256; // 256 instead of 160 according to RFC 6043 clause 6.1
+    var BitStringList_Type v_S;
+    var BitStringList_Type v_P;
+    var bitstring v_Result;
+    var integer v_Pos := 0;
+    var integer i;
+    var bitstring v_Key;
+    
+    for (i := 0; i < n - 1; i := i + 1) {
+      v_S[i] := substr(p_InKey, v_Pos, 256);
+      v_Pos := v_Pos + 256;
+    }
+    v_S[i] := substr(p_InKey, v_Pos, v_InKeyLen - v_Pos);  // i = n-1
+
+    for (i := 0; i < n; i := i + 1) {
+      v_P[i] := fl_MIKEY_KeyCalculation_P(v_S[i], p_Label, m);
+    }
+    v_Result := int2bit(0, lengthof(v_P[0]));    // NOTE: all elements of v_P shall have the same length
+
+    for (i := 0; i < n; i := i + 1) {
+      v_Result := v_Result xor4b v_P[i];
+    }
+    v_Key := substr(v_Result, 0, p_OutKeyLen);     // most significant bits
+    return bit2oct(v_Key);
+  }
+
+  /*
+   * @desc      Derivation of SRTP master keys (master key, master salt) according to
+   *            33.180 clause 7.4.1 (private call)
+   *            33.180 clause 7.4.2 (group call)
+   *            33.180 clause 9.4.6 (SRTCP)
+   *            using key derivation function according to RFC 3830 clause 4.1.4
+   *            with PRF-HMAC-SHA-256 Pseudo-Random Function described in RFC 6043 clause 6.1
+   * @param     p_ServiceType
+   * @param     p_KeyIndex
+   * @param     p_CS_Id
+   * @param     p_SecurityProfile
+   * @return    template (omit) SRTP_Config_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MIKEY_KeyDerivation(MCX_ServiceType_Type p_ServiceType,
+                                 MCX_KeyIndex_Type p_KeyIndex,
+                                 MCX_CS_ID_Type p_CS_Id,
+                                 template (value) SRTP_SecurityProfile_Type p_SecurityProfile) runs on MCX_IMS_PTC return template (omit) SRTP_Config_Type
+  {
+    var template (omit) MCX_SecurityKey_Type v_StoredSecurityKey := f_MCX_IMS_PTC_SecurityParameters_GetKey(p_KeyIndex);
+    var integer v_MasterKeyLen := 128;     // According to 33.180 clause 7.5.1 and clause 9.4.8 the SRTP PRF is AES-CM-128 as according to RFC 3711 clause 8.2 (see also RFC 4568 clause 6.2)
+    var integer v_MasterSaltLen := 96;     // As according to RFC Errata for RFC 7714 (see SRTP_KeyInfo_Type)
+    var MCX_SecurityKey_Type v_SecurityKey;
+    var charstring v_MCServiceId;
+    var bitstring v_Key;
+    var O1_Type v_CSB_Id;
+    var O1_Type v_CS_Id;
+    var O4_Type v_MasterKeyConstant;
+    var O4_Type v_MasterSaltConstant;
+    var octetstring v_MasterKeyLabel;
+    var octetstring v_MasterSaltLabel;
+    var octetstring v_MasterKey;
+    var octetstring v_MasterSalt;
+    var bitstring v_MKI;
+
+    if (isvalue(v_StoredSecurityKey)) {
+      v_SecurityKey := valueof(v_StoredSecurityKey);
+      v_Key := oct2bit(v_SecurityKey.Value);
+      v_CSB_Id := bit2oct(v_SecurityKey.Id);
+      /* key derivation according to RFC 3830 clause 4.1.3: */
+      v_CS_Id := int2oct(enum2int(p_CS_Id), 1);
+      v_MasterKeyConstant := '2AD01C64'O;   // TEK (Traffic-encrypting key)
+      v_MasterSaltConstant := '39A2C14B'O;  // salting key
+      v_MasterKeyLabel  := v_MasterKeyConstant & v_CS_Id & v_CSB_Id & v_SecurityKey.RAND;
+      v_MasterSaltLabel := v_MasterSaltConstant & v_CS_Id & v_CSB_Id & v_SecurityKey.RAND;
+      v_MasterKey  := fl_MIKEY_PRF_SHA256(v_Key, v_MasterKeyLabel, v_MasterKeyLen);
+      v_MasterSalt := fl_MIKEY_PRF_SHA256(v_Key, v_MasterSaltLabel, v_MasterSaltLen);
+      
+      select (p_KeyIndex) {
+        case (GMK) {
+          v_MCServiceId := f_MCX_MCService_ID_User_A(p_ServiceType);
+          v_MKI := v_SecurityKey.Id & f_MCX_CalculateGUKID(v_MCServiceId, v_SecurityKey);
+        }
+        case else {
+          v_MKI := v_SecurityKey.Id;
+        }
+      }
+      return cs_SRTP_Config(cs_SRTP_KeyInfo(v_MasterKey, v_MasterSalt, bit2oct(v_MKI)), p_SecurityProfile);
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Configure SRTP at the system simulator
+   * @param     p_ServiceType
+   * @param     p_CS_Id_RTP
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_ConfigSRTP(MCX_ServiceType_Type p_ServiceType,
+                            template (omit) MCX_CS_ID_Type p_CS_Id_RTP) runs on MCX_IMS_PTC
+  { /* @sic R5s220129 - MCC160: p_CS_Id_RTP may be omit case of preestablished session sic@ */
+    var IP_AddrInfo_Type v_IP_AddrInfo := f_IMS_PTC_NW_Address_Get();
+    var O4_Type v_LocalSSRC_RTCP  := tsc_MCX_RTCP_SSRC_SS;      /* @sic R5-236320, R5-236323 sic@ */
+    var O4_Type v_LocalSSRC_Audio := tsc_MCX_MediaSSRC_ClientB; /* @sic R5-236320, R5-236323 sic@ */
+    var O4_Type v_LocalSSRC_Video := v_LocalSSRC_Audio;         /* @sic R5-236320, R5-236323: as there is only one value in the transmission control signalling for Rel-17 and earlier, SSRC values for video and audio are assumed to be the same sic@ */
+
+    var MCX_CS_ID_Type v_CS_Id_RTCP;
+    var MCX_KeyIndex_Type v_KeyIndex_RTCP := CSK;
+    var template (value) SRTP_SecurityProfile_Type v_SecurityProfile_RTCP := cds_SRTP_SecurityProfile_CSK;
+    var template (omit) SRTP_Config_Type v_SRTP_Config_RTCP;
+
+    var MCX_CS_ID_Type v_CS_Id_RTP;
+    var MCX_KeyIndex_Type v_KeyIndex_RTP;
+    var template (value) SRTP_SecurityProfile_Type v_SecurityProfile_RTP;
+    var template (omit) SRTP_Config_Type v_SRTP_Config_RTP;
+
+    var template (value) SRTP_ConnectionTable_Type v_SRTP_ConnectionTable := {};    /* @sic R5s220129: MCC160 comments r1 sic@ */
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_CS_Id_RTCP := CSK_MCPTT; }
+      case (MCVideo) { v_CS_Id_RTCP := CSK_MCVideo; }
+      case else      { FatalError(__FILE__, __LINE__, "invalid service"); }
+    }
+    v_SRTP_Config_RTCP := f_MIKEY_KeyDerivation(p_ServiceType, v_KeyIndex_RTCP, v_CS_Id_RTCP, v_SecurityProfile_RTCP);
+
+    if (isvalue(p_CS_Id_RTP)) {
+      v_CS_Id_RTP := valueof(p_CS_Id_RTP);
+
+      select (v_CS_Id_RTP) {
+        case (PCK_MCPTT_Initiator, PCK_MCPTT_Receiver, PCK_MCVideo_Initiator, PCK_MCVideo_Receiver) {
+          v_KeyIndex_RTP := PCK;
+          v_SecurityProfile_RTP := cds_SRTP_SecurityProfile_PCK;
+        }
+        case (GMK_MCPTT, GMK_MCVideo) {
+          v_KeyIndex_RTP := GMK;
+          v_SecurityProfile_RTP := cds_SRTP_SecurityProfile_GMK;
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "invalid CS_ID");
+        }
+      }
+      v_SRTP_Config_RTP := f_MIKEY_KeyDerivation(p_ServiceType, v_KeyIndex_RTP, v_CS_Id_RTP, v_SecurityProfile_RTP);
+
+      // Audio
+      v_SRTP_ConnectionTable[0] := cs_SRTP_Connection(cs_UDP_ConnectionId(cs_IP_Socket(v_IP_AddrInfo, tsc_MCX_MediaPort_Audio)),     v_LocalSSRC_Audio, v_SRTP_Config_RTP);
+      v_SRTP_ConnectionTable[1] := cs_SRTP_Connection(cs_UDP_ConnectionId(cs_IP_Socket(v_IP_AddrInfo, tsc_MCX_MediaPort_Audio + 1)), v_LocalSSRC_Audio, v_SRTP_Config_RTCP);
+
+      // Video
+      select (v_CS_Id_RTP) {
+        case (PCK_MCVideo_Initiator, PCK_MCVideo_Receiver, GMK_MCVideo) {
+          v_SRTP_ConnectionTable[2] := cs_SRTP_Connection(cs_UDP_ConnectionId(cs_IP_Socket(v_IP_AddrInfo, tsc_MCX_MediaPort_Video)),     v_LocalSSRC_Video, v_SRTP_Config_RTP);
+          v_SRTP_ConnectionTable[3] := cs_SRTP_Connection(cs_UDP_ConnectionId(cs_IP_Socket(v_IP_AddrInfo, tsc_MCX_MediaPort_Video + 1)), v_LocalSSRC_Video, v_SRTP_Config_RTCP);
+        }
+      }
+    }
+    // Media control
+    v_SRTP_ConnectionTable[lengthof(v_SRTP_ConnectionTable)] := cs_SRTP_Connection(cs_UDP_ConnectionId(cs_IP_Socket(v_IP_AddrInfo, tsc_MCX_MediaControlPortNW)), v_LocalSSRC_RTCP, v_SRTP_Config_RTCP);
+
+    SRTP.send(cas_SRTP_CTRL_REQ(v_SRTP_ConnectionTable));
+    alt {
+      [] SRTP.receive(car_SRTP_CTRL_IND_Confirm) {}
+      [] SRTP.receive(car_SRTP_CTRL_IND_Any) {
+        f_SetVerdictInconc(__FILE__, __LINE__, "error configuring SRTP");
+      }
+    }
+  }
+
+}

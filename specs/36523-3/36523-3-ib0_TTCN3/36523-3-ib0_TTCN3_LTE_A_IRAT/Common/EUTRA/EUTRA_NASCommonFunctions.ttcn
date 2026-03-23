@@ -1,0 +1,137 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-12-10 10:32:45 +0100 (Wed, 10 Dec 2025) $
+// $Rev: 42613 $
+/******************************************************************************/
+
+module EUTRA_NASCommonFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_Timing all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from Parameters all;
+
+  /*
+   * @desc      Check whether UE tries to attach in any cell given by p_CellId
+   * @param     p_CellId        ... template describing on or more cells
+   * @param     p_TimerValue
+   * @param     p_FailMsg       ... message to be used in case of FAIL
+   * @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC_IRAT)
+   */
+  function fl_EUTRA_CheckNoAttach_Common(template (present) EUTRA_CellId_Type p_CellId,
+                                         float p_TimerValue,
+                                         charstring p_FailMsg) runs on EUTRA_PTC
+  { /* @sic R5s110507 additional changes sic@ */
+    if (f_EUTRA_RRC_RRCConnectionRequest_Check(p_CellId, p_TimerValue)) {
+      if (p_FailMsg == "") { // @sic R5s120534 sic@
+        p_FailMsg := "Unexpected RRCConnectionRequest before timer expiry";
+      }
+      f_EUTRA_SetVerdictFailOrInconc (__FILE__, __LINE__, p_FailMsg);
+    }
+  }
+
+  /*
+   * @desc      Check whether UE tries to attach to given cell
+   * @param     p_CellId
+   * @param     p_Wait          ... time to wait before UE may attach again
+   * @param     p_StepNo            (default value: "")
+   * @status    APPROVED (LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC_IRAT)
+   */
+  function f_EUTRA_CheckNoAttachOn1Cell(EUTRA_CellId_Type p_CellId,
+                                        float p_Wait,
+                                        charstring p_StepNo := "") runs on EUTRA_PTC
+  {
+    var float v_TimerValue := f_EUTRA_SetTimerToleranceMin (p_CellId, nonProtocolTimer, p_Wait);
+    fl_EUTRA_CheckNoAttach_Common(p_CellId, v_TimerValue, p_StepNo);
+  }
+
+  /*
+   * @desc      Only required in certain U-E/G-E test cases
+   *            To setup the PTCs correctly to do IMS registration as soon as TAU finished
+   * @param     p_CellId
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_OptionalMultiPDN_IMSRegistration_PTCSetup(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC
+  {
+    var EPS_BearerIdentity v_EpsBearerId := f_EUTRA_InitialRegistrationEpsBearerId(firstPDN);
+    var EPS_BearerIdentity v_EpsBearerId2;
+    var PDN_Index_Type v_FirstPdn := f_EUTRA_InitialRegistrationPdnIndex(firstPDN);
+
+    if (pc_IMS) {
+      f_EUTRA_Update_RANType (p_CellId); // @sic R5s170173 sic@
+      f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_IpcanInd); // @sic R5s170176 sic@
+      // @sic R5s211657: f_IP_ChangeDrbMappingEUTRA removed sic@
+      f_IP_Handling_StartPDN(IP, v_FirstPdn, cs_DrbInfo_EUTRA(p_CellId,  f_EUTRA_NB_EpsBearerAssociatedDRB(v_EpsBearerId))); // @sic R5s190434 sic@
+      if (tsc_EUTRA_Registration_MultiplePDN) { // @sic R5s180190 sic@
+        v_EpsBearerId2 := f_EUTRA_InitialRegistrationEpsBearerId(secondPDN);
+        f_IP_Handling_StartPDN(IP, f_EUTRA_InitialRegistrationPdnIndex(secondPDN), cs_DrbInfo_EUTRA(p_CellId,  f_EUTRA_NB_EpsBearerAssociatedDRB(v_EpsBearerId2))); // @sic R5s170964, R5s180190, R5s190434 sic@
+      }
+    }
+  }
+
+  /*
+   * @desc      Only required in certain U-E/G-E test cases
+   *            Wait for 10 seconds to allow optional IMS registration if not done on other RAT
+   * @param     p_CellId
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_OptionalMultiPDN_IMSRegistration(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC
+  {
+    var EPS_BearerIdentity v_EpsBearerId := f_EUTRA_InitialRegistrationEpsBearerId(firstPDN);
+    var EUTRA_SecurityParams_Type v_SecurityParams := f_EUTRA_Security_Get();
+    timer t_WaitForIMS := 10.0;
+    
+    if (pc_IMS) {
+      if (match('111'B, v_SecurityParams.KSIsgsn)) { // Did not do authentication on EUTRA cell since power on
+        v_SecurityParams.KSIsgsn := v_SecurityParams.AuthParams.KeySeq; // @sic R5s170901 sic@
+      }
+      if (match('111'B, v_SecurityParams.KSIasme)) { // @sic R5s190004 sic@
+        v_SecurityParams.KSIasme := v_SecurityParams.KSIsgsn;
+      }
+      f_EUTRA_Security_Set (v_SecurityParams);  // @sic R5s170265 sic@
+      t_WaitForIMS.start;
+      alt {
+        [] t_WaitForIMS.timeout {} // Don't do anything
+        [] SRB.check(receive(car_SRB0_RrcPdu_IND(?, cr_RRCConnectionRequest(cr_EstablishmentCause_Any)))) {
+          t_WaitForIMS.stop;
+
+          if (tsc_EUTRA_Registration_MultiplePDN) {  // UE wants to connect to another PDN for IMS
+            f_EUTRA_ServiceRequestAndActivate_SRB2_DRB(p_CellId,-,-,-,-,-,-,-,-,-,-,-,-, f_EUTRA_NB_EpsBearerAssociatedDRB(v_EpsBearerId)); // @sic R5s170173, R5s180513 sic@
+          
+            a_EUTRA_IdleUpdated_ConnectToAdditionalPDN_Step1_2(p_CellId, v_EpsBearerId);
+            a_EUTRA_IdleUpdated_ConnectToAdditionalPDN_Step3(p_CellId);
+            a_EUTRA_IdleUpdated_ConnectToAdditionalPDN_Step4(p_CellId, v_EpsBearerId);
+            
+            f_EUTRA_DelayForUserPlaneSignalling(waitForIMS);
+
+            f_EUTRA_RRC_ConnectionRelease(p_CellId);
+          } else { // UE uses existing PDN for IMS
+          f_EUTRA_ServiceRequestAndActivate_SRB2_DRB(p_CellId); // @sic R5s170173, R5s180513 sic@
+          
+          f_EUTRA_DelayForUserPlaneSignalling(waitForIMS);
+
+          f_EUTRA_RRC_ConnectionRelease(p_CellId);
+          }
+        }
+      }
+    }
+  }
+
+}

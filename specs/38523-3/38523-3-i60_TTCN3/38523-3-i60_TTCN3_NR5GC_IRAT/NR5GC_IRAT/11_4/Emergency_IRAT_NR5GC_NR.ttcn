@@ -1,0 +1,296 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-06-11 18:16:53 +0200 (Tue, 11 Jun 2024) $
+// $Rev: 38913 $
+/******************************************************************************/
+
+module Emergency_IRAT_NR5GC_NR {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G all;
+  import from CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_5GC_Parameters all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_SecurityFunctions all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IRAT_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+
+  template (value) NG_NetworkFeatureSupport cds_NG_NetworkFeatureSupport_emc_emf_NotSupported
+                   modifies cs_NG_NetworkFeatureSupport_Def :=
+  { /* @status    APPROVED (NR5GC_IRAT) */
+    //Emergency services not supported
+    //Emergency services fallback not supported
+    emf                    := '00'B,
+    emc                    := '00'B
+  };
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.11
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_4_11_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / N26 interface not supported / S1 mode to N1 mode transfer of an existing emergency PDN session
+  
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var PLMN_Identity v_ASN_PLMN;
+    var NAS_PlmnId v_PLMN;
+    var NG_NAS_GutiParameters_Type v_GutiParams;
+    var template (value) NG_MobileIdentity v_GUTIToSend;
+    var TrackingAreaCode v_TAC;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) NG_NetworkFeatureSupport v_NwkSupport := cds_NG_NetworkFeatureSupport_NoN26;
+    
+    f_NR5GC_IRAT_Init(NR_6);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(nr_Cell1);
+
+    v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1);
+    v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    v_TAC := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+    
+    // Step 14
+    // Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   omit,
+                                                   -, -, -,
+                                                   v_NwkSupport);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    // Steps 15 - 20
+    f_NR5GC_RRC_Idle_Steps15_20(nr_Cell1, TESTMode_OFF);
+
+    // Deregister on switch off
+    f_NR_UE_DeRegisterOnSwitchOff(nr_Cell1, STATE_IDLE_1A);
+    // Tell IMS PTC to stop waiting for De-register
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // @sic R5s220883 sic@
+    // Turn power off
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    // Now tell EUTRA to attach
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Preamble"));
+    // First pass capability info to EUTRA
+    f_NR5GC_IRAT_UECapabilityTransfer(nr_Cell1);
+    // Wait until UE has attached on EUTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Preamble");
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_11_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+    
+    // Now tell EUTRA test is finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Postamble"));
+  }
+
+  /*
+   * @desc      test body of TC_11_4_11_NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_4_11_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1);
+    var PLMN_Identity v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    var template (present) NG_Request_Type v_RequestType := (cr_NG_Request_Type('010'B), cr_NG_Request_Type('100'B));
+    var EUTRA_NR_PduSessionInfoList_Type v_PduSessionInfoList;
+    var O1_Type v_EmergencySessionId;
+    var template (value) NG_PDU_SessionId v_SessionId;
+    var integer i;
+
+    //@siclog "Step 17" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Cell Power");   // @sic R5s220883 sic@
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    //@siclog "Step 18-28" siclog@
+    f_NR5GC_IRAT_MobilityRegistration (nr_Cell1,
+                                      v_NAS_SecurityParams,
+                                      omit,
+                                      f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams),
+                                      f_LastVisited_TAI(nr_Cell1),
+                                      -, -,
+                                      noRrcConnectionRelease,
+                                      -,
+                                      cds_NG_NetworkFeatureSupport_NoN26,
+                                      -,
+                                      cr_PDU_SessionStatusAny ifpresent, // @sic R5-231417 sic@
+                                      SUPPORTED);  // @sic R5-237320 sic@
+
+    // Tell IMS PTCs the RAT has changed
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_QueryResponse(f_NR_IMS_IpcanInfo()));
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IPCAN_IMS_QueryResponse(f_NR_IMS_IpcanInfo()));
+
+    // always wait for PDU info, even if not 1st time
+    v_PduSessionInfoList := f_EUTRA_NR_WaitForCoOrd_PduSessionInfoList(EUTRA);
+
+    // This function stores all received PDN Connectivity msgs, so just expect one more...
+    //@siclog "Step 29a1" siclog@
+    f_NR5GC_PDUSessionEstablishment (nr_Cell1, (pc_noOf_PDUsSameConnection+1), tsc_NR_RbId_SRB1, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, v_RequestType, -, -, -, -, -, -, -, -, -, v_PduSessionInfoList);
+    
+    // @sic R5s210149, R5s220883, R5s221342 sic@
+    for (i := 0; i < lengthof (v_PduSessionInfoList); i := i + 1) {
+      if (match (v_PduSessionInfoList[i].PdnIndex, f_GetMultiPdnIndex(Emergency_PDN))) {
+        // Keep note of this for later checks
+        v_EmergencySessionId := int2oct(v_PduSessionInfoList[i].PDU_SessionId, 1);
+      }
+    }
+    // ...then check one of received msgs is for the emergency bearer
+    // @siclog "Step 1 Parallel Behaviour" siclog@
+    for (i := 1; i <= f_NR5GC_MsgInDefault_GetNumOfNASMessageReq(); i := i+1){  // @sic R5s220174 sic@
+      v_ReceivedAsp := f_NR5GC_MsgInDefault_GetOneNASMessageReq(i);
+      if (f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                -, -, -, -,
+                                                crs_SSC_Mode('A'H, '001'B),
+                                                -, -, -, -, -, -,
+                                                cr_NG_Request_Type('100'B),
+                                                omit,
+                                                omit)) {
+        // Emergency bearer
+        v_SessionId := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg.pdu_Session_Establishment_Request.pduSessionId;
+        if (match (v_EmergencySessionId, v_SessionId.sessionId)) {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Parallel Behaviour Step 1");
+        }
+        // transfer of existing bearer
+      } else if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  -,-, -, -, -, -, -, -, -, -, -,
+                                                  cr_NG_Request_Type('010'B))) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Request Type neither existing nor emergency PDU session");
+      }
+
+    }
+    
+    // @siclog "Step 30" siclog@
+    f_Delay(3.0);
+    // tell IMS stop waiting for Re-register
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IMS_IPCAN_Trigger("Stop Waiting For Reregister"));
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Stop Waiting For Reregister"));
+
+    // @siclog "Step 31-33" siclog@
+    f_NR5GC_PDUSessionRelease (nr_Cell1,
+                               v_EmergencySessionId,
+                               cs_GMM_GSM_Cause (omit, '00100100'B));
+
+    // @siclog "Step 34" siclog@
+    f_NR_RRCRelease(nr_Cell1);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.12
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_4_12_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / 5GMM-IDLE / Emergency call / Disabling N1 mode / Emergency call establishment over EPS / Success
+    var NAS_PlmnId v_PLMN_cell;
+    var TrackingAreaCode v_TAC_cell;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+
+    f_NR5GC_IRAT_Init(NR_6);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    // First pass capability info to EUTRA
+    f_NR5GC_IRAT_UECapabilityTransfer(nr_Cell1);
+    // Wait until UE has attached on EUTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Preamble");
+
+    // Now register on NR
+    f_NR_SetCellPower (nr_Cell1, -88, -82); // @sic R5s221058 sic@
+    v_PLMN_cell := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1));
+    v_TAC_cell := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN_cell, {bit2oct(v_TAC_cell)});
+
+    // Preamble
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(nr_Cell1);
+
+    // Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   v_TAIList,
+                                                   -, -, -, -,
+                                                   cds_NG_NetworkFeatureSupport_emc_emf_NotSupported);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // Preamble Steps 15 - 20
+    f_NR5GC_RRC_Idle_Steps15_20 (nr_Cell1, TESTMode_OFF);
+
+    // Now tell EUTRA preamble finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Preamble"));
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_12_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_11_4_12_NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_4_12_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    
+    //@siclog "Steps 4 - 10" siclog@
+    //Check: Does the UE transmit an RRCConnectionSetupComplete message to confirm the successful completion of the connection establishment and a TRACKING AREA UPDATE REQUEST message is sent to update the registration of the actual tracking area.
+    //For some consequences related to the content of the TRACKING AREA UPDATE REQUEST message see the Notes in TS.36.508 [7], Table 4.5A.2.1-1.
+    //Steps 5-8 from the Generic Test Procedure for IMS Emergency call establishment in EUTRA: Normal Service as specified in TS 36.508 [7], Table 4.5A.4.3-1 are performed.
+    //SS responds with TRACKING AREA UPDATE ACCEPT message.
+    //The UE transmits a TRACKING AREA UPDATE COMPLETE message.
+    // Send both authentication and NR sysinfo paramters to EUTRA
+    f_NR5GC_TrackingAreaUpdateFromN1(nr_Cell1);
+
+    //@siclog "Step 18A" siclog@
+    //Set the power levels according to "T1" as per Table 11.4.12.3.1-1/2.
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Change Power Level");  // @sic R5-241692 sic@
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE); //@sic R5-241692 sic@
+
+    //f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Postamble");   // @sic R5s240275 sic@
+  }
+
+}

@@ -1,0 +1,446 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-09-09 13:13:26 +0200 (Mon, 09 Sep 2024) $
+// $Rev: 39600 $
+/******************************************************************************/
+
+module HTTP_CommonAuthentication {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from HTTP_ASP_TypeDefs all;
+  import from HTTP_CommonFunctions all;
+  import from HTTP_CommonTemplates all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SIPTypesAndValues all;
+  import from NAS_AuthenticationCommon all;
+  import from Parameters all;
+  import from uri_3gpp_gba language "XSD" all;
+
+  type enumerated NAF_Type { NAF_XCAP, NAF_ProSe };                                           /* @status    APPROVED (IMS) */
+
+  const charstring tsc_GBA_Opaque := "5ccc069c403ebaf9f0171e9517f30e41";                      /* note: this is different than tsc_IMS_Opaque
+                                                                                                 @status    APPROVED (IMS) */
+
+  const B128_Type tsc_HTTP_AuthRAND := px_eAuthRAND;                                          /* @status    APPROVED (IMS) */
+
+  type record HTTP_AuthenticationParams_Type {   /* @status    APPROVED (IMS) */
+    Common_AuthenticationParams_Type AuthParams,
+    PSK_BootstrappingInfo_Type PSK_BootstrappingInfo,
+    charstring Nonce,
+    charstring BsfServerDomainName,
+    charstring PrivateUserId,
+    charstring HomeDomainName
+  };
+
+  type union HTTP_AuthenticationResult_Type {   /* @status    APPROVED (IMS) */
+    charstring Error,
+    HTTP_DATA_ASP InitialRequest,
+    Null_Type NoError
+  };
+
+  template (value) HTTP_AuthenticationResult_Type cs_HTTP_AuthenticationResult_Error(charstring p_Error) := { Error := p_Error };                                            /* @status    APPROVED (IMS) */
+
+  template (value) HTTP_AuthenticationResult_Type cs_HTTP_AuthenticationResult_Timeout := cs_HTTP_AuthenticationResult_Error("timeout during HTTP authentication");          /* @status    APPROVED (IMS) */
+
+  template (value) HTTP_AuthenticationResult_Type cs_HTTP_AuthenticationResult_InitialRequest(HTTP_DATA_ASP p_InitialRequest) := { InitialRequest := p_InitialRequest };     /* @status    APPROVED (IMS) */
+
+  template (value) HTTP_AuthenticationResult_Type cs_HTTP_AuthenticationResult_NoError := { NoError := true };                                                               /* @status    APPROVED (IMS) */
+
+  template (value) PSK_BootstrappingInfo_Type cs_PSK_BootstrappingInfo(charstring p_BTid,
+                                                                       bitstring p_Ks_NAF) :=
+  { /* @status    APPROVED (IMS) */
+    BTid := p_BTid,
+    Ks_NAF := p_Ks_NAF
+  };
+
+  template (value) HTTP_AuthenticationParams_Type cs_HTTP_AuthenticationParams(template (value) Common_AuthenticationParams_Type p_AuthParams,
+                                                                               template (value) PSK_BootstrappingInfo_Type p_BootstrappingInfo,
+                                                                               charstring p_Nonce,
+                                                                               charstring p_BsfServerDomainName,
+                                                                               charstring p_PrivateUserId,
+                                                                               charstring p_HomeDomainName) :=
+  { /* @status    APPROVED (IMS) */
+    AuthParams := p_AuthParams,
+    PSK_BootstrappingInfo := p_BootstrappingInfo,
+    Nonce := p_Nonce,
+    BsfServerDomainName := p_BsfServerDomainName,
+    PrivateUserId := p_PrivateUserId,
+    HomeDomainName := p_HomeDomainName
+  };
+
+  /*
+   * @desc      check digest response sent by the UE; returns error message (if any) or ""
+   * @param     p_ServerName
+   * @param     p_HttpRequest
+   * @param     p_XRES
+   * @param     p_XRESLength
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_CheckDigestResponse(charstring p_ServerName,
+                                      HttpRequest_Type p_HttpRequest,
+                                      bitstring p_XRES,
+                                      integer p_XRESLength) return charstring
+  { /* @sic R5s150945 change 5: p_XRES, p_XRESLength instead of p_Password sic@ */
+    var Authorization v_Authorization := p_HttpRequest.authorization;
+    var charstring v_Error := "";
+
+    // Check digest response
+    if (not ischosen(v_Authorization.body[0].digestResponse)) {
+      v_Error := p_ServerName & " - No digestResponse sent in the authorization header";
+    }
+    else if (not f_IMS_Authorization_CheckDigestResponse(p_HttpRequest.requestLine.method, v_Authorization.body[0].digestResponse, p_XRES, p_XRESLength)) {
+      v_Error := p_ServerName & " - DigestResponse check failed";
+    }
+    return v_Error;
+  }
+
+  template (value) BootstrappingInfo cs_BootstrappingInfo(charstring p_BTid) :=
+  { /* @status    APPROVED (IMS) */
+    btid := p_BTid,
+    lifetime := fl_NextYearSameTime(),
+    extension_ := omit
+  };
+
+  /*
+   * @desc      get system time and return HTTP Date/Time formatted according to RFC2616 cl. 3.3.1 and RFC822 cl. 5.1
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_NextYearSameTime() return charstring
+  {
+    var Struct_tm_Type v_LocalTime;
+    var integer v_TimezoneSeconds;
+
+    fx_GetSystemTime(v_LocalTime, v_TimezoneSeconds);
+    v_LocalTime.tm_year := v_LocalTime.tm_year + 1; // next year
+
+    return f_UTC_FormatDateTime(v_LocalTime);
+  }
+
+  template (present) Authorization cr_Authorization_GBA(template (present) CommaParam_List p_DigestResponse) :=
+  { /* @status    APPROVED (IMS) */
+    fieldName := AUTHORIZATION_E,
+    body := {
+      {
+        digestResponse := p_DigestResponse
+      }
+    }
+  };
+
+  /*
+   * @desc      build up Authorization header to be used for GBA authentication (34.229-1 cl. C.29.2 step 1 and 3)
+   * @param     p_Username
+   * @param     p_BsfAddress
+   * @param     p_GbaInitialRequest (default value: false)
+   * @return    template (present) Authorization
+   * @status    APPROVED (IMS)
+   */
+  function fl_Authorization_GBA(template (present) charstring p_Username,
+                                charstring p_BsfAddress,
+                                boolean p_GbaInitialRequest := false) return template (present) Authorization
+  {
+    var template (present) CommaParam_List v_DigestResponse;
+    var template (present) charstring v_DigestUri := ("/", "http://" & p_BsfAddress);
+
+    v_DigestResponse := {
+      cr_GenericParam("username", p_Username),
+      cr_GenericParam("realm",    p_BsfAddress),     // @sic R5-155363 sic@
+      cr_GenericParam("uri",      v_DigestUri)       // @sic R5s150945 change 8: "digest-uri" -> "uri" sic@ */
+    };
+    // add further parameters for step 3
+    if (p_GbaInitialRequest) {
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam("nonce", ""));                   // @sic R5s160642 sic@
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam("response", ""));                // @sic R5s160642 sic@
+    }
+    else {
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam("opaque", tsc_GBA_Opaque));      // @sic R5s160642 sic@
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam_Common("cnonce", ?));            // @sic R5s160642 sic@
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam("nc", "00000001"));              // @sic R5s150945 change 8: "1" -> "00000001" sic@ @sic R5s160642 sic@
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam_Common("response", ?));          // @sic R5s160642 sic@
+      v_DigestResponse := f_CommaParam_List_Add_RX(v_DigestResponse, cr_GenericParam("algorithm", tsc_AKAv1_MD5));    // @sic R5s160642 sic@
+    }
+    return cr_Authorization_GBA(superset(all from v_DigestResponse));
+  }
+
+  /*
+   * @desc      build up WwwAuthenticate for GBA authentication
+   * @param     p_Nonce
+   * @param     p_DomainName
+   * @return    template (value) WwwAuthenticate
+   * @status    APPROVED (IMS)
+   */
+  function fl_WwwAuthenticate_GBA(charstring p_Nonce,
+                                  charstring p_DomainName) return template (value) WwwAuthenticate
+  { /* @sic R5s160442 change 2: p_DomainName sic@ */
+    var template (value) CommaParam_List v_ChallangeParams;
+
+    v_ChallangeParams := {
+      cs_GenericParamQuoted("challenge", "Digest"),
+      cs_GenericParamQuoted("realm",     p_DomainName),
+      cs_GenericParamQuoted("algorithm", tsc_AKAv1_MD5),
+      cs_GenericParamQuoted("qop",       "auth-int"),
+      cs_GenericParamQuoted("nonce",     p_Nonce),
+      cs_GenericParamQuoted("opaque",    tsc_GBA_Opaque)
+    };
+    return cs_HTTP_WwwAuthenticate(v_ChallangeParams);
+  }
+
+  /*
+   * @desc      build up AuthenticationInfo for GBA authentication
+   * @param     p_RspAuth
+   * @param     p_CNonce
+   * @return    template (value) AuthenticationInfo
+   * @status    APPROVED (IMS)
+   */
+  function fl_AuthenticationInfo_GBA(charstring p_RspAuth,
+                                     charstring p_CNonce) return template (value) AuthenticationInfo
+  { /* @sic R5-155995, R5s150945 change 9: p_NextNonce removed; new parameter p_RspAuth sic@ */
+    /* @sic R5s160829, R5-168954: opaque parameter removed from v_AuthInfoParams sic@ */
+    var template (value) CommaParam_List v_AuthInfoParams;
+
+    v_AuthInfoParams := {
+      cs_GenericParamToken ("qop",       "auth-int"),   /* @sic R5s150945 change 9: acc. to RFC2617 in contrast to WWW-Authenticate qop-value is a token in AuthenticationInfo sic@ */
+      cs_GenericParamQuoted("rspauth",   p_RspAuth),    /* @sic R5-155995, R5s150945 change 9: p_RspAuth sic@ */
+      cs_GenericParamQuoted("cnonce",    p_CNonce),
+      cs_GenericParamToken ("nc",        "00000001")    /* @sic R5s150945 change 9: token, "00000001" (acc. to RFC2617) sic@ */
+    };
+    return cs_AuthenticationInfo(v_AuthInfoParams);
+  }
+
+  /*
+   * @desc      encode single input parameter for KDF
+   * @param     p_Pi
+   * @return    octetstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_KDF_InputParameter(octetstring p_Pi) return octetstring
+  {
+    return p_Pi & int2oct(lengthof(p_Pi), 2);
+  }
+
+  /*
+   * @desc      Derivation of the TMPI acc. to TS 33.220 B.4
+   * @param     p_AuthParams
+   * @param     p_PrivateUserId
+   * @param     p_BsfServerDomainName
+   * @return    charstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_GBA_TMPI_Derivation(Common_AuthenticationParams_Type p_AuthParams,
+                                  charstring p_PrivateUserId,
+                                  charstring p_BsfServerDomainName) return charstring
+  {
+    var octetstring v_FC := '01'O;
+    var octetstring v_P0 := char2oct("gba-me");
+    var octetstring v_P1 := bit2oct(p_AuthParams.RandValue);
+    var octetstring v_P2 := char2oct(p_PrivateUserId);
+    var octetstring v_P3 := char2oct(p_BsfServerDomainName);
+    var octetstring v_S := v_FC & fl_KDF_InputParameter(v_P0) & fl_KDF_InputParameter(v_P1) & fl_KDF_InputParameter(v_P2) & fl_KDF_InputParameter(v_P3);
+    var B256_Type v_Ks := p_AuthParams.CK & p_AuthParams.IK;
+    var B256_Type v_Result := fx_KeyDerivationFunction(tsc_KDF_HMAC_SHA_256, v_Ks, v_S);
+    var charstring v_TEMP := f_Base64Encode(substr(v_Result, 0, 192));    // base64-encoding of the 24 most significant octets of the output of KDF
+    
+    return v_TEMP & "@tmpi.bsf.3gppnetwork.org";
+  }
+
+  /*
+   * @desc      NAF specific key derivation acc. to 33.220 Annex B.3
+   * @param     p_CK
+   * @param     p_IK
+   * @param     p_DomainName
+   * @param     p_AuthRAND
+   * @param     p_PrivateUserId
+   * @return    bitstring
+   * @status    APPROVED (IMS)
+   */
+  function fl_GBA_NafSpecificKeyDerivation(B128_Type p_CK,
+                                           B128_Type p_IK,
+                                          charstring p_DomainName,
+                                           B128_Type p_AuthRAND,
+                                           charstring p_PrivateUserId) return bitstring
+  {
+    // Variables for key computation
+    var octetstring v_UaSecProtocolId;
+    var octetstring v_NAF_Id;
+    var octetstring v_S;
+    var bitstring v_Ks_ext_NAF;
+
+    // TS 32.220 Annex B.3. - NAF specific key derivation in GBA and GBA_U
+    v_UaSecProtocolId := '01'O & '000000'O & '02'O; //'01'O stands for 3GPP and '02'O for the HTTP Digest from TS 24.109
+    v_NAF_Id := char2oct(p_DomainName) & v_UaSecProtocolId;
+    v_S :=  '01'O &                                // FC
+      char2oct("gba-me") &                         // "gba-me"
+      int2oct(lengthof(char2oct("gba-me")), 2) &
+      bit2oct(p_AuthRAND) &                        // RAND
+      int2oct(lengthof(bit2oct(p_AuthRAND)), 2) &
+      char2oct(p_PrivateUserId) &                  // IMPI
+      int2oct(lengthof(char2oct(p_PrivateUserId)), 2) &
+      v_NAF_Id &                                   // NAF-ID
+      int2oct(lengthof(v_NAF_Id), 2);
+    
+    v_Ks_ext_NAF := fx_KeyDerivationFunction(tsc_KDF_HMAC_SHA_256, p_CK & p_IK, v_S);
+    
+    //Converting to correct format for password in RFC2617
+    v_Ks_ext_NAF := oct2bit(char2oct(f_Base64Encode(v_Ks_ext_NAF)));
+
+    return v_Ks_ext_NAF;
+  }
+
+  /*
+   * @desc      Initialisation of parameters used for HTTP authnetication
+   * @param     p_XRESLength
+   * @return    HTTP_AuthenticationParams_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_AuthenticationInit(template (omit) integer p_XRESLength) return HTTP_AuthenticationParams_Type
+  { /* @sic R5-160765: new function to allow generic implementation for XCAP and ProSe sic@ */
+    /* @sic R5s160710: p_XRESLength sic@ */
+    var Common_AuthenticationParams_Type v_AuthParams := f_AuthenticationInit(valueof(cs_CommonAuthParams_Init(tsc_HTTP_AuthRAND)));
+    var charstring v_Nonce := f_Base64Encode(v_AuthParams.RandValue & v_AuthParams.AUTN);
+    var CharStringList_Type v_BsfServerLableList;
+    var charstring v_BsfServerDomainName;
+    var charstring v_PrivateUserId;
+    var charstring v_HomeDomainName;
+    var charstring v_BTid;
+    var bitstring v_Ks_NAF;
+
+    if (px_UEwithISIM) {
+      v_HomeDomainName := px_IMS_HomeDomainName;
+      v_PrivateUserId := px_IMS_Private_UserId;
+      v_BsfServerLableList := {"bsf", v_HomeDomainName};   /* @sic R5-155363 sic@ */
+    } else {
+      v_HomeDomainName := f_DomainName_IMS_DerivedFromIMSI(px_IMSI_Def);
+      v_PrivateUserId := f_IMS_PrivateUserIdentityDerivedFromIMSI(px_IMSI_Def);
+      v_BsfServerLableList := {"bsf", f_DomainName_MNC_MCC_DerivedFromIMSI(px_IMSI_Def), "pub", "3gppnetwork.org"};
+    }
+    v_BsfServerDomainName := f_StringJoin(v_BsfServerLableList, ".");
+    v_BTid := f_Base64Encode(v_AuthParams.RandValue) & "@" & v_BsfServerDomainName;   // see 33.220 cl. 4.5.2
+    v_Ks_NAF := fl_GBA_NafSpecificKeyDerivation(v_AuthParams.CK, v_AuthParams.IK, v_HomeDomainName, v_AuthParams.RandValue, v_PrivateUserId); /* @sic R5s150945 change 1.8 sic@ */
+    
+    if (ispresent(p_XRESLength)) {  /* @sic R5s160710 sic@ */
+      v_AuthParams.XRESLength := valueof(p_XRESLength);
+    } else {
+      v_AuthParams.XRESLength := lengthof(v_AuthParams.XRES) / 8;   /* @sic R5s160442 change 1 sic@ */
+    }
+
+    return valueof(cs_HTTP_AuthenticationParams(v_AuthParams,
+                                                cs_PSK_BootstrappingInfo(v_BTid, v_Ks_NAF),
+                                                v_Nonce,
+                                                v_BsfServerDomainName,
+                                                v_PrivateUserId,
+                                                v_HomeDomainName));
+  }
+
+  /*
+   * @desc      GBA authentication acc. to 23.229-1 C.29.2
+   * @param     p_HttpDataPort
+   * @param     p_Watchdog
+   * @param     p_NAF
+   * @param     p_HTTP_AuthenticationParams
+   * @return    template (value) HTTP_AuthenticationResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_HTTP_GBA_Authentication(HTTP_DATA_PORT p_HttpDataPort,
+                                     timer p_Watchdog,
+                                     NAF_Type p_NAF,
+                                     HTTP_AuthenticationParams_Type p_HTTP_AuthenticationParams) return template (value) HTTP_AuthenticationResult_Type
+  { /* @sic R5-160765: generic implementation for XCAP and ProSe sic@ */
+    var template (omit) HTTP_DATA_ASP v_HTTP_DATA_ASP;
+    var HTTP_DATA_ASP v_InitialRequestGBA;
+    var HTTP_DATA_ASP v_SubsequentRequestGBA;
+    var charstring v_RequestLineUri;
+    var bitstring v_XRES := p_HTTP_AuthenticationParams.AuthParams.XRES;
+    var integer v_XRESLength := p_HTTP_AuthenticationParams.AuthParams.XRESLength;
+    var charstring v_CNonce;
+    var ServerVal_List v_ProductTokenList;
+    var template (value) WwwAuthenticate v_WwwAuthenticate;
+    var template (value) AuthenticationInfo v_AuthenticationInfo;
+    var template (value) ContentType v_ContentType;
+    var charstring v_TextBody;
+    var template (present) HttpRequest_Type v_HttpRequest;
+    var template (present) charstring v_RequestLineMethod;
+    var template UserAgent v_UserAgent;
+    var template (present) charstring v_UsernameGBA;
+    var charstring v_UsernameGBA_TMPI;
+    var template Authorization v_Authorization;
+    var template (present) Host v_Host;
+    var template integer v_HostPort := 80 ifpresent;     /* @sic R5-170611 sic@ */
+    var octetstring v_DigestResponse;
+    var charstring v_RspAuth;
+    var boolean v_GbaInitialRequest := true;
+    var charstring v_Error := "";
+
+    v_Host := cr_Host(p_HTTP_AuthenticationParams.BsfServerDomainName, v_HostPort);     /* @sic R5-155363, R5-170611 sic@ */
+      
+    v_UsernameGBA_TMPI := fl_GBA_TMPI_Derivation(p_HTTP_AuthenticationParams.AuthParams, p_HTTP_AuthenticationParams.PrivateUserId, p_HTTP_AuthenticationParams.BsfServerDomainName);
+    v_UsernameGBA := (p_HTTP_AuthenticationParams.PrivateUserId, v_UsernameGBA_TMPI);    /* @sic R5-169057, R5-168963: pc_TMPI_forGBA removed sic@ */
+
+    select (p_NAF) {
+      case (NAF_XCAP, NAF_ProSe) {      /* @sic R5-160765: GBA for ProSE; !!!! most likely for ProSe a different method than GET needs to be used !!!! sic@ */
+        v_RequestLineMethod := "GET";
+      }
+    }
+
+    // 29.2 step 1
+    v_ProductTokenList := {"3gpp-gba-tmpi"};
+    v_UserAgent := f_UserAgentRX(v_ProductTokenList);
+    v_Authorization := fl_Authorization_GBA(v_UsernameGBA, p_HTTP_AuthenticationParams.BsfServerDomainName, v_GbaInitialRequest);
+    v_HttpRequest := cr_HttpRequest(cr_HttpRequestLine(v_RequestLineMethod), v_UserAgent, v_Authorization, v_Host); /* @sic R5-160765: GBA for ProSE; R5-155363: v_Host sic@ */
+    v_HTTP_DATA_ASP := f_HTTP_ReceiveRequest(p_HttpDataPort, v_HttpRequest, p_Watchdog);
+    if (not ispresent(v_HTTP_DATA_ASP)) { return cs_HTTP_AuthenticationResult_Timeout; }
+    v_InitialRequestGBA := valueof(v_HTTP_DATA_ASP);
+
+    /* Authentication is based on standard 3GPP AKA infratructure which sets the password (XRES)
+       used in the HTTP Digest authentication according RFC 3310.
+       See TS 33.220 clause 4.3.1. */
+    
+    // 29.2 step 2
+    v_ProductTokenList := {"BSF-Server"};
+    v_WwwAuthenticate := fl_WwwAuthenticate_GBA(p_HTTP_AuthenticationParams.Nonce, p_HTTP_AuthenticationParams.BsfServerDomainName); /* @sic R5s160442 change 2: p_HTTP_AuthenticationParams.BsfServerDomainName sic@ */
+    f_HTTP_SendResponse(p_HttpDataPort, v_InitialRequestGBA.routingInfo, cs_HttpResponse_401(v_ProductTokenList, v_WwwAuthenticate));
+    
+    // 29.2 step 3
+    v_RequestLineUri := v_InitialRequestGBA.http.request.requestLine.uri;    // same URI as in previous request */
+    v_UserAgent := *;
+    v_Authorization := fl_Authorization_GBA(v_UsernameGBA, p_HTTP_AuthenticationParams.BsfServerDomainName);
+    v_HttpRequest := cr_HttpRequest(cr_HttpRequestLine(v_RequestLineMethod, v_RequestLineUri), v_UserAgent, v_Authorization, v_Host); /* @sic R5-160765: GBA for ProSE; R5-155363: v_Host sic@ */
+    v_HTTP_DATA_ASP := f_HTTP_ReceiveRequest(p_HttpDataPort, v_HttpRequest, p_Watchdog);
+    if (not ispresent(v_HTTP_DATA_ASP)) { return cs_HTTP_AuthenticationResult_Timeout; }
+    v_SubsequentRequestGBA := valueof(v_HTTP_DATA_ASP);
+
+    // Check authentication response
+    v_Error := f_HTTP_CheckDigestResponse("BSF-Server", v_SubsequentRequestGBA.http.request, v_XRES, v_XRESLength);
+    if (v_Error != "") { return cs_HTTP_AuthenticationResult_Error(v_Error); }
+
+    v_CNonce := f_SIP_CommaParamList_GetParamValue(v_SubsequentRequestGBA.http.request.authorization.body[0].digestResponse, "cnonce");
+    
+    // 29.2 step 4
+    v_ProductTokenList := {"3gpp-gba-tmpi"};  /* @sic R5s150945 change 1.5: "3gpp-gba-tmpi" only sic@ */
+    v_ContentType := cs_ContentType("application/vnd.3gpp.bsf+xml");
+    v_TextBody := oct2char(bit2oct(encvalue(cs_BootstrappingInfo(p_HTTP_AuthenticationParams.PSK_BootstrappingInfo.BTid))));
+    
+    v_DigestResponse := f_IMS_Authorization_CalculateDigestResponse("", v_SubsequentRequestGBA.http.request.authorization.body[0].digestResponse, v_XRES, v_XRESLength, v_TextBody); /* @sic R5s150945 change 1.6 sic@ */
+    v_RspAuth := f_StringToLower(oct2str(v_DigestResponse));
+    v_AuthenticationInfo := fl_AuthenticationInfo_GBA(v_RspAuth, v_CNonce);
+    
+    f_HTTP_SendResponse(p_HttpDataPort,
+                        v_SubsequentRequestGBA.routingInfo,
+                        cs_HttpResponse_200(-, cs_Server(v_ProductTokenList), v_AuthenticationInfo, v_ContentType, cs_HttpMessageBody_Text(v_TextBody)));
+    
+    return cs_HTTP_AuthenticationResult_NoError;
+  }
+
+}

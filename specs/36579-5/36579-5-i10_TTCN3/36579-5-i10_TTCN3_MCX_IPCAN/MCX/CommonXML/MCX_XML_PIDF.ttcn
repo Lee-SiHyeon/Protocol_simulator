@@ -1,0 +1,626 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2023-06-05 19:04:55 +0200 (Mon, 05 Jun 2023) $
+// $Rev: 36055 $
+/******************************************************************************/
+
+module MCX_XML_PIDF {
+
+  import from CommonDefs all;
+  import from IMS_XML_PIDF_Templates all;
+  import from MCX_CommonDefs all;
+  import from MCX_XML_Encryption all;
+  import from MCX_XML_mcdataPresInfo all;
+  import from MCX_XML_mcdataPresInfoFA all;
+  import from MCX_XML_mcpttPresInfo all;
+  import from MCX_XML_mcpttPresInfoFA all;
+  import from MCX_XML_mcvideoPresInfo all;
+  import from XSD all;
+  import from urn_3gpp_ns_mcdataPresInfoFA_1_0 language "XSD" all;
+  import from urn_3gpp_ns_mcdataPresInfo_1_0 language "XSD" all;
+  import from urn_3gpp_ns_mcpttPresInfoFA_1_0 language "XSD" all;
+  import from urn_3gpp_ns_mcpttPresInfo_1_0 language "XSD" all;
+  import from urn_3gpp_ns_mcvideoPresInfo_1_0 language "XSD" all;
+  import from urn_ietf_params_xml_ns_pidf language "XSD" all;
+
+  group MCX_PIDF_Presence_Group {
+
+  template (present) PIDF_Presence_Type cr_MCX_PIDF_Presence(template (present) XSD.AnyURI p_Entity,
+                                                             template (present) XSD.AnyURI p_Id ) :=
+  /* 36.579-1 Table 5.5.3.5.1-1: PIDF for MCPTT from the UE
+     @status    APPROVED (MCX) */
+    cr_PIDF_Presence_SingleTuple(p_Entity,
+                                 cr_PIDF_Tuple(p_Id,
+                                               cr_PIDF_Status(omit),    /* basic := omit; elem_list := ?; elem_list[0] is checked for Affiliation by f_MCPTT_PIDF_DecodeDecrypt (-> f_MIME_CheckPIDFwithAffiliation) */
+                                               omit,                    /* contact */
+                                               {},                      /* note_list */
+                                               omit),                   /* timestamp */
+                                 ?);                                    /* elem_list; elem_list[0] is checked P-Id by f_MCX_Affiliation_P_Id_Decode (-> f_MIME_CheckPIDFwithAffiliation) */
+
+  template (value) PIDF_Status_Type cs_MCX_PIDF_EmptyStatus :=
+  { /* @status    APPROVED (MCX) */
+    basic := omit,
+    elem_list := {}        // Affiliation or FunctionalAlias may be added by f_MCX_PIDF_EncryptEncode
+  };
+
+  template (value) PIDF_Tuple_Type cs_MCX_PIDF_Tuple(XSD.AnyURI p_IdAttribute) :=
+  { /* @status    APPROVED (MCX) */
+    id := p_IdAttribute,
+    status := cs_MCX_PIDF_EmptyStatus,
+    elem_list := {},
+    contact := omit,
+    note_list := {},
+    timestamp := omit
+  };
+
+  template (value) PIDF_Presence_Type cs_MCX_PIDF_Presence(XSD.AnyURI p_EntityAttribute,
+                                                           template (value) PIDF_Presence_Type.tuple_list p_TupleList) :=
+  { /* @status    APPROVED (MCX) */
+    entity := p_EntityAttribute,
+    tuple_list := p_TupleList,
+    note_list := {},
+    elem_list := {}        // p-id may be added by f_MCX_PIDF_EncryptEncode
+  };
+
+  template (value) PIDF_Presence_Type cs_MCX_PIDF_Presence_SingleTuple(XSD.AnyURI p_EntityAttribute,
+                                                                       XSD.AnyURI p_IdAttribute) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCX_PIDF_Presence(p_EntityAttribute, { cs_MCX_PIDF_Tuple(p_IdAttribute) });
+
+  /*
+   * @desc      Encode PIDF_Presence_Type
+   * @param     p_Pidf
+   * @return    XmlBody_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_PIDF_Presence_Encode(template (value) Presence p_Pidf) return XmlBody_Type
+  {
+    var bitstring v_EncodedPidf := encvalue(p_Pidf);
+    return f_Bit2XmlBody(v_EncodedPidf);
+  }
+
+  /*
+   * @desc      Encrypt attribute URIs and encode PIDF
+   *            NOTE: in contrast to e.g. content encryption the attribute URI encryption happens before encoding
+   * @param     p_Pidf
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    XmlBody_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PIDF_Presence_EncryptEncode(template (value) Presence p_Pidf,
+                                             charstring p_MCServiceID,
+                                             template (omit) MCX_SecurityKey_Type p_CSK) return XmlBody_Type
+  {
+    var Presence v_Pidf := valueof(p_Pidf);
+    var integer i;
+
+    v_Pidf.entity := f_MCX_XML_EncryptAttributeUri(v_Pidf.entity, p_MCServiceID, p_CSK);
+    for (i := 0; i < lengthof(v_Pidf.tuple_list); i := i + 1) {
+      v_Pidf.tuple_list[i].id := f_MCX_XML_EncryptAttributeUri(v_Pidf.tuple_list[i].id, p_MCServiceID, p_CSK);
+    }
+    return fl_MCX_PIDF_Presence_Encode(v_Pidf);
+  }
+
+  /*
+   * @desc      Decode and decrypt PIDF
+   * @param     p_XmlBody
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    PIDF_Presence_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_PIDF_Presence_DecodeDecrypt(XmlBody_Type p_XmlBody,
+                                              charstring p_MCServiceID,
+                                              template (omit) MCX_SecurityKey_Type p_CSK) return PIDF_Presence_Type
+  {
+    var Presence v_Pidf := f_PIDF_Decode(p_XmlBody);
+    var integer i;
+
+    v_Pidf.entity := f_MCX_XML_DecryptAttributeUri(v_Pidf.entity, p_MCServiceID, p_CSK);
+    for (i := 0; i < lengthof(v_Pidf.tuple_list); i := i + 1) {
+      v_Pidf.tuple_list[i].id := f_MCX_XML_DecryptAttributeUri(v_Pidf.tuple_list[i].id, p_MCServiceID, p_CSK);
+    }
+    return v_Pidf;
+  }
+
+  } // end of group MCX_PIDF_Presence_Group
+
+  group MCX_PIDF_Group {
+
+  type record MCPTT_PIDF_TupleStatusExtension_Type {    /* @status    APPROVED (MCX) */
+    MCPTT_Affiliation_Type Affiliation optional,
+    MCPTT_FunctionalAlias_Type FunctionalAlias optional
+  };
+
+  type record MCPTT_PIDF_Extension_Type {               /* @status    APPROVED (MCX) */
+    // Status extension
+    record of MCPTT_PIDF_TupleStatusExtension_Type TupleStatusExtension,         // extensions correponding to the tuples' <status> elements
+    // Presence extension
+    MCPTT_P_id_Type P_id optional,
+    MCPTT_P_id_fa_Type P_id_fa optional,
+    MCPTT_AdditionalData_Type AdditionalData optional
+  };
+
+  type record MCVideo_PIDF_TupleStatusExtension_Type {  /* @status    APPROVED (MCX) */
+    MCVideo_Affiliation_Type Affiliation optional
+  };
+
+  type record MCVideo_PIDF_Extension_Type {             /* @status    APPROVED (MCX) */
+    // Status extension
+    record of MCVideo_PIDF_TupleStatusExtension_Type TupleStatusExtension,         // extensions correponding to the tuples' <status> elements
+    // Presence extension
+    MCVideo_P_id_Type P_id optional,
+    MCVideo_AdditionalData_Type AdditionalData optional
+  };
+
+  type record MCData_PIDF_TupleStatusExtension_Type {   /* @status    APPROVED (MCX) */
+    MCData_Affiliation_Type Affiliation optional,
+    MCData_FunctionalAlias_Type FunctionalAlias optional
+  };
+
+  type record MCData_PIDF_Extension_Type {              /* @status    APPROVED (MCX) */
+    // Status extension
+    record of MCData_PIDF_TupleStatusExtension_Type TupleStatusExtension,         // extensions correponding to the tuples' <status> elements
+    // Presence extension
+    MCData_P_id_Type P_id optional,
+    MCData_P_id_fa_Type P_id_fa optional
+  };
+
+  type record MCX_PIDF_Type {                           /* @status    APPROVED (MCX) */
+    PIDF_Presence_Type Presence,
+    union {
+      MCPTT_PIDF_Extension_Type   MCPTT,
+      MCVideo_PIDF_Extension_Type MCVideo,
+      MCData_PIDF_Extension_Type  MCData
+    } Extension
+  };
+
+  template (value) MCPTT_PIDF_TupleStatusExtension_Type cs_MCPTT_PIDF_TupleStatusExtension(template (omit) MCPTT_Affiliation_Type p_Affiliation := omit,
+                                                                                           template (omit) MCPTT_FunctionalAlias_Type p_FunctionalAlias := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation,
+    FunctionalAlias := p_FunctionalAlias
+  };
+
+  template (value) MCX_PIDF_Type cs_MCPTT_PIDF(template (value) PIDF_Presence_Type p_Presence,
+                                               template (value) MCPTT_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                               template (omit) MCPTT_P_id_Type p_P_id := omit,
+                                               template (omit) MCPTT_P_id_fa_Type p_P_id_fa := omit,
+                                               template (omit) MCPTT_AdditionalData_Type p_AdditionalData := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCPTT := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        P_id_fa := p_P_id_fa,
+        AdditionalData := p_AdditionalData
+      }
+    }
+  };
+
+  template (value) MCX_PIDF_Type cs_MCPTT_PIDF_Affiliation(template (value) PIDF_Presence_Type p_Presence,
+                                                           template (value) MCPTT_Affiliation_Type p_Affiliation,
+                                                           template (omit) MCPTT_P_id_Type p_P_id := omit) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCPTT_PIDF(p_Presence, { cs_MCPTT_PIDF_TupleStatusExtension(p_Affiliation) }, -, p_P_id);
+
+  template (value) MCX_PIDF_Type cs_MCPTT_PIDF_FunctionalAlias(template (value) PIDF_Presence_Type p_Presence,
+                                                               template (omit) MCPTT_FunctionalAlias_Type p_FunctionalAlias := omit,
+                                                               template (omit) MCPTT_P_id_fa_Type p_P_id_fa := omit) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCPTT_PIDF(p_Presence, { cs_MCPTT_PIDF_TupleStatusExtension(-, p_FunctionalAlias) }, -, p_P_id_fa);
+
+  template (present) MCPTT_PIDF_TupleStatusExtension_Type cr_MCPTT_PIDF_TupleStatusExtension(template MCPTT_Affiliation_Type p_Affiliation := omit,
+                                                                                             template MCPTT_FunctionalAlias_Type p_FunctionalAlias := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation,
+    FunctionalAlias := p_FunctionalAlias
+  };
+
+  template (present) MCX_PIDF_Type cr_MCPTT_PIDF(template (present) PIDF_Presence_Type p_Presence,
+                                                 template (present) MCPTT_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                                 template MCPTT_P_id_Type p_P_id := omit,
+                                                 template MCPTT_P_id_fa_Type p_P_id_fa := omit,
+                                                 template MCPTT_AdditionalData_Type p_AdditionalData := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCPTT := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        P_id_fa := p_P_id_fa,
+        AdditionalData := p_AdditionalData
+      }
+    }
+  };
+
+  template (present) MCX_PIDF_Type cr_MCPTT_PIDF_Affiliation(template (present) PIDF_Presence_Type p_Presence,
+                                                             template MCPTT_Affiliation_Type p_Affiliation,
+                                                             template MCPTT_P_id_Type p_P_id := ?) :=
+  /* @status    APPROVED (MCX) */
+    cr_MCPTT_PIDF(p_Presence, { cr_MCPTT_PIDF_TupleStatusExtension(p_Affiliation) }, p_P_id);
+
+  template (present) MCX_PIDF_Type cr_MCPTT_PIDF_FunctionalAlias(template (present) PIDF_Presence_Type p_Presence,
+                                                                 template MCPTT_FunctionalAlias_Type p_FunctionalAlias,
+                                                                 template MCPTT_P_id_fa_Type p_P_id_fa := ?) :=
+  /* @status    APPROVED (MCX) */
+    cr_MCPTT_PIDF(p_Presence, { cr_MCPTT_PIDF_TupleStatusExtension(-, p_FunctionalAlias) }, -, p_P_id_fa);
+
+  template (value) MCVideo_PIDF_TupleStatusExtension_Type cs_MCVideo_PIDF_TupleStatusExtension(template (omit) MCVideo_Affiliation_Type p_Affiliation := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation
+  };
+
+  template (value) MCX_PIDF_Type cs_MCVideo_PIDF(template (value) PIDF_Presence_Type p_Presence,
+                                                 template (value) MCVideo_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                                 template (omit) MCVideo_P_id_Type p_P_id := omit,
+                                                 template (omit) MCVideo_AdditionalData_Type p_AdditionalData := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCVideo := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        AdditionalData := p_AdditionalData
+      }
+    }
+  };
+
+  template (value) MCX_PIDF_Type cs_MCVideo_PIDF_Affiliation(template (value) PIDF_Presence_Type p_Presence,
+                                                             template (value) MCVideo_Affiliation_Type p_Affiliation,
+                                                             template (omit) MCVideo_P_id_Type p_P_id := omit) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCVideo_PIDF(p_Presence, { cs_MCVideo_PIDF_TupleStatusExtension(p_Affiliation) }, p_P_id);
+
+  template (present) MCVideo_PIDF_TupleStatusExtension_Type cr_MCVideo_PIDF_TupleStatusExtension(template MCVideo_Affiliation_Type p_Affiliation := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation
+  };
+
+  template (present) MCX_PIDF_Type cr_MCVideo_PIDF(template (present) PIDF_Presence_Type p_Presence,
+                                                   template (present) MCVideo_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                                   template MCVideo_P_id_Type p_P_id := omit,
+                                                   template MCVideo_AdditionalData_Type p_AdditionalData := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCVideo := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        AdditionalData := p_AdditionalData
+      }
+    }
+  };
+
+  template (present) MCX_PIDF_Type cr_MCVideo_PIDF_Affiliation(template (present) PIDF_Presence_Type p_Presence,
+                                                               template MCVideo_Affiliation_Type p_Affiliation,
+                                                               template MCVideo_P_id_Type p_P_id := ?) :=
+  /* @status    APPROVED (MCX) */
+    cr_MCVideo_PIDF(p_Presence, { cr_MCVideo_PIDF_TupleStatusExtension(p_Affiliation) }, p_P_id);
+
+  template (value) MCData_PIDF_TupleStatusExtension_Type cs_MCData_PIDF_TupleStatusExtension(template (omit) MCData_Affiliation_Type p_Affiliation := omit,
+                                                                                             template (omit) MCData_FunctionalAlias_Type p_FunctionalAlias := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation,
+    FunctionalAlias := p_FunctionalAlias
+  };
+
+  template (value) MCX_PIDF_Type cs_MCData_PIDF(template (value) PIDF_Presence_Type p_Presence,
+                                                template (value) MCData_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                                template (omit) MCData_P_id_Type p_P_id := omit,
+                                                template (omit) MCData_P_id_fa_Type p_P_id_fa := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCData := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        P_id_fa := p_P_id_fa
+      }
+    }
+  };
+
+  template (value) MCX_PIDF_Type cs_MCData_PIDF_Affiliation(template (value) PIDF_Presence_Type p_Presence,
+                                                           template (value) MCData_Affiliation_Type p_Affiliation,
+                                                           template (omit) MCData_P_id_Type p_P_id := omit) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCData_PIDF(p_Presence, { cs_MCData_PIDF_TupleStatusExtension(p_Affiliation) }, p_P_id);
+
+  template (value) MCX_PIDF_Type cs_MCData_PIDF_FunctionalAlias(template (value) PIDF_Presence_Type p_Presence,
+                                                                template (omit) MCData_FunctionalAlias_Type p_FunctionalAlias := omit,
+                                                                template (omit) MCData_P_id_fa_Type p_P_id_fa := omit) :=
+  /* @status    APPROVED (MCX) */
+    cs_MCData_PIDF(p_Presence, { cs_MCData_PIDF_TupleStatusExtension(-, p_FunctionalAlias) }, -, p_P_id_fa);
+
+  template (present) MCData_PIDF_TupleStatusExtension_Type cr_MCData_PIDF_TupleStatusExtension(template MCData_Affiliation_Type p_Affiliation := omit,
+                                                                                               template MCData_FunctionalAlias_Type p_FunctionalAlias := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Affiliation := p_Affiliation,
+    FunctionalAlias := p_FunctionalAlias
+  };
+
+  template (present) MCX_PIDF_Type cr_MCData_PIDF(template (present) PIDF_Presence_Type p_Presence,
+                                                  template (present) MCData_PIDF_Extension_Type.TupleStatusExtension p_TupleStatusExtension := {},
+                                                  template MCData_P_id_Type p_P_id := omit,
+                                                  template MCData_P_id_fa_Type p_P_id_fa := omit) :=
+  { /* @status    APPROVED (MCX) */
+    Presence := p_Presence,
+    Extension := {
+      MCData := {
+        TupleStatusExtension := p_TupleStatusExtension,
+        P_id := p_P_id,
+        P_id_fa := p_P_id_fa
+      }
+    }
+  };
+
+  template (present) MCX_PIDF_Type cr_MCData_PIDF_Affiliation(template (present) PIDF_Presence_Type p_Presence,
+                                                              template MCData_Affiliation_Type p_Affiliation,
+                                                              template MCData_P_id_Type p_P_id := ?) :=
+  /* @status    APPROVED (MCX) */
+    cr_MCData_PIDF(p_Presence, { cr_MCData_PIDF_TupleStatusExtension(p_Affiliation) }, p_P_id);
+
+  template (present) MCX_PIDF_Type cr_MCData_PIDF_FunctionalAlias(template (present) PIDF_Presence_Type p_Presence,
+                                                                  template MCData_FunctionalAlias_Type p_FunctionalAlias,
+                                                                  template MCData_P_id_fa_Type p_P_id_fa := ?) :=
+  /* @status    APPROVED (MCX) */
+    cr_MCData_PIDF(p_Presence, { cr_MCData_PIDF_TupleStatusExtension(-, p_FunctionalAlias) }, -, p_P_id_fa);
+
+  /*
+   * @desc      Encrypt and encode PIDF
+   * @param     p_PIDF
+   * @param     p_MCServiceID
+   * @param     p_CSK               (default value: omit)
+   * @return    XmlBody_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_PIDF_EncryptEncode(template (value) MCX_PIDF_Type p_PIDF,
+                                    charstring p_MCServiceID,
+                                    template (omit) MCX_SecurityKey_Type p_CSK := omit) return XmlBody_Type
+  {
+    var template (value) PIDF_Presence_Type v_Presence := p_PIDF.Presence;
+    var integer i := 0;
+    var integer k;
+    var integer l;
+    
+    if (isvalue(p_CSK)) {
+      fx_XML_Log(__FILE__, __LINE__, DOWNLINK, f_MCX_PIDF_EncryptEncode(p_PIDF, p_MCServiceID));
+    }
+
+    for (k := 0; k < lengthof(v_Presence.tuple_list); k := k + 1) {
+      l := 0;
+      // MCPTT
+      if (isvalue(p_PIDF.Extension.MCPTT.TupleStatusExtension[k].Affiliation)) {
+        v_Presence.tuple_list[k].status.elem_list[l] := f_MCPTT_Affiliation_EncryptEncode(valueof(p_PIDF.Extension.MCPTT.TupleStatusExtension[k].Affiliation), p_MCServiceID, p_CSK);
+        l := l + 1;
+      }
+      if (isvalue(p_PIDF.Extension.MCPTT.TupleStatusExtension[k].FunctionalAlias)) {
+        v_Presence.tuple_list[k].status.elem_list[l] := f_MCPTT_FunctionalAlias_EncryptEncode(valueof(p_PIDF.Extension.MCPTT.TupleStatusExtension[k].FunctionalAlias), p_MCServiceID, p_CSK);
+        l := l + 1;
+      }
+      // MCVideo
+      if (isvalue(p_PIDF.Extension.MCVideo.TupleStatusExtension[k].Affiliation)) {
+        v_Presence.tuple_list[k].status.elem_list[l] := f_MCVideo_Affiliation_EncryptEncode(valueof(p_PIDF.Extension.MCVideo.TupleStatusExtension[k].Affiliation), p_MCServiceID, p_CSK);
+        l := l + 1;
+      }
+      // MCData
+      if (isvalue(p_PIDF.Extension.MCData.TupleStatusExtension[k].Affiliation)) {
+        v_Presence.tuple_list[k].status.elem_list[l] := f_MCData_Affiliation_EncryptEncode(valueof(p_PIDF.Extension.MCData.TupleStatusExtension[k].Affiliation), p_MCServiceID, p_CSK);
+        l := l + 1;
+      }
+      if (isvalue(p_PIDF.Extension.MCData.TupleStatusExtension[k].FunctionalAlias)) {
+        v_Presence.tuple_list[k].status.elem_list[l] := f_MCData_FunctionalAlias_EncryptEncode(valueof(p_PIDF.Extension.MCData.TupleStatusExtension[k].FunctionalAlias), p_MCServiceID, p_CSK);
+        l := l + 1;
+      }
+    }
+    // MCPTT
+    if (isvalue(p_PIDF.Extension.MCPTT.P_id)) {
+      v_Presence.elem_list[i] := f_MCPTT_Affiliation_P_id_Encode(valueof(p_PIDF.Extension.MCPTT.P_id));
+      i := i + 1;
+    }
+    if (isvalue(p_PIDF.Extension.MCPTT.P_id_fa)) {
+      v_Presence.elem_list[i] := f_MCPTT_FunctionalAlias_P_id_fa_Encode(valueof(p_PIDF.Extension.MCPTT.P_id_fa));
+      i := i + 1;
+    }
+    if (isvalue(p_PIDF.Extension.MCPTT.AdditionalData)) {
+      v_Presence.elem_list[i] := f_MCPTT_Affiliation_AdditionalData_Encode(valueof(p_PIDF.Extension.MCPTT.AdditionalData));
+      i := i + 1;
+    }
+    // MCVideo
+    if (isvalue(p_PIDF.Extension.MCVideo.P_id)) {
+      v_Presence.elem_list[i] := f_MCVideo_Affiliation_P_id_Encode(valueof(p_PIDF.Extension.MCVideo.P_id));
+      i := i + 1;
+    }
+    if (isvalue(p_PIDF.Extension.MCVideo.AdditionalData)) {
+      v_Presence.elem_list[i] := f_MCVideo_Affiliation_AdditionalData_Encode(valueof(p_PIDF.Extension.MCVideo.AdditionalData));
+      i := i + 1;
+    }
+    // MCData
+    if (isvalue(p_PIDF.Extension.MCData.P_id)) {
+      v_Presence.elem_list[i] := f_MCData_Affiliation_P_id_Encode(valueof(p_PIDF.Extension.MCData.P_id));
+      i := i + 1;
+    }
+    if (isvalue(p_PIDF.Extension.MCData.P_id_fa)) {
+      v_Presence.elem_list[i] := f_MCData_FunctionalAlias_P_id_fa_Encode(valueof(p_PIDF.Extension.MCData.P_id_fa));
+      i := i + 1;
+    }
+    return f_MCX_PIDF_Presence_EncryptEncode(v_Presence, p_MCServiceID, p_CSK);
+  }
+
+  /*
+   * @desc      Decode and decrypt PIDF
+   * @param     p_XmlBody
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    MCX_PIDF_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCPTT_PIDF_DecodeDecrypt(XmlBody_Type p_XmlBody,
+                                      charstring p_MCServiceID,
+                                      template (omit) MCX_SecurityKey_Type p_CSK) return MCX_PIDF_Type
+  {
+    var Presence v_Presence := fl_MCX_PIDF_Presence_DecodeDecrypt(p_XmlBody, p_MCServiceID, p_CSK);
+    var template (value) MCX_PIDF_Type v_PIDF := cs_MCPTT_PIDF(v_Presence);
+
+    var urn_3gpp_ns_mcpttPresInfo_1_0.Affiliation v_Affiliation;
+    var urn_3gpp_ns_mcpttPresInfoFA_1_0.FunctionalAlias v_FunctionalAlias;
+    var urn_3gpp_ns_mcpttPresInfo_1_0.P_id v_P_id;
+    var urn_3gpp_ns_mcpttPresInfoFA_1_0.P_id_fa v_P_id_fa;
+    var urn_3gpp_ns_mcpttPresInfo_1_0.AdditionalData v_AdditionalData;
+    var PIDF_Tuple_Type v_Tuple;
+    var bitstring v_Bitstring;
+    var integer i;
+    var integer k;
+
+    for (k := 0; k < lengthof(v_Presence.tuple_list); k := k + 1) {
+      v_Tuple := v_Presence.tuple_list[k];
+      v_PIDF.Extension.MCPTT.TupleStatusExtension[k] := cs_MCPTT_PIDF_TupleStatusExtension;
+
+      for (i := 0; i < lengthof(v_Tuple.status.elem_list); i := i + 1) {
+        v_Bitstring := f_XsdString2Bit(v_Tuple.status.elem_list[i]);
+
+        if (not isvalue(v_PIDF.Extension.MCPTT.TupleStatusExtension[k].Affiliation) and (decvalue(v_Bitstring, v_Affiliation) == 0)) {
+          v_PIDF.Extension.MCPTT.TupleStatusExtension[k].Affiliation := f_MCPTT_Affiliation_Decrypt(v_Affiliation, p_MCServiceID, p_CSK);
+        } else if (not isvalue(v_PIDF.Extension.MCPTT.TupleStatusExtension[k].FunctionalAlias) and (decvalue(v_Bitstring, v_FunctionalAlias) == 0)) {
+          v_PIDF.Extension.MCPTT.TupleStatusExtension[k].FunctionalAlias := f_MCPTT_FunctionalAlias_Decrypt(v_FunctionalAlias, p_MCServiceID, p_CSK);
+        } else {
+          FatalError(__FILE__, __LINE__, "Can not decode PIDF Status extension");
+        }
+      }
+    }
+    for (i := 0; i < lengthof(v_Presence.elem_list); i := i + 1) {
+      v_Bitstring := f_XsdString2Bit(v_Presence.elem_list[i]);
+      if (not isvalue(v_PIDF.Extension.MCPTT.P_id) and (decvalue(v_Bitstring, v_P_id) == 0)) {
+        v_PIDF.Extension.MCPTT.P_id := v_P_id;
+      } else if (not isvalue(v_PIDF.Extension.MCPTT.P_id_fa) and (decvalue(v_Bitstring, v_P_id_fa) == 0)) {
+        v_PIDF.Extension.MCPTT.P_id_fa := v_P_id_fa;
+      } else if (not isvalue(v_PIDF.Extension.MCPTT.AdditionalData) and (decvalue(v_Bitstring, v_AdditionalData) == 0)) {
+        v_PIDF.Extension.MCPTT.AdditionalData := v_AdditionalData;
+      } else {
+        FatalError(__FILE__, __LINE__, "Can not decode PIDF Presence extension");
+      }
+    }
+    if (isvalue(p_CSK)) {
+      fx_XML_Log(__FILE__, __LINE__, UPLINK, f_MCX_PIDF_EncryptEncode(v_PIDF, p_MCServiceID));
+    }
+    return valueof(v_PIDF);
+  }
+
+  /*
+   * @desc      Decode and decrypt PIDF
+   * @param     p_XmlBody
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    MCX_PIDF_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCVideo_PIDF_DecodeDecrypt(XmlBody_Type p_XmlBody,
+                                        charstring p_MCServiceID,
+                                        template (omit) MCX_SecurityKey_Type p_CSK) return MCX_PIDF_Type
+  {
+    var Presence v_Presence := fl_MCX_PIDF_Presence_DecodeDecrypt(p_XmlBody, p_MCServiceID, p_CSK);
+    var template (value) MCX_PIDF_Type v_PIDF := cs_MCVideo_PIDF(v_Presence);
+    var urn_3gpp_ns_mcvideoPresInfo_1_0.Affiliation v_Affiliation;
+    var urn_3gpp_ns_mcvideoPresInfo_1_0.P_id v_P_id;
+    var urn_3gpp_ns_mcvideoPresInfo_1_0.AdditionalData v_AdditionalData;
+    var PIDF_Tuple_Type v_Tuple;
+    var bitstring v_Bitstring;
+    var integer i;
+    var integer k;
+
+    for (k := 0; k < lengthof(v_Presence.tuple_list); k := k + 1) {
+      v_Tuple := v_Presence.tuple_list[k];
+      v_PIDF.Extension.MCVideo.TupleStatusExtension[k] := cs_MCVideo_PIDF_TupleStatusExtension;
+
+      for (i := 0; i < lengthof(v_Tuple.status.elem_list); i := i + 1) {
+        v_Bitstring := f_XsdString2Bit(v_Tuple.status.elem_list[i]);
+
+        if (not isvalue(v_PIDF.Extension.MCVideo.TupleStatusExtension[k].Affiliation) and (decvalue(v_Bitstring, v_Affiliation) == 0)) {
+          v_PIDF.Extension.MCVideo.TupleStatusExtension[k].Affiliation := f_MCVideo_Affiliation_Decrypt(v_Affiliation, p_MCServiceID, p_CSK);
+        } else {
+          FatalError(__FILE__, __LINE__, "Can not decode PIDF Status extension");
+        }
+      }
+    }
+    for (i := 0; i < lengthof(v_Presence.elem_list); i := i + 1) {
+      v_Bitstring := f_XsdString2Bit(v_Presence.elem_list[i]);
+      if (not isvalue(v_PIDF.Extension.MCVideo.P_id) and (decvalue(v_Bitstring, v_P_id) == 0)) {
+        v_PIDF.Extension.MCVideo.P_id := v_P_id;
+      } else if (not isvalue(v_PIDF.Extension.MCVideo.AdditionalData) and (decvalue(v_Bitstring, v_AdditionalData) == 0)) {
+        v_PIDF.Extension.MCVideo.AdditionalData := v_AdditionalData;
+      } else {
+        FatalError(__FILE__, __LINE__, "Can not decode PIDF Presence extension");
+      }
+    }
+    if (isvalue(p_CSK)) {
+      fx_XML_Log(__FILE__, __LINE__, UPLINK, f_MCX_PIDF_EncryptEncode(v_PIDF, p_MCServiceID));
+    }
+    return valueof(v_PIDF);
+  }
+
+  /*
+   * @desc      Decode and decrypt PIDF
+   * @param     p_XmlBody
+   * @param     p_MCServiceID
+   * @param     p_CSK
+   * @return    MCX_PIDF_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_PIDF_DecodeDecrypt(XmlBody_Type p_XmlBody,
+                                       charstring p_MCServiceID,
+                                       template (omit) MCX_SecurityKey_Type p_CSK) return MCX_PIDF_Type
+  {
+    var Presence v_Presence := fl_MCX_PIDF_Presence_DecodeDecrypt(p_XmlBody, p_MCServiceID, p_CSK);
+    var template (value) MCX_PIDF_Type v_PIDF := cs_MCData_PIDF(v_Presence);
+
+    var urn_3gpp_ns_mcdataPresInfo_1_0.Affiliation v_Affiliation;
+    var urn_3gpp_ns_mcdataPresInfoFA_1_0.FunctionalAlias v_FunctionalAlias;
+    var urn_3gpp_ns_mcdataPresInfo_1_0.P_id v_P_id;
+    var urn_3gpp_ns_mcdataPresInfoFA_1_0.P_id_fa v_P_id_fa;
+    var PIDF_Tuple_Type v_Tuple;
+    var bitstring v_Bitstring;
+    var integer i;
+    var integer k;
+
+    for (k := 0; k < lengthof(v_Presence.tuple_list); k := k + 1) {
+      v_Tuple := v_Presence.tuple_list[k];
+      v_PIDF.Extension.MCData.TupleStatusExtension[k] := cs_MCData_PIDF_TupleStatusExtension;
+
+      for (i := 0; i < lengthof(v_Tuple.status.elem_list); i := i + 1) {
+        v_Bitstring := f_XsdString2Bit(v_Tuple.status.elem_list[i]);
+
+        if (not isvalue(v_PIDF.Extension.MCData.TupleStatusExtension[k].Affiliation) and (decvalue(v_Bitstring, v_Affiliation) == 0)) {
+          v_PIDF.Extension.MCData.TupleStatusExtension[k].Affiliation := f_MCData_Affiliation_Decrypt(v_Affiliation, p_MCServiceID, p_CSK);
+        } else if (not isvalue(v_PIDF.Extension.MCData.TupleStatusExtension[k].FunctionalAlias) and (decvalue(v_Bitstring, v_FunctionalAlias) == 0)) {
+          v_PIDF.Extension.MCData.TupleStatusExtension[k].FunctionalAlias := f_MCData_FunctionalAlias_Decrypt(v_FunctionalAlias, p_MCServiceID, p_CSK);
+        } else {
+          FatalError(__FILE__, __LINE__, "Can not decode PIDF Status extension");
+        }
+      }
+    }
+    for (i := 0; i < lengthof(v_Presence.elem_list); i := i + 1) {
+      v_Bitstring := f_XsdString2Bit(v_Presence.elem_list[i]);
+      if (not isvalue(v_PIDF.Extension.MCData.P_id) and (decvalue(v_Bitstring, v_P_id) == 0)) {
+        v_PIDF.Extension.MCData.P_id := v_P_id;
+      } else if (not isvalue(v_PIDF.Extension.MCData.P_id_fa) and (decvalue(v_Bitstring, v_P_id_fa) == 0)) {
+        v_PIDF.Extension.MCData.P_id_fa := v_P_id_fa;
+      } else {
+        FatalError(__FILE__, __LINE__, "Can not decode PIDF Presence extension");
+      }
+    }
+    if (isvalue(p_CSK)) {
+      fx_XML_Log(__FILE__, __LINE__, UPLINK, f_MCX_PIDF_EncryptEncode(v_PIDF, p_MCServiceID));
+    }
+    return valueof(v_PIDF);
+  }
+
+  } // end of group MCX_PIDF_Group
+
+}

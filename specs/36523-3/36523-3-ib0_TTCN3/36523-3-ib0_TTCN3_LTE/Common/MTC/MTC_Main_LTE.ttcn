@@ -1,0 +1,163 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2020-07-09 13:32:12 +0200 (Thu, 09 Jul 2020) $
+// $Rev: 28306 $
+/******************************************************************************/
+
+module MTC_Main_LTE {
+
+  import from CommonDefs all;
+  import from EUTRA_Component all;
+  import from IMS_Component all;
+  import from IMS_DefaultHandler all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Main all;
+  import from MTC_Base all;
+  import from MTC_Component_LTE all;
+  import from MTC_UpperTester all;
+  import from NasEmu_Component_EUTRA all;
+  import from NasEmu_Main_EUTRA all;
+  import from UpperTesterSystemCmds all;
+
+  /*
+   * @desc      Connect all PTCs (LTE test cases)
+   * @param     p_System
+   * @param     p_Eutra     EUTRA_PTC
+   * @param     p_ImsPdn1
+   * @param     p_ImsPdn2   IMS PTC for PDN2; for PDN1 per default the common IMS handler is started which handles regular IMS registration
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_MTC_ConnectPTCs_LTE(SYSTEM_LTE p_System,
+                                 EUTRA_PTC p_Eutra,
+                                 IMS_PTC p_ImsPdn1,
+                                 IMS_PTC p_ImsPdn2) runs on MTC_LTE
+  { /* @sic R5-104796 change 12: CDMA2000 added sic@ */
+    /* @sic R5-113805, R5-113696, R5-113734: new parameter p_RatCombination sic@ */
+    /* @sic R5-113037: Introduction of positioning test cases sic@ */
+    /* p_RatCombination is used only in cases where a dummy PTC is used for GERAN or UTRAN to get the system info for EUTRA's system information combination 10 and c10a */
+    /* @sic R5-113037: Introduction of positioning test cases sic@ */
+    var IP_PTC v_IP_PTC;
+    var NASEMU_EUTRA_PTC v_NASEMU_PTC;
+    var IMS_PTC v_ImsPdn1;
+    var boolean v_C2KTunnellingFlag := false;
+
+    vc_Components.Eutra := p_Eutra;
+
+    if (p_Eutra == null) {
+      FatalError (__FILE__, __LINE__, "invalid configuration");
+      mtc.stop;
+    }
+
+    // ***** MTC *****
+    f_MTC_BASE_Map(p_System);
+
+    // ***** EUTRA PTC *****
+    f_EUTRA_PTC_Map(p_System, p_Eutra, v_C2KTunnellingFlag);                // map EUTRA system ports
+    v_NASEMU_PTC := f_NasEmu_CreateConnectAndMap_EUTRA(p_System, p_Eutra);  // create NasEmu, map system ports and connect with EUTRA PTC
+    v_NASEMU_PTC.start(f_NASEMU_MainLoop_EUTRA());                          // start NASEMU
+
+    // ***** Create, map, connect and start IP PTC *****
+    v_IP_PTC := f_IP_PTC_CreateAndMap(p_System);
+    if (p_Eutra != null)     {connect(p_Eutra:IP, v_IP_PTC:EUTRA_CTRL);}    /* @sic R5-125676 sic@ */
+    v_IP_PTC.start(f_IP_PTC_MainLoop());
+
+    // ***** Create, connect and start IMS PTC *****
+    // IMS for PDN1: if PTC is not created yet the default IMS PTC will be used
+    if (p_ImsPdn1 == null) { v_ImsPdn1 := f_IMS_PTC_Create(); }         // => default IMS handling for PDN1
+    else                   { v_ImsPdn1 := p_ImsPdn1; }
+
+    connect(v_ImsPdn1:IMS_CTRL,      v_IP_PTC:IMS_CTRL[tsc_Index_IMS1]);
+    connect(v_ImsPdn1:IMS_Server,    v_IP_PTC:IMS_Server[tsc_Index_IMS1]);
+    connect(v_ImsPdn1:IMS_Client,    v_IP_PTC:IMS_Client[tsc_Index_IMS1]);
+    
+    connect(v_ImsPdn1:IPCAN,         p_Eutra:IMS[tsc_Index_IMS1]);
+    connect(v_ImsPdn1:MMI,           mtc:PTC_Ut[tsc_MTC_PortIndex_IMS1]);   /* @sic R5-134070: generic handling of UT commands for IMS PTC as well as for the other PTCs sic@ */
+
+
+    if (p_ImsPdn1 == null) {
+      v_ImsPdn1.start(f_IMS_DefaultHandler());
+    }
+
+    // IMS for PDN (emergency call)
+    if (p_ImsPdn2 != null) {                             // test case specific IMS handling for PDN2
+      connect(p_ImsPdn2:IMS_CTRL,      v_IP_PTC:IMS_CTRL[tsc_Index_IMS2]);
+      connect(p_ImsPdn2:IMS_Server,    v_IP_PTC:IMS_Server[tsc_Index_IMS2]);
+      connect(p_ImsPdn2:IMS_Client,    v_IP_PTC:IMS_Client[tsc_Index_IMS2]);
+      
+      connect(p_ImsPdn2:IPCAN,         p_Eutra:IMS[tsc_Index_IMS2]);
+      connect(p_ImsPdn2:MMI,           mtc:PTC_Ut[tsc_MTC_PortIndex_IMS2]);   /* @sic R5-134070: generic handling of UT commands for IMS PTC as well as for the other PTCs sic@
+                                                                                 @sic R5s130987 sic@ */
+    }
+
+    // ***** Connect PTCs to MTC *****
+    if (p_Eutra != null)     {connect(mtc:PTC_Ut[tsc_MTC_PortIndex_EUTRA],    p_Eutra:UT);}
+
+    f_UT_InitialPowerOffUE(Ut); /* @sic R5s120520 sic@ */
+  }
+
+  /*
+   * @desc      stop mtc, NAS emulator, IP PTC etc. when all test case components have finished
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function fl_MTC_StopIfFinished_LTE () runs on MTC_LTE
+  { /* NOTE: there is no reference for IMS since no IMS behaviour will happen when all RAT PTC are gone */
+    if (vc_Components.Eutra == null) {
+      f_MTC_Stop(pass);                      // 'pass' will overrule 'none' only
+    }
+  }
+
+  /*
+   * @desc      Interface to control the other components
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  altstep a_PTC_Control_LTE() runs on MTC_LTE
+  { /* NOTEs:
+       - acc. to ES 201 873-1 Annex F.1.1 an error verdict shall be assignd when "running" is applied on any uninitialised component
+       - it seems that "running" cannot be used in the "[]" */
+
+    [] any component.killed
+      { // at a component something's gone wrong and it killed itself, so have to stop everything else
+        all component.kill;
+        mtc.stop;
+      }
+
+    /* since the NAS emulator is a parallel component which does not terminate on its own we need to check all components
+       @sic R5s100751 change 9 sic@ */
+    [vc_Components.Eutra != null] vc_Components.Eutra.done
+      {
+        vc_Components.Eutra := null;
+        fl_MTC_StopIfFinished_LTE();
+      }
+  }
+
+  /*
+   * @desc      Main loop of the MTC
+   * @param     p_GuardTimer timer
+   * @status    APPROVED (LTE, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12)
+   */
+  function f_MTC_MainLoop_LTE(timer p_GuardTimer) runs on MTC_LTE
+  { /* @sic R5-113037: Introduction of positioning test cases sic@ */
+    /* @sic R5s120520: f_UT_InitialPowerOffUE moved to f_MTC_ConnectPTCs_LTE sic@ */
+
+    f_MTC_BASE_Init();
+
+    while (true) {      /* mtc will be stopped by a_PTC_Control_LTE or due to timeout of the guard timer;
+                           => neither a_PTC_Control_LTE nor a_UpperTester needs to use 'repeat' */
+      alt {
+        [] a_PTC_Control_LTE();             // handle 'done' and 'killed' of PTCs: MTC will be stopped, when all PTCs are terminated or a fatal error occurs
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_EUTRA);    // handle upper tester for PTC 0 (EUTRA)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_IMS1);     // handle upper tester for PTC 4 (IMS1)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_IMS2);     // handle upper tester for PTC 5 (IMS2)
+        [] a_MTC_ReceiveFromUT_SendToPTC();
+        [] p_GuardTimer.timeout {f_MTC_Stop(fail);}    /* acc. to the assumption that preamble and postamble are short compared to the testbody
+                                                          a FAIL verdict is assigned (rather than an INCONC) */
+      }
+    }
+  }
+
+}

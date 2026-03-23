@@ -1,0 +1,550 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module IMS_SessionTimerTestcases {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CC_SessionTimerCommon all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Steps 1 to 11A defined in annex C.11
+   * @param     p_SessionExpires    (default value: omit)
+   * @param     p_Allow             (default value: omit)
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_Invite_C11)
+   * @return    IMS_CC_MT_SpeechCallInfo_Type
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_MTCallSetupWithSessionTimer_Steps1_11A(template (omit) SessionExpires p_SessionExpires := omit,
+                                                         template (omit) Allow p_Allow := omit,
+                                                         OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_Invite_C11) runs on IMS_PTC return IMS_CC_MT_SpeechCallInfo_Type
+  {
+    var SipUrl v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    var template (value) SDP_Message v_SDP_MessageStep1 := f_IMS_BuildSDP_InitialOfferAudio_TX(tsc_IMS_SDP_AudioCodecList_WBAMR_AMR);
+    var template (value) MessageHeader v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderTX(p_OptionTagsForSupported);
+    var template (value) INVITE_Request v_InviteRequest;
+    var IMS_CC_MT_SpeechCallInfo_Type v_SpeechCallInfo;
+    var IMS_ResponseWithSdp_Type v_IMS_ResponseWithSdp;
+    var IMS_Response_Type v_SessionProgress183;
+
+    v_MessageHeader_Invite.sessionExpires := p_SessionExpires;
+    v_MessageHeader_Invite.allow := p_Allow;
+
+    v_InviteRequest := cs_INVITE_Request(v_ContactUrl, v_MessageHeader_Invite, cs_MessageBody_SDP(v_SDP_MessageStep1));
+    v_SpeechCallInfo.InviteRequestWithSdp := f_IMS_InviteRequestWithSdpMT(v_InviteRequest, v_SDP_MessageStep1);
+
+    // Step 1 - 4
+    v_IMS_ResponseWithSdp := f_IMS_MTCallSetup_AnnexC11_Steps1_4(v_SpeechCallInfo.InviteRequestWithSdp);
+    v_SessionProgress183 := v_IMS_ResponseWithSdp.Response;
+    v_SpeechCallInfo.ContactUrl := f_MessageHeader_GetContactSipUrl(v_SessionProgress183.msgHeader);
+    
+    // Step 5 - 6
+    f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_SpeechCallInfo.InviteRequestWithSdp.Invite, v_SessionProgress183.msgHeader);
+
+    // Establish Dedicated EPS bearer
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);
+
+    // Step 7 - 11
+    f_IMS_MTCallSetup_AnnexC11_Steps7_11(v_SpeechCallInfo.InviteRequestWithSdp, v_IMS_ResponseWithSdp);
+
+    // Step 11A
+    f_UT_AnswerCall(MMI);
+
+    return v_SpeechCallInfo;
+  }
+
+  /*
+   * @desc      Steps 3 - 11 of C.21; returns Contact URL of the remote side (SS side)
+   * @param     p_InviteRequestWithSdp
+   * @param     p_Allow             (default value: omit)
+   * @return    template (omit) Contact
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallSetup_AnnexC21_Steps3_11(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                template (omit) Allow p_Allow := omit) runs on IMS_PTC return template (omit) Contact
+  { /* @sic R5-201447: p_Allow sic@ */
+    /* @sic R5s220760: return template (omit) Contact sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response183;
+
+    // Step 3. SS sends a 100 Trying provisional response.
+    f_IMS_MOCallSetup_Send100Trying(p_InviteRequestWithSdp);
+
+    // Step 4. Send 183 Session In Progress.
+    v_MessageHeader_Response183 := f_IMS_InviteResponse_183_MessageHeaderTX(p_InviteRequestWithSdp.Invite);
+    v_MessageHeader_Response183.allow := p_Allow;                                                 /* @sic R5-201447 sic@ */
+    f_IMS_MOCallSetup_AnnexC21_Step4(p_InviteRequestWithSdp, v_MessageHeader_Response183);
+    
+    // See TS. 36.508 EUTRA/EPS signalling for IMS MO speech call Table 4.5A.6.3-1 Step 9-11
+    f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);  /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer */
+    
+    // Step 5 - 8
+    f_IMS_MOCallSetup_AnnexC21_Steps5_8(p_InviteRequestWithSdp, v_MessageHeader_Response183);
+    
+    // Step 9 - 11
+    f_IMS_MOCallSetup_AnnexC21C25_Step9_11(p_InviteRequestWithSdp);
+    
+    return v_MessageHeader_Response183.contact;
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.1
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_22_1_IMS1() runs on IMS_PTC
+  {
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) Allow v_Allow := cs_Allow(v_MethodList);
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var MessageHeader v_MessageHeaderUpdate;
+    var template (omit) Contact v_ContactSS;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+    var boolean v_CheckMinSE := true;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4();
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (not ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      v_DeltaSec := 1920;
+    } else {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+
+      // @siclog "Steps 4a0 - 4a7" siclog@
+      for (i := 0; i < 2; i := i + 1) {
+        v_DeltaSec := v_DeltaSec + 60;
+        f_IMS_CallWithSessionTimer_Send100Send422ReceiveACK(v_InviteRequest, v_RoutingInfo_DL, v_DeltaSec);
+
+        v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4();
+        f_IMS_CallWithSessionTimer_CheckInviteAfter422(v_InviteRequestWithSdp, v_DeltaSec);  // @sic R5-210118: TC_7_27_NR5GC sic@
+
+        v_InviteRequest := v_InviteRequestWithSdp.Invite;
+        v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+      }
+    }
+
+    // @siclog "Step 5 - 13" siclog@
+    v_ContactSS := f_IMS_MOCallSetup_AnnexC21_Steps3_11(v_InviteRequestWithSdp, v_Allow);
+    v_ContactUrlSS := f_Contact_GetSipUrl(v_ContactSS);
+    
+    // @siclog "Step 14" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, v_Allow, cs_Require_timer, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uac"), cs_MinSE(v_DeltaSec));
+
+    // @siclog "Step 15" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+
+    // @siclog "Step 16 - 19" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac", v_CheckMinSE);
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);   // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+      v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+      f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL, -, -, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uac"), cs_MinSE(v_DeltaSec));
+    }
+
+    // @siclog "Step 20 - 23" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.2
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_22_2_IMS1() runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var InternetProtocol_Type v_Protocol;
+    var template (omit) Contact v_ContactSS;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+    var template charstring v_Refressher := omit;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4();
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {    /* @sic R5-201120 sic@ */
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, v_Refressher);
+    }
+
+    // @siclog "Step 3 - 11" siclog@
+    v_ContactSS := f_IMS_MOCallSetup_AnnexC21_Steps3_11(v_InviteRequestWithSdp);
+    v_ContactUrlSS := f_Contact_GetSipUrl(v_ContactSS);
+    
+    // @siclog "Step 12" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, -, cs_Require_timer, cs_Supported_timer, cs_SessionExpires(v_DeltaSec, "uas"));
+
+    // @siclog "Step 13" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+
+    // @siclog "Step 14" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    v_RoutingInfo_DL := cs_IMS_RoutingInfo(v_Protocol);     /* @sic R5s200206 change 2.2.1 sic@ */
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequest, v_RoutingInfo_DL, v_ContactSS, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 15" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_Protocol, v_MessageHeaderUpdate, cr_Require_timer, -, v_DeltaSec, "uac"); /* @sic R5s200206 change 2.2.2, R5-201120: cr_Require_timer instead of cr_Supported_timer sic@ */
+
+    // @siclog "Steps 16 - 19" siclog@
+    f_IMS_CallWithSessionTimer_MOCallRelease(v_InviteRequest, v_ContactUrlSS, v_DeltaSec);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.3
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_22_3_IMS1() runs on IMS_PTC
+  {
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) Allow v_Allow := cs_Allow(v_MethodList);
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var MessageHeader v_MessageHeaderUpdate;
+    var template (omit) Contact v_ContactSS;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4();
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+    }
+
+    // @siclog "Step 3 - 11" siclog@
+    v_ContactSS := f_IMS_MOCallSetup_AnnexC21_Steps3_11(v_InviteRequestWithSdp, v_Allow);
+    v_ContactUrlSS := f_Contact_GetSipUrl(v_ContactSS);
+
+    // @siclog "Step 12" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, v_Allow);
+
+    // @siclog "Step 13" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+
+    // @siclog "Steps 14 - 17" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac");
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);   // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+      v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+      f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL);
+    }
+
+    // @siclog "Step 18 - 21" siclog@
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.4
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_22_4_IMS1() runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var INVITE_Request v_InviteRequest;
+    var MessageHeader v_MessageHeaderInvite;
+    var template (omit) Contact v_ContactSS;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4();
+    v_InviteRequest := v_InviteRequestWithSdp.Invite;
+    v_MessageHeaderInvite := v_InviteRequest.msgHeader;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    
+    if (ispresent(v_MessageHeaderInvite.sessionExpires)) {
+      f_IMS_CallWithSessionTimer_CheckSessionExpires(v_MessageHeaderInvite.sessionExpires, v_DeltaSec, "uac" ifpresent);
+    }
+
+    // @siclog "Step 3 - 11" siclog@
+    v_ContactSS := f_IMS_MOCallSetup_AnnexC21_Steps3_11(v_InviteRequestWithSdp);
+    v_ContactUrlSS := f_Contact_GetSipUrl(v_ContactSS);
+
+    // @siclog "Step 12" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderInvite, v_RoutingInfo_DL, -, -, cs_Supported_timer);
+
+    // @siclog "Step 13" siclog@
+    f_IMS_CallWithSessionTimer_ReceiveACK(v_InviteRequest, v_ContactUrlSS);
+
+    // @siclog "Step 14 - 17" siclog@
+    f_Delay(int2float(1860));
+    v_ContactUrlUE := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MO_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.5
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_22_5_IMS1() runs on IMS_PTC
+  {
+    var IMS_CC_MT_SpeechCallInfo_Type v_SpeechCallInfo;
+    var INVITE_Request v_InviteRequest;
+    var Contact v_ContactSS;
+    var SipUrl v_ContactUrlSS;
+    var SipUrl v_ContactUrlUE;
+    var IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Steps 1 - 11A" siclog@
+    v_SpeechCallInfo := f_IMS_MTCallSetupWithSessionTimer_Steps1_11A();
+    v_InviteRequest := v_SpeechCallInfo.InviteRequestWithSdp.Invite;
+    v_ContactSS := v_InviteRequest.msgHeader.contact;
+    v_ContactUrlSS := f_Contact_GetSipUrl(v_ContactSS);
+    v_ContactUrlUE := v_SpeechCallInfo.ContactUrl;
+    v_RoutingInfo_DL := v_SpeechCallInfo.InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 12 - 13" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_SpeechCallInfo.InviteRequestWithSdp, cr_Require_timer, -, v_DeltaSec, "uac");
+
+    // @siclog "Step 14" siclog@
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequest, v_RoutingInfo_DL, v_ContactSS, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 15" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_RoutingInfo_DL.Protocol, v_MessageHeaderUpdate, -, cr_Supported_timer, v_DeltaSec, "uac");
+
+    // @siclog "Steps 16 - 19" siclog@
+    f_IMS_CallWithSessionTimer_MOCallRelease(v_InviteRequest, v_ContactUrlSS, v_DeltaSec);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.6
+   * @status    APPROVED (IMS)
+   */
+   function f_TC_22_6_IMS1() runs on IMS_PTC
+  {
+    var IMS_CC_MT_SpeechCallInfo_Type v_SpeechCallInfo;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUrlUE;
+    var IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Steps 1 - 11A" siclog@
+    v_SpeechCallInfo := f_IMS_MTCallSetupWithSessionTimer_Steps1_11A(cs_SessionExpires(v_DeltaSec));
+    v_InviteRequest := v_SpeechCallInfo.InviteRequestWithSdp.Invite;
+    v_ContactUrlUE := v_SpeechCallInfo.ContactUrl;
+    v_RoutingInfo_DL := v_SpeechCallInfo.InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 12 - 13" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_SpeechCallInfo.InviteRequestWithSdp, cr_Require_timer, -, v_DeltaSec, "uac");
+
+    // @siclog "Step 14" siclog@
+    v_MessageHeaderUpdate := f_IMS_CallWithSessionTimer_SendUpdateAfterHalfDeltaSec(v_InviteRequest, v_RoutingInfo_DL, -, v_ContactUrlUE, v_DeltaSec, "uac");
+
+    // @siclog "Step 15" siclog@
+    f_IMS_CallWithSessionTimer_Receive200OK(v_RoutingInfo_DL.Protocol, v_MessageHeaderUpdate, -, cr_Supported_timer, v_DeltaSec, "uac");
+
+    // @siclog "Step 16 - 19" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.7
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_22_7_IMS1() runs on IMS_PTC
+  {
+    var Method_List v_MethodList := {"INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var IMS_CC_MT_SpeechCallInfo_Type v_SpeechCallInfo;
+    var INVITE_Request v_InviteRequestMT;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var integer v_DeltaSec := 1800;
+    var integer i;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Steps 1 - 11A" siclog@
+    v_SpeechCallInfo := f_IMS_MTCallSetupWithSessionTimer_Steps1_11A(cs_SessionExpires(v_DeltaSec, "uas"), cs_Allow(v_MethodList));
+    v_InviteRequestMT := v_SpeechCallInfo.InviteRequestWithSdp.Invite;
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequestMT.msgHeader);
+    v_ContactUrlUE := v_SpeechCallInfo.ContactUrl;
+
+    // @siclog "Steps 12 - 13" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_SpeechCallInfo.InviteRequestWithSdp, cr_Require_timer, -, v_DeltaSec, "uas");
+
+    // @siclog "Steps 14 - 19" siclog@
+    for (i := 0; i < 2; i := i + 1) {
+      f_IMS_CallWithSessionTimer_MORefresh(v_ContactUrlSS, cs_Require_timer, -, v_DeltaSec, "uac");  /* @sic R5-210124: common function sic@
+                                                                                                        @sic R5s210678 change 2: cs_Supported_timer as parameter sic@
+                                                                                                        @sic R5-214215: cs_Require_timer instead of cs_Supported_timer sic@*/
+    }
+
+    // @siclog "Step 20 - 23" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 22.8
+   * @status    APPROVED (IMS)
+   */
+  function f_TC_22_8_IMS1() runs on IMS_PTC
+  {
+    var Method_List v_MethodList := {"INVITE", "UPDATE", "PRACK", "ACK", "OPTIONS", "CANCEL", "BYE"};
+    var OptionTag_List v_OptionTagsForSupported := tsc_OptionTagList_100rel & tsc_OptionTagList_precondition;   // no 'timer'
+    var IMS_CC_MT_SpeechCallInfo_Type v_SpeechCallInfo;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUrlUE;
+    var SipUrl v_ContactUrlSS;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var MessageHeader v_MessageHeaderUpdate;
+    var integer v_DeltaSec := 1800;
+
+    f_IMS_CC_Preamble(IPCAN_SpeechCall, IMS_REGISTERED);
+    
+    f_IMS_TestBody_Set(true);
+
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+
+    // @siclog "Steps 1 - 11A" siclog@
+    v_SpeechCallInfo := f_IMS_MTCallSetupWithSessionTimer_Steps1_11A(-, cs_Allow(v_MethodList), v_OptionTagsForSupported);  // @sic R5-201447: cs_Allow sic@
+    v_InviteRequest := v_SpeechCallInfo.InviteRequestWithSdp.Invite;
+    v_ContactUrlSS := f_MessageHeader_GetContactSipUrl(v_InviteRequest.msgHeader);
+    v_ContactUrlUE := v_SpeechCallInfo.ContactUrl;
+    v_RoutingInfo_DL := v_SpeechCallInfo.InviteRequestWithSdp.RoutingInfo;
+
+    // @siclog "Steps 12 - 13" siclog@
+    f_IMS_MTCallSetupWithSessionTimer_Receive200OK_SendACK(v_SpeechCallInfo.InviteRequestWithSdp, -, -, v_DeltaSec, "uas");
+
+    // @siclog "Step 14" siclog@
+    v_IMS_DATA_REQ := f_IMS_CallWithSessionTimer_ReceiveUpdate(v_ContactUrlSS, v_InviteRequest, v_DeltaSec, "uac");
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);   // @sic R5s220951: get RoutingInfo from latest IMS_DATA_REQ sic@
+    v_MessageHeaderUpdate := v_IMS_DATA_REQ.Request.Update.msgHeader;
+
+    // @siclog "Step 15" siclog@
+    f_IMS_CallWithSessionTimer_Send200OK(v_MessageHeaderUpdate, v_RoutingInfo_DL, -, -, -, -, -, f_SIP_SipUrl2Str(v_ContactUrlSS));   /* @sic R5s240677: f_SIP_SipUrl2Str(v_ContactUrlSS) sic@ */
+
+    // @siclog "Step 16 - 19" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrlUE);
+
+    f_IMS_TestBody_Set(false);
+
+    f_IMS_CC_Postamble(IPCAN_MT_SpeechCall);
+  }
+
+}

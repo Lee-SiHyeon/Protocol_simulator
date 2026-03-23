@@ -1,0 +1,374 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-12 15:37:11 +0200 (Thu, 12 Jun 2025) $
+// $Rev: 41486 $
+/******************************************************************************/
+
+module NBIOT_L2_Common {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CIOT_NASTemplates all;
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_LoopBack all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NasEmu_L2Test_NBIOT all;
+
+  template (value) NB_ReqAspCommonPart_Type cs_NB_ReqAspCommonPart_L2TEST :=
+  { /* ASP common part for ASPs sent to the NAS emulator to be routed back to the L2DATA port */
+    /* @status    APPROVED (NBIOT) */
+    CellId := nbiot_Cell_NonSpecific,
+    RoutingInfo := cs_NB_RoutingInfo_L2Test,
+    TimingInfo := cs_TimingInfo_None,
+    ControlInfo := {
+      CnfFlag := false,
+      FollowOnFlag := false
+    }
+  };
+
+  template (value) NB_SRB_COMMON_REQ cas_NB_L2TEST_NasPdu_REQ(template (value) NAS_MSG_Request_Type p_NasMsg) :=
+  { /* ASP to send NAS message (within RRC DLInformationTransfer) to NAS emulator to get is back encoded at NASEMU_L2TEST */
+    /* @status    APPROVED (NBIOT) */
+    Common := cs_NB_ReqAspCommonPart_L2TEST,
+    Signalling := {
+      Rrc := omit,
+      Nas := { p_NasMsg }
+    }
+  };
+
+  template (present) NASEMU_NBIOT_NB_L2SDU_MSG cr_NB_L2SDU_MSG_DCCH :=
+  { /* @status    APPROVED (NBIOT) */
+    Dcch := ?
+  };
+
+  /*
+   * @desc      send L3 message to the NAS emulator and get it back encoded
+   * @param     p_NasRequest
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_CPMode_EncodeL3Message(template (value) NAS_MSG_Request_Type p_NasRequest) runs on NBIOT_PTC return octetstring
+  {
+    var NASEMU_NBIOT_NB_L2SDU_MSG v_NB_L2SDU_MSG_DCCH;
+
+    SRB.send(cas_NB_L2TEST_NasPdu_REQ(p_NasRequest));
+    NASEMU_L2TEST.receive(cr_NB_L2SDU_MSG_DCCH) -> value v_NB_L2SDU_MSG_DCCH;
+    
+    return bit2oct(f_OctetAlignedBitString(v_NB_L2SDU_MSG_DCCH.Dcch));   /* @sic R5s170684: f_OctetAlignedBitString sic@ */
+  }
+
+  /*
+   * @desc      return NAS request with ESM_DATA_TRANSPORT to be used for CP loop back mode
+   * @param     p_TestLoopMode
+   * @param     p_RlcSdu
+   * @param     p_EPSBearerId       (default value: tsc_EpsDefaultBearerId)
+   * @return    template (value) NAS_MSG_Request_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_CPMode_DL_NAS_Message(NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                            template (value) RLC_SDU_Type p_RlcSdu,
+                                            EPS_BearerIdentity p_EPSBearerId := tsc_EpsDefaultBearerId) return template (value) NAS_MSG_Request_Type
+  {
+    var ProcedureTransactionIdentifier v_PTI := tsc_PTI_Unassigned;
+    var template (value) NAS_DL_Message_Type v_NasMsg;
+
+    select (p_TestLoopMode) {
+      case (STATE2A_NB_TESTLOOP_ModeG) {
+        v_NasMsg := cs_ESM_DATA_TRANSPORT(p_EPSBearerId, v_PTI, cs_UserDataContainer(p_RlcSdu));
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "TestLoopMode not implemented yet");
+      }
+    }
+    return cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_NasMsg);
+  }
+
+  template (value) NB_RLC_CountsReq_Type cs_RLC_CountsGet :=
+  { /* @status    APPROVED (NBIOT) */
+    Get := true
+  };
+
+  template (present) NB_SYSTEM_CTRL_CNF car_RlcCounts_CNF(NBIOT_CellId_Type p_CellId,
+                                                          template (present) NB_RLC_CountsCnf_Type p_RLC_CountsCnf) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := cr_NB_CnfAspCommonPart_CellCfg(p_CellId),
+    Confirm := {
+      RlcCounts := p_RLC_CountsCnf
+    }
+  };
+
+  template (value) NB_RLC_CountsReq_Type cs_RLC_CountsSet(integer p_AM_VTS,
+                                                          integer p_AM_VRR) :=
+  { /* @status    APPROVED (NBIOT) */
+    Set := {
+      AM_VTS := p_AM_VTS,
+      AM_VRR := p_AM_VRR
+    }
+  };
+
+  template (value) NB_SYSTEM_CTRL_REQ cas_RlcCounts_REQ(NBIOT_CellId_Type p_CellId,
+                                                        template (value) NB_RLC_CountsReq_Type p_CountsReq,
+                                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common  := cs_NB_ReqAspCommonPart_CellCfg(p_CellId, p_TimingInfo),
+    Request := {
+      RlcCounts := p_CountsReq
+    }
+  };
+
+  /*
+   * @desc      Common functon to enquire RLC sequence numbers
+   * @param     p_CellId
+   * @return    NB_RLC_CountsInfoList_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_RlcCounts_Get(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC return NB_RLC_CountsInfoList_Type
+  {
+    var NB_SYSTEM_CTRL_CNF  v_ReceivedAsp;
+    
+    SYS.send   (cas_RlcCounts_REQ (p_CellId, cs_RLC_CountsGet));
+    SYS.receive(car_RlcCounts_CNF(p_CellId, {Get := ?})) -> value v_ReceivedAsp;
+
+    return v_ReceivedAsp.Confirm.RlcCounts.Get;
+  }
+
+  /*
+   * @desc      set RLC counts at the given cell
+   * @param     p_CellId
+   * @param     p_AM_VTS
+   * @param     p_AM_VRR
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_RlcCounts_Set(NBIOT_CellId_Type p_CellId,
+                                    integer p_AM_VTS,
+                                    integer p_AM_VRR,
+                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var boolean v_CnfFlag := f_TimingInfo_IsNow(p_TimingInfo);
+    var template (present) NB_RLC_CountsCnf_Type v_CountsCnf := {Set := true};
+
+    SYS.send (cas_RlcCounts_REQ(p_CellId, cs_RLC_CountsSet(p_AM_VTS, p_AM_VRR), p_TimingInfo));
+    if (v_CnfFlag) {
+      SYS.receive(car_RlcCounts_CNF(p_CellId, v_CountsCnf));
+    }
+  }
+
+  type enumerated NBIOT_L2_TestConfig_Type { NormalMode, TransparentMode_RLC_Only, TransparentMode_RLC_MAC };  /* @status    APPROVED (NBIOT) */
+
+  /*
+   * @desc      configure test mode at the SS
+   * @param     p_CellId
+   * @param     p_TestConfig
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_CPMode_SrbTestMode(NBIOT_CellId_Type p_CellId,
+                                         NBIOT_L2_TestConfig_Type p_TestConfig,
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearer_Type v_NB_RadioBearer;
+    var template (value) NB_RadioBearerList_Type v_SrbList;
+    var IndicationAndControlMode_Type v_L2TestMode;
+
+    select (p_TestConfig) {
+      case (NormalMode) {
+        v_L2TestMode := disable;
+        v_NB_RadioBearer := cs_NB_SRB1bis_ConfigCommon(v_L2TestMode);
+      }
+      case (TransparentMode_RLC_Only) {
+        v_L2TestMode := enable;         // SS to route UL messages to the L2DATA port
+        v_NB_RadioBearer := cs_NB_SRB1bis_ConfigCommon(v_L2TestMode, cs_NB_RLC_RbConfig_TM);
+      }
+      case (TransparentMode_RLC_MAC) {
+        v_L2TestMode := enable;         // SS to route UL messages to the L2DATA port
+        v_NB_RadioBearer := cs_NB_SRB1bis_ConfigCommon(v_L2TestMode, cs_NB_RLC_RbConfig_TM, cs_NB_MAC_TestMode_Transparent);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "unknown test mode");
+      }
+    }
+    v_SrbList := { v_NB_RadioBearer };
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_SrbList, p_TimingInfo); //@sic R5s240246 ch 2.1.10 sic@
+  }
+
+  /*
+   * @desc      Leave state 2B: stop SRB test mode and restore RLC counters
+   * @param     p_CellId
+   * @param     p_AM_VTS
+   * @param     p_AM_VRR
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_CPMode_RestoreSRBs(NBIOT_CellId_Type p_CellId,
+                                         integer p_AM_VTS,
+                                         integer p_AM_VRR,
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    f_NBIOT_L2_CPMode_SrbTestMode(p_CellId, NormalMode, p_TimingInfo);
+    f_NBIOT_SS_RlcCounts_Set(p_CellId, p_AM_VTS, p_AM_VRR, p_TimingInfo);
+  }
+
+  /*
+   * @desc      stop UL grants and configure SRB test mode at the SS
+   * @param     p_CellId
+   * @param     p_TestConfig
+   * @return    NB_RLC_CountsInfoList_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_CPMode_StopULGrant_EnableSrbTestMode(NBIOT_CellId_Type p_CellId,
+                                                           NBIOT_L2_TestConfig_Type p_TestConfig) runs on NBIOT_PTC return NB_RLC_CountsInfoList_Type
+  {
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoList;
+
+    f_NBIOT_StopULGrantTransmission(p_CellId, delay500ms);              /* stop UL grants  @sic R5s170967: delay500ms to wait for RLC ACK sic@ */
+    f_Delay(0.5);                                                       /* @sic R5s180148: wait some time to ensure that the UE does not send any padding PDU anymore as response to a scheduled UL grant sic@
+                                                                           NOTE:
+                                                                           assuming that when the SS confirms stop of UL grants it does not send UL grants afterwards anymore,
+                                                                           a potential padding PDU may only come as response to an UL grant which has been sent immediately before stopping the grants
+                                                                           => 500ms seems to be quite long
+                                                                           Nevertheless there is no known restriction for even a quite long delay in this case */
+    v_RLC_CountsInfoList := f_NBIOT_SS_RlcCounts_Get(p_CellId);         /* get RLC sequence numbers */
+    f_NBIOT_L2_CPMode_SrbTestMode(p_CellId, p_TestConfig);              /* enable testmode */
+
+    return v_RLC_CountsInfoList;
+  }
+
+  /*
+   * @desc      preamble function to enter state 2B
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_TestConfig
+   * @param     p_TestLoopMode
+   * @param     p_TestLoopModeRepetitions (default value: 1)
+   * @param     p_PreconfigureNTN   (default value: false)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_Enter_State2B_NB(out NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                       NBIOT_CellId_Type p_CellId,
+                                       NBIOT_L2_TestConfig_Type p_TestConfig,
+                                       NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                       integer p_TestLoopModeRepetitions := 1,
+                                       boolean p_PreconfigureNTN := false    //@sic R5s250039r2 sic@
+                                       ) runs on NBIOT_PTC
+  {
+    //Bring UE to initial state
+    f_NBIOT_Preamble(p_CellId, CONTROL_PLANE, p_TestLoopMode, -, p_PreconfigureNTN);
+    
+    // test case specific pre-configuration
+    f_NBIOT_CloseUE_TestLoopModeGH(p_CellId,                              // Bring UE to state 2B-NB
+                                   f_NBIOT_UE_TestLoopMode_Type(p_TestLoopMode),
+                                   tsc_TestLoopModeGH_UplinkMode_RLC,
+                                   p_TestLoopModeRepetitions);
+    p_RLC_CountsInfoList := f_NBIOT_L2_CPMode_StopULGrant_EnableSrbTestMode(p_CellId, p_TestConfig);    // @sic R5s180148 sic@
+  }
+
+  /*
+   * @desc      common preamble for L2 test cases; to bring UE into state 2B-NB: Test loop mode closed
+   * @param     p_RLC_CountsInfoList (by reference)
+   * @param     p_CellId
+   * @param     p_TestConfig
+   * @param     p_TestLoopMode
+   * @param     p_RrcConnSetup      (default value: omit)
+   * @param     p_TestLoopModeRepetitions (default value: 1)
+   * @param     p_MaxReferencePower (default value: tsc_ServingCellRS_EPRE)
+   * @param     p_ProcessNumber     (default value: omit)
+   * @param     p_PreconfigureNTN   (default value: false)
+   * @param     p_SysinfoCombination (default value: c1)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_Preamble_State2B_NB(out NB_RLC_CountsInfoList_Type p_RLC_CountsInfoList,
+                                          NBIOT_CellId_Type p_CellId,
+                                          NBIOT_L2_TestConfig_Type p_TestConfig,
+                                          NBIOT_IDLEUPDATED_STATE_Type p_TestLoopMode,
+                                          template (omit) DL_CCCH_Message_NB p_RrcConnSetup := omit,
+                                          integer p_TestLoopModeRepetitions := 1,
+                                          AbsoluteCellPower_Type p_MaxReferencePower := tsc_ServingCellRS_EPRE,
+                                          template (omit) integer p_ProcessNumber := omit, // @sic R5s190043 sic@
+                                          boolean p_PreconfigureNTN := false,             //@sic R5s250039r2 sic@
+                                          NB_Combination_Type p_SysinfoCombination := c1  //@sic R5s250039r2 sic@
+    ) runs on NBIOT_PTC
+  {// @sic R5s240579, R5s240707 sic@
+    f_NBIOT_Init(p_SysinfoCombination);
+    
+    if (p_MaxReferencePower != tsc_ServingCellRS_EPRE) {
+      f_NBIOT_CellInfo_InitMaxReferencePower(p_CellId, p_MaxReferencePower);
+    }
+
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(p_CellId, CONTROL_PLANE);
+
+    if (isvalue(p_ProcessNumber)) {            // configure HARQ process number to be used
+      f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_CcchDcchDtchDL_Config_REQ(p_CellId, cs_TimingInfo_Now, -, cs_NB_DciDlInfo_Auto(p_ProcessNumber)));  // @sic R5s190043 sic@
+    }
+
+    if (isvalue(p_RrcConnSetup)) {            // configure RRC Connection Setup being used during RACH procedure
+      f_NBIOT_SS_ConfigRachProcedureMsg4(p_CellId, p_RrcConnSetup);
+    }
+
+    f_NBIOT_L2_Enter_State2B_NB(p_RLC_CountsInfoList, p_CellId, p_TestConfig, p_TestLoopMode, p_TestLoopModeRepetitions, p_PreconfigureNTN);
+  }
+
+  /*
+   * @desc      Leave state 2B: restore RLC counters, start continuous UL grant scheduling and open the test loop
+   * @param     p_CellId
+   * @param     p_AM_VTS
+   * @param     p_AM_VRR
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_Leave_State2B_NB(NBIOT_CellId_Type p_CellId,
+                                       integer p_AM_VTS,
+                                       integer p_AM_VRR) runs on NBIOT_PTC
+  {
+    var template (omit) integer v_HarqProcessNumber := f_NBIOT_CellInfo_GetDefaultHarqProcessNumber(p_CellId); /* @sic R5w180305: support of two HARQ processes sic@ */
+
+    f_NBIOT_L2_CPMode_RestoreSRBs(p_CellId, p_AM_VTS, p_AM_VRR);
+
+    f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_ContinuousGrant(cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, v_HarqProcessNumber))));  /* @sic R5w180305: support of two HARQ processes sic@ */
+    f_NBIOT_OpenUE_TestLoopMode(p_CellId, tsc_SRB1bis);
+  }
+
+  /*
+   * @desc      postamble for L2 test using test loop
+   * @param     p_CellId
+   * @param     p_AM_VTS
+   * @param     p_AM_VRR
+   * @param     p_DelayBeforeReset  (default value: delay500ms)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_L2_Postamble_State2B_NB(NBIOT_CellId_Type p_CellId,
+                                           integer p_AM_VTS,
+                                           integer p_AM_VRR,
+                                           DelayBeforeConfiguration_Type p_DelayBeforeReset := delay500ms) runs on NBIOT_PTC
+  {
+    f_DelayBeforeConfiguration(p_DelayBeforeReset);     /* @sic R5s170970 sic@ */
+    f_NBIOT_L2_Leave_State2B_NB(p_CellId, p_AM_VTS, p_AM_VRR);
+    f_NBIOT_Postamble(p_CellId, CONTROL_PLANE, N3_TESTMODE);
+  }
+
+}

@@ -1,0 +1,693 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-05 10:22:06 +0100 (Thu, 05 Mar 2026) $
+// $Rev: 43210 $
+/******************************************************************************/
+
+module NAS_AuxiliaryDefsAndFunctions {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from SMS_Templates all;
+  import from SMS_TypeDefs all;
+
+  template (value) ExtdEmergNum cs_ExtdEmergNum (octetstring p_Digits,
+                                                 octetstring p_SubServices := ''O) :=
+  { /* @status    APPROVED (NR5GC) */
+    len         := int2oct(lengthof(p_Digits), 1),
+    digits      := p_Digits,                 // BCD numbers
+    lengthOfSubService := int2oct(lengthof(p_SubServices), 1),
+    subServices := p_SubServices
+  };
+
+  /*
+   * @desc      Function used to check whether the UE requests in its PCO an address allocation via NAS signalling
+   *            If the UE does not send PCO, then address assignment shall be via DHCP. TS 36.508 table 4.7.3-6.
+   * @param     p_Pco
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_CheckExtdPCOforIPallocationViaNas(template (omit) ExtdProtocolConfigOptions p_Pco) return boolean
+  {
+    var ExtdProtocolConfigOptions v_Pco;
+    var integer i;
+
+    if (isvalue(p_Pco)) {
+      v_Pco := valueof (p_Pco);
+      if (ispresent(v_Pco.pco)) { // @sic R5s170233 sic@
+        for (i := 0; i < lengthof(v_Pco.pco); i := i + 1 ) {
+          if(v_Pco.pco[i].protocolID == '000B'O) { // TS 24.008 clause 10.5.6.3
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  /*
+   * @desc      Function used to get the IPv4 and IPv6 PCSCF addresses for the new PDN
+   *            If they're not different from the current PDN address then return an empty list
+   * @param     p_NewPdnIndex
+   * @param     p_ExistingPdnIndex  (default value: PDN_1)
+   * @return    CharStringList_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_GetNewPCSCFaddr(PDN_Index_Type p_NewPdnIndex,
+                           PDN_Index_Type p_ExistingPdnIndex := PDN_1) return CharStringList_Type
+  {
+    var CharStringList_Type v_AddrList := {};
+    var PDN_AddressInfo_Type v_PDN_Address1 := f_PDN_AddressInfo_Get(p_ExistingPdnIndex);
+    var PDN_AddressInfo_Type v_PDN_Address2 := f_PDN_AddressInfo_Get(p_NewPdnIndex);
+    
+    v_AddrList[0] := v_PDN_Address2.PCSCF_IPAddressIPv4;
+    v_AddrList[1] := v_PDN_Address2.PCSCF_IPAddressIPv6;
+
+    if (f_IPAddresses_Compare(v_PDN_Address1.PCSCF_IPAddressIPv4, v_AddrList[0]) or
+          f_IPAddresses_Compare(v_PDN_Address1.PCSCF_IPAddressIPv6, v_AddrList[1]) ) {
+        return {};
+    }
+    
+    return v_AddrList;
+  }
+
+  /*
+   * @desc      Function used to update PCO with new PCSCF addresses
+   *            Can be used for LTE and NR
+   * @param     p_PCOListFromUE
+   * @param     p_AddrList_2
+   * @param     p_AddrList_3        (default value: {})
+   * @return    template
+   * @status    APPROVED (NR5GC)
+   */
+  function f_GetNewPCOPCSCFaddr_Common(ProtocolContainerList p_PCOListFromUE,
+                                       CharStringList_Type p_AddrList_2,
+                                       CharStringList_Type p_AddrList_3 := {}) return template (value) ProtocolContainerList
+  {
+    var template (value) ProtocolContainerList v_PCOList;
+    var octetstring v_Contents;
+    var integer i;
+    var integer v_Count := 0;
+    
+    for (i := 0; i < lengthof(p_PCOListFromUE); i := i +1) {
+      if (p_PCOListFromUE[i].protocolID == '0001'O) { // IPv6
+        v_Contents := f_Convert_IPv6Addr2OctString(p_AddrList_2[1]);
+        v_PCOList[v_Count] := cs_ProtocolContainer('0001'O, v_Contents);
+        v_Count := v_Count + 1;
+        if (lengthof(p_AddrList_3) > 0) {
+          v_Contents := f_Convert_IPv6Addr2OctString(p_AddrList_3[1]);
+          v_PCOList[v_Count] := cs_ProtocolContainer('0001'O, v_Contents);
+          v_Count := v_Count + 1;
+        }
+      } else if(p_PCOListFromUE[i].protocolID == '000C'O) { // IPv4
+        v_Contents := f_Convert_IPv4Addr2OctString(p_AddrList_2[0]);
+        v_PCOList[v_Count] := cs_ProtocolContainer('000C'O, v_Contents);
+        v_Count := v_Count + 1;         // @sic R5s250241 sic@
+        if (lengthof(p_AddrList_3) > 0) {
+          v_Contents := f_Convert_IPv4Addr2OctString(p_AddrList_3[0]);
+          v_PCOList[v_Count] := cs_ProtocolContainer('000C'O, v_Contents);
+          v_Count := v_Count + 1;
+        }
+      }
+     }
+    return v_PCOList;
+  }
+
+  /*
+   * @desc      return
+   *              omit when there is no protocol config option with the given id in the given list
+   *              content of the protocol config option (which can be empty or omit) otherwise
+   * @param     p_Pco
+   * @param     p_ProtocolID
+   * @return    template (omit) octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_ExtdProtocolConfigOptions_Get(template (omit) ExtdProtocolConfigOptions p_Pco,
+                                       O2_Type p_ProtocolID) return template (omit) octetstring
+  {
+    var NAS_ProtocolConfigOptions_Type v_ProtocolConfigOptions;
+    var integer i;
+
+    if (isvalue(p_Pco.pco)) {
+      v_ProtocolConfigOptions := valueof(p_Pco.pco);
+      for (i := 0; i < lengthof(v_ProtocolConfigOptions); i := i + 1) {
+        if (v_ProtocolConfigOptions[i].protocolID == p_ProtocolID) { // TS 24.008 clause 10.5.6.3
+          return v_ProtocolConfigOptions[i].content;
+        }
+      }
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Common function to build up ProtocolConfigOptions
+   * @param     p_ProtocolContainers
+   * @return    template (value) ExtdProtocolConfigOptions
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NAS_ExtdProtocolConfigOptionsTX(template (omit) NAS_ExtdProtocolConfigOptions_Type  p_ProtocolContainers) return template (value) ExtdProtocolConfigOptions
+  {
+    var integer v_Length := 1;   // there are at least ext, spare, configProtocol
+    var integer i;
+
+    if (isvalue(p_ProtocolContainers)) { // @sic R5s170233 sic@
+      for (i:=0; i < lengthof(p_ProtocolContainers); i:=i+1) {
+        v_Length := v_Length + oct2int(valueof(p_ProtocolContainers[i].protocolLength)) + 3; // 2 octets for protocolID and 1 octet for protocolLength
+      }
+    }
+    return cs_ExtdPCO(int2oct(v_Length, 2), p_ProtocolContainers);
+  }
+
+  /*
+   * @desc      Get Pdn Index to be used in Multi PDN/PDU ATS
+   * @param     p_DNNType
+   * @return    PDN_Index_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_GetMultiPdnIndex(PDU_PDN_DNN_Type p_DNNType) return PDN_Index_Type
+  { // @sic R5-221467 sic@
+    var PDN_Index_Type v_PDN := PDN_3;
+    select (p_DNNType) {
+      case (IMS_DNN){
+        v_PDN := PDN_1;
+      }
+      case (Emergency_PDN){
+        v_PDN := PDN_2;
+      }
+      case (URLLC_DNN, UAS_USS_DNN){ // @sic R5-245495 sic@
+        v_PDN := PDN_4;
+      }
+      case (MIOT_DNN, UAS_C2_DNN){   // @sic R5-245495 sic@
+        v_PDN := PDN_5;
+      }
+      case (V2X_DNN){
+        v_PDN := PDN_6;
+      }
+    }
+    return v_PDN;
+  }
+
+  /*
+   * @desc      Checks DNN/APN to see if it requests IMS
+   * @param     p_DNNFromReq
+   * @return    boolean
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IsDNNForIMS(octetstring p_DNNFromReq) return boolean
+  {
+    var CharStringList_Type v_FieldList := f_DomainName_DecodeToList(p_DNNFromReq); // @sic R5s250201 sic@
+    var integer v_FieldCnt := lengthof(v_FieldList);
+    
+    if (v_FieldCnt == 1) {   // DNN = IMS
+      if (match (v_FieldList[0], "IMS")) {
+        return true;
+      }
+    }  else if (v_FieldCnt == 4) {  // @sic R5s250298 sic@
+        if ((match (v_FieldList[0], "IMS")) and (match (v_FieldList[3], "gprs"))) { // DNN = IMS.mccMCC.mncMNC.gprs
+          return true;
+        }
+    }
+    // if none of the above
+    return false;
+  }
+
+  /*
+   * @desc      Get PDN DNN Type to be used in Multi PDN/PDU ATS from APN
+   * @param     p_APN
+   * @return    PDU_PDN_DNN_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_GetPDN_DNNTypeFromAPN(octetstring p_APN) return PDU_PDN_DNN_Type
+  { // @sic R5-221467, R5-245495 sic@
+    var PDU_PDN_DNN_Type v_PDNType := Internet_DNN; // @sic R5s240433 sic@
+    
+    if (match (p_APN, f_DomainName_Encode(pc_APN_ID_Internet))) { // @sic R5s210014 sic@
+      v_PDNType := Internet_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_IMS)) or f_IsDNNForIMS(p_APN)) { // @sic R5s210014 sic@
+      v_PDNType := IMS_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_URLLC))) {
+      v_PDNType := URLLC_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_MIOT))) {
+      v_PDNType := MIOT_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_V2X))) {
+      v_PDNType := V2X_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_Ethernet))) {
+      v_PDNType := Ethernet_DNN;
+/*    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_MBS))) {
+      v_PDNType := MBS_DNN;*/
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_USS))) {
+      v_PDNType := UAS_USS_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_C2))) {
+      v_PDNType := UAS_C2_DNN;
+    } else if (match (p_APN, f_DomainName_Encode(pc_APN_ID_MCX))) {      // @sic R5-250446 sic@
+      v_PDNType := MCX_DNN;
+ 
+    } else if (f_IsDNNForEmergency(p_APN)) {
+      v_PDNType := Emergency_PDN;
+    }
+    
+    return v_PDNType;
+  }
+
+  /*
+   * @desc      function to get/initialise p_DNN as per PICS
+   * @param     p_PDUType
+   * @return    charstring
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_GetDNNStringFromPICS(PDU_PDN_DNN_Type p_PDUType) return charstring
+  {
+    var charstring v_DNN;
+    
+    select (p_PDUType) {
+      case (Internet_DNN) {
+        v_DNN := pc_APN_ID_Internet;
+      }
+      case (IMS_DNN) {
+        v_DNN := pc_APN_ID_IMS;
+      }
+      case (MCX_DNN) {        // @sic R5s250265 change 8 sic@
+        v_DNN := pc_APN_ID_MCX;
+      }
+      case (Emergency_PDN) {  // @sic R5s250092 sic@
+        v_DNN := "sos";
+      }
+      case (URLLC_DNN) {
+        v_DNN := pc_APN_ID_URLLC;
+      }
+      case (MIOT_DNN) {
+        v_DNN := pc_APN_ID_MIOT;
+      }
+      case (V2X_DNN) {
+        v_DNN := pc_APN_ID_V2X;
+      }
+      case (Ethernet_DNN) { // @sic R5-227472 sic@
+        v_DNN := pc_APN_ID_Ethernet;
+      }
+  /*    case (MBS_DNN) { // @sic R5-245495 sic@
+        v_DNN := pc_APN_ID_MBS;
+      }*/
+      case (UAS_USS_DNN) { // @sic R5-246404 sic@
+        v_DNN := pc_APN_ID_USS;
+      }
+      case (UAS_C2_DNN) { // @sic R5-246404 sic@
+        v_DNN := pc_APN_ID_C2;
+      }
+    // @sic R5s220670 sic@
+      case else { FatalError(__FILE__, __LINE__, "Unexpected PICS setting in f_GetDNNStringFromPICS"); }
+    }
+    return v_DNN;
+  }
+
+  /*
+   * @desc      Get Default PDN DNN Type to be used in Multi PDN/PDU ATS from PICS
+   * @return    PDU_PDN_DNN_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_GetDefaultAPN_DNNType_FromPICS() return PDU_PDN_DNN_Type
+  { // @sic R5-221467 sic@
+    var PDU_PDN_DNN_Type v_PDNType := None;
+    
+    select (pc_APN_Default_Configuration) {
+      case (internet) {
+        v_PDNType := Internet_DNN;
+      }
+      case (ims) {
+        v_PDNType := IMS_DNN;
+      }
+      case (emergency) {  // @sic R5-252166 sic@
+        v_PDNType := Emergency_PDN;
+      }
+      case (urllc) {
+        v_PDNType := URLLC_DNN;
+      }
+      case (miot) {
+        v_PDNType := MIOT_DNN;
+      }
+      case (v2x) {
+        v_PDNType := V2X_DNN;
+      }
+      case (ethernet) { // @sic R5-227472 sic@
+        v_PDNType := Ethernet_DNN;
+      }
+      case (mbs) { // @sic R5-245495 sic@
+        v_PDNType := MBS_DNN;
+      }
+      case (uas_uss) { // @sic R5-245495 sic@
+        v_PDNType := UAS_USS_DNN;
+      }
+      case (uas_c2) { // @sic R5-245495 sic@
+        v_PDNType := UAS_C2_DNN;
+      }
+      case (mcx) {    // @sic R5-250446 sic@
+        v_PDNType := MCX_DNN;
+      }
+    }
+    return v_PDNType;
+  }
+
+  /*
+   * @desc      Checks DNN to see if it requests emergency PDN,  based on f_EUTRA_GetAPNForIMS
+   * @param     p_DNNFromReq
+   * @return    boolean
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IsDNNForEmergency(octetstring p_DNNFromReq) return boolean
+  {
+    return match(p_DNNFromReq, f_DomainName_EncodeLabels({"sos"}));
+  }
+
+  /*
+   * @desc      Encode APN acc. to TS 23.003 cl. 9.1 and RFC 1035 cl. 4.1.2
+   * @param     p_LabelList
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_DomainName_EncodeLabels(CharStringList_Type p_LabelList) return octetstring
+  {
+    var octetstring v_EncodedAPN := ''O;
+    var octetstring v_LabelOctets;
+    var integer v_Length;
+    var integer i;
+
+    for (i := 0; i < lengthof(p_LabelList); i := i + 1) {
+      v_LabelOctets := char2oct(p_LabelList[i]);
+      v_Length := lengthof(v_LabelOctets);
+      v_EncodedAPN := v_EncodedAPN & int2oct(v_Length, 1) & v_LabelOctets;
+    }
+    return v_EncodedAPN;
+  }
+
+  /*
+   * @desc      Encode APN acc. to TS 23.003 cl. 9.1 and RFC 1035 cl. 4.1.2
+   * @param     p_DomainName
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_DomainName_Encode(charstring p_DomainName) return octetstring
+  {
+    var CharStringList_Type v_LabelList := f_StringSplit(p_DomainName, {"."});
+    return f_DomainName_EncodeLabels(v_LabelList);
+  }
+
+  /*
+   * @desc      Convert from IMSI, IMEI or IMEISV of type hexstring to octetstring (to be used in f_Imsi2MobileIdentity, f_Imei2MobileIdentity and f_Imeisv2MobileIdentity)
+   * @param     p_MobileId
+   * @return    octetstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_R10_R11, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, POS, SSNITZ, UTRAN)
+   */
+  function f_ImsiImei2Octetstring(hexstring p_MobileId) return octetstring
+  {
+    var integer v_Length := lengthof(p_MobileId);
+    var integer v_Odd := (v_Length rem 2);
+    var octetstring v_Other := '00'O;
+    var integer I;
+    var integer K;
+    
+    if (v_Odd == 0) {                   // If length is even
+      v_Length := v_Length + 1;
+      p_MobileId := p_MobileId & 'F'H;          // add '1111' on to the end of the IMSI
+    }
+    
+    // Reverse each pair of digits
+    // First digit is not included as it is treated differently
+    K:=0;
+    for (I:=1; I < v_Length - 1; I:=I+2) {
+      v_Other[K] := hex2oct(p_MobileId[I+1] & p_MobileId[I]);
+      K := K + 1;
+    }
+    
+    return v_Other;
+  }
+
+  /*
+   * @desc      Convert from Emergency Number of type hexstring to octetstring (to be used in Emergency Number List in e.g. Attach Accept)
+   * @param     p_EmgNum
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_EmgNum2Octetstring(hexstring p_EmgNum) return octetstring
+  {
+    var integer v_Length := lengthof(p_EmgNum);
+    var integer v_Odd := (v_Length rem 2);
+    var octetstring v_Result := '00'O;
+    var integer I;
+    var integer K;
+    
+    if (v_Odd == 1) {               // If length is odd
+      v_Length := v_Length + 1;
+      p_EmgNum := p_EmgNum & 'F'H;  // add '1111' on to the end of the Emergency Number
+    }
+    
+    // Reverse each pair of digits, note that v_Length is even
+    K:=0;
+    for (I:=0; I < v_Length - 1; I:=I+2) {
+      v_Result[K] := hex2oct(p_EmgNum[I+1] & p_EmgNum[I]);
+      K := K + 1;
+    }
+    
+    return v_Result;
+  }
+
+  /*
+   * @desc      To generate an local emergency number list
+   * @param     p_NoOfNums - To specify how many numbers to be included in the list (max = 10)
+   * @param     p_NumList
+   * @return    template (value) EmergNumList
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_Build_EmergNumList(integer p_NoOfNums,
+                                EmergencyNumList p_NumList) return  template (value) EmergNumList
+  {
+    var integer i;
+    var template (value) EmergNumList v_EmergNum;
+    var octetstring v_LocalNum;
+    var integer v_LocalLength := 0;
+    var integer v_TotalLength := 0;
+    var B7_Type v_ServCat;
+    
+    v_EmergNum.iei := '34'O;
+    for (i := 0; i < p_NoOfNums; i:=i+1) {
+      v_LocalNum := fl_EmgNum2Octetstring (p_NumList[i]);
+      v_LocalLength := lengthof(v_LocalNum);
+      if (i/2 > 0) {
+        v_ServCat := ('00'B & ('00001'B << i));
+      } else {
+        v_ServCat := ('00'B & ('00001'B << i));
+      }
+      v_EmergNum.emergNum[i]:= cs_EmergencyLocalNumber(int2oct(v_LocalLength + 1, 1),
+                                                       cs_EmergServCat(v_ServCat),
+                                                       v_LocalNum);
+      v_TotalLength := v_TotalLength + 2 + v_LocalLength; // 1 octet for v_LocalLength + 1 for SCValue + length of number
+    }
+    v_EmergNum.iel := int2oct (v_TotalLength, 1);
+    return v_EmergNum;
+  }
+
+  /*
+   * @desc      To generate an extended emergency number list
+   * @param     p_NoOfNums
+   * @param     p_NumList
+   * @param     p_EENLV             (default value: '0'B)
+   * @param     p_SubServices       (default value: ''O)
+   * @return    template (value) ExtdEmergNumList
+   * @status    APPROVED (NR5GC)
+   */
+  function f_Build_ExtdEmergNumList(integer p_NoOfNums,
+                                    EmergencyNumList p_NumList,
+                                    B1_Type p_EENLV := '0'B,
+                                    octetstring p_SubServices := ''O) return  template (value) ExtdEmergNumList
+  {
+    var integer i;
+    var template (value) ExtdEmergNumList v_EmergNum;
+    var octetstring v_LocalNum;
+    var integer v_LocalLength := 0;
+    var integer v_TotalLength := 0;
+    
+    v_EmergNum.iei := '7A'O;
+    for (i := 0; i < p_NoOfNums; i:=i+1) {
+      v_LocalNum := fl_EmgNum2Octetstring (p_NumList[i]);
+      v_EmergNum.emergNum[i]:= cs_ExtdEmergNum(v_LocalNum, p_SubServices);
+      v_LocalLength := (lengthof(v_LocalNum)+ 2 + lengthof (p_SubServices));
+      v_TotalLength := v_TotalLength + v_LocalLength;
+    }
+    v_EmergNum.spareBits := tsc_Spare7;
+    v_EmergNum.extdEmergNumListValidity := p_EENLV;
+    v_EmergNum.iel := int2oct (v_TotalLength + 1, 2); // 1 octet for EENLV
+    return v_EmergNum;
+  }
+
+  /*
+   * @desc      check response on AT command from the UE
+   * @param     p_AT_Response
+   * @param     p_ExpectedString
+   * @param     p_Text              (default value: "")
+   * @param     p_Expression        (default value: "*[""]([^""]+)[""]*")
+   * @param     p_Group             (default value: 0)
+   * @return    boolean         // @sic R5s240303 sic@
+   * @status    APPROVED (LTE, NR5GC, SSNITZ)
+   */
+  function f_AT_ResponseCheck(charstring p_AT_Response,
+                              charstring p_ExpectedString,
+                              charstring p_Text := "",
+                              charstring p_Expression := "*[""]([^""]+)[""]*",
+                              integer p_Group := 0) return boolean
+  { /* p_Expression := "*[""]([^""]+)[""]*";    TTCN-3 regular expression: anything + quote + no quote (at least one character) + quote + anything;
+     *                                          => the text between the most inner quotes is returned */
+    var charstring v_Expression := p_Expression;
+    var charstring v_Result;
+    var template charstring v_ExpectedString := pattern p_ExpectedString;
+    var boolean v_MatchResult;
+    var charstring v_CRLF := oct2char('0D'O) & oct2char('0A'O);
+    
+    v_Result := regexp(p_AT_Response, v_Expression, p_Group);
+    
+    v_MatchResult := match(v_Result, v_ExpectedString);
+    
+    if (v_MatchResult == true) {
+      f_SetVerdict(pass,__FILE__, __LINE__, p_Text);
+    } else  {
+      f_ErrorLog(__FILE__, __LINE__, v_CRLF & "Value expected: " & p_ExpectedString & v_CRLF & "Value received: " & v_Result);  // if anything went wrong, show it
+      f_SetVerdict(fail,__FILE__, __LINE__, p_Text);
+    }
+    return v_MatchResult;  // @sic R5s240303 sic@
+  }
+
+  /*----------------------------------------------------------------------------
+   * @desc      Extract UE security capabilities from IEs and store for use later
+   * @param     p_UeNetworkCapability
+   * @param     p_MsNetworkCapability
+   * @return    UE_SecurityCapability
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_EPS_FillNAS_SecurityCapability_Common(UE_NetworkCap p_UeNetworkCapability,
+                                                        template (omit) MS_NetworkCap p_MsNetworkCapability) return UE_SecurityCapability
+  { /* @sic R5s110014, R5-190717 Renamed to be re-used by NR sic@ */
+    var UE_SecurityCapability v_SecurityCapability;
+    var MS_NetworkCap v_MS_NetworkCap;
+    var B8_Type v_GEA := '00000000'B;
+    var integer v_Length := 2;
+    
+    v_SecurityCapability.eeaCap := bit2oct(p_UeNetworkCapability.eeaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    v_SecurityCapability.eiaCap := bit2oct(p_UeNetworkCapability.eiaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    
+    if (ispresent(p_UeNetworkCapability.ueaCap)) {
+      v_SecurityCapability.ueaCap := bit2oct(p_UeNetworkCapability.ueaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+      v_Length := v_Length + 2; // if octet 5 is present, 6 will be too @sic R5s100485 sic@
+      if (ispresent(p_UeNetworkCapability.uiaCap)) {
+        v_SecurityCapability.uiaCap := bit2oct(p_UeNetworkCapability.uiaCap) and4b '7F'O; // @sic R5s100520, R5s180271 Baseline Moving 2018 Phase 1 sic@
+      } else {
+        v_SecurityCapability.uiaCap := '00'O; // @sic R5s100485 sic@
+      }
+    } else {
+      v_SecurityCapability.ueaCap := omit;
+      v_SecurityCapability.uiaCap := omit; // @sic R5s100184 sic@
+    }
+
+    if (isvalue (p_MsNetworkCapability)) {
+      v_MS_NetworkCap := valueof(p_MsNetworkCapability);
+      if (v_MS_NetworkCap.gea1 == '1'B) {
+        v_GEA := v_GEA or4b '01000000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea2 == '1'B) {
+        v_GEA := v_GEA or4b '00100000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea3 == '1'B) {
+        v_GEA := v_GEA or4b '00010000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea4 == '1'B) {
+        v_GEA := v_GEA or4b '00001000'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea5 == '1'B) {
+        v_GEA := v_GEA or4b '00000100'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea6 == '1'B) {
+        v_GEA := v_GEA or4b '00000010'B; // error corrected in delivery
+      }
+      if (v_MS_NetworkCap.gea7 == '1'B) {
+        v_GEA := v_GEA or4b '00000001'B; // error corrected in delivery
+      }
+      v_Length := v_Length + 1;
+      v_SecurityCapability.geaCap := bit2oct (v_GEA); // Now store the completed GEA octet
+      if (v_Length == 3) { // UE didn't report any UTRAN capabilities, so set them to 0 @sic R5s100485 sic@
+        v_Length := 5;
+        v_SecurityCapability.ueaCap := '00'O;
+        v_SecurityCapability.uiaCap := '00'O;
+      }
+    } else {// MS Network Capability not present @sic R5s100184 sic@
+      v_SecurityCapability.geaCap := omit;
+      // if UE included UTRAN capabilities but they're all zero
+      if (v_SecurityCapability.ueaCap == '00'O and v_SecurityCapability.uiaCap == '00'O) { // @sic R5s130107 sic@
+        v_SecurityCapability.ueaCap := omit;
+        v_SecurityCapability.uiaCap := omit;
+        v_Length := 2;
+      }
+    }
+    
+    v_SecurityCapability.iel := int2oct (v_Length, 1);  // Now store the length
+    
+    return v_SecurityCapability;
+  }
+
+  /*
+   * @desc      Calculate current year from System Time
+   * @return    integer
+   * @status    APPROVED (LTE, NR5GC, SSNITZ)
+   */
+  function f_NITZ_GetCurrentYear() return integer
+  {
+    var Struct_tm_Type v_LocalTime;
+    var integer v_TimezoneSeconds;
+    fx_GetSystemTime(v_LocalTime, v_TimezoneSeconds);
+    return v_LocalTime.tm_year + 1900;
+  }
+
+  /*
+   * @desc      Convert current year from integer to 1 octet
+   * @param     p_Year
+   * @return    O1_Type
+   * @status    APPROVED (LTE, NR5GC, SSNITZ)
+   */
+  function f_NITZ_CurrentYear2Oct(integer p_Year) return O1_Type
+  {
+    return hex2oct(f_SwappedNibbles(p_Year));
+  }
+
+  /*
+   * @desc      Extract the last 2 digits of the current year (as integer value)
+   * @param     p_Year
+   * @return    charstring
+   * @status    APPROVED (LTE, NR5GC, SSNITZ)
+   */
+  function f_NITZ_CurrentYear2Str(integer p_Year) return charstring
+  {
+    return int2str(p_Year mod 100);
+  }
+
+  /*
+   * @desc      Selection of the TP SUBMIT PDU to match against
+   * @param     p_SMS_MsgFrmt       (default value: px_SMS_MsgFrmt)
+   * @return    template (present) CP_UserData_Type
+   * @status    APPROVED (LTE, NR5GC)
+   */
+  function f_SMS_CP_UserData_SUBMIT(charstring p_SMS_MsgFrmt := px_SMS_MsgFrmt) return template (present) CP_UserData_Type // @sic R5s141400 sic@
+  {
+    var template (present) RP_UserData v_RP_UserData;
+
+    if (p_SMS_MsgFrmt == "1") {
+      v_RP_UserData := cr_RP_UserData_SUBMIT;
+    } else {
+      v_RP_UserData := cr_RP_UserData_SUBMIT(cr_SMS_SUBMIT_AnyVP);
+    }
+    return cr_CP_UserData_SUBMIT(cr_RP_DATA_ul_SUBMIT(v_RP_UserData));
+  }
+
+}

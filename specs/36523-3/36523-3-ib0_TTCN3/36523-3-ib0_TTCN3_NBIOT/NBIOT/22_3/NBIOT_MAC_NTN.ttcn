@@ -1,0 +1,489 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-02-23 13:35:46 +0100 (Mon, 23 Feb 2026) $
+// $Rev: 42871 $
+/******************************************************************************/
+
+module NBIOT_MAC_NTN {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_LoopBack_Templates all;
+  import from EPS_NAS_MsgContainers all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_CommonL2 all;
+  import from NBIOT_ASP_L2DataDefs all;
+  import from NBIOT_ASP_SrbDefs all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_CommonProcedures all;
+  import from NBIOT_Component all;
+  import from NBIOT_ConfigurationSteps all;
+  import from NBIOT_L2_Common all;
+  import from NBIOT_LoopBack all;
+  import from NBIOT_MAC_Common all;
+  import from NBIOT_RRCSteps all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from NBIOT_Timing all;
+  import from UpperTesterFunctions all;
+
+  template (present) NB_SYSTEM_IND car_NB_TARreport_IND(NBIOT_CellId_Type p_CellId,
+                                                        template (present) MAC_CTRL_TimingAdvanceReport_Type p_TimingAdvanceReport) :=
+  { /* @status    APPROVED (NBIOT) */
+    Common := cr_NB_IndAspCommonPart_SysInd(p_CellId, cr_TimingInfo_Any),
+    Indication := {
+      TimingAdvanceReport := p_TimingAdvanceReport
+    }
+  };
+
+  /*
+   * @desc      SS broadcasts SystemInformationBlockType2-NB with ta-Report-r17 not present.
+   * @param     p_CellId
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_DisableTA_Report_and_Broadcast(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC
+  {
+    var template (value) SystemInformationBlockType2_NB_r13 v_SIB2;
+    var float v_ModificationPeriod_s;
+    
+    v_SIB2 := f_NBIOT_CellInfo_GetSIB2(p_CellId);
+    if (isvalue(v_SIB2.radioResourceConfigCommon_r13.ntn_ConfigCommon_r17)){ // Cond NTN
+       v_SIB2.radioResourceConfigCommon_r13.ntn_ConfigCommon_r17.ta_Report_r17 := omit;
+    } else {
+       f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "SIB2 is not including Cond. NTN");
+    }
+    
+    f_NBIOT_CellInfo_SetSIB2(p_CellId,v_SIB2);
+    f_NBIOT_ModifySysinfo(p_CellId, false);
+    v_ModificationPeriod_s := int2float(f_NB_CalculateModificationPeriod (p_CellId))/100.0;
+    f_Delay(2.1 * v_ModificationPeriod_s); //@sic R5s240246 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.13
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_13_NBIOT() runs on NBIOT_PTC
+  {//NB-IoT / NTN / UE specific TA report / UE specific Koffset
+   //@sic R5-241563, R5-234494 sic@
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;   // RLC status to be maintained by Send/Receive functions
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var SubFrameTiming_Type v_TimingStart;
+    var NB_SYSTEM_IND v_NB_SYSTEM_IND;
+    var NB_SRB_COMMON_IND v_NB_SRB_COMMON_IND;
+    var template (value) DL_CCCH_Message_NB v_RRCConnectionSetup;
+    var integer v_Koffset;
+    var integer v_Differential_Koffset;
+      
+    //System information combination 8 as defined in TS 36.508 [18] clause 8.1.4.3.1.1 is used.
+    f_NBIOT_Init(c8);  //ta-Report-r17 is enabled by default
+    
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+      
+    f_NBIOT_SetCellPower(nbiot_Cell1, tsc_ServingCellRS_EPRE);
+      
+    //The UE is in state 1-NB according to TS 36.508 [18] clause 8.1.5.1
+
+    // Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+      
+    //f_UT_AutomaticPLMN_Select (UT); @sic R5s240281, R5-242526 sic@
+
+    //The preconfigured UE location is defined in TS 36.508 Clause 4.13.
+    f_NBIOT_PreconfigureNTN_UE(); // @sic R5w240103 sic@
+
+    // Now continue with the procedure
+    f_NBIOT_InitialRegistration(nbiot_Cell1, CONTROL_PLANE, PREAMBLE);
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED);
+    
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, enable);
+    f_NBIOT_SS_ConfigTimingAdvanceReportMode(nbiot_Cell1, enable);// @sic R5s240246 ch1 sic@
+      
+    f_NBIOT_TestBody_Set(true);
+      
+    //@siclog "Step 1" siclog@
+    //Power on UE.
+    f_UT_SwitchOnUE(UT, false);
+      
+    //@siclog "Step 2" siclog@
+    //The UE transmits preamble on PRACH
+    SYSIND.receive(car_NB_RachPreamble_IND(nbiot_Cell1));
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, disable);
+      
+    //@siclog "Step 3" siclog@
+    //The SS transmits Random Access Response with RAPID corresponding to the transmitted Preamble in step 2
+      
+    //@siclog "Step 4" siclog@
+    //The UE transmits an RRCConnectionRequest-NB message
+    SRB.receive(car_NB_SRB0_RrcPdu_IND(nbiot_Cell1, cr_RRCConnectionRequest_NB(?,?)));  //@sic R5s240246, R5-243480 sic@
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start(cs_NB_ContinuousGrant(cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, f_NBIOT_CellInfo_GetDefaultHarqProcessNumber(nbiot_Cell1))))); //@sic R5s240246 sic@
+      
+    //@siclog "Step 4a" siclog@
+    //The SS transmits an RRCConnectionSetup-NB message
+    //@sic R5240264 sic@ RRC Connection setup is already configured and provided to the SS as part of the RACH procedure
+    
+    //@siclog "Step 4b" siclog@
+    //Check: Does the UE transmit an RRCConnectionSetupComplete-NB message with one Timing Advance Report MAC CE?
+    interleave
+    {
+        [] SRB.receive(car_NB_SRB_RrcNasPdu_IND(nbiot_Cell1, tsc_SRB1bis, cr_508_RRCConnectionSetupComplete_NB(tsc_RRC_TI_Def),?)) -> value v_NB_SRB_COMMON_IND {}
+        [] SYSIND.receive(car_NB_TARreport_IND(nbiot_Cell1, ?)) -> value v_NB_SYSTEM_IND {}
+    }
+    if (v_NB_SRB_COMMON_IND.Common.TimingInfo != v_NB_SYSTEM_IND.Common.TimingInfo)
+    {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "TA report is not received in the same MAC PDU as RRCConnectionSetupComplete-NB");
+    }
+    else
+    {
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 4b")
+    }
+      
+    //@siclog "Steps 5-6" siclog@
+    //Void
+          
+    //@siclog "Steps 7-16" siclog@
+    // Steps 5 to 14b1 of the Attach, connected mode procedure described in TS 36.508 [18] subclause 8.1.5.2.3 are performed on Ncell 1.
+    v_NAS_Ind := v_NB_SRB_COMMON_IND.Signalling.Nas[0];
+    f_NBIOT_InitialRegistration_Step5_14 (nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED, v_NAS_Ind);
+       
+    //@siclog "Stesp 16B-16C" siclog@
+    //Void @sic R5-243480 sic@
+      
+    //@siclog "Steps 16A, 16C1a1-16C1b2" siclog@
+    //If possible switch off is performed or the USIM is removed, otherwise the power is removed.
+    f_NBIOT_UE_Detach_SwitchOffUe(nbiot_Cell1, CONTROL_PLANE, RRC_CONNECTED,-,-,false);//@sic R5-243480 sic@
+    
+    
+    //@siclog "Step 16D" siclog@
+    //SS broadcasts SystemInformationBlockType2-NB with ta-Report-r17 not present.
+    f_NBIOT_DisableTA_Report_and_Broadcast(nbiot_Cell1);
+      
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, enable);
+    // Prepare Msg4 at the SS for step 17
+    v_RRCConnectionSetup := f_NBIOT_508_RRCConnectionSetup();
+    v_RRCConnectionSetup.message_.c1.rrcConnectionSetup_r13.criticalExtensions.c1.rrcConnectionSetup_r13.radioResourceConfigDedicated_r13.mac_MainConfig_r13.explicitValue_r13.offsetThresholdTA_r17.setup := ms3;
+    f_NBIOT_SS_ConfigRachProcedureMsg4(nbiot_Cell1, v_RRCConnectionSetup); //@sic R5s240246 sic@
+          
+    //@siclog "Step 16E" siclog@
+    //Power on UE.
+    f_UT_SwitchOnUE(UT, false);
+      
+    //@siclog "Step 16F" siclog@
+    //The UE transmits preamble on NPRACHSteps
+    SYSIND.receive(car_NB_RachPreamble_IND(nbiot_Cell1));
+    f_NBIOT_SS_ConfigRachPreambleIndMode(nbiot_Cell1, disable);
+      
+    //@siclog "Step 16G" siclog@
+    //The SS transmits Random Access Response with RAPID corresponding to the transmitted Preamble in step 16F
+      
+    //@siclog "Step 16H" siclog@
+    //The UE transmits an RRCConnectionRequest-NB message with no Timing Advance Report MAC CE
+    SRB.receive(car_NB_SRB0_RrcPdu_IND(nbiot_Cell1, cr_RRCConnectionRequest_NB(?,?)));  //@sic R5s240246, R5-243480 sic@
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start(cs_NB_ContinuousGrant(cs_NB_DciInfo_CcchDcchDtchUL(-, -, -, f_NBIOT_CellInfo_GetDefaultHarqProcessNumber(nbiot_Cell1))))); //@sic R5s240246 sic@
+
+      
+    //@siclog "Step 17" siclog@
+    //The SS transmits an RRCConnectionSetup-NB message to configure the offsetThresholdTA, Table 22.3.1.13.3.3-2
+    
+    //@siclog "Step 18" siclog@
+    //Check: Does the UE transmit an RRCConnectionSetupComplete-NB message with one Timing Advance Report MAC CE?
+    interleave
+    {
+        [] SRB.receive(car_NB_SRB_RrcNasPdu_IND(nbiot_Cell1, tsc_SRB1bis, cr_508_RRCConnectionSetupComplete_NB(tsc_RRC_TI_Def,?),?)) -> value v_NB_SRB_COMMON_IND {}  //@sic R5s240246 sic@
+        [] SYSIND.receive(car_NB_TARreport_IND(nbiot_Cell1, ?)) -> value v_NB_SYSTEM_IND {}
+    }
+    if (v_NB_SRB_COMMON_IND.Common.TimingInfo != v_NB_SYSTEM_IND.Common.TimingInfo)
+    {
+        f_NBIOT_SetVerdictFailOrInconc(__FILE__, __LINE__, "TA report is not received in the same MAC PDU as RRCConnectionSetupComplete-NB");
+    }
+    else
+    {
+        f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 18")
+    }
+    v_NAS_Ind := v_NB_SRB_COMMON_IND.Signalling.Nas[0];
+    
+    
+    //@siclog "Step 18A-18J" siclog@
+    //Steps 5 to 14b1 of the Attach, connected mode procedure described in TS 36.508 [18] subclause 8.1.5.2.3 are performed on Ncell 1.
+    f_NBIOT_InitialRegistration_Step5_14 (nbiot_Cell1, CONTROL_PLANE, STATE2_NB_CONNECTED_UPDATED, v_NAS_Ind);
+      
+    f_Delay(int2float(f_NBIOT_NTN_Get_T_NTNoffset(nbiot_Cell1))/500.0); //@sic R5s240435 sic@ added delay to ensure RLC ACK is sent before moving to transparent mode
+    
+    //switch to L2 test mode
+    v_RLC_CountsInfoListByRef := f_NBIOT_L2_CPMode_StopULGrant_EnableSrbTestMode(nbiot_Cell1, TransparentMode_RLC_MAC);
+       
+    //@siclog "Step 19" siclog@
+    //The SS transmits a MAC PDU containing a Differential Koffset MAC CE with differential Koffset set to 5 ms.
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()==ntn_GSO) //@sic R5s250359, R5-256605 sic@
+    {
+        v_Differential_Koffset := 5;
+    }
+    if(f_NBIOT_MobileInfo_GetNTNSatelliteType()==ntn_NGSO) //@sic R5s250359, R5-256605 sic@
+    {
+        v_Differential_Koffset := 1;
+    }
+
+    f_NBIOT_MAC_CPMode_SendMacPdu(nbiot_Cell1, -, cs_MAC_PDU_DifferentialKoffset(int2bit(v_Differential_Koffset,6))); //@sic R5s240246, ch 2.1.9, R5s250359 sic@
+    v_TimingStart := f_NBIOT_GetNextSearchSpace(nbiot_Cell1);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_TimingStart);
+    
+    v_Koffset := f_NBIOT_CellInfo_Get_Koffset(nbiot_Cell1) - v_Differential_Koffset;  //@sic R5-241556, R5s250359 sic@
+    f_NBIOT_SS_CommonCellConfig(nbiot_Cell1, cas_NB_CellConfig_Update_NTNConfig(nbiot_Cell1, v_TimingInfo, -, cs_NB_NTN_Config(cs_NB_NTN_TimingOffset (v_Koffset)))); //@sic R5s240246, ch 2.1.9, R5-241556 sic@
+    
+    f_Delay(2.0); //@sic R5s240246, ch 2.1.10, R5s240435 sic@ added delay and remove activation time, as the sequence of events have to happen with immediate activation time for Step 20-21 to be sent immediately after restoring SRBs to normal mode
+     
+    //leave L2 test mode
+    f_NBIOT_L2_CPMode_RestoreSRBs(nbiot_Cell1, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR); //@sic R5s240246, ch 2.1.10, R5s240235 sic@
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start);  //@sic R5s240246 sic@
+            
+    //@siclog "Steps 20-21" siclog@
+    //The SS sends UECapabilityEnquiry-NB message to the UE
+      
+    //Check: Does UE send a UECapabilityInformation-NB message after applying differential Koffset of 5ms received at step 19?
+    f_NBIOT_Capability(nbiot_Cell1, CONTROL_PLANE);
+     
+    //Note: Successful reception of this message at SS confirms that differential Koffset is applied at UE.
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 21"); //@sic R5s240435 sic@
+    
+   
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    
+    f_NBIOT_Postamble(nbiot_Cell1, CONTROL_PLANE, N2_CONNECTED);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 22.3.1.5a
+   * @status    APPROVED (NBIOT)
+   */
+  function f_TC_22_3_1_5a_NBIOT() runs on NBIOT_PTC
+  {
+    var template (value) NPDCCH_ConfigDedicated_NB_r13 v_NPDCCH_ConfigDedicated;
+    var NPdcchSearchSpaceCandidateIndex_Type v_SearchSpaceCandidateForULGrant;
+    var template (value) NPdcchUESpecificSearchSpace_Type v_NPdcchUESpecificSearchSpace;
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var NB_RLC_CountsInfoList_Type v_RLC_CountsInfoListByRef;   // RLC status to be maintained by Send/Receive functions
+    var template (value) TimingInfo_Type v_TimingInfo;
+    var template (value) MAC_PDU_Type v_MAC_PDU;
+    var template (value) RLC_SDU_Type v_RlcSdu;
+    var MAC_SDUList_Type v_MAC_SDUList;
+    var SubFrameTiming_Type v_NpdcchPeriod;
+    var NBIOT_SearchSpaceParameters_Type v_SearchSpaceParameters := tsc_NBIOT_SearchSpaceParameters_Def;
+    var template (present) MAC_PDU_Type v_MAC_PDU_RX;
+    var template (value) NB_UL_TransRetransmissionList_Type v_TransRetransmissionList;
+    var template (value) NB_DciUlInfo_Type v_DciUlInfo;
+    var integer v_NDI_NotToggled;
+    var NB_SYSTEM_IND v_SYSTEM_IND;
+    var NB_L2_DATA_IND v_NB_L2_DATA_IND;
+    var integer v_UL_HARQ_RTT;
+    var integer v_Drx_ULRetransmissionTimer := 6144;
+      
+    //System information combination 8 as defined in TS 36.508 [18] clause 8.1.4.3.1.1 is used.
+    f_NBIOT_Init(c8); //@sic R5s240430 sic@
+    
+    //@sic R5s240411, R5s260008 removed code is replaced by f_NBIOT_CellInfo_GetNTN_UE_gNB_RTT function call sic@
+     
+    //Create and configure all cells
+    f_NBIOT_CellConfig_Def(nbiot_Cell1, CONTROL_PLANE);
+      
+    // configure RRC Connection Setup being used during RACH procedure: Message modified according to Table 22.3.1.5a.3.3-1
+    v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    v_MAC_MainConfig.ul_SCH_Config_r13.periodicBSR_Timer_r13 := infinity_;
+    v_MAC_MainConfig.drx_Config_r13 := cs_DRX_Config_NB_Setup;
+
+    v_NPDCCH_ConfigDedicated := cs_NPDCCH_ConfigDedicated_NB_DEFAULT;
+    v_NPDCCH_ConfigDedicated.npdcch_NumRepetitions_r13 := r64;
+    v_SearchSpaceParameters.Rmax := 64;      // to be used for timing calculations
+
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup(-, -, v_MAC_MainConfig, v_NPDCCH_ConfigDedicated);
+    f_NBIOT_SS_ConfigRachProcedureMsg4(nbiot_Cell1, v_RrcConnSetup);
+
+
+    // Modify cell configuration for UE specific search space according to Table 22.3.1.5a.3.3-1 and UL grants to be scheduled in the last search space candidate as needed for step 2:
+    v_SearchSpaceCandidateForULGrant := tsc_LastSearchSpaceCandidate;    /* as we have a NPDCCH period of 256ms (instead of 64ms), there is no issue always to use the last search space candidate during the test case */
+    v_NPdcchUESpecificSearchSpace := cs_NPdcchUESpecificSearchSpace(v_NPDCCH_ConfigDedicated.npdcch_NumRepetitions_r13,
+                                                                    v_NPDCCH_ConfigDedicated.npdcch_StartSF_USS_r13,
+                                                                    v_NPDCCH_ConfigDedicated.npdcch_Offset_USS_r13,
+                                                                    -,
+                                                                    v_SearchSpaceCandidateForULGrant);
+
+    f_NBIOT_SS_CommonCellConfig(nbiot_Cell1, cas_NB_CellConfig_REQ(nbiot_Cell1, -, -, cds_NB_BasicCellConfig_NPDCCH(cs_NPdcchConfig(v_NPdcchUESpecificSearchSpace))));
+    f_NBIOT_SS_DrxCtrlConfig(nbiot_Cell1, cs_NB_DrxCtrl(cs_DRX_Config_NB_Setup));    //@sic R5s230746 Ch2.1.2 sic@
+    
+    //The UE is in state 2B-NB according to TS 36.508 [18] clause 8.1.5.2B with test loop mode G closed
+    f_NBIOT_SetCellPower(nbiot_Cell1, tsc_ServingCellRS_EPRE);
+    // Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+      
+    //f_UT_AutomaticPLMN_Select(UT); //@sic R5s240281, R5-242526, R5s2390746 Ch.2.1.1 sic@
+    //The preconfigured UE location is defined in TS 36.508 [18] Clause 4.13.
+    f_NBIOT_PreconfigureNTN_UE(); // @sic R5w240103 sic@
+      
+    // Now continue with the procedure
+    f_NBIOT_InitialRegistration(nbiot_Cell1, CONTROL_PLANE, PREAMBLE, STATE2A_NB_TESTLOOP_ModeG);
+    
+      
+    f_NBIOT_CloseUE_TestLoopModeGH(nbiot_Cell1,            // Bring UE to state 2B-NB
+                                   f_NBIOT_UE_TestLoopMode_Type(STATE2A_NB_TESTLOOP_ModeG),
+                                   tsc_TestLoopModeGH_UplinkMode_RLC);
+    
+    v_RLC_CountsInfoListByRef := f_NBIOT_L2_CPMode_StopULGrant_EnableSrbTestMode(nbiot_Cell1, TransparentMode_RLC_MAC); //@sic R5s2390746 Ch.2.1.3 sic@
+   
+    f_NBIOT_TestBody_Set(true, layer2);
+      
+    f_NBIOT_SS_DrxCtrlConfig(nbiot_Cell1, cs_NB_DrxCtrl_None); //@sic R5s2390746 Ch.2.1.4 sic@
+    f_Delay(1.0); //@sic R5s2390746 Ch.2.1.5 sic@
+  
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(nbiot_Cell1, enable);
+      
+    //@siclog "Step 1" siclog@
+    //In the first NPDCCH period of the next DRX On Duration the SS schedules the DL transmission of a MAC PDU in the first search space candidate of the search space.
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(nbiot_Cell1, tsc_FirstNpdcchPeriod, v_SearchSpaceParameters);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_NpdcchPeriod);
+    v_RlcSdu := crs_PDCP_SDU_16B;
+    //v_RlcSduList := { v_RlcSdu };
+    v_MAC_SDUList := { f_NBIOT_MAC_CPMode_EncodeMacSdu(STATE2A_NB_TESTLOOP_ModeG, v_RlcSdu, v_RLC_CountsInfoListByRef.AM_VTS) };    // NAS/RRC PDU gets encoded by NAS emulator and packed into RLC PDU
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList);
+    f_NBIOT_MAC_CPMode_SendMacPdu(nbiot_Cell1, v_TimingInfo, v_MAC_PDU, tsc_FirstSearchSpaceCandidate);
+    v_RLC_CountsInfoListByRef.AM_VTS := v_RLC_CountsInfoListByRef.AM_VTS + 1;
+      
+    //@siclog "Step 1A" siclog@
+    //The UE transmit a HARQ ACK for the DL MAC PDU in Step 1.
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, ack));
+      
+    //@siclog "Step 2" siclog@
+    //In the last NPDCCH period of the next DRX On Duration the SS allocates an UL grant for UE in the last search space candidate of the search space.
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(nbiot_Cell1, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_NpdcchPeriod);
+    v_TransRetransmissionList := {cs_NB_UL_TransRetransmission_NewTransmission}; //@sic R5s230746 Ch2.1.6, R5s240430 sic@
+
+    v_DciUlInfo := cs_NB_DciInfo_CcchDcchDtchUL(2, 4, v_TransRetransmissionList);
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant(v_DciUlInfo)), v_TimingInfo);
+ 
+   
+    //@siclog "Step 3" siclog@
+    //The UE loops back the MAC PDU.
+    v_MAC_PDU_RX := f_NBIOT_MacPdu_SingleRlcAmdPdu_RX(-, v_RlcSdu);  //same as in Step 1
+    v_NB_L2_DATA_IND := f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, nbiot_Cell1, v_MAC_PDU_RX); //@sic R5s240411 sic@
+    v_TimingInfo := v_NB_L2_DATA_IND.Common.TimingInfo; // reference time for calculation of UE timer start @sic R5s240411 sic@
+     
+    //For NB-IoT, when single TB is scheduled by PDCCH the UL HARQ RTT timer length is set to 4 subframes plus RTToffset +deltaPDCCH,
+    //where deltaPDCCH is the interval starting from the subframe following the last subframe of the PUSCH transmission plus 3 subframes plus RTToffset to the first subframe of the next PDCCH occasion
+     v_UL_HARQ_RTT := 4 + f_NBIOT_CellInfo_GetNTN_UE_gNB_RTT(nbiot_Cell1) + 3; //@sic R5s240411, R5s260008 sic@
+      
+    //@siclog "Step 4" siclog@
+    //In the NPDCCH sub frame when the drx-uLRetransmissionTimer-r13 for MAC PDU in Step 3 is still running, the SS transmits UL grant for the retransmission of the MAC PDU in step 3, and NDI is the same with which in step 2, and redundancy version = 1
+    //i.e. UL HARQ RTT + drx-uLRetransmissionTimer-r13 - x subframes after step 3 (x is between 0 and 20 the difference between On duration and UL Retransmission timer) (Note 5)
+    v_Drx_ULRetransmissionTimer := v_Drx_ULRetransmissionTimer - 10*256;  // x = 10 NPDCCH Periods  @sic R5s240411, R5s260008, R5-261130 sic@
+    v_NpdcchPeriod := f_SubFrameTiming_AddMilliSeconds(valueof(v_TimingInfo.SubFrame), v_UL_HARQ_RTT + v_Drx_ULRetransmissionTimer); // @sic R5s240411, R5s240430, R5s260008 sic@
+    v_NpdcchPeriod := f_SubFrameTiming_CalculateCycleStartTime(v_NpdcchPeriod, f_NBIOT_SearchSpace_GetPdcchPeriod(v_SearchSpaceParameters), v_SearchSpaceParameters.Alpha); // + delatPDCCH @sic R5s240411 sic@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_NpdcchPeriod);
+    v_TransRetransmissionList := {cs_NB_UL_TransRetransmission_ReTransmission(1)};  //RV=1
+    v_DciUlInfo := cs_NB_DciInfo_CcchDcchDtchUL(2, 4, v_TransRetransmissionList);
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant(v_DciUlInfo)), v_TimingInfo); //@sic R5s240411 sic@
+     
+    //@siclog "Step 5" siclog@
+    //Void.
+      
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE loop back the MAC PDU?
+    v_NDI_NotToggled := 0;
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, nbiot_Cell1, v_MAC_PDU_RX, v_NDI_NotToggled); //@sic R5s230746 Ch2.1.7 sic@
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+      
+    //@siclog "Step 6A" siclog@
+    //The SS transmits an RLC STATUS PDU to acknowledge received data.
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, nbiot_Cell1);
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, ack)); //@sic R5s230746 Ch2.1.8 sic@
+      
+    //The SS stops allocating UL Grant.
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Stop);
+      
+    //@siclog "Steps 7-10" siclog@
+    //Void.
+      
+    //@siclog "Step 11" siclog@
+    //In the last NPDCCH period when onDurationTimer-r13 is running, SS schedules the DL transmission of a MAC PDU in the last search space candidate and generates a CRC error causing the UE to send a NACK, but not perform any retransmissions.
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(nbiot_Cell1, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendInvalidMacPdu(nbiot_Cell1, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate, v_SearchSpaceParameters);
+          
+    //@siclog "Step 12" siclog@
+    //The UE transmits a HARQ NACK for the DL MAC PDU in Step 11.
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, nack));
+      
+    //@siclog "Step 13" siclog@
+    //In the next NPDCCH period the SS schedules the DL transmission of a (new) MAC PDU in the first search space candidate.
+    //Note: The NDI of the corresponding DCI indicates a new transmission. (Note 5)
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(nbiot_Cell1, tsc_FirstNpdcchPeriod, v_SearchSpaceParameters);
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_NpdcchPeriod);
+    v_RlcSdu := crs_PDCP_SDU_16B;
+    v_MAC_SDUList := { f_NBIOT_MAC_CPMode_EncodeMacSdu(STATE2A_NB_TESTLOOP_ModeG, v_RlcSdu, v_RLC_CountsInfoListByRef.AM_VTS) };    // NAS/RRC PDU gets encoded by NAS emulator and packed into RLC PDU
+    v_MAC_PDU := f_NBIOT_MAC_PDU_WithSDUs_TX(tsc_LchId_SIB1bis, v_MAC_SDUList);
+    f_NBIOT_MAC_CPMode_SendMacPdu(nbiot_Cell1, v_TimingInfo, v_MAC_PDU, tsc_FirstSearchSpaceCandidate);
+    v_RLC_CountsInfoListByRef.AM_VTS := v_RLC_CountsInfoListByRef.AM_VTS + 1;
+    
+    //@siclog "Step 14" siclog@
+    //Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 13?
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, ack));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 14");
+      
+    //@siclog "Step 15" siclog@
+    //In the last NPDCCH period when onDurationTimer-r13 is running, SS schedules the DL transmission of a MAC PDU in the last search space candidate and generates a CRC error causing the UE to send a NACK, but not perform any retransmissions.
+    v_NpdcchPeriod := fl_NBIOT_DrxCycle_NpdcchPeriod(nbiot_Cell1, tsc_LastNpdcchPeriod, v_SearchSpaceParameters);
+    fl_TC_22_3_1_5_SendInvalidMacPdu(nbiot_Cell1, v_NpdcchPeriod, tsc_LastSearchSpaceCandidate, v_SearchSpaceParameters);
+          
+    //@siclog "Step 16" siclog@
+    //The UE transmits a HARQ NACK for the DL MAC PDU in Step 15.
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, nack)) -> value v_SYSTEM_IND;
+    v_TimingInfo := v_SYSTEM_IND.Common.TimingInfo;  //@sic R5-237435 sic@
+    
+    //@siclog "Step 17" siclog@
+    //Six NPDCCH periods after the step 16 the SS schedules the DL re-transmission of the MAC PDU in the last search space candidate.
+    //Note 1: Six NPDCCH periods is the duration of the drx-RetransmissionTimer-r13.
+    //(Note 5)
+    v_NpdcchPeriod := f_NBIOT_IncrementSearchSpace(valueof(v_TimingInfo.SubFrame), int2float(5), v_SearchSpaceParameters); //@sic R5s230746 Ch2.1.9, R5-237435, R5s240006 sic@
+    v_TimingInfo := cs_TimingInfo_SubFrameFull(v_NpdcchPeriod);
+    f_NBIOT_MAC_CPMode_SendMacPdu(nbiot_Cell1, v_TimingInfo, v_MAC_PDU, tsc_LastSearchSpaceCandidate);
+      
+    //@siclog "Step 18" siclog@
+    //Check: Does the UE transmit a HARQ ACK for the DL MAC PDU in Step 17?
+    SYSIND.receive(car_NB_UL_HARQ_IND(nbiot_Cell1, ack));
+    f_NBIOT_PreliminaryPass(__FILE__, __LINE__, "Step 18");
+      
+    //@siclog "Step 19" siclog@
+    //The SS starts allocating UL Grant
+    f_NBIOT_SS_ConfigUL_HARQ_IndMode(nbiot_Cell1, disable);  //@sic R5s230746 Ch.2.1.10 R5-237435 sic@
+    f_NBIOT_ULGrantTransmission(nbiot_Cell1, cs_NB_UL_GrantScheduling_Start);
+      
+    //@siclog "Step 20" siclog@
+    //The UE loops back the MAC PDU.
+    f_NBIOT_MAC_CPMode_MacPdu_Receive(v_RLC_CountsInfoListByRef, nbiot_Cell1, v_MAC_PDU_RX);
+        
+    //@siclog "Step 21" siclog@
+    //The SS transmits an RLC STATUS PDU to acknowledge received data.
+    f_NBIOT_MAC_CPMode_SendRlcStatus(v_RLC_CountsInfoListByRef, nbiot_Cell1);
+
+    f_NBIOT_SS_DrxCtrlConfig(nbiot_Cell1, cs_NB_DrxCtrl(cs_DRX_Config_NB_Setup)); //@sic R5s2390746 Ch.2.1.4 sic@
+    f_NBIOT_TestBody_Set(false);
+    //------------------------------------
+    f_NBIOT_L2_Postamble_State2B_NB(nbiot_Cell1, v_RLC_CountsInfoListByRef.AM_VTS, v_RLC_CountsInfoListByRef.AM_VRR);
+      
+    } //f_TC_22_3_1_5a_NTN_NBIOT
+
+}

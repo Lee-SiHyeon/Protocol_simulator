@@ -1,0 +1,269 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-08 20:14:42 +0100 (Thu, 08 Feb 2024) $
+// $Rev: 37834 $
+/******************************************************************************/
+
+module IMS_CC_CommonFunctions {
+
+  import from CommonDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_IPCAN_Coordination all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  type enumerated CallType_Type {normalCall, conferenceCall, normalCallOIR, normalCall_ReturnId};   /* @status    APPROVED (IMS)
+                                                                                                       @sic R5-160975: normalCallOIR sic@
+                                                                                                       @sic R5s160855: normalCall_ReturnId - call id to be returned to use later sic@ */
+
+  type record IMS_CC_MT_SpeechCallInfo_Type {                                                       /* @status    APPROVED (IMS) */
+    IMS_InviteRequestWithSdp_Type InviteRequestWithSdp,
+    SipUrl ContactUrl           /* Contact URI of the UE; in principle not needed as f_IMS_PTC_ImsInfo_GetContactUrlUE can be used as well */
+  };
+
+  type record IMS_CC_MO_CallInfo_Type { /* @status    APPROVED (IMS) */
+    IMS_InviteRequestWithSdp_Type InviteRequestWithSdp,     // INVITE sent by the UE to create the session
+    MessageHeader MessageHeader183,                         // earlier response sent to the UE within the same dialog
+    SDP_Message LatestSdpOffer                              // latest SDP offer sent by the UE during session establishment
+  };
+
+  type enumerated IMS_InitState_Type {IMS_NULL, IMS_REGISTERED};     /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      common preamble for IMS test cases
+   * @param     p_TestConfiguration
+   * @param     p_InitState
+   * @param     p_SecurityScheme    (default value: omit)
+   * @param     p_RanType           (default value: omit)
+   * @param     p_SigCompIsActive   (default value: false)
+   * @param     p_NumOfIPAddressesToAllocate (default value: 1)
+   * @param     p_TestProcedure     (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_Preamble(IMS_TestConfiguration_Type p_TestConfiguration,
+                             IMS_InitState_Type p_InitState,
+                             template (omit) IMS_SecurityScheme_Type p_SecurityScheme := omit,
+                             template (omit) IPCAN_RAN_Type p_RanType := omit,
+                             boolean p_SigCompIsActive := false,
+                             integer p_NumOfIPAddressesToAllocate := 1,
+                             template (omit) IMS_TestProcedure_Type p_TestProcedure := omit) runs on IMS_PTC
+  { /* p_TestProcedure  ..  major test procedure of the test case (=> number/type of DRBs to be configured at SS
+     * p_InitState      ..  IDLE => intitial registration including IMS registration is done; RRC connection is released
+     *                      NULL => intitial registration is started at the IPCAN but IMS registration shall be controled by the test case */
+    /* @sic R5s130133 additional changes: XRES length shall be queried by the IMS PTC i.e. is not returned by f_IMS_IPCAN_StartProcedure_Preamble anymore sic@ */
+    /* @sic R5s130347: local GuardTimer sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA replaced by p_SecurityScheme sic@ */
+
+    timer t_GuardTimer := tsc_GuardTimePreamble;
+
+    t_GuardTimer.start;
+
+    f_IMS_PTC_Init(PDN_1, -, p_SecurityScheme, p_RanType);      /* local initialisation */
+    f_IMS_IPCAN_Init(IPCAN, p_TestConfiguration, p_TestProcedure); /* initialisation of IPCAN:
+                                                                   - RAN type is selected by IPCAN PTC acc. to the PIXITs
+                                                                   - cell is created acc. to the RAN type and PIXITs
+                                                                   - Test procedure is handed over as for e.g. EUTRA we need to know in advance which DRBs need to be (pre-)configured at the SS
+                                                                   -                                      or if need to use a different cell to default (Cell 1) @sic R5s220611 sic@
+                                                                   p_TestcaseName is present If the test case requires a specific IPCAN initialisation e.g. for cell barring */
+    if (p_NumOfIPAddressesToAllocate != 1) { // @sic R5-213400 sic@
+      f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_AdditionalIPAddress);
+    }
+    if (p_InitState == IMS_REGISTERED) {
+      f_IMS_IPCAN_StartProcedure(IPCAN, IPCAN_InitialRegistration);
+      f_IMS_Registration(-, -, p_SigCompIsActive);
+      f_IMS_CC_ReleaseConnection(IPCAN_InitialRegistration);
+    }
+
+    t_GuardTimer.stop;
+  }
+
+  /*
+   * @desc      trigger IPCAN to start signalling for given test procedure
+   * @param     p_TestProcedure
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_StartSignalling(IMS_TestProcedure_Type p_TestProcedure) runs on IMS_PTC
+  { /* @sic R5s130133 additional changes: XRES length shall be queried by the IMS PTC i.e. is not returned by f_IMS_IPCAN_StartProcedure_Preamble anymore sic@ */
+    
+    select (p_TestProcedure) {
+      case (IPCAN_InitialRegistration, IPCAN_MO_IMS_Signalling, IPCAN_XCAP_Signalling) {
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure);
+      }
+      case (IPCAN_MT_IMS_Signalling) {
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure);
+        f_IMS_IPCAN_WaitForTrigger(IPCAN);         // wait for RRC connection to be established    @sic R5s130183 change 3 sic@
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+  }
+
+  /*
+   * @desc      Start MO, MT or emergency call (interworking with IPCAN, MMI)
+   * @param     p_TestProcedure
+   * @param     p_SpeechAndVideoCallUri  (default value: px_IMS_CalleeUri)
+   * @param     p_CallType          (default value: normalCall)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_StartCall(IMS_TestProcedure_Type p_TestProcedure,
+                              charstring p_SpeechAndVideoCallUri := px_IMS_CalleeUri,
+                              CallType_Type p_CallType := normalCall) runs on IMS_PTC
+  { /* @sic new parameters p_SpeechAndVideoCallUri and p_CallType to support conference calls sic@ */
+    // @sic R5s160855 removed return type sic@
+
+    f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure);
+
+    select (p_TestProcedure) {
+      case (IPCAN_MO_SpeechCall) {
+        select (p_CallType) {
+          case (normalCall) {
+            f_UT_RequestIMSCall(MMI, p_SpeechAndVideoCallUri);  // @sic R5s130333, R5-134070 sic@
+          }
+          case (normalCall_ReturnId){
+            f_UT_RequestIMSCall(MMI, p_SpeechAndVideoCallUri, CNF_REQUIRED);  // @sic R5s130333, R5-134070, R5s160855 sic@
+          }
+          case (conferenceCall) {
+            f_UT_InitiateConferenceCall(MMI); // @sic R5-155177 sic@
+          }
+          case (normalCallOIR) {              // @sic R5-160975 sic@
+            f_UT_RequestIMSCallOIR(MMI, p_SpeechAndVideoCallUri);
+          }
+        }
+      }
+      case (IPCAN_MO_VideoCall) {
+        f_UT_RequestIMSVideoCall(MMI, p_SpeechAndVideoCallUri); // @sic R5-134070 sic@
+      }
+      case (IPCAN_MT_SpeechCall, IPCAN_MT_VideoCall) {
+        f_IMS_IPCAN_WaitForTrigger(IPCAN);         // wait for RRC connection to be established
+      }
+      case (IPCAN_EmergencyCall_NormalService, IPCAN_EmergencyCall_OptionalPDNRelease) { // @sic R5s150091 sic@ @sic R5s180023: IPCAN_EmergencyCall_OptionalPDNRelease sic@
+        f_UT_RequestIMSEmergencyCall(MMI, px_EmergencyCallNumber); // @sic R5-134070 sic@
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+  }
+
+  /*
+   * @desc      send trigger to IPCAN to abort the ongoing call establishment
+   *            (e.g. when IPCAN is waiting for trigger to continue with bearer establishment but that shall be aborted)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_AbortCall() runs on IMS_PTC
+  {
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN, cms_IMS_IPCAN_Abort);
+  }
+
+  /*
+   * @desc      trigger activation of dedicated bearer at the IPCAN PTC
+   * @param     p_TestProcedure
+   * @param     p_PreconditionsRequired  (default value: true)
+   * @param     p_TestConfiguration (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_TriggerDedicatedBearerActivation(IMS_TestProcedure_Type p_TestProcedure,
+                                                     boolean p_PreconditionsRequired := true,
+                                                     template (omit) IMS_TestConfiguration_Type p_TestConfiguration := omit) runs on IMS_PTC
+  { /* @sic R5s210423: p_PreconditionsRequired sic@ */
+    select (p_TestProcedure) {
+      case (IPCAN_MO_SpeechCall, IPCAN_MO_VideoCall) {
+        f_IMS_IPCAN_SendCoOrdMsg(IPCAN);       /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer */
+      }
+      case (IPCAN_MT_SpeechCall, IPCAN_MT_VideoCall) {
+        f_IMS_IPCAN_SendCoOrdMsg(IPCAN);       /* trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer */
+        if (p_PreconditionsRequired) {         /* @sic R5s210423 sic@ */
+          f_IMS_IPCAN_WaitForTrigger(IPCAN);   /* wait for completion of RRC/NAS signalling */
+        }
+      }
+      case (IPCAN_EmergencyCall_OptionalPDNRelease) {  // @sic R5-225426 sic@
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure, p_TestConfiguration);
+      }
+      case (IPCAN_EmergencyCall_NormalService) {  // @sic R5-225426, R5s240081 sic@
+        f_IMS_IPCAN_StartProcedure(IPCAN, p_TestProcedure, p_TestConfiguration);
+        f_IMS_IPCAN_WaitForTrigger(IPCAN);   /* wait for completion of RRC/NAS signalling
+                                                  NOTE: in case of no preconditions the Trigger needs to be handled after the 180 Ringing */
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+  }
+
+  /*
+   * @desc      Release RRC connection
+   * @param     p_TestProcedure
+   * @param     p_TcpCloseHandling  (default value: omit)
+   * @param     p_DelayForDL_SIP  (default value: 2.0)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_ReleaseConnection(IMS_TestProcedure_Type p_TestProcedure,
+                                      template (omit) IMS_TCP_CloseHandling_Type p_TcpCloseHandling := omit,
+                                      float p_DelayForDL_SIP := 2.0) runs on IMS_PTC
+  { /* @sic R5s140801: new parameter p_TcpCloseHandling sic@ */
+    /* @sic R5s190785: new parameter p_DelayForDL_SIP sic@ */
+    var IMS_TCP_CloseHandling_Type v_TcpCloseHandling := dontWaitOrClose;
+    var float v_DelayForDL_SIP := p_DelayForDL_SIP;
+
+    if (isvalue(p_TcpCloseHandling )) {   /* @sic R5s140801 sic@ */
+      v_TcpCloseHandling := valueof(p_TcpCloseHandling );
+    }
+    else{
+      select (p_TestProcedure) {
+        case (IPCAN_InitialRegistration) {  /* @sic R5s140219 - MCC160 implementation: wait for possible TCP close of unprotected connection but don't close any further TCP connection sic@ */
+          v_TcpCloseHandling := justWait;
+        }
+        case else {
+        }
+      }
+    }
+    if (v_TcpCloseHandling != dontWaitOrClose) {
+      f_IMS_TCP_CloseHandling(v_TcpCloseHandling);
+    } else {
+      f_Delay(v_DelayForDL_SIP);  /* @sic R5s140779: delay to ensure that latest DL SIP message (if any) is sent out before releasing the RRC connection, R5s190785 ch. 2.2 sic@ */
+    }
+    f_IMS_IPCAN_EndProcedure(IPCAN, p_TestProcedure);
+  }
+
+  /*
+   * @desc      common postamble for IMS test cases
+   * @param     p_TestProcedure     (default value: omit)
+   * @param     p_TcpCloseHandling  (default value: omit)
+   * @param     p_DelayForDL_SIP  (default value: 2.0)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CC_Postamble(template (omit) IMS_TestProcedure_Type p_TestProcedure := omit,
+                              template (omit) IMS_TCP_CloseHandling_Type p_TcpCloseHandling := omit,
+                              float p_DelayForDL_SIP := 2.0) runs on IMS_PTC
+  { /* @sic R5s140801: new parameter p_TcpCloseHandling, R5s170028: removed parameter p_WaitForDeRegistration sic@ */
+    /* @sic R5s190785: new parameter p_DelayForDL_SIP sic@ */
+    var boolean v_AllowRetransmission := f_IMS_PTC_RanTypeIsUTRAN();
+    var float v_DelayForDL_SIP := p_DelayForDL_SIP;
+
+    if (isvalue(p_TestProcedure)) { // @sic R5s220789 sic@
+      f_IMS_CC_ReleaseConnection(valueof(p_TestProcedure), p_TcpCloseHandling, v_DelayForDL_SIP); /* @sic R5s140801: p_TcpCloseHandling, R5s190785 ch. 2.2 sic@ */
+      IPCAN.send(cms_IMS_IPCAN_ReleaseReq);
+      if (valueof(p_TestProcedure) != IPCAN_Deregistration) { // @sic R5s211495 sic@
+        f_IMS_IpcanReleaseWithOptionalDeregistration(v_AllowRetransmission);  /* @sic R5s140346 - MCC160 implementation: new function f_IMS_CC_IpcanReleaseWithOptionalDeregistration, R5s170541 sic@ */
+      }
+    } else {  // @sic R5s211495 sic@
+      IPCAN.send(cms_IMS_IPCAN_ReleaseReq);
+      f_IMS_IpcanReleaseWithOptionalDeregistration(v_AllowRetransmission);  /* @sic R5s140346 - MCC160 implementation: new function f_IMS_CC_IpcanReleaseWithOptionalDeregistration, R5s170541 sic@ */
+    }
+  }
+
+}

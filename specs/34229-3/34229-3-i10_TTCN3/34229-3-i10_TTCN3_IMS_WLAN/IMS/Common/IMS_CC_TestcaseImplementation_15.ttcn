@@ -1,0 +1,469 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-12-12 16:08:11 +0100 (Tue, 12 Dec 2023) $
+// $Rev: 37733 $
+/******************************************************************************/
+
+module IMS_CC_TestcaseImplementation_15 {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CC_CommonFunctions all;
+  import from IMS_CC_CommonFunctions4G all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_CallHold all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_Procedures_SupplementaryServices all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Test case body for 34.229-1 TC 15.2a, TC G.15.2
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallwithOIR(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR) runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var MessageHeader v_MessageHeader_Invite;
+    var MessageHeader v_MessageHeader_Response183;
+    var IMS_SDP_AudioCodec_Type v_AudioCodecToBeSelected := p_AudioCodecList[0];
+    var boolean v_OriginatingIdentificationRestriction := true;
+    var boolean v_IsC21a := f_IMS_PTC_RanTypeIsWLAN();
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall, -, normalCallOIR);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_ReceiveINVITE_Common(-, -, p_AudioCodecList, -, v_OriginatingIdentificationRestriction);
+    v_MessageHeader_Invite := v_InviteRequestWithSdp.Invite.msgHeader;
+    f_IMS_MessageHeader_CheckFromAnonymous(v_MessageHeader_Invite);
+    f_IMS_MessageHeader_CheckPrivacy(v_MessageHeader_Invite, idOrHeader);   /* @sic R5-194827: idOrHeader sic@ */
+    
+    if (v_IsC21a) {
+      // @siclog "Step 3" siclog@
+      f_IMS_MOCallSetup_Send100Trying(v_InviteRequestWithSdp);
+      // @siclog "Step 4 - 6" siclog@ Annex C21a step 4-6.
+      f_IMS_MOCallSetup_AnnexC21aC25a_Steps4_6(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, -, v_AudioCodecToBeSelected);
+      // @siclog "Step 7 - 8" siclog@ Annex C21a step 7-8.
+      f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp);
+    }
+    else {
+      // @siclog "Step 3 - 4" siclog@ Annex C21
+      v_MessageHeader_Response183 := f_IMS_MOCallSetup_AnnexC21_Step3_4(v_InviteRequestWithSdp, -, -, -, v_AudioCodecToBeSelected);
+      f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MO_SpeechCall);  // trigger IPCAN to continue with activation of secondary PDP context or dedicated EPS bearer
+      // @siclog "Step 5 - 13" siclog@ Annex C21
+      f_IMS_MOCallSetup_AnnexC21_Steps5_13(v_InviteRequestWithSdp, v_MessageHeader_Response183, -, -, -, v_AudioCodecToBeSelected);
+    }
+    
+    // Steps defined in Annex C.32
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite);
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test case body for 34.229-1 TC 15.4a, G.15.4
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallwithTIR(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR) runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var IMS_Response_180_183_WithSdp_Type v_Response_180_183_WithSdp;  // @sic R5s180436: IMS_Response_180_183_WithSdp_Type instead of v_OptionalResponseWithSdp sic@
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+    var IMS_Response_Type v_SessionProgress183;
+    var template (present) SDP_Message v_SDP_Message;
+    var MessageHeader v_MessageHeader_SessionProgress;
+    var template (omit) MessageHeader v_MessageHeader_Ringing := omit;
+    var MessageHeader v_MessageHeader_200OK;
+    var SipUrl v_ContactUrl;
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+    var IMS_SDP_AudioCodec_Type v_AudioCodecToBeSelected := p_AudioCodecList[0];
+
+    timer t_Dummy;    // according to the test case prose of G.15.4 the 180 Ringing seems to be optional
+
+    f_IMS_TestBody_Set(true);
+
+    f_UT_MMI_ActivateIMS_TIR(MMI);
+    
+    f_IMS_CC_StartCall(IPCAN_MT_SpeechCall);
+    
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSdp(p_AudioCodecList, -, tsc_SDP_WithPreconditions);
+
+    if (v_IsWLAN) {
+      // @siclog "Step 1" siclog@
+      IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+
+      // @siclog "Step 2 - 5" siclog@
+      v_SDP_Message := f_IMS_BuildSDP_FinalAnswerAudio_RX(v_AudioCodecToBeSelected);
+      v_Response_180_183_WithSdp := f_IMS_MTCallSetup_AnnexC11aC26a_Steps2_5(t_Dummy, v_InviteRequestWithSdp, v_SDP_Message);
+      
+      f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);  /* trigger IPCAN to do the routing for RTP/RTCP loopback */
+      
+      if (ispresent(v_Response_180_183_WithSdp.Response180)) {
+        v_MessageHeader_Ringing := v_Response_180_183_WithSdp.Response180.msgHeader;
+      }
+      if(ispresent (v_Response_180_183_WithSdp.Response183)){ // @sic R5-184056 sic@
+        v_MessageHeader_SessionProgress :=  v_Response_180_183_WithSdp.Response183.msgHeader;
+        f_IMS_MessageHeader_CheckPrivacy(v_MessageHeader_SessionProgress);
+      }
+
+    } else {
+      // @siclog "Step 1 - 4" siclog@
+      v_ResponseWithSdp := f_IMS_MTCallSetup_AnnexC11_Steps1_4(v_InviteRequestWithSdp, v_AudioCodecToBeSelected);
+      v_SessionProgress183 := v_ResponseWithSdp.Response;
+      v_MessageHeader_SessionProgress := v_SessionProgress183.msgHeader;
+      f_IMS_MessageHeader_CheckPrivacy(v_MessageHeader_SessionProgress);
+
+      // Step 5 - 6. Send PRACK, Receive 200 OK
+      f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_SessionProgress183.msgHeader);     /* @sic R5-181141: steps 5-6 before sending the trigger sic@ */
+      
+      // Establish Dedicated EPS bearer
+      // See TS. 36.508 EUTRA/EPS signalling for IMS MT speech call Table 4.5A.7.3-1 Step 9-12
+      f_IMS_CC_TriggerDedicatedBearerActivation(IPCAN_MT_SpeechCall);
+      
+      // Step 7 - 11. Send UPDATE, Receive 200 OK, Receive optional 180 Ringing and send PRACK if requested
+      v_MessageHeader_Ringing := f_IMS_MTCallSetup_AnnexC11_Steps7_11(v_InviteRequestWithSdp, v_ResponseWithSdp, v_AudioCodecToBeSelected);
+    }
+    
+    if (ispresent(v_MessageHeader_Ringing)) {
+      f_IMS_MessageHeader_CheckPrivacy(valueof(v_MessageHeader_Ringing));
+    }
+
+    // Step 11A - Make UE accept the speech AMR offer
+    f_UT_AnswerCall(MMI);
+    
+    // Step 12. Receive 200 OK, Send ACK
+    v_ResponseWithSdp := f_IMS_MTCallSetup_Receive200OK_SendACK(v_InviteRequestWithSdp);
+    v_MessageHeader_200OK := v_ResponseWithSdp.Response.msgHeader;
+    
+    f_IMS_MessageHeader_CheckPrivacy(v_MessageHeader_200OK);
+    
+    // MT Call is now established
+    f_Delay(3.0);    /* @sic R5s130510 change 1; draft prose CR sic@ */
+    
+    // Step 14-15. SS sends BYE to release the call; UE sends 200 OK for the BYE request and ends the call
+    // @siclog "Step 14 -15" siclog@
+    v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog); //@sic R5s180433 sic@
+    f_IMS_CallReleaseMT(v_ContactUrl);
+    
+    f_UT_MMI_DeactivateIMS_TIR(MMI);
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test case body for 34.229-1 TC G.15.7
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MO_ComunicationForwardingOnNonReply_C21a(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR) runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var charstring v_ForwardedToCalleeContactUri := "sip:15.8@" & tsc_IMS_CallerDomain;
+    var template (value) SipUrl v_TargetedTo := f_SIP_BuildSipUri_TX("sip:user@company.com");
+    var template (value) HistoryInfo v_HistoryInfo := cs_HistoryInfo(v_TargetedTo);
+    var template (value) MessageHeader v_MessageHeader_Response;
+    var template (value) SDP_Message v_SDP_MessageStep4;
+    var IMS_SDP_AudioCodec_Type v_AudioCodecToBeUsed := p_AudioCodecList[0];
+    var OptionTag_List v_OptionTagsForRequired := tsc_OptionTagList_100rel_precondition;
+    
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1" siclog@
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall);
+    
+    // @siclog "Step 2" siclog@
+    v_InviteRequestWithSdp := f_IMS_MOCallSetup_AnnexC21_Step2_A4(-, p_AudioCodecList);
+
+    // @siclog "Step 3" siclog@
+    f_IMS_MOCallSetup_Send100Trying(v_InviteRequestWithSdp);
+    
+    // @siclog "Step 4 - 6" siclog@
+    f_IMS_MOCallSetup_AnnexC21aC25a_Steps4_6(IPCAN_MO_SpeechCall, v_InviteRequestWithSdp, -, v_AudioCodecToBeUsed);
+
+    // @siclog "Step 7" siclog@
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine181, f_IMS_InviteResponse_181_MessageHeaderTX(v_InviteRequestWithSdp.Invite, v_TargetedTo))));
+    
+    f_IMS_MO_ComunicationForwarding_ModifyDialog(v_InviteRequestWithSdp.Invite.msgHeader.cSeq.seqNumber);
+    
+    // @siclog "Step 8" siclog@
+    v_SDP_MessageStep4 := f_IMS_BuildSDP_InitialAnswerAudio_TX(v_InviteRequestWithSdp.SdpOffer, -, v_AudioCodecToBeUsed);
+    v_MessageHeader_Response := f_IMS_InviteResponse_180_MessageHeaderTX(v_InviteRequestWithSdp.Invite, v_ForwardedToCalleeContactUri, -, v_OptionTagsForRequired, -, cs_ContentTypeSDP);
+    v_MessageHeader_Response.historyInfo := v_HistoryInfo;
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine180, v_MessageHeader_Response, cs_MessageBody_SDP(v_SDP_MessageStep4))));
+    
+    // @siclog "Step 9 - 10" siclog@
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(v_InviteRequestWithSdp, v_MessageHeader_Response);  /* @sic R5-204484, R5s201620: new common function being used for EPS fallback too sic@ */
+    
+    // @siclog "Step 11 - 12" siclog@
+    f_IMS_MOCallSetup_Send200OK_ReceiveACK(v_InviteRequestWithSdp, v_ForwardedToCalleeContactUri, -, v_HistoryInfo);
+
+    // @siclog "Step 13 - 14" siclog@
+    f_IMS_CallReleaseMO(v_InviteRequestWithSdp.Invite, f_SIP_BuildSipUri_RX(v_ForwardedToCalleeContactUri));
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test case body for 34.229-1 TC 15.11 and G.15.11
+   * @param     p_InviteRequest
+   * @param     p_MessageHeader_Response183
+   * @param     p_SDP_OriginalOffer
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MO_CallOnHoldWithoutAnnouncement(INVITE_Request p_InviteRequest,
+                                                  MessageHeader p_MessageHeader_Response183,
+                                                  SDP_Message p_SDP_OriginalOffer) runs on IMS_PTC
+  {
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1 - 4" siclog@
+    f_UT_CallHold(MMI);
+    f_IMS_MOCallHoldResume(HOLD, p_InviteRequest, p_MessageHeader_Response183, p_SDP_OriginalOffer);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "");
+    
+    // @siclog "Step 5 - 8" siclog@
+    f_UT_CallResume(MMI);
+    f_IMS_MOCallHoldResume(RESUME, p_InviteRequest, p_MessageHeader_Response183, p_SDP_OriginalOffer);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "");
+    
+    // @siclog "Step 9 -10" siclog@
+    f_IMS_CallReleaseMO(p_InviteRequest);
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test case body for 34.229-1 TC 15.12 and G.15.12
+   * @param     p_InviteRequest
+   * @param     p_SDP_LatestMessageBySS
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MT_CallOnHoldWithoutAnnouncement(INVITE_Request p_InviteRequest,
+                                                  template (value) SDP_Message p_SDP_LatestMessageBySS) runs on IMS_PTC
+  {
+    var SipUrl v_ContactUrl := f_Addr_Union_GetSipUrl(p_InviteRequest.msgHeader.contact.contactBody.contactAddresses[0].addressField);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1 - 4" siclog@
+    f_IMS_MTCallHoldResume(HOLD, v_ContactUrl, p_SDP_LatestMessageBySS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "");
+    
+    // @siclog "Step 5 - 8" siclog@
+    f_IMS_MTCallHoldResume(RESUME, v_ContactUrl, p_SDP_LatestMessageBySS);
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "");
+    
+    // @siclog "Step 9 -10" siclog@
+    f_IMS_CallReleaseMT(v_ContactUrl);
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      Test procedure for subscription of MWI Event Package (34.229-1 15.15, G.15.17)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_Subscription_MWI_Event_Package_4G() runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_REGISTER_REQ;
+    var REGISTER_Request v_RegisterRequest;
+    var SUBSCRIBE_Request v_SubscribeReq_MsgSummaryEvent;
+    var SipUrl v_ContactUrl_RegEvent;
+    
+    f_IMS_CC_StartSignalling(IPCAN_InitialRegistration);
+
+    v_IMS_REGISTER_REQ := f_IMS_Register();
+    v_RegisterRequest := v_IMS_REGISTER_REQ.Request.Register;
+    v_ContactUrl_RegEvent := f_MessageHeader_GetContactSipUrl(v_RegisterRequest.msgHeader);
+
+    f_IMS_TestBody_Set(true);
+
+    // @siclog "Step 1 - 2b" siclog@
+    v_SubscribeReq_MsgSummaryEvent := f_IMS_MWI_Subscribe();
+
+    // @siclog "Step 3 - 4" siclog@
+    f_IMS_MWI_Notify(v_SubscribeReq_MsgSummaryEvent, false);   // no message waiting
+    
+    // @siclog "Step 5 - 6" siclog@
+    f_IMS_MWI_Notify(v_SubscribeReq_MsgSummaryEvent, true);    // message waiting
+
+    // @siclog "Step 7 - 8" siclog@
+    f_IMS_Register_Notify(v_ContactUrl_RegEvent, f_IMS_XmlMessageForNotify_Active(v_RegisterRequest));    /* @sic R5-153756, R5-153986: p_SubscribeRequest and p_CseqValue removed sic@ */
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      function for 15.27 and 15.28 to establish incoming call for CW
+   * @param     p_AudioCodecList
+   * @param     p_AudioCodec
+   * @return    INVITE_Request
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_CW_IncomingCall(IMS_SDP_AudioCodecList_Type p_AudioCodecList,
+                                  IMS_SDP_AudioCodec_Type p_AudioCodec) runs on IMS_PTC return INVITE_Request
+  { /* @sic R5-173555 p_AudioCodec := AMR_16000 sic@ */
+    /* @sic R5s180132: p_AudioCodecList, p_AudioCodec sic@ */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp; /* @sic R5w140112: v_InviteRequestWithSdp instead of v_InviteRequest sic@ */
+    var IMS_Response_180_183_WithSdp_Type v_Response_180_183_WithSdp;   // @sic R5s180436: IMS_Response_180_183_WithSdp_Type instead of v_OptionalResponseWithSdp sic@
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;           /* @sic R5w140112 sic@ */
+    var IMS_Response_Type v_SessionProgress183;
+    var MessageHeader v_MessageHeader_PrevReliableResponse;
+    var template (omit) MessageHeader v_MessageHeader_Ringing;
+    var boolean v_IsWLAN := f_IMS_PTC_RanTypeIsWLAN();
+    
+    timer t_Dummy;
+
+    v_InviteRequestWithSdp := f_IMS_MTCallSetup_BuildInviteRequestWithSdp(p_AudioCodecList);    /* @sic R5s180132: parameter p_AudioCodecList sic@ */
+
+    if (v_IsWLAN) {
+      IMS_Client.send(cas_IMS_Invite_Request(v_InviteRequestWithSdp.RoutingInfo, v_InviteRequestWithSdp.Invite));
+      v_Response_180_183_WithSdp := f_IMS_MTCallSetup_AnnexC11aC26a_Steps2_5(t_Dummy, v_InviteRequestWithSdp, f_IMS_BuildSDP_FinalAnswerAudio_RX());
+      v_MessageHeader_Ringing := v_Response_180_183_WithSdp.Response180.msgHeader;  /* 180 Ringing is mandatory according to the test case */
+    }
+    else {
+      v_ResponseWithSdp := f_IMS_MTCallSetup_AnnexC11_Steps1_4(v_InviteRequestWithSdp, p_AudioCodec);
+      v_SessionProgress183 := v_ResponseWithSdp.Response;
+      // Establish Dedicated EPS bearer
+      // See TS. 36.508 EUTRA/EPS signalling for IMS MT speech call Table 4.5A.7.3-1 Step 9-12
+      
+      // Step 5 - 6. Send PRACK, Receive 200 OK
+      v_MessageHeader_PrevReliableResponse := v_SessionProgress183.msgHeader;
+      f_IMS_MTCallSetup_SendPRACK_ReceiveOK(v_InviteRequestWithSdp.Invite, v_MessageHeader_PrevReliableResponse);
+      
+      // Step 7 - 11. Send UPDATE, Receive 200 OK, Receive 180 Ringing and send PRACK if requested
+      v_MessageHeader_Ringing := f_IMS_MTCallSetup_AnnexC11_Steps7_11(v_InviteRequestWithSdp, v_ResponseWithSdp, p_AudioCodec);  /* @sic R5-153798: parameter v_ResponseWithSdp sic@
+                                                                                                                                    @sic R5s180132: parameter p_AudioCodec sic@ */
+    }
+
+    f_IMS_CommunicationWaiting_Check180Ringing(v_MessageHeader_Ringing);  // Requirement step 9
+    return v_InviteRequestWithSdp.Invite;
+  }
+
+  /*
+   * @desc      Common test body for test cases 15.27, G.15.24, J.15.1
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CW_Answering(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR) runs on IMS_PTC
+  { /* @sic R5-173555 p_AudioCodec := AMR_16000 sic@ */
+    var INVITE_Request v_InviteRequest_Dialog1;
+    var INVITE_Request v_InviteRequest_Dialog2;
+    var template (present) MessageHeader v_MessageHeader_ExpectedBye_Dialog1;
+    var template (present) MessageHeader v_MessageHeader_Expected200_Dialog2;
+    var template (present) SipUrl v_ContactUrl_Dialog1;
+    var SipUrl v_ContactUrl_Dialog2;
+    var template (value) MessageHeader v_MessageHeader;
+    var MessageHeader v_MessageHeader_ReceivedBye;
+    var InternetProtocol_Type v_Protocol;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var IMS_SDP_AudioCodec_Type v_AudioCodecToBeSelected := p_AudioCodecList[0];
+    
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall); // @sic R5s180267 sic@
+
+    v_InviteRequest_Dialog1 := f_IMS_CC_MO_SpeechCall(p_AudioCodecList, v_AudioCodecToBeSelected);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1 - 11" siclog@
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX("11111112");      // @sic R5-220212 sic@
+    v_InviteRequest_Dialog2 := fl_IMS_CW_IncomingCall(p_AudioCodecList, v_AudioCodecToBeSelected);
+    
+    // @siclog "Step 11a: terminate previous session and take over waiting call" siclog@
+    f_UT_HangupIMSCall(MMI);                    // @sic R5-142955, R5s140307 sic@
+    
+    //  @siclog "Step 12: Receive BYE corresponding to first call" siclog@
+    /* @sic R5-142955: the BYE comes as reaction of the UE on the UT command at step 11a sic@ */
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog);
+    v_MessageHeader_ExpectedBye_Dialog1 := f_IMS_ByeRequest_MessageHeaderRX(v_InviteRequest_Dialog1);
+    v_ContactUrl_Dialog1 := f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri);   /* as used in the C.21 procedure */
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Bye_Request(cr_BYE_Request(v_ContactUrl_Dialog1, v_MessageHeader_ExpectedBye_Dialog1)));
+    v_MessageHeader_ReceivedBye := v_IMS_DATA_REQ.Request.Bye.msgHeader;
+    f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader_ReceivedBye, v_IMS_DATA_REQ.RoutingInfo.Protocol);
+     
+    //  @siclog "Step 13: Send 200 OK" siclog@
+    v_MessageHeader := f_IMS_OtherResponse_200_MessageHeaderTX(v_MessageHeader_ReceivedBye);
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, v_MessageHeader)));
+    f_IMS_PTC_ImsInfo_DialogRelease();
+    
+    // @siclog "Step 13a: Accept incoming call" siclog@
+    f_UT_AnswerCall(MMI); // @sic R5-142955, R5s140307 sic@
+    
+    //  @siclog "Step 14: SS expects and receives 200 OK for INVITE from the UE" siclog@
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);
+    v_MessageHeader_Expected200_Dialog2 := f_IMS_OtherResponse_200_MessageHeaderRX(v_InviteRequest_Dialog2.msgHeader);
+    v_ContactUrl_Dialog2 := f_IMS_PTC_ImsInfo_GetContactUrlUE(dialog);       /* @sic R5s150908 change 4: dialog sic@ */
+    v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    f_IMS_ReceiveResponse(v_InviteRequest_Dialog2.msgHeader,
+                          v_Protocol,
+                          cr_Response(c_statusLine200, v_MessageHeader_Expected200_Dialog2));
+    
+    //  @siclog "Step 15: SS sends ACK to the UE"
+    v_MessageHeader := f_IMS_AckRequest_MessageHeaderTX(v_InviteRequest_Dialog2);
+    IMS_Client.send(cas_IMS_Ack_Request(cs_IMS_RoutingInfo(v_Protocol), cs_ACK_Request(v_ContactUrl_Dialog2, v_MessageHeader)));
+    
+    f_IMS_TestBody_Set(false);
+    
+    f_IMS_CallReleaseMT(v_ContactUrl_Dialog2); // @sic R5s140606 sic@
+  }
+
+  /*
+   * @desc      Common test body for test cases 15.28, G.15.25, J.15.2
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_CW_Cancelling(IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR) runs on IMS_PTC
+  { /* @sic R5-173555 p_AudioCodec := AMR_16000 sic@ */
+    var INVITE_Request v_InviteRequest_Dialog1;
+    var INVITE_Request v_InviteRequest_Dialog2;
+    var IMS_SDP_AudioCodec_Type v_AudioCodecToBeSelected := p_AudioCodecList[0];
+    
+    f_IMS_CC_StartCall(IPCAN_MO_SpeechCall); //@sic R5s180267 sic@
+   
+   // Initial conditions - Setup an MO Call according to Annex C.21
+    v_InviteRequest_Dialog1 := f_IMS_CC_MO_SpeechCall(p_AudioCodecList, v_AudioCodecToBeSelected);           // @sic R5-140909 sic@
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 1 - 11" siclog@
+    f_IMS_PTC_ImsInfo_ActivateDialog(secondDialog);               /* @sic R5s140092 change 1.5 sic@ */
+    f_IMS_PTC_ImsInfo_DialogSetSessIdTX("11111112");              // @sic R5-220212 sic@
+    v_InviteRequest_Dialog2 := fl_IMS_CW_IncomingCall(p_AudioCodecList, v_AudioCodecToBeSelected);          /* @sic R5-140909 sic@ */
+    
+    // @siclog "Step 12 - 15" siclog@
+    f_IMS_MTCallSetup_CancelCall(v_InviteRequest_Dialog2);        /* @sic R5-211447: common function for 4G/5G sic@ */
+
+    f_IMS_PTC_ImsInfo_DialogRelease();                              /* @sic R5s140092 change 1.5 sic@ */
+    f_IMS_PTC_ImsInfo_ActivateDialog(firstDialog);                  /* @sic R5s140092 change 1.5 sic@ */
+    
+    f_IMS_TestBody_Set(false);
+    f_IMS_CallReleaseMO(v_InviteRequest_Dialog1);
+  }
+
+}

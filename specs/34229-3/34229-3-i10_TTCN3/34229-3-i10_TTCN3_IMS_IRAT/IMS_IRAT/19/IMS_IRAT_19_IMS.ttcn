@@ -1,0 +1,592 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2022-06-08 15:59:40 +0200 (Wed, 08 Jun 2022) $
+// $Rev: 33602 $
+/******************************************************************************/
+
+module IMS_IRAT_19_IMS {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_DefaultHandler all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_Templates all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  const integer tsc_StatusCode_380 := 380;  /* @status    APPROVED (IMS_IRAT) */
+
+  const integer tsc_StatusCode_503 := 503;  /* @status    APPROVED (IMS_IRAT) */
+
+  /*
+   * @desc      503 Service Unavailable (see TS 34.229, A.4.2)
+   * @param     p_InviteRequest
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_IMS_InviteResponse_503_MessageHeaderTX(INVITE_Request p_InviteRequest) return template (value) MessageHeader
+  {
+    var MessageHeader v_MessageHeader_Invite := p_InviteRequest.msgHeader;
+    var template (value) MessageHeader v_MessageHeader_Response := cs_MessageHeader_Dummy;
+
+    v_MessageHeader_Response.via             := v_MessageHeader_Invite.via;
+    v_MessageHeader_Response.fromField       := v_MessageHeader_Invite.fromField;
+    v_MessageHeader_Response.toField         := cs_ToDef(f_Addr_Union_GetSipUrl(v_MessageHeader_Invite.toField.addressField));
+    v_MessageHeader_Response.callId          := v_MessageHeader_Invite.callId;
+    v_MessageHeader_Response.cSeq            := v_MessageHeader_Invite.cSeq;
+    v_MessageHeader_Response.retryAfter      := cs_RetryAfter(60);
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      Common funtion TCs 19.1.3, 19.1.3c, 19.3.2, 19.3.2b, 19.3.2c
+   * @param     p_Context           (default value: A_2_1_A4)
+   * @param     p_ContactUri        (default value: omit)
+   * @param     p_StatusCode        (default value: tsc_StatusCode_380)
+   * @return    INVITE_Request
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function fl_TC_19_1_3_TC_19_3_2x_Common(INVITE_A_2_1_Context_Type p_Context := A_2_1_A4,
+                                          template (omit) charstring p_ContactUri := omit,
+                                          integer p_StatusCode := tsc_StatusCode_380) runs on IMS_PTC return INVITE_Request
+  { // @sic R5s160076 sic@
+    // @sic R5-198896 sic@
+
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL; // @sic R5s160076 sic@
+    var charstring v_FmtAudio;
+    var charstring v_Fmt;
+    var template (present) SDP_Message v_SDP_Message_Step1;
+    var INVITE_Request v_InviteRequest;
+    var SipUrl v_ContactUri; /* acc. to A.2.15 (CANCEL) and A.2.7 (ACK, A4: for non-2xx response) the contact URI as of the INVITE shall be used */
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var template (value) MessageHeader v_MessageHeader_AltService_380;
+    var template (value) MessageHeader v_MessageHeader_ServiceUnavailable_503;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var SDP_Message v_SDP_Message;
+    var template (omit) MessageBody v_MessageBody := omit;
+    var integer v_StatusCode := p_StatusCode;
+    
+    if (p_Context== A_2_1_A7) {
+      // Step 2/6. Receive INVITE for an Emergency call
+      v_SDP_Message_Step1 := f_IMS_BuildSDP_EmergencyCallOffer_RX(); // Build SDP record to be received from the UE at step 1 according to 34.229-1 Annex C.22
+      v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest(p_Context); // @sic R5s150846 sic@ @sic R5s160076 sic@
+
+      v_InviteRequest := v_IMS_DATA_REQ.Request.Invite;
+      v_ContactUri := v_InviteRequest.requestLine.requestUri; // @sic R5s160076 sic@
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+      
+      v_SDP_Message := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_InviteRequest.messageBody, v_SDP_Message_Step1); // @sic R5s150846 sic@
+     
+      v_FmtAudio := f_SDP_MediaDescr_GetAMR_8000_1(v_SDP_Message.media_list[0], omit);
+      if (v_FmtAudio == "") {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no AMR codec found in given media description");
+      }
+    }
+    else {
+      // Step 2. Receive INVITE for non Emergency call
+      v_SDP_Message_Step1 := f_IMS_BuildSDP_InitialOfferAudio_RX(); // Build SDP record to be received from the UE at step 1 according to 34.229-1 Annex C.22
+      v_InviteRequestWithSdp := f_IMS_MOCallSetup_ReceiveINVITE_Common(); // @sic R5s160076 sic@
+      v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_InviteRequestWithSdp.RoutingInfo);
+      v_InviteRequest := v_InviteRequestWithSdp.Invite;
+      v_ContactUri := v_InviteRequest.requestLine.requestUri;// @sic R5s160076 sic@
+
+      v_SDP_Message := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_InviteRequest.messageBody, v_SDP_Message_Step1); // @sic R5s150846 sic@
+      
+      v_FmtAudio := f_SDP_MediaDescr_GetAMR_8000_1(v_SDP_Message.media_list[0], omit);
+      
+      if (v_FmtAudio == "") {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no AMR codec found in given media description");
+      }
+      
+      // check media description:
+      v_Fmt := f_SDP_MediaDescr_GetAMR_8000_1(v_SDP_Message.media_list[0], omit);
+      if (v_Fmt == "") {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no AMR codec found in given media description");
+      }
+    }
+
+    if (v_StatusCode == tsc_StatusCode_380) {     // @sic R5-198896 sic@
+      // Step 7. The SS responds with a 380 Alternative Service response
+      /* Send XML contents according to Annex A.4.1
+         <alternative-service>
+         <type>emergency</type>
+         <reason/>
+         </alternative-service>
+      */
+      v_MessageHeader_AltService_380 := f_IMS_InviteResponse_380_MessageHeaderTX(v_InviteRequest);
+      if (isvalue (p_ContactUri)) {
+        v_MessageHeader_AltService_380.contact := cs_Contact(f_SIP_BuildSipUri_TX(valueof(p_ContactUri)));
+      }
+      v_MessageBody := cs_MessageBody_XML_Ims_3gpp(cs_Ims_3gpp_Emergency); // XSD schema needed according to 24.229 section 7.6.2.
+      IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine380, v_MessageHeader_AltService_380, v_MessageBody)));
+      // Step 8. The UE acknowledges the receipt of 380 Alternative Service for INVITE
+      v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine380);
+    } else if (v_StatusCode == tsc_StatusCode_503) {
+      // Step 7. The SS responds with a 503 Service Unavailable
+      /* no message body */
+      v_MessageHeader_ServiceUnavailable_503 := f_IMS_InviteResponse_503_MessageHeaderTX(v_InviteRequest);
+      if (isvalue (p_ContactUri)) {
+        v_MessageHeader_ServiceUnavailable_503.contact := cs_Contact(f_SIP_BuildSipUri_TX(valueof(p_ContactUri)));
+      }
+      IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine503, v_MessageHeader_ServiceUnavailable_503))); // no message body is needed per 34.229 A.4.2
+
+      // Step 8. The UE acknowledges the receipt of 503 Service Unavailable for INVITE
+      v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine503);
+    } else {
+      FatalError(__FILE__, __LINE__, "Invalid status code");
+    }
+       
+    //trigger to EUTRA, 380 resp 503 is being sent (wait for ESR timer can be started)
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160294 ch.4 sic@
+
+    // Step 8 cc.
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_ContactUri, v_MessageHeader_Ack))); // @sic R5s160076 sic@
+    
+    // Coordination betweenIMS PTC and EUTRA PT: step 8-->ACK is received
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);  // @sic R5s15700 sic@ @sic R5s160339 sic@
+
+    return v_InviteRequest;
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2c steps 2-4
+   * @return    INVITE_Request
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function fl_TC_34229_19_3_2c_Steps2To4() runs on IMS_PTC return INVITE_Request
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) SipUrl v_CalleeSipUri := f_SIP_BuildSipUri_RX(px_IMS_CalleeUri);
+    var charstring v_FmtAudio;
+    var template (present) SDP_Message v_SDP_Message_Step1;
+    var INVITE_Request v_InviteRequest;
+    var template (value) MessageHeader v_MessageHeader_AltService_380;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var SDP_Message v_SDP_Message;
+    var template (omit) MessageBody v_MessageBody := omit;
+ 
+    v_SDP_Message_Step1 := f_IMS_BuildSDP_InitialOfferAudio_RX(); // Build SDP record to be received from the UE at step 1 according to 34.229-1 Annex C.21
+
+    // Step 2. Receive INVITE for an MO call
+    v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest(A_2_1_A4); // @sic R5s150846 sic@
+    v_InviteRequest := v_IMS_DATA_REQ.Request.Invite;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo);
+
+    v_SDP_Message := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_InviteRequest.messageBody, v_SDP_Message_Step1); // @sic R5s150846 sic@
+
+
+    v_FmtAudio := f_SDP_MediaDescr_GetAMR_8000_1(v_SDP_Message.media_list[0], omit);
+    if (v_FmtAudio == "") {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no AMR codec found in given media description");
+    }
+
+    // Step 3. The SS responds with a 380 Alternative Service response
+    /* Send XML contents according to Annex A.4.1
+       <alternative-service>
+       <type>emergency</type>
+       <reason/>
+       </alternative-service>
+    */
+
+    v_MessageHeader_AltService_380 := f_IMS_InviteResponse_380_MessageHeaderTX(v_InviteRequest);
+    v_MessageHeader_AltService_380.contact := cs_Contact(f_SIP_BuildSipUri_TX("urn:service:sos.police"));
+    v_MessageBody := cs_MessageBody_XML_Ims_3gpp(cs_Ims_3gpp_Emergency); // XSD schema needed according to 24.229 section 7.6.2.
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine380, v_MessageHeader_AltService_380, v_MessageBody)));
+    
+    //trigger to EUTRA, 380 is being sent (wait for ESR timer can be started)
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160294 ch.5 sic@
+
+    // Step 4. The UE acknowledges the receipt of 380 Alternative Service for INVITE
+    v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine380);
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_CalleeSipUri, v_MessageHeader_Ack)));
+
+    return v_InviteRequest;
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.1.3
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_1_3_IMS1() runs on IMS_PTC
+  { /* Emergency call with emergency registration / Abnormal case / IM CN sends a 380 / UE performs emergency call via CS domain */
+    f_IMS_PTC_Init();
+    
+    f_IMS_DefaultHandler_InitialRegistration();
+
+    select (px_RATComb_Tested) {
+      case (EUTRA_UTRA) {
+        f_IMS_PTC_ResetRanType(); // @sic R5s150868 change 2 sic@
+        f_IMS_OptionalReregistrationAnnexC46(IPCAN); // @sic  R5-182560 sic@
+        f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN();
+      }
+      case (EUTRA_GERAN) {
+        /* do nothing as IMS is not supported for GERAN:
+           as PS and CS are not needed simultanously the PDP context status in the RAU accept can be set to inactive what should prevent any further IMS signalling */
+      }
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.1.3
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_1_3_IMS2() runs on IMS_PTC
+  { /* Emergency call with emergency registration / Abnormal case / IM CN sends a 380 / UE performs emergency call via CS domain */
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    // Test Case Body
+    f_IMS_TestBody_Set(true);
+    
+    //@siclog "Steps 2-5" siclog@
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyRegistration();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 5");
+    
+    //@siclog "Steps 6-8" siclog@
+    fl_TC_19_1_3_TC_19_3_2x_Common(A_2_1_A7); // @sic R5s160076 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 6 to 8"); // @sic R5-145792 sic@
+        
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2_IMS1() runs on IMS_PTC
+  { /* Non-UE detectable emergency call / IM CN sends 380 Alternative Service including emergency service URN and no emergency subservice type /  Non-emergency IMS registration / UTRAN or GERAN */
+
+    var charstring v_ContactUri:="urn:service:sos";  // @sic R5s160076 sic@ @sic R5s160294 ch.6 sic@
+    
+    f_IMS_PTC_Init(PDN_1);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    
+    // Test Case Body
+    f_IMS_TestBody_Set(true);
+
+    //wait for preamble to finish
+    f_IMS_IPCAN_WaitForTrigger(IPCAN); // @sic R5s160294 ch.6 sic@
+    
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number
+    f_UT_RequestIMSCall(MMI, px_IMS_CalleeUri);
+    
+    //@siclog "Steps 2-4" siclog@
+    fl_TC_19_1_3_TC_19_3_2x_Common(-, v_ContactUri); // @sic R5-160937 sic@ @sic R5s160076 sic@
+    
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 4");
+    
+    f_IMS_PTC_SetRanType(UTRAN_FDD);
+    f_IMS_OptionalReregistrationAnnexC46(IPCAN); // @sic  R5-183106 sic@
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); //@sic R5-204530 sic@
+    
+    f_IMS_TestBody_Set(false); // @sic R5s160076 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2b
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2b_IMS1() runs on IMS_PTC
+  { /* Non-UE detectable emergency call / IM CN sends a 380 with unavailable emergency service URN / UE performs normal call via CS domain / UTRAN or GERAN */
+    
+    var charstring v_ContactUri:="urn:service:sos.country-specific"; // @sic R5s160070 sic@
+    
+    f_IMS_PTC_Init(PDN_1);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    
+    // Test Case Body
+    f_IMS_TestBody_Set(true);
+    
+    //wait for preamble to finish
+    f_IMS_IPCAN_WaitForTrigger(IPCAN); // @sic R5s160294 ch.7 sic@
+
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number
+    f_UT_RequestIMSCall(MMI, px_IMS_CalleeUri);
+    
+    //@siclog "Steps 2-4" siclog@
+    fl_TC_19_1_3_TC_19_3_2x_Common(-, v_ContactUri); // @sic R5s160070 sic@
+    
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 4");
+ 
+    f_IMS_PTC_SetRanType(UTRAN_FDD);
+    f_IMS_OptionalReregistrationAnnexC46(IPCAN); // @sic R5-183106 sic@
+    f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN(); //@sic R5-204530 sic@
+ 
+    f_IMS_TestBody_Set(false); // @sic R5s160070 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.3.2c
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_3_2c_IMS1() runs on IMS_PTC
+  { /* Non-UE detectable emergency call / IM CN sends a 380 with available emergency service URN / UE performs CS Emergency call via CS domain / UTRAN or GERAN */
+    
+    f_IMS_PTC_Init(PDN_1);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // @sic R5s160406 sic@
+    
+    // Test Case Body
+    f_IMS_TestBody_Set(true);
+    
+    //wait for preamble to finish
+    f_IMS_IPCAN_WaitForTrigger(IPCAN); // @sic R5s160294 ch.8 sic@
+    
+    //@siclog "Step 1" siclog@
+    // Dial a "non emergency" number
+    f_UT_RequestIMSCall(MMI, px_IMS_CalleeUri);
+    
+    //@siclog "Steps 2-4" siclog@
+    fl_TC_34229_19_3_2c_Steps2To4();
+    
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 4");
+    
+    // Inform EUTRA: ACK received.
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    select (px_RATComb_Tested) {
+      case (EUTRA_UTRA) {
+        f_IMS_PTC_SetRanType(UTRAN_FDD);
+        f_IMS_OptionalReregistrationAnnexC46(IPCAN); // @sic  R5-183106 sic@
+        f_IMS_IpcanReleaseWithOptionalDeregistrationOtherIPCAN();
+      }
+      case (EUTRA_GERAN) {
+        /* do nothing as IMS is not supported for GERAN:
+           as PS and CS are not needed simultanously the PDP context status in the RAU accept can be set to inactive what should prevent any further IMS signalling */
+      }
+    }
+    
+    f_IMS_TestBody_Set(false); // @sic R5s160072 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.1
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_1_IMS2() runs on IMS_PTC // @sic R5s160032 ch. 5 sic@
+  { /* Emergency call without emergency registration / EPS / UE does not contain an ISIM or USIM */
+
+    var INVITE_Request v_InviteRequest;
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (Step 1) refers to condition A8 of A.2.1 */
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    f_IMS_TestBody_Set(true);
+    
+    //@siclog "Steps 1-5" siclog@
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(A_2_1_A6, v_GeolocationUsage); // @sic R5s130799 change 2 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 1 to 5");
+
+    //@siclog "Steps 8-10" siclog@
+    //Release Emergency Call MO
+    f_IMS_EmergencyCallRelease(v_InviteRequest); // @sic R5s130799 change 2, R5-172935 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 8 to 10");
+    
+    f_IMS_TestBody_Set(false);
+    
+    // Inform EUTRA: IMS Call released.
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.2
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_2_IMS1() runs on IMS_PTC  // @sic R5s160032 ch. 5 sic@
+  {
+    /* Emergency call without emergency registration / EPS / UE contains an ISIM or
+    USIM / UE is in state EMM-REGISTERED.LIMITED-SERVICE */
+    f_IMS_PTC_Init(PDN_1);
+    f_IMS_Registration();  // @sic R5s150327 sic@
+    f_IMS_IpcanReleaseWithOptionalDeregistration();  // @sic R5s160125 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.2
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_2_IMS2() runs on IMS_PTC  // @sic R5s160032 ch. 5 sic@
+  {
+    /* Emergency call without emergency registration / EPS / UE contains an ISIM or
+    USIM / UE is in state EMM-REGISTERED.LIMITED-SERVICE */
+    var INVITE_Request v_InviteRequest;
+    
+    f_IMS_PTC_Init(PDN_2);
+    f_IMS_TestBody_Set(true);
+    
+    //@siclog "Steps 2-6" siclog@
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(A_2_1_A6); // @sic R5s150327 sic@ @sic R5s150846 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 6");
+    
+    //@siclog "Steps 7-8" siclog@
+    //Release Emergency Call MO
+    f_IMS_CallReleaseMO(v_InviteRequest, -, REGULAR_EMERGENCY); // @sic R5s160125 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 7 to 8");
+ 
+ // Inform EUTRA: IMS Call released.
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+
+    f_IMS_TCP_CloseHandling(waitAndClose); // @sic R5s160125 sic@
+
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.4.5
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_4_5_IMS2() runs on IMS_PTC
+  { /* Emergency call without emergency registration / UE credentials are not accepted */
+
+    var INVITE_Request v_InviteRequest;
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    // Test Case Body
+    f_IMS_TestBody_Set(true);
+    
+    //@siclog "Steps 2-17" siclog@
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyCallRegistration_403Forbidden();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 2 to 17");
+
+    f_IMS_GlobalRelease (keepUnprotected);  // @sic R5s170468 - additional change sic@  @sic R5s220609 - Additional changes: keepUnprotected instead of oldestProtectedContextOnly sic@
+    
+    //@siclog "Steps 18-22" siclog@
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(A_2_1_A6);  // @sic R5-131470 sic@ @sic R5s150846 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 18 to 22");
+    
+    // Inform EUTRA: IMS Call established.
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    // Wait for Call Release Trigger
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);  // @sic R5s140786 sic@
+    
+    //@siclog "Steps 23-23F" siclog@
+    //Release Emergency Call MO as per Annex C.32a
+    f_IMS_EmergencyCallRelease(v_InviteRequest);  // @sic R5-131470 sic@
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 23 to 24"); // @sic R5s190785 ch. 1 sic@
+    
+    f_IMS_TestBody_Set(false);   //IMS deregistration handled in default  @sic R5s160125 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.5.1
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_5_1_IMS2() runs on IMS_PTC
+  { /* New initial emergency registration / UE obtains from the serving IP-CAN an IP address different
+     * than the IP address used for the emergency registration */
+    /* @sic R5s160131: coordination messages are needed after call release only sic@ */
+
+    var INVITE_Request v_InviteRequest;
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (step 1 of Annex C.22) refers to condition A8 of A.2.1 */
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    /* Initial conditions:
+     * UE is registered to IMS services, by executing the generic test procedure in Annex C.2 up to the last step
+     * UE has registered to IMS emergency services, by executing the generic test procedure in Annex C.20 up to the last step. Thereafter the UE has initiated an emergency call by executing the generic test procedure in Annex C.22 up to the last step.
+     * The emergency call is released.
+     */
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyRegistration();
+    
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(-, v_GeolocationUsage);
+    
+    f_IMS_EmergencyCallRelease(v_InviteRequest);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // Inform EUTRA that IMS Call has been released
+    
+    f_IMS_TestBody_Set(true);
+    
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyRegistration();
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 1 to 4");
+    
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(-, v_GeolocationUsage);
+    
+    f_IMS_EmergencyCallRelease(v_InviteRequest);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // Inform EUTRA that IMS Call has been released
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.229-1 clause 19.5.10
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_TC_19_5_10_IMS2() runs on IMS_PTC
+  { /* New initial emergency registration / UE obtains from the serving IP-CAN an IP address different
+     * than the IP address used for the emergency registration */
+
+    var INVITE_Request v_InviteRequest;
+    var boolean v_GeolocationUsage := pc_IMS_Geolocation; /* the test case intends to use GeoLocationInformation if supported by the UE (PICS) @sic R5s150846 sic@
+                                                             INVITE (step 1 of Annex C.22) refers to condition A8 of A.2.1 */
+    
+    f_IMS_PTC_Init(PDN_2);
+    
+    /* Initial conditions:
+     * UE is registered to IMS services, by executing the generic test procedure in Annex C.2 up to the last step
+     * UE has registered to IMS emergency services, by executing the generic test procedure in Annex C.20 up to the last step. Thereafter the UE has initiated an emergency call by executing the generic test procedure in Annex C.22 up to the last step.
+     * The emergency call is released.
+     */
+    
+    f_IMS_TestBody_Set(true);
+    
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_EmergencyRegistration(-, "100");
+    // Emergency registration: 34.229-1 Annex C.20
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // Inform EUTRA that IMS registration has been achieved
+    f_IMS_PreliminaryPass(__FILE__, __LINE__, "Steps 1 to 4");
+    
+    // Emergency call setup: 34.229-1 Annex C.22
+    v_InviteRequest := f_IMS_EmergencyCallSetup(-, v_GeolocationUsage);
+        
+    // Wait for Call Release Trigger
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    
+    f_IMS_EmergencyCallRelease(v_InviteRequest);
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN); // Inform EUTRA that IMS Call has been released
+    
+    f_IMS_TestBody_Set(false);
+  }
+
+}

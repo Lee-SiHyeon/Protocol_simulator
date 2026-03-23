@@ -1,0 +1,121 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2022-12-16 15:51:38 +0100 (Fri, 16 Dec 2022) $
+// $Rev: 35129 $
+/******************************************************************************/
+
+module MCDataMessage_Common {
+
+  import from CommonDefs all;
+  import from MCDataMessage_TypeDefs all;
+  import from MCX_SecurityFunctions all;
+
+  const O1_Type tsc_MCData_PayloadContentType_TEXT   := '01'O;          /* @status    APPROVED (MCX) */
+
+  const O1_Type tsc_MCData_PayloadContentType_BINARY := '02'O;          /* @status    APPROVED (MCX) */
+
+  template (value) MCData_ProtectedPayloadMessage cs_MCX_ProtectedPayloadMessage(MCData_MessageType p_MessageType,
+                                                                                 integer p_TimestampSeconds,
+                                                                                 O4_Type p_PayloadId,
+                                                                                 O1_Type p_PayloadSequenceNumber,
+                                                                                 O16_Type p_IV,
+                                                                                 B32_Type p_DPPK_Id) :=
+  { /* MCData Protected Payload message as defined in 33.180 Clause 8.5.4 */
+    /* @status    APPROVED (MCX) */
+    messageType := p_MessageType,
+    dateAndTime := int2oct(p_TimestampSeconds, 5),
+    payloadId := p_PayloadId,
+    payloadSequenceNumber := p_PayloadSequenceNumber,
+    payloadAlgorithm := '01'O,          // R5w210207 Assumption 2.1-2: AEAD_AES_128_GCM
+    signallingAlgorithm := omit,        // R5w210207 Assumption 2.1-3: omit
+    initialisationVector := p_IV,
+    dppkId := bit2oct(p_DPPK_Id),
+    payload := omit,                    // to be added during encoding
+    mikeySakkeIMessage := omit
+  };
+
+  template (value) MCData_Payload cs_MCData_Payload(O1_Type p_IEI := '78'O,
+                                                    O1_Type p_ContentType,
+                                                    octetstring p_Content) :=
+  { /* @status    APPROVED (MCX) */
+    iei := p_IEI,
+    iel := int2oct(lengthof(p_Content) + 1, 2),   // length of the content + one octet for the contentType
+    contentType := p_ContentType,
+    content := p_Content
+  };
+
+  /*
+   * @desc      return enumerated corresponding to Numeric Identifier according to RFC 5116 clause 6
+   * @param     p_PayloadAlgorithm
+   * @return    AEAD_EncryptionMethod_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_AEAD_Oct2EncryptionMethod(template (value) O1_Type p_PayloadAlgorithm) return AEAD_EncryptionMethod_Type
+  { /* R5w210207 Assumption 2.1-2: AEAD_AES_128_GCM (1) and AEAD_AES_256_GCM (2) according to RFC 5116 clause 6 */
+    var AEAD_EncryptionMethod_Type v_Method;
+    select (valueof(p_PayloadAlgorithm)) {
+      case ('01'O) { v_Method := AEAD_AES_128_GCM; }
+      case ('02'O) { v_Method := AEAD_AES_256_GCM; }
+    }
+    return v_Method;
+  }
+
+  /*
+   * @desc      return associated data of the MCData Protected Payload message (according to 33.180 clause 8.5.4.2) for AEAD encryption (RFC 5116)
+   * @param     p_ProtectedPayload
+   * @return    octetstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCData_ProtectedPayloadMessage_AEAD_AssociatedData(template (value) MCData_ProtectedPayloadMessage p_ProtectedPayload) return octetstring
+  {
+    var template (value) MCData_ProtectedPayloadMessage v_ProtectedPayload := p_ProtectedPayload;
+    v_ProtectedPayload.payload := omit;
+    v_ProtectedPayload.mikeySakkeIMessage := omit;
+    return bit2oct(encvalue(v_ProtectedPayload));
+  }
+
+  /*
+   * @desc      encrypt content (encoded payload) and return ProtectedPayloadMessage according to 36.579-1 Table 5.5.9.1-3
+   * @param     p_ProtectedPayloadWithoutContent
+   * @param     p_Key
+   * @param     p_Content
+   * @return    template (value) MCData_ProtectedPayloadMessage
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_ProtectedPayloadMessage_Encrypt(template (value) MCData_ProtectedPayloadMessage p_ProtectedPayloadWithoutContent,
+                                                  bitstring p_Key,
+                                                  octetstring p_Content) return template (value) MCData_ProtectedPayloadMessage
+  {
+    var template (value) MCData_ProtectedPayloadMessage v_ProtectedPayload := p_ProtectedPayloadWithoutContent;
+    var octetstring v_AssociatedData := fl_MCData_ProtectedPayloadMessage_AEAD_AssociatedData(v_ProtectedPayload);
+    var AEAD_EncryptionMethod_Type v_Method := f_AEAD_Oct2EncryptionMethod(v_ProtectedPayload.payloadAlgorithm);
+    var O16_Type v_IV := valueof(v_ProtectedPayload.initialisationVector);
+    var octetstring v_EncryptedContent := fx_AEAD_Encrypt(p_Content, v_AssociatedData, v_Method, p_Key, v_IV);
+
+    v_ProtectedPayload.payload := cs_MCData_Payload('78'O, tsc_MCData_PayloadContentType_BINARY, v_EncryptedContent);        /* R5w210207 Assumption 2.1-4b: contentType BINARY; Assumption 2.1-4c: IEI='78'O */
+
+    return v_ProtectedPayload;
+  }
+
+  /*
+   * @desc      Encrypt given content and encode Protected Payload (33.180 Table 8.5.4.1-1)
+   * @param     p_ProtectedPayloadWithoutContent
+   * @param     p_Key
+   * @param     p_Content
+   * @return    octetstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_ProtectedPayloadMessage_EncryptAndEncode(template (value) MCData_ProtectedPayloadMessage p_ProtectedPayloadWithoutContent,
+                                                             bitstring p_Key,
+                                                             octetstring p_Content) return octetstring
+  {
+    var template (value) MCData_ProtectedPayloadMessage v_ProtectedPayload := fl_MCX_ProtectedPayloadMessage_Encrypt(p_ProtectedPayloadWithoutContent, p_Key, p_Content);
+    return bit2oct(encvalue(v_ProtectedPayload));
+  }
+
+}

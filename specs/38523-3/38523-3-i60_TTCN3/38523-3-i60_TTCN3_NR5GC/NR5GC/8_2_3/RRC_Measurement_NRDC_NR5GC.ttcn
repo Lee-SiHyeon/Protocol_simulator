@@ -1,0 +1,106 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2023-10-09 22:34:37 +0200 (lu., 09 oct. 2023) $
+// $Rev: 37215 $
+/******************************************************************************/
+
+module RRC_Measurement_NRDC_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps_NRDC all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_Measurement_Functions all;
+  import from NR_Measurement_Templates all;
+  import from NR_RRC_Templates all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.3.16.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_2_3_16_2_NR5GC() runs on NR5GC_PTC
+  { // Measurement configuration control and reporting / SRB3 / Intra NR measurements / NR-DC
+    f_NR5GC_Init_NRDC(NR_4, {nr_Cell1, nr_Cell10});
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10, -, tsc_NRDC_SCG_Cell); //@sic R5s210891 sic@
+    
+    // Bring UE to State RRC_CONNECTED
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower(nr_Cell10, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR5GC_RRC_ConnectedState3N_NRDC(nr_Cell1, nr_Cell10, MCG_SCG); //@sic R5-206295 sic@
+    
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_3_16_2_NR5GC_TestBody();
+    f_NR_TestBody_Set(false);
+
+    //Postamble
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      8.2.3.16.2 Test Body
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_2_3_16_2_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (omit) octetstring v_EncodedSCG_Config := omit;
+    var PhysCellId v_PhysCellIdServing;
+    var template (value) MeasObjectParamsList_Type v_MeasuredObjectList;
+    var template (value) ReportConfigToAddModList v_ReportConfigList;
+    var template (value) MeasIdToAddModList v_MeasIdConfigList;
+    var template (value) MeasConfig v_MeasConfig;
+    var template (present) MeasResults v_MeasResults;
+    
+    // @siclog "Step 1 and Step2" siclog@
+    // The SS transmits an RRCReconfiguration message via SRB1 to establish SRB3
+    // The UE transmits an RRCReconfigurationComplete message via SRB1
+    f_NR_ReconfigureAddSRB3_NRDC(nr_Cell1, nr_Cell10);
+
+    // @siclog "Step 3" siclog@
+    // The SS transmits an RRCReconfiguration message from Cell10 to setup periodical intra-NR measurements and reporting via SRB3
+    v_SCGConfig := cs_NR_CellGroupConfigMeas(tsc_NR_CellGroupId_SCG,
+                                             cs_NR_SpCellConfigDef(tsc_NR_CellGroupId_SCG,
+                                                                   -,
+                                                                   -,
+                                                                   cs_NR_ServingCellConfigMeas(tsc_NR_MeasObjectId1)));
+
+    v_EncodedSCG_Config := bit2oct(encvalue(v_SCGConfig));
+    v_MeasuredObjectList := {cs_MeasObjectId1(nr_Cell10)};
+    v_ReportConfigList := cs_NR_ReportConfigToAddModList_1Entry(tsc_NR_IdReportConfigId1, cs_38508_ReportConfigNR_Periodical);
+    v_MeasIdConfigList := {cs_NR_MeasId_Config_id1_obj1_conf1};
+
+    v_MeasConfig :=f_NR_GenerateMeasurementConfigNR(v_MeasuredObjectList, v_ReportConfigList, v_MeasIdConfigList);
+    SRB.send(cas_NR_SRB3_RrcPdu_REQ(nr_Cell10, -, cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, -, v_EncodedSCG_Config, v_MeasConfig)));
+    
+    // @siclog "Step 4" siclog@
+    // Check: Does the UE transmits an RRCReconfigurationComplete message via SRB3?
+    SRB.receive(car_NR_SRB3_RrcPdu_IND(nr_Cell10, cr_38508_RRCReconfigurationComplete));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    // @siclog "Step 5" siclog@
+    // Check: Does the UE transmits at least 10 MeasurementReport messges to periodically report the measured RSRP value for NR Cell 10
+    // via SRB3 within the next 30 seconds?
+    v_PhysCellIdServing := f_NR_CellInfo_GetPhysicalCellId(nr_Cell10);
+    v_MeasResults := cdr_38508_MeasResults_NR_DC_SCG(tsc_NR_MeasId1, v_PhysCellIdServing, -, -, -); // @sic R5s221133 sic@
+    f_NR_ReceivePeriodicalMeasurementReports(nr_Cell10, 30.0, 10, cr_NR_MeasurementReport(v_MeasResults), false);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+    
+    activate(a_NR_AddDefault_IgnorePeriodicalMeasurmentReport_SRB3(nr_Cell10, cr_NR_MeasurementReport(v_MeasResults)));
+
+  } // End of fl_TC_8_2_3_16_2_TestBody
+
+}

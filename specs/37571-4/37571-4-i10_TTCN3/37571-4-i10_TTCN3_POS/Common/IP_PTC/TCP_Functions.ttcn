@@ -1,0 +1,258 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2022-11-21 13:36:08 +0100 (Mon, 21 Nov 2022) $
+// $Rev: 34579 $
+/******************************************************************************/
+
+module TCP_Functions {
+
+  import from CommonDefs all;
+  import from IP_ASP_TypeDefs all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Routing all;
+  import from IP_PTC_Templates all;
+
+  /*
+   * @desc      close TCP connection of TCP server;
+   *            p_IP_Connection.Remote shall be omit if (and only if) the server shall be stopped;
+   *            otherwise p_IP_Connection shall refer to the TCP connection to be released
+   * @param     p_IP_Connection
+   * @param     p_WaitForCNF
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_TCP_Close(template (value) IP_Connection_Type p_IP_Connection,
+                        boolean p_WaitForCNF) runs on IP_PTC
+  {
+    var template (present) IP_Connection_Type v_IP_Connection := p_IP_Connection;
+    var IP_SOCKET_IND v_Dummy;
+
+    if (not isvalue(p_IP_Connection.Remote)) {                                   /* stop server; @sic R5s220106: if client tries in parallel to close connection(s) to the server, the remote socket is not omit in any corresponsding close indication sic@ */
+      v_IP_Connection.Remote := ?;
+    }
+
+    IP_SOCK_CTRL.send(cs_TCP_CLOSE_REQ(p_IP_Connection));
+    if (p_WaitForCNF) {
+      alt {
+        [] a_IP_PTC_ReceiveCNF_NonBlocking(cr_TCP_CLOSE_CNF(p_IP_Connection), v_Dummy) {}       /* @sic R5s221255: use of a_IP_PTC_ReceiveCNF_NonBlocking sic@ */
+        /* @sic R5s220117: no handling of TCP_CLOSE_CNF for other TCP_CLOSE_REQ with p_WaitForCNF==false anymore (has been added for R5s170043) sic@ */
+        [] IP_SOCK_CTRL.receive(cr_TCP_CLOSE_IND(v_IP_Connection)) { repeat; }                  /* @sic R5s150270 change 1, R5s220106: v_IP_Connection instead of p_IP_Connection sic@ */
+      }
+    }
+  }
+
+  /*
+   * @desc      start TCP server
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_DrbInfo
+   * @param     p_Application       (default value: ims)
+   * @param     p_TLSConfig         (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpServer_Start(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                             template (value) PortNumber_Type p_LocalPort,
+                             IP_DrbInfo_Type p_DrbInfo,
+                             InternetApplication_Type p_Application := ims,
+                             template (omit) TLSConfig_Type p_TLSConfig := omit) runs on IP_PTC
+  { /* @sic R5w140125: additional parameter p_TLSInfo sic@ */
+   
+    var template (value) IP_Socket_Type v_LocalSocket := cs_IP_Socket(p_LocalIpAddr, p_LocalPort);
+
+    // Start TCP socket
+    IP_SOCK_CTRL.send(cs_TCP_LISTEN_REQ(v_LocalSocket, p_Application, p_TLSConfig));
+
+    // Modify routing table
+    f_IP_PTC_RoutingTable_AddEntry(cs_TCP_ConnectionId(v_LocalSocket), p_DrbInfo);
+  }
+
+  /*
+   * @desc      stop a TCP server
+   * @param     p_LocalIpAddr
+   * @param     p_LocalPort
+   * @param     p_WaitForCNF        (default value: true)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpServer_Stop(template (value) IP_AddrInfo_Type p_LocalIpAddr,
+                            template (value) PortNumber_Type p_LocalPort,
+                            boolean p_WaitForCNF := true) runs on IP_PTC
+  { /* NOTE: stoping the server causes all connections to this server to be closed too */
+    /* @sic R5s141154: new parameter p_WaitForCNF sic@ */
+    var template (value) IP_Connection_Type v_IP_Connection := cs_TCP_ConnectionId(cs_IP_Socket(p_LocalIpAddr, p_LocalPort), omit);
+
+    // Close TCP socket
+    fl_TCP_Close(v_IP_Connection, p_WaitForCNF);
+    
+    // Modify routing table
+    f_IP_PTC_RoutingTable_RemoveEntry(v_IP_Connection);
+  }
+
+  /*
+   * @desc      close a UE's connection to the server;
+   *            returns false if the connection is pending i.e. there has been no CNF yet
+   *            returns true when there has been no the connection or closing the connection has been confirmed
+   *            (i.e. in case of IMS the security context can be released)
+   * @param     p_IP_Connection
+   * @param     p_WaitForCNF        (default value: true)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpServer_CloseConnection(template (omit) IP_Connection_Type p_IP_Connection,
+                                       boolean p_WaitForCNF := true) runs on IP_PTC return boolean
+  { /* @sic R5s170203: return value sic@ */
+    var IP_Connection_Type v_IP_Connection;
+    var boolean v_ConnectionIsClosed := true;
+
+    if (isvalue(p_IP_Connection)) {
+      v_IP_Connection := valueof(p_IP_Connection);
+      
+      fl_TCP_Close(v_IP_Connection, p_WaitForCNF);
+      
+      /* routing table does not need to be modified as the server is still running */
+
+      v_ConnectionIsClosed := p_WaitForCNF;
+    }
+    return v_ConnectionIsClosed;
+  }
+
+  /*
+   * @desc      deal with the UE connecting to the TCP server;
+   *            p_IP_Connection returns the new connection
+   * @param     p_IP_Connection     (by reference)
+   * @param     p_ServerSocket
+   * @param     p_RemoteSocket      (default value: cr_IP_Socket_Any)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_TcpServer_AcceptConnection(out template (omit) IP_Connection_Type p_IP_Connection,
+                                       template (present) IP_Socket_Type p_ServerSocket,
+                                       template (present) IP_Socket_Type p_RemoteSocket := cr_IP_Socket_Any) runs on IP_PTC
+  { /* @sic R5s140172: when there is already a connection which needs to be released, the confirmation may come even after date on the new connection sic@ */
+    /* @sic R5-145732: parameters p_ServerSocket and p_RemoteSocket for support of 2nd security context sic@ */
+    /* @sic R5s170203: receiption of TCP_CLOSE_CNF removed as being handled in a_IMS_TCP_Close_CNF_Handler for IMS and not needed for HTTP sic@ */
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+
+    [] IP_SOCK_CTRL.receive(cr_TCP_ACCEPT_IND(p_ServerSocket, p_RemoteSocket)) -> value v_IP_SOCKET_IND {
+      /* @sic R5-145732: new connection is checked and handled by the caller sic@ */
+      p_IP_Connection := v_IP_SOCKET_IND.CTRL.ConnectionId;
+      /* the routing table does not need to be changed as there is an entry for the TCP server already and there is no need to change it just because of the remote address */
+    }
+  }
+
+  /*
+   * @desc      deal with the UE closing a TCP connection
+   * @param     p_IP_Connection
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_TcpServer_CloseConnection(IP_Connection_Type p_IP_Connection) runs on IP_PTC
+  {
+    [] IP_SOCK_CTRL.receive(cr_TCP_CLOSE_IND(p_IP_Connection)) {
+      /* routing table does not need to be modified as the server is still running */
+    }
+  }
+
+  /*
+   * @desc      connect to a TCP server at the UE's side
+   * @param     p_LocalSocket
+   * @param     p_RemoteSocket
+   * @param     p_Application
+   * @return    IP_Connection_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpClient_ConnectReq(template (value) IP_Socket_Type p_LocalSocket,
+                                  template (value) IP_Socket_Type p_RemoteSocket,
+                                  InternetApplication_Type p_Application) runs on IP_PTC return IP_Connection_Type
+  { /* @sic R5s140713 - MCC160 implementation sic@ */
+    IP_SOCK_CTRL.send(cs_TCP_CONNECT_REQ(p_LocalSocket, p_RemoteSocket, p_Application));
+    return valueof(cs_TCP_ConnectionId(p_LocalSocket, p_RemoteSocket));
+  }
+
+  /*
+   * @desc      locall function to allow modification of the TCP connection in alt step
+   * @param     p_TcpConnection
+   * @return    template (present) IP_SOCKET_IND
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function fl_TCP_CONNECT_CNF(IP_Connection_Type p_TcpConnection) return template (present) IP_SOCKET_IND
+  {
+    var template (present) IP_Connection_Type v_TcpConnection := p_TcpConnection;
+    if (not isvalue(p_TcpConnection.Local.Port)) {   /* => ephemeral port */
+      v_TcpConnection.Local.Port := ?;
+    }
+    return cr_TCP_CONNECT_CNF(v_TcpConnection);
+  }
+
+  /*
+   * @desc      to receive confirmation for pending TCP close
+   * @param     p_TcpConnection     (by reference)
+   * @param     p_DrbInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  altstep a_TcpClient_ConnectCnf(inout IP_Connection_Type p_TcpConnection,
+                                 IP_DrbInfo_Type p_DrbInfo) runs on IP_PTC
+  { /* @sic R5s140713 - MCC160 implementation sic@ */
+    var IP_SOCKET_IND v_IP_SOCKET_IND;
+    var template (present) IP_SOCKET_IND v_IP_SOCKET_IND_Template := fl_TCP_CONNECT_CNF(p_TcpConnection);
+
+    [] IP_SOCK_CTRL.receive(v_IP_SOCKET_IND_Template) -> value v_IP_SOCKET_IND
+      {
+        p_TcpConnection.Local.Port := v_IP_SOCKET_IND.CTRL.ConnectionId.Local.Port;  // in case of ephemeral port
+      
+        // Modify routing table
+        f_IP_PTC_RoutingTable_AddEntry(p_TcpConnection, p_DrbInfo);
+      }
+  }
+
+  /*
+   * @desc      'simple' function to connect to a TCP server at the UE
+   *            NOTE: function shall be used only if there is no other potential connection establishment ongoing in parallel
+   * @param     p_LocalSocket
+   * @param     p_RemoteSocket
+   * @param     p_Application
+   * @param     p_DrbInfo
+   * @return    IP_Connection_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpClient_Connect(template (value) IP_Socket_Type p_LocalSocket,
+                               template (value) IP_Socket_Type p_RemoteSocket,
+                               InternetApplication_Type p_Application,
+                               IP_DrbInfo_Type p_DrbInfo) runs on IP_PTC return IP_Connection_Type
+  {
+    var IP_Connection_Type v_ConnectionByRef := f_TcpClient_ConnectReq(p_LocalSocket, p_RemoteSocket, p_Application);
+    a_TcpClient_ConnectCnf(v_ConnectionByRef, p_DrbInfo);
+    return v_ConnectionByRef;
+  }
+
+  /*
+   * @desc      close TCP connection to the UE's server
+   *            returns false if the connection is pending i.e. there has been no CNF yet
+   *            returns true when there has been no the connection or closing the connection has been confirmed
+   * @param     p_IP_Connection
+   * @param     p_WaitForCNF        (default value: true)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS, UTRAN)
+   */
+  function f_TcpClient_CloseConnection(template (omit) IP_Connection_Type p_IP_Connection,
+                                       boolean p_WaitForCNF := true) runs on IP_PTC return boolean
+  { /* @sic R5s141154: new parameter p_WaitForCNF sic@ */
+    /* @sic R5s170203: return value sic@ */
+    var IP_Connection_Type v_IP_Connection;
+    var boolean v_ConnectionIsClosed := true;
+
+    if (isvalue(p_IP_Connection)) {
+      v_IP_Connection := valueof(p_IP_Connection);
+
+      fl_TCP_Close(v_IP_Connection, p_WaitForCNF);
+      
+      // Modify routing table
+      f_IP_PTC_RoutingTable_RemoveEntry(v_IP_Connection);
+
+      v_ConnectionIsClosed := p_WaitForCNF;
+    }
+    return v_ConnectionIsClosed;
+  }
+
+}

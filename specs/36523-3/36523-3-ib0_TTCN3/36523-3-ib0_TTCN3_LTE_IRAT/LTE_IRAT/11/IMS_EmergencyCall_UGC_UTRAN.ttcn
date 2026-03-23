@@ -1,0 +1,245 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2023-05-04 11:15:59 +0200 (ju., 04 may. 2023) $
+// $Rev: 35894 $
+/******************************************************************************/
+
+module IMS_EmergencyCall_UGC_UTRAN {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;  
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_CommonProcedures all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 11.2.8
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_11_2_8_UTRAN() runs on UTRAN_IRAT_PTC
+  {
+    //Initialise test case
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    //Create UTRAN cell5
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5);
+    
+    //Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5); // @sic R5s140588 sic@ @sic R5s160405 sic@
+        
+    f_UTRAN_InterRAT_InitialiseAuthParams(); // @sic R5s160405 sic@
+    // The SS reconfigures Cell 5 as the "Suitable Neighbour Cell".
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationSuitableNeighbourCell); // @sic R5-145953 sic@ @sic R5s160405 sic@
+
+    //@siclog "Steps 4a1A-4a14 of 11.2.8 UTRAN" siclog@
+    f_UTRAN_TestBody_Set(true);
+
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA); // @sic R5-165916 sic@
+    
+    f_UTRAN_EmgCallSetup(utran_Cell5, true); // @sic R5-169042 sic@
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    // send coordination message for end of test case
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    // @sic R5s140588 sic@
+    //CC Disconnect followed by RRC connection release followed by release of the UTRAN cell resources
+    f_UTRAN_CC_Disconnect(cs_TI_MO);
+    
+    f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Dch, true);
+    
+    //Release the UTRAN cell
+    f_UTRAN_ReleaseCell(utran_Cell5, f_UTRAN_CellInfo_GetConfigType(utran_Cell5));
+    
+  }  // f_TC_11_2_8_UTRAN
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 11.2.10
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_11_2_10_UTRAN() runs on UTRAN_IRAT_PTC
+  {
+    var U_RLC_TM_IND v_RLC_TR_DATA_IND; // @sic R5-150124 sic@
+    var InitialUE_Identity v_InitialUE_Id;
+    var TI v_TI_R;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var template (present) EstablishmentCause v_EstCause := emergencyCall;
+    var KeySeq v_KeySeq := '111'B; //cipher key sequence number IE: no key is available
+    var float v_Wait := 60.0; // 60 seconds to allow UE to complete the procedure on UTRAN cell
+    var RB_ConfigType v_CellConfig;
+    timer t_Wait := v_Wait ; // Local wait Timer
+    
+    //Initialise test case
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    //Create UTRAN cell5
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5); // @sic R5s140846 sic@
+    //Start sending System Information
+    f_UTRAN_SendDefSysInfo ( utran_Cell5 );  // @sic R5s140731 R5-144741 sic@
+
+    //First Trigger, sent to UTRA after step 2 having been performed in EUTRA
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+
+    // Cell 5 powered after step 2
+    f_UTRAN_SetCellPower(utran_Cell5, -70, -70); // @sic R5s140731 R5-144741 R5s140961 R5s160755 sic@
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    // Wait for 60s for the UE to complete cell selection. UTRA cell is less powerful than EUTRA cell
+    //@siclog "Step 2B" siclog@
+    f_Delay(60.0); // @sic R5s160755 sic@ @sic R5s160947 sic@
+
+    // Cause the UE to originate Emergency call. The request is assumed to be triggered by AT command D.
+    //@siclog "Step 3" siclog@
+    f_UT_RequestCSCall(UT, px_EmergencyCallNumber);
+    
+    t_Wait.start;
+    
+    alt {
+      //@siclog "Step 4" siclog@
+      //Check: Does the UE transmit an RRC CONNECTION REQUEST message on Cell 5 with Establishment cause: Emergency Call in the next [60] seconds?
+      [] U_TM.receive(car_RRC_ConnReq(utran_Cell5,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8(v_EstCause))) -> value v_RLC_TR_DATA_IND {
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+        v_InitialUE_Id := v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity;  // @sic R5-150124 sic@
+        f_UTRAN_CheckReleaseIndicator(v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.v3d0NonCriticalExtensions.v4b0NonCriticalExtensions.rrcConnectionRequest_v4b0ext.accessStratumReleaseIndicator); // @sic R5-150124 sic@
+        t_Wait.stop; // @sic R5s150887 sic@
+      }
+      [] t_Wait.timeout {
+        f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4: RRC Connection Request not received within wait time");
+      }
+    }
+    
+    //@siclog "Step 5" siclog@
+    // The SS transmits an RRC CONNECTION SETUP message on Cell 5.
+    //@siclog "Step 6" siclog@
+    // The UE transmits an RRC CONNECTION SETUP COMPLETE message on Cell 5.
+    f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq(utran_Cell5,v_InitialUE_Id);
+    
+    //@siclog "Step 7" siclog@
+    // The UE transmits an INITIAL DIRECT TRANSFER message on Cell 5. This message includes a CM SERVICE REQUEST message.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                        tsc_RB3,
+                                        cr_U_ServReq_MO_Emergency(v_KeySeq, ?))); // UE id to be clarified
+    
+    //@siclog "Step 8" siclog@
+    // The SS transmits a DOWNLINK DIRECT TRANSFER message on Cell 5. This message includes a CM SERVICE ACCEPT message.
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CM_ServAcc)); // @sic R5s140731 R5-144741 sic@
+    
+    //@siclog "Step 9" siclog@
+    // The UE transmits an UPLINK DIRECT TRANSFER message on Cell 5. This message includes an EMERGENCY SETUP message.
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ESetup)) -> value v_RRC_DataInd;
+    //@siclog "Steps 10-15" siclog@
+    // steps 11-16 of 34.108 cl. 7.2.3.2.3
+    v_TI_R := v_RRC_DataInd.msg.esetup.ti;
+    f_UTRAN_MO_SpeechCall_Steps11_16(utran_Cell5, v_TI_R, -, -, false);  // @sic R5s210654 sic@
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    // send coordination message for end of test case
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+
+    // Switch off/power off and release cells   @sic R5s140731 R5-144741 sic@
+    //Disconnect the active CC call
+    f_UTRAN_CC_Disconnect (cs_TI_MO );
+    //Release RRC connection
+    f_UTRAN_RRC_ConnRel( utran_Cell5, cell_Dch, -, false ); // @sic R5s210654 sic@
+    //SwitchPower off UE
+    f_UT_SwitchOffUE (UT, true, CNF_REQUIRED);
+    v_CellConfig := f_UTRAN_CellInfo_GetConfigType(utran_Cell5);
+    //Release the UTRAN cell
+    f_UTRAN_ReleaseCell(utran_Cell5, v_CellConfig);
+  
+    
+  }  // f_TC_11_2_10_UTRAN
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 11.2.11
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_11_2_11_UTRAN() runs on UTRAN_IRAT_PTC
+  {
+    var integer v_T0_CPICH_Cell5 := tsc_AttenuationCellOFF; // @sic R5s140949 sic@
+    var integer v_T1_CPICH_Cell5 := -64;
+    var integer v_T0_PCCPCH_Cell5 := tsc_AttenuationCellOFF; // @sic R5s140949 sic@
+    var integer v_T1_PCCPCH_Cell5 := -64;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    f_UTRAN_Security_SetCipheringAlgorithm(uea0); // @sic R5s230373 sic@
+    
+    // Create and configure Cell 5
+    f_UTRAN_SS_CreateCellDCH(utran_Cell5);
+    
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    
+    // Send relevant UTRAN cell info to EUTRA PTC
+    f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5);
+    
+    // Set Cell Power level as per T0
+    f_UTRAN_SetCellPower(utran_Cell5, v_T0_CPICH_Cell5, v_T0_PCCPCH_Cell5);  // @sic R5s140708 ch. 2.3 sic@
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    //@siclog "Step 1" siclog@
+    //Configure a dedicated channel in the UTRAN FDD with configuration
+    // according to 34.108 cl. 6.10.2.4.1.26
+    f_SS_Config_ConvSpeech_RAB(utran_Cell5); // @sic R5s140708 ch. 2.2 sic@
+        
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    //@siclog "Step 25" siclog@
+    // Set Cell Power level as per T1
+    f_UTRAN_SetCellPower(utran_Cell5, v_T1_CPICH_Cell5, v_T1_PCCPCH_Cell5);
+
+    // NOTE:  The start-PS values received must be used to configure ciphering on cell 5.
+    f_UTRAN_InterRAT_InitialiseAuthParams();  // @sic R5s140949 sic@
+    f_UTRAN_ConfigureCipheringBeforeHO_SRVCC(utran_Cell5);
+    
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC to transmit Mobility from EUTRA
+   
+    //@siclog "Step 28" siclog@
+    U_AM.receive (car_RLC_Data_Ind(utran_CellDedicated,
+                                   tsc_RB2,
+                                   cr_HandoverToUTRANComplete)); // @sic R5s140708 ch. 2.5 sic@
+       
+    f_UTRAN_TestBody_Set(false);
+    
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger); // Tell to EUTRA PTC Test case is now finished on E-UTRA side
+    
+    // Switch off UE and release cell @sic R5s140708 ch. 2.6 sic@
+    f_UTRAN_CC_Disconnect (cs_TI_MT);
+    f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Dch);
+    f_UTRAN_Postamble(utran_Cell5, U6_DEREGISTERED);
+
+  } // f_TC_11_2_11_UTRAN
+
+}

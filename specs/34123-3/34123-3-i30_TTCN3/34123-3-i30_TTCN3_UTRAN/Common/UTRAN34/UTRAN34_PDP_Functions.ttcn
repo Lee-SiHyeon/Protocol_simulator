@@ -1,0 +1,468 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+module UTRAN34_PDP_Functions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_LoopBack_Functions all;
+  import from UTRAN34_Parameters all;
+  import from UTRAN34_RAB_Functions all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  type record PDPContextParameters { /* @status    APPROVED (UTRAN) */
+    TI                  received_TI,
+    TI                  send_TI,
+    IP_VersionType      ip_VersionType,
+    PktDataProtoAddr    pktDataProtoAddr optional,
+    NSAPI               recdNSAPI,
+    QualityOfService    qOS,
+    boolean             IPv4IPv6
+  };
+
+  const B3_Type tsc_SeviceTypeSignalling := '000'B;    // Service type as per 24.008 Table 10.5.153a; @status    APPROVED (UTRAN)
+
+  template (value) PDPContextParameters cs_PDPContextParameters(TI                                  p_TI_R,
+                                                                TI                                  p_TI_S,
+                                                                IP_VersionType                      p_IP_VersionType,
+                                                                template (omit) PktDataProtoAddr    p_PktDataProtoAddr := omit,
+                                                                NSAPI                               p_RecdNSAPI,
+                                                                template (value) QualityOfService   p_QoS,
+                                                                boolean                             p_IPv4IPv6Requested := false)  :=
+  { /* @status    APPROVED (UTRAN) */
+    received_TI := p_TI_R,
+    send_TI     := p_TI_S,
+    ip_VersionType  := p_IP_VersionType,
+    pktDataProtoAddr := p_PktDataProtoAddr,
+    recdNSAPI := p_RecdNSAPI,
+    qOS := p_QoS,
+    IPv4IPv6 := p_IPv4IPv6Requested
+  };
+
+  /*
+   * @desc      This function will trigger PDP Context Activation and also may activate Test Mode depending on the passed parameter
+   * @desc      It will take care of establishing the 64kPS_RAB  as per the received NSAPI
+   * @param     p_CellId
+   * @param     p_QualityOfService
+   * @param     p_ActivateTestMode - set to true if test mode should be activated, false overwise
+   * @param     p_IPv4_Prefered
+   * @param     p_CheckLogMeasAvail (default value: omit)
+   * @return    PDPContextParameters
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_ActivateFirstPDP_Context(UTRAN_CellId_Type p_CellId,
+                                              template (value) QualityOfService p_QualityOfService,
+                                              boolean p_ActivateTestMode,
+                                              boolean p_IPv4_Prefered,
+                                              template (omit) boolean p_CheckLogMeasAvail := omit) runs on UTRAN_IP_PTC return PDPContextParameters
+  {
+    var integer v_Cid := 1;
+    //var AccessStratumReleaseIndicator v_UE_ReleaseIndicator := tsc_UTRAN_Release99;  @sic R5s170936 sic@
+    var U_RLC_TM_IND v_RLC_TR_DATA_IND;  //@sic R5-150124 sic@
+    var InitialUE_Identity v_InitialUE_Id;
+    
+    // Initiate an outgoing PS call
+    f_UT_ActivatePDPContextUG(UT, v_Cid, f_ConvertQoS_ForATCommand(p_QualityOfService), tsc_RandomAPN); // @sic R5s160680, R5s140558, R5-192186 sic@
+    
+    // Activate DHCP and ICMPv6
+    f_IP_Handling_StartPDN(IP, PDN_1, cs_DrbInfo_UTRAN(utran_CellDedicated, tsc_RB20)); // @sic R5s160060 sic@
+    
+    // The SS checks that the IE "Establishment cause" in the received RRC CONNECTION REQUEST message
+    // is set to either Originating Streaming Call, Originating Interactive Call or Originating Background Call or OriginatingSubscribedTrafficCall
+    U_TM.receive(car_RRC_ConnReq(p_CellId, tsc_RB0, cr_108_RRC_ConnReq_r8((originatingStreamingCall,originatingInteractiveCall, originatingBackgroundCall,originatingSubscribedTrafficCall)))) -> value v_RLC_TR_DATA_IND;
+    v_InitialUE_Id := v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity;
+    //@sic R5s170936 sic@  removed code related to v_UE_ReleaseIndicator
+    
+    f_UTRAN34_RRC_ConnEst_WithoutRRCConnectionReq(p_CellId, v_InitialUE_Id, p_CheckLogMeasAvail);
+    
+    // The UE transmits the SERVICE REQUEST message, service type = "signalling"
+    f_UTRAN_GMM_ServReq(tsc_SeviceTypeSignalling); // @sic R5s150838 sic@
+    
+    // Activate RB Test Mode, if requested
+  /*  if (p_ActivateTestMode) {        @sic R5s151028, R5-160357  sic@
+      f_UTRAN34_ActivateRB_TestMode();
+    }*/
+    
+    // The SS starts integrity protection
+    f_UTRAN_GMM_Authentication();
+    f_UTRAN34_RRC_Security(p_CellId, true, ps_domain);
+    
+    // Activate PDP context and RAB
+    return f_UTRAN34_EstablishPDP_Context(p_CellId,
+                                          p_QualityOfService,
+                                          //v_UE_ReleaseIndicator,  @sic R5s170936 sic@
+                                          p_IPv4_Prefered,
+                                          -,
+                                          -,
+                                          -,
+                                          -,
+                                          cs_ProtocolConfigOptions_OneOption(cs_ProtocolContainer('0005'O, '02'O)), //@sic R5s140387 R5s140558 sic@
+                                          cs_PktFlowId, //@sic R5s140387 sic@
+                                          p_ActivateTestMode); // @sic R5s151028, R5-160357  sic@
+  }
+
+  /*
+   * @desc      This function will receive PDP Context Activation and send PDP Context to the UE.
+   *            It will take care of establishing the 64kPS_RAB  as per the received NSAPI
+   *            UTRAN34: Handle all releases for RAB setup from Rel-8
+   *            UTRAN34: + handle Rel-7 cell_DCH_64kPS_RAB_SRB for NISPC test cases
+   * @param     p_CellId
+   * @param     p_QualityOfService
+   * @param     p_IPv4_Prefered
+   * @param     p_LoopbackRLC_PDU   (default value: false)
+   * @param     p_CheckDeviceProperties (default value: false)
+   * @param     p_LowPriorityBit    (default value: '0'B)
+   * @param     p_TimerVal          (default value: 0.0)
+   * @param     p_ProtocolConfigOptions (default value: omit)
+   * @param     p_PacketFlowIdentifier (default value: omit)
+   * @param     p_ActivateTestMode  (default value: false)
+   * @return    PDPContextParameters
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_EstablishPDP_Context(UTRAN_CellId_Type p_CellId,
+                                          template (value) QualityOfService p_QualityOfService,
+                                          boolean p_IPv4_Prefered, // @sic R5s170936 sic@  removed parameter p_UE_ReleaseIndicator
+                                          boolean p_LoopbackRLC_PDU := false,
+                                          boolean p_CheckDeviceProperties := false, // @sic R5-140627 sic@ - if true will run the check of the device properties
+                                          B1_Type p_LowPriorityBit := '0'B, // @sic R5-140627 sic@ - expected value of the low priority bit in the device properties
+                                          float p_TimerVal := 0.0, // @sic R5-140949 sic@ - if the value differs from the default one (0.0) then PDP context activation request must arrive before the given timer bound is expired
+                                          template (omit) ProtocolConfigOptions p_ProtocolConfigOptions := omit, //@sic R5s140387 sic@
+                                          template (omit) PacketFlowIdentifier p_PacketFlowIdentifier := omit,  //@sic R5s140387 sic@
+                                          boolean p_ActivateTestMode := false ) //@sic R5s151028, R5-160357 sic@
+    runs on UTRAN_PTC return PDPContextParameters
+  {
+    var TI v_TI_R;
+    var TI v_TI_S;
+    var PktDataProtoAddr v_Recd_PktDataProtoAddr;
+    var NSAPI  v_Recd_NSAPI;
+    var template (present) QualityOfService v_ExpectedQualityOfService;
+    var template (value) QualityOfService  v_Recd_QoS;
+    var boolean v_IPv4IPv6Requested := false;
+    var bitstring v_RAB_Id;
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActivatePDPContectRequest;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var IP_VersionType v_IP_Version := iPv4;    //initial assigment for IPv4, will be reassigned to IPv6 later in the function if necessary
+    var template (omit) PktDataProtoAddr v_PktDataProtoAddr := cs_PktDataProtoAddrMT('06'O, tsc_PDP_TypeNoIPv4, f_Convert_IPv4Addr2OctString(tsc_PDN1_AddressInfo.UE_IPAddressIPv4));
+    
+    timer t_Timer;
+    
+    if (pc_AT_SupportToInit_PS_Call) {
+      if (pc_GERAN) {
+        v_ExpectedQualityOfService := cr_QoS_InteractiveOrBackgroundMO(p_QualityOfService.delayClass, p_QualityOfService.trafficClass);
+      } else {
+        v_ExpectedQualityOfService := cdr_QoS_InteractiveOrBackgroundMO_UMTS(p_QualityOfService.delayClass, p_QualityOfService.trafficClass);
+      }
+    } else {
+      v_ExpectedQualityOfService := cr_QualityOfService_Any;
+    }
+    
+    //The UE transmits PDP Context Activation Request
+    if (p_TimerVal == 0.0){
+      v_ActivatePDPContectRequest := f_UTRAN_PS_SessionAct_ReceivePDP_Req(v_ExpectedQualityOfService);
+    }
+    else{
+      t_Timer.start(p_TimerVal);
+      alt {
+        [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,   //@sic R5s140387 sic@
+                                                    tsc_RB3,
+                                                    cr_U_ActPDP_ContextReqMo(v_ExpectedQualityOfService))) -> value v_RRC_DataInd
+          {
+            v_ActivatePDPContectRequest := v_RRC_DataInd.msg.activatePDPContextRequestul;
+            f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "UE requests PDP context activation before the timer has expired");
+            t_Timer.stop;
+          }
+        []  t_Timer.timeout
+          {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Timer has expired, UE did not initiate PDP context activation");
+          }
+      }
+    }
+    
+    if (p_ActivateTestMode) {  //@sic R5s151028, R5-160357 sic@
+      f_UTRAN34_ActivateRB_TestMode();
+    }
+  
+    //Check Device Properties
+    // @sic R5-140627 sic@
+    if (p_CheckDeviceProperties) {
+      f_UTRAN34_DeviceProperties_CheckLowPriority(v_ActivatePDPContectRequest.deviceProperties, p_LowPriorityBit);
+      if (p_LowPriorityBit == '0'B) {
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "MS is not configured for NAS signalling low priority");
+      } else {
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "MS is configured for NAS signalling low priority");
+      }
+    }
+    
+    v_TI_R := v_ActivatePDPContectRequest.ti;
+    v_Recd_PktDataProtoAddr := v_ActivatePDPContectRequest.pDP_Address;
+    v_Recd_NSAPI := v_ActivatePDPContectRequest.requestedNSAPI;
+    v_Recd_QoS := v_ActivatePDPContectRequest.requestedQoS;
+    
+    f_UTRAN34_CheckTI(v_TI_R);
+    
+    //Set TI when a message is sent from the network as a response to a request from UE
+    v_TI_S.tiFlag := '1'B;
+    v_TI_S.tiVal := v_TI_R.tiVal;
+    
+    //Check Static PDP Address acc to 34.108 cl 7.2.4.1.3
+    //The UE implemented according to the Rel-7 and earlier versions of the specification may include static PDP address.
+    //The UE implemented according to the Rel-8 and later versions of the specification shall not include the PDP address but the PDP address allocation is dynamic and shall be handled by the SS by including the IPv4 PDP address (set as per PIXIT) in the ACTIVATE PDP CONTEXT ACCEPT message.
+    if ((f_UTRAN_MobileInfo_UE_Release_Get() == rel_7) and v_Recd_PktDataProtoAddr.iel != '02'O) { // @sic R5s170936 sic@
+      // Rel-7 UE and static PDP address is included, the PDP address shall be omitted in Activate PDP context accept
+      // if the value of iel!=2, static PDP address is included
+      v_PktDataProtoAddr := omit;
+    } else if (v_Recd_PktDataProtoAddr.iel != '02'O) {
+      // Rel-8 or later UE
+      // if the value of iel!=2, static PDP address is included
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received address should not indicate dynamic IP address");
+    }
+    
+    if (v_Recd_PktDataProtoAddr.pDP_TypeNo == tsc_PDP_TypeNoIPv6) { //@sic R5s141153, R5-145387, R5-145389, R5-150627 sic@
+      v_IP_Version := iPv6;
+      v_PktDataProtoAddr.iel := '12'O;
+      v_PktDataProtoAddr.pDP_TypeNo := tsc_PDP_TypeNoIPv6;
+      v_PktDataProtoAddr.addrInfo := f_Convert_IPv6Addr2OctString(tsc_PDN1_AddressInfo.UE_IPAddressIPv6);
+    }
+    else if (v_Recd_PktDataProtoAddr.pDP_TypeNo == tsc_PDP_TypeNoIPv4v6) {
+      //initially keep assigned IP Version iPv4
+      v_PktDataProtoAddr.iel := '16'O;
+      v_PktDataProtoAddr.pDP_TypeNo := tsc_PDP_TypeNoIPv4v6;
+      v_PktDataProtoAddr.addrInfo := f_Convert_IPv4Addr2OctString(tsc_PDN1_AddressInfo.UE_IPAddressIPv4) & f_Convert_IPv6Addr2OctString(tsc_PDN1_AddressInfo.UE_IPAddressIPv6);
+      v_IPv4IPv6Requested := true;
+      if (not p_IPv4_Prefered) { // IPv4IPv6 and IPv6 is preferred @sic R5s140837 sic@
+        v_IP_Version := iPv6;
+      }
+    }
+    
+    // Establish RADIO BEARER for DCH 64k PS for FDD Rel-7
+    v_RAB_Id := int2bit(bit2int(v_Recd_NSAPI.nSAPI_Value), 8);
+    f_UTRAN34_RB_SetUp_PS_RAB(p_CellId, cell_DCH_64kPS_RAB_SRB, true, p_LoopbackRLC_PDU, v_RAB_Id); // @sic R5s160060 sic@
+
+    // PDP CONTEXT ACCEPT
+    f_UTRAN34_SendActivatePDP_Accept(v_Recd_QoS, v_TI_S, v_PktDataProtoAddr, p_ProtocolConfigOptions, p_PacketFlowIdentifier);  //@sic R5s140387 sic@
+    
+    return valueof(cs_PDPContextParameters(v_TI_R, v_TI_S, v_IP_Version, v_PktDataProtoAddr, v_Recd_NSAPI, v_Recd_QoS, v_IPv4IPv6Requested));
+  }
+
+  /*
+   * @desc      Check DeviceProperties
+   * @param     p_DeviceProperties
+   * @param     p_ExpectedValue
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_DeviceProperties_CheckLowPriority(template (omit) DeviceProperties p_DeviceProperties,
+                                                       B1_Type p_ExpectedValue) runs on UTRAN_PTC
+  {
+    if (not ispresent(p_DeviceProperties)) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Device Properties IE not present");
+    }
+    if (not match(p_ExpectedValue, p_DeviceProperties.lowPriority)) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "MS configuration for NAS signalling low priority is not as expected");
+    }
+  }
+
+  /*
+   * @desc      Check TI
+   * @param     p_TI
+   * @param     p_ExpectedFlag      (default value: '0'B)
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_CheckTI(TI p_TI,
+                             B1_Type p_ExpectedFlag := '0'B) runs on UTRAN_PTC
+  {
+    var integer v_TI_Value := bit2int(p_TI.tiVal);
+    
+    //TI flag (octet 1, Bit 8) and TI value of TI0 (octet 1, Bits 765) should be set in range 0-6
+    if ((p_TI.tiFlag != p_ExpectedFlag) or (v_TI_Value < 0) or (v_TI_Value > 6)) {
+      f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "TI value out of range");
+    }
+  }
+
+  /*
+   * @desc      To bring UE from switched off to state 6-10
+   * @param     p_CellId
+   * @param     p_EPLMN             (default value: omit)
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_PreambleGoToState6_10_MO(UTRAN_CellId_Type  p_CellId,
+                                              template (omit) PLMN_List p_EPLMN := omit)  //@sic R5-134916 sic@
+    runs on UTRAN_IP_PTC
+  { /* @sic R5s130347: local GuardTimer sic@ */
+    
+    var RB_ConfigType v_RB_Configuration;
+    
+    timer t_GuardTimer := tsc_GuardTimePreamble;
+    
+    t_GuardTimer.start;
+    
+    //  Switch cell power on
+    f_UTRAN_SetCellPower (p_CellId, tsc_AttenuationServingCell);
+    
+    //  Switch on UE
+    f_UT_SwitchOnUE (UT, false);
+    
+    f_UTRAN34_IdleUpdated(p_CellId, p_EPLMN);
+    
+    select (f_UTRAN_CellInfo_GetConfigType(p_CellId)) {
+      case (cell_FACH_NoConn, cell_FACH_NoDedicated) {
+        v_RB_Configuration := cell_FACH_PS;
+      }
+      case else {
+        v_RB_Configuration := cell_DCH_64kPS_RAB_SRB;
+      }
+    }
+    f_UTRAN34_UE_PsRB_Est(p_CellId, v_RB_Configuration); // @sic R5s160060 sic@
+    
+    t_GuardTimer.stop;
+  }
+
+  /* @desc      To set the UE to state 6-7 (PS-DCCH DCH)
+   * @param     p_CellId
+   * @param     p_QualityOfService
+   * @param     p_RBId              (default value: tsc_RB25)
+   * @param     p_APN               (default value: tsc_RandomAPN)
+   * @param     p_TriggerUE         (default value: TRIGGER_UE)
+   * @return    ACTIVATEPDPCONTEXTREQUESTul
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_GoToState6_7_MO(UTRAN_CellId_Type p_CellId,
+                                     template (value) QualityOfService p_QualityOfService,
+                                     integer p_RBId := tsc_RB25,
+                                     charstring p_APN := tsc_RandomAPN, // @sic R5s160680 sic@
+                                     UTRAN_PDPContextTrigger_Type p_TriggerUE := TRIGGER_UE)
+    runs on UTRAN_IP_PTC return ACTIVATEPDPCONTEXTREQUESTul
+  {
+    var template (value) EstablishmentCause v_EstCause := f_GetMoEstCause();
+    var RB_ConfigType v_CellConfiguration := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActPdpContextReq;
+    var PDN_Index_Type v_PdnIndex := PDN_1;
+    var boolean v_NewKeyFlag := true;
+    var integer v_DedicatedId := 1;
+       
+    if (p_TriggerUE == TRIGGER_UE) { // @sic R5s120097, R5s160060, R5-160730 sic@
+      //Initiate an outgoing PS call
+      f_UT_ActivatePDPContextUG(UT, v_DedicatedId, f_ConvertQoS_ForATCommand(p_QualityOfService), p_APN); // @sic R5s160060, R5-192186 sic@
+    }
+    
+    if (v_CellConfiguration == cell_DCH_64kPS_RAB_SRB)  {
+      v_PdnIndex := PDN_2;
+    } else { // must be the first PDP context @sic R5s160378 sic@
+      vc_UTRAN_Global_IP.NoOfPDPContexts := 0;
+      vc_UTRAN_Global_IP.PDPInfo := omit;
+    }
+    //Steps 1-3 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+    f_UTRAN34_RRC_ConnEst(p_CellId, v_EstCause);
+    
+    // Step 4 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+    f_UTRAN_GMM_ServReq(); // @sic R5s110465, R5s150838 sic@
+    
+    //Perform NAS session activation procedure for packet switched sessions (34.108 cl. 7.4.2.4.2)
+    //Steps 1-2 in 34.108 cl. 7.4.2.4.2: Generate authentication and run authentication procedure
+    f_UTRAN_GMM_Authentication();
+    
+    // Activate DHCP and ICMPv6 @sic R5-125676 sic@
+    f_IP_Handling_StartPDN(IP, v_PdnIndex, cs_DrbInfo_UTRAN(utran_CellDedicated, p_RBId)); // @sic R5s160060 sic@
+    
+    //Step 3-4 in 34.108 cl. 7.4.2.4.2: Transmit Security Mode Command & Receive Security Mode Complete
+    f_UTRAN34_RRC_Security(p_CellId, v_NewKeyFlag, ps_domain);
+    
+    //Step 5 in 34.108 cl. 7.4.2.4.2: Receive PDP Context Activation Request
+    v_ActPdpContextReq := f_UTRAN_PS_SessionAct_ReceivePDP_Req(); // @sic R5s160378 sic@
+    
+    return v_ActPdpContextReq;// We need to get TI from here (v_ActPdpContextReq.ti)
+  }
+
+  /*
+   * @desc      Performs UTRA PS RB Establishment according to TS 34.108 subclause 7.4.2 in a UTRAN cell.
+   *            UTRAN34: only cell_DCH_dlSRB_E_HS with MAC-ehs is handled: for 4C TC
+   *            UTRAN34: handle all releases + QoS check enhanced
+   * @param     p_CellId
+   * @param     p_RB_Configuration
+   * @param     p_TriggerUE         (default value: TRIGGER_UE)
+   * @return    ACTIVATEPDPCONTEXTREQUESTul
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_UE_PsRB_Est(UTRAN_CellId_Type p_CellId,
+                                 RB_ConfigType p_RB_Configuration, // Radio Bearer type to be configured
+                                 UTRAN_PDPContextTrigger_Type p_TriggerUE := TRIGGER_UE) runs on UTRAN_IP_PTC return ACTIVATEPDPCONTEXTREQUESTul
+  {
+    var RB_ConfigType v_RB_Configuration := p_RB_Configuration;
+    var integer v_RBId := tsc_RB20;
+    var charstring v_APN := "";
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActPdpContextReq;
+    var NSAPI  v_Recd_NSAPI;
+    var bitstring v_RAB_Id;
+    var template (value) PktDataProtoAddr v_ExpectedPDN_Address;
+    var PDN_Index_Type v_PDN := PDN_1;
+    var integer v_NoOfPDPContexts;
+    var TI v_Ti_R;   // Transaction Identifier. r = value used to receive CC PDU. s = value used to send CC PDU.
+    var TI v_Ti_S;   // Transaction Identifier. r = value used to receive CC PDU. s = value used to send CC PDU.
+    var template (value) QualityOfService v_QualityOfService;
+    
+    v_ExpectedPDN_Address := f_UG_GetPktDataProtoAddr(true);
+    if (p_RB_Configuration == cell_DCH_2AM_PS) { // Must be 2nd PDP context
+      v_RB_Configuration := cell_DCH_64kPS_RAB_SRB;
+      v_RBId := tsc_RB22;
+      v_APN := "APN-2";
+      v_ExpectedPDN_Address := f_UG_GetPktDataProtoAddr(true, PDN_2);
+      v_PDN := PDN_2;
+    }
+    v_QualityOfService := f_UTRAN_InitialiseQoS(p_CellId, v_RB_Configuration);
+    
+    //Step 1-5 in 34.108 cl. 7.4.2.4.2: Receive PDP Context Activation Request
+    v_ActPdpContextReq := f_UTRAN34_GoToState6_7_MO(p_CellId, v_QualityOfService, v_RBId, v_APN, p_TriggerUE); // @sic R5s160060 sic@
+    
+    //Assign v_RAB_Id (BITSTRING[8]) with the NSAPI (BITSTRING[4]) value received in ACTIVATE PDP CONTEXT REQUEST message:
+    //v_RAB_Id := int2bit (bit2int (v_ActPdpContextReq.requestedNSAPI.nSAPI_Value), 8);
+    //Radio Bearer Identity is set according to 34.108 cl 9.1.1 RADIO BEARER SETUP message for condition A3, A6 or A9.
+    v_Ti_R := v_ActPdpContextReq.ti;
+    v_Ti_S.tiFlag := '1'B;
+    v_Ti_S.tiVal := v_Ti_R.tiVal;
+    
+    v_NoOfPDPContexts := f_UTRAN_Global_IP_NoOfPDPContexts_Increment();
+    f_UTRAN_Global_IP_PDPInfo_Set((v_NoOfPDPContexts-1), true, v_PDN);
+
+        //Step 1-3 in 34.108 cl. 7.4.2.6.2.3: Radio access bearer establishment procedure for PS mobilie originated calls.
+    //Step 1-2 in 34.108 cl. 7.4.2.6.2.3: Send RADIO BEARER SETUP and receive COMPLETE
+    v_Recd_NSAPI := v_ActPdpContextReq.requestedNSAPI;
+    v_RAB_Id := int2bit(bit2int(v_Recd_NSAPI.nSAPI_Value), 8);
+    f_UTRAN34_RB_SetUp_PS_RAB(p_CellId, p_RB_Configuration, true, false, v_RAB_Id); // @sic R5s160060 sic@
+    
+    //Step 3 in 34.108 cl. 7.4.2.6.2.3: Send ACTIVATE PDP CONTEXT ACCEPT
+    f_UTRAN34_SendActivatePDP_Accept(v_QualityOfService,
+                                     v_Ti_S,
+                                     v_ExpectedPDN_Address);
+    return v_ActPdpContextReq;
+  }
+
+}

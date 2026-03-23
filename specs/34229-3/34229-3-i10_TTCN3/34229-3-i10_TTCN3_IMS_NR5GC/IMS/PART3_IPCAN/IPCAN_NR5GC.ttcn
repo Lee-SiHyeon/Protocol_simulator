@@ -1,0 +1,643 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-08-07 10:49:35 +0200 (Wed, 07 Aug 2024) $
+// $Rev: 39203 $
+/******************************************************************************/
+
+module IPCAN_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR5GC_UE_Location all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from UpperTesterFunctions all;
+
+  const NR_CellId_Type tsc_IMS_NR5GC_CellId := nr_Cell1;  /* @status    APPROVED (IMS) */
+
+  const NR_CellId_Type tsc_IMS_NR5GC_CellId_VPLMN := nr_Cell12;  /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      Initialise IPCAN
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_Init(IMS_IPCAN_CO_ORD_PORT p_Port,
+                              NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    f_NR5GC_Init(NR_1);
+    f_NR_CellConfig_Def(p_NR_CellId);
+
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port, cms_IPCAN_IMS_Response(IPCAN_INIT));
+  }
+
+  /*
+   * @desc      provide LOCATION INFRMATION to UE
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_LocationInformation(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                             NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    f_NR_ProvideUE_LocationInformation(p_NR_CellId, RRC_IDLE); // @sic R5s220215 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      UE Registration acc. to 38.508-1 Table 4.5.2.2-2;
+   *            RRC connection is not released
+   * @param     p_NR_CellId
+   * @param     p_RegType           (default value: Initial_Secure)
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_IdleUpdated(NR_CellId_Type p_NR_CellId, TypeOfRegistration_Type p_RegType := Initial_Secure) runs on NR5GC_PTC
+  {
+    // @sic R5s20807 sic@
+    f_NR5GC_Registration(p_NR_CellId, -, p_RegType);
+    f_NR5GC_RRC_Idle_Steps16_20 (p_NR_CellId,
+                             -,
+                             -,
+                             noRrcConnectionRelease,
+                             -, -, -, -, -, -, -, -, -, -, -, -,
+                             false);
+
+  }
+
+  /*
+   * @desc      Initial registration
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_InitialRegistration(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    f_NR_SetCellPower(p_NR_CellId, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // Switch on UE
+    f_UT_SwitchOnUE(UT);
+
+    f_NR5GC_IPCAN_IdleUpdated(p_NR_CellId, Initial_NoSecurity);    // f_IP_Handling_StartPDN is called inside f_NR5GC_IPCAN_IdleUpdated (f_NR5GC_PDUSessionEstablishment_InnerLoop)
+  }
+
+  /*
+   * @desc      connection establishment for XCAP signalling
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_XCAP_Signalling(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := omit;
+    var integer v_NoOfSessions := f_NR5GC_MobileInfo_GetNoOfSessions();
+    var integer v_DRBId;
+
+    // Get into connected mode first
+    f_NR5GC_RRC_ConnectedState3N_Def(p_NR_CellId);
+    
+    // Then make sure there's an internet PDN
+    if ( v_NoOfSessions > 0){
+      v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+    }
+    if (not isvalue(v_GSM_MobilityInfo)) {
+      f_NR5GC_TriggerSinglePDUSession(p_NR_CellId, (v_NoOfSessions+1), Internet_DNN);
+      v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);  // @sic R5s220617 sic@
+    }
+    v_DRBId := f_NR_GetDefaultDRB_InDRBList(f_NR_GetDRBList_ForGivenPDUSession(oct2int(valueof(v_GSM_MobilityInfo.SessionId))));  // @sic R5s220617 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IPCAN_IMS_DrbInfo(cs_DrbInfo_NR(p_NR_CellId, f_NR_GetQosFlowIdentification_ForDRBId(v_DRBId))));  // @sic R5s220617 sic@
+  }
+
+  /*
+   * @desc      Additional IP Address
+   *            Only used for 5GC test case 6.2 which allocates 2 IP addresses
+   *            Can be extended if required by other tests
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_AdditionalIPAddress() runs on NR5GC_PTC {
+    f_NR5GC_MobileInfo_SetNumOfIPAddressesToAllocate(2);
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS MO Speech call establishment in NR (TS 38.508-1 cl. 4.9.15);
+   *            as the call setup is initiated by the UE there is no trigger needed to start IMS signalling,
+   *            but a trigger is expected from the IMS PTC after IPS PTC has sent out "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MO_SpeechCall(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                       NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_NR5GC_SpeechCall_Steps2_8(p_NR_CellId, mo_VoiceCall, '0001'B); // @sic R5s10037 sic@);
+
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_Port);  // wait until IMS PTC has sent "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21) @sic R5-225362 sic@
+    if (v_Result == NORMAL) {                               // => procedure shall not be aborted
+      f_NR5GC_ModifyPDUSession_AddVoice(p_NR_CellId, valueof(v_GSM_MobilityInfo));
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS MT Speech call establishment in NR (TS 38.508-1 cl. 4.9.16);
+   *            as the call setup is initiated by the UE there is no trigger needed to start IMS signalling,
+   *            but a trigger is expected from the IMS PTC after IMS PTC has sent out "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MT_SpeechCall(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                       NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    
+    f_NR_Paging_Def(p_NR_CellId, RRC_IDLE);
+    v_GSM_MobilityInfo := f_NR5GC_SpeechCall_Steps2_8(p_NR_CellId, mt_Access, '0010'B); // @sic R5s10037 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);  // @sic R5s210330 sic@
+        
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_Port);  // wait until IMS PTC has sent "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+    if (v_Result == NORMAL) {                               // => procedure shall not be aborted
+      f_NR5GC_ModifyPDUSession_AddVoice(p_NR_CellId, valueof(v_GSM_MobilityInfo)); // @sic R5-221423 sic@
+    }
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);  // @sic R5s210330 sic@
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS MO Video call establishment in NR (TS 38.508-1 cl. 4.9.24);
+   *            as the call setup is initiated by the UE there is no trigger needed to start IMS signalling,
+   *            but a trigger is expected from the IMS PTC after IPS PTC has sent out "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MO_VideoCall(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                       NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    // Steps 2 - 8 the same as for speech call
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_NR5GC_SpeechCall_Steps2_8(p_NR_CellId, mo_VideoCall, '0001'B);
+
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_Port);  // wait until IMS PTC has sent "100 Trying" and "183 Session Progress" (steps 3 and 4 of C.21)
+    if (v_Result == NORMAL) {                               // => procedure shall not be aborted
+      f_NR5GC_ModifyPDUSession_AddVideo(p_NR_CellId, valueof(v_GSM_MobilityInfo));
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS MT Speech call establishment in NR (TS 38.508-1 cl. 4.9.26);
+   *            as the call setup is initiated by the UE there is no trigger needed to start IMS signalling,
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MT_VideoCall(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                       NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    
+    f_NR_Paging_Def(p_NR_CellId, RRC_IDLE);
+    v_GSM_MobilityInfo := f_NR5GC_SpeechCall_Steps2_8(p_NR_CellId, mt_Access, '0010'B); // @sic R5s220235 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port, cms_IMS_IPCAN_Trigger()); // @sic R5-225362, R5s230014 sic@
+        
+    v_Result := f_IMS_IPCAN_WaitForTriggerOrAbort(p_Port);  // wait until IMS PTC is ready to configure video DRB
+    if (v_Result == NORMAL) {                               // => procedure shall not be aborted
+      f_NR5GC_ModifyPDUSession_AddVideo(p_NR_CellId, valueof(v_GSM_MobilityInfo));
+    }
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure to add Video to an existing speech call in NR (TS 38.508-1 cl. 4.9.27);
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_AddVideo(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                  NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    // Steps 2 - 8 the same as for speech call
+    f_NR5GC_ModifyPDUSession_AddVideoToSpeech(p_NR_CellId);
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port); // @sic R5s220336 sic@
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure to remove Video from an existing  call in NR (TS 38.508-1 cl. 4.9.28);
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_ReleaseVideo(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                      NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return TriggerResult_Type
+
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    // Steps 2 - 8 the same as for speech call
+    f_NR5GC_ModifyPDUSession_RemoveVideoFromSpeech(p_NR_CellId);
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port); // @sic R5s220336 sic@
+    return v_Result;
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS Emergency call establishment in NR (TS 38.508-1 cl. 4.9.11/12)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @param     p_ConnectionEstablished
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_EmergencyCall(IMS_IPCAN_CO_ORD_PORT p_Port, //FFS input parameter left for consistency
+                                       NR_CellId_Type p_NR_CellId,
+                                       boolean p_ConnectionEstablished) runs on NR5GC_PTC
+  {
+    var integer v_PDUEstAlreadyRxd := 0;
+    if (p_ConnectionEstablished) {
+      f_NR5GC_EmergencyCallPDUSession(p_NR_CellId);
+    } else { // @sic R5-217857 sic@
+      v_PDUEstAlreadyRxd := f_NR5GC_EmergencyCallWithRegistration_Steps1_8 (p_NR_CellId);
+      f_NR5GC_EmergencyCallPDUSession(p_NR_CellId, -, v_PDUEstAlreadyRxd);
+    }
+  }
+
+  /*
+   * @desc      Generic Test Procedure for IMS Emergency call establishment in NR (TS 38.508-1 cl. 4.9.11/12)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+   function f_NR5GC_IPCAN_EmergencyAddVoice(IMS_IPCAN_CO_ORD_PORT p_Port, //FFS input parameter left for consistency
+                                       NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Emergency_PDN);
+    f_NR5GC_ModifyPDUSession_AddVoice(p_NR_CellId, valueof(v_GSM_MobilityInfo));
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port); // @sic R5s240081 sic@  Tell IMS that speech DRB is configured
+  }
+
+  /*
+   * @desc      MO RRC connection establishment
+   *            TS 38.508-1 table 4.9.15.2.2-1/4.9.19.2.2-1 steps 2-8
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MO_IMS_Signalling(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg := f_NR5GC_RRCIdleToConnected_Steps2_4(p_NR_CellId, '0001'B, (mo_Data, mo_SMS)); // @sic R5s201327, R5s210037 sic@
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(p_NR_CellId, v_ReceivedMsg);
+  }
+
+  /*
+   * @desc      MT RRC connection establishment (TS 38.508-1 table 4.9.16.2.2-1)
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MT_IMS_Signalling(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                           NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    
+    f_NR_Paging_Def(p_NR_CellId, RRC_IDLE);
+    v_ReceivedMsg := f_NR5GC_RRCIdleToConnected_Steps2_4(p_NR_CellId, '0010'B, mt_Access); // @sic R5-204387, R5s210037 sic@
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(p_NR_CellId, v_ReceivedMsg);
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);       // trigger IMS PTC to do IMS signalling after RRC connection establishment
+  }
+
+  /*
+   * @desc      start IPCAN procedure
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @param     p_ProcedureType
+   * @param     p_TestConfiguration
+   * @param     p_ConnectionEstablished
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_StartProcedure(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                        NR_CellId_Type p_NR_CellId,
+                                        IMS_TestProcedure_Type p_ProcedureType,
+                                        template (omit) IMS_TestConfiguration_Type p_TestConfiguration,
+                                        boolean p_ConnectionEstablished) runs on NR5GC_PTC return TriggerResult_Type
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+
+    select (p_ProcedureType) {
+      case (IPCAN_InitialRegistration) {
+        f_NR5GC_IPCAN_InitialRegistration(p_NR_CellId);
+      }
+      case (IPCAN_EmergencyCall_NormalService,                                  // emergency call, normal service, uses 112 as default emg number
+            IPCAN_EmergencyCall_OptionalPDNRelease) {
+        if (isvalue(p_TestConfiguration)) {  // @sic R5-225426 sic@
+          if (match(IPCAN_SpeechAndEmergencyCall, p_TestConfiguration)) {
+             f_NR5GC_IPCAN_EmergencyAddVoice(p_Port, p_NR_CellId);
+          }
+        } else {
+          f_NR5GC_IPCAN_EmergencyCall(p_Port, p_NR_CellId, p_ConnectionEstablished);  // @sic R5s220531 sic@
+        }
+      }
+      case (IPCAN_EmergencyCall_LimitedService) {                               // emergency call, limited service
+        /* nothing to be done */
+      }
+      case (IPCAN_MO_SpeechCall) {                                              // MO speech call
+        v_Result := f_NR5GC_IPCAN_MO_SpeechCall(p_Port, p_NR_CellId);           // @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_MT_SpeechCall) {                                              // MT speech call
+        v_Result := f_NR5GC_IPCAN_MT_SpeechCall(p_Port, p_NR_CellId);           // @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_MO_VideoCall) {                                               // MO video call
+        v_Result := f_NR5GC_IPCAN_MO_VideoCall(p_Port, p_NR_CellId);            // @sic R5s210877 sic@ @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_MT_VideoCall) {                                               // MT video call
+        v_Result := f_NR5GC_IPCAN_MT_VideoCall(p_Port, p_NR_CellId);            // @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_MO_AddVideo, IPCAN_MT_AddVideo) {                             // add video to existing speech call
+        v_Result := f_NR5GC_IPCAN_AddVideo(p_Port, p_NR_CellId);                // @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_ReleaseVideo) {                                               // Release video but keep speech call
+        v_Result := f_NR5GC_IPCAN_ReleaseVideo(p_Port, p_NR_CellId);            // @sic R5s240232: v_Result sic@
+      }
+      case (IPCAN_MO_IMS_Signalling) {                                          // MO IMS signalling
+        f_NR5GC_IPCAN_MO_IMS_Signalling(p_NR_CellId);
+      }
+      case (IPCAN_MT_IMS_Signalling) {                                          // MT IMS signalling
+        f_NR5GC_IPCAN_MT_IMS_Signalling(p_Port, p_NR_CellId);
+      }
+      case (IPCAN_XCAP_Signalling) {                                            // XCAP signalling
+        f_NR5GC_IPCAN_XCAP_Signalling(p_NR_CellId);
+      }
+      case (IPCAN_AdditionalIPAddress) { // @sic R5-213400 sic@
+        f_NR5GC_IPCAN_AdditionalIPAddress();
+      }
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      End a procedure
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @param     p_ProcedureType
+   * @param     p_TestConfiguration
+   * @param     p_CallEstablishmentResult
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_ProcedureEnd(IMS_IPCAN_CO_ORD_PORT p_Port, //FFS parameter left for future use
+                                       NR_CellId_Type p_NR_CellId,
+                                       IMS_TestProcedure_Type p_ProcedureType,
+                                       IMS_TestConfiguration_Type p_TestConfiguration,
+                                       TriggerResult_Type p_CallEstablishmentResult) runs on NR5GC_PTC
+  {
+    select (p_ProcedureType) {
+      case (IPCAN_InitialRegistration) {
+        // just release RRC connection
+      }
+      case (IPCAN_MO_IMS_Signalling, IPCAN_MT_IMS_Signalling) {
+        // just release RRC connection
+      }
+      case (IPCAN_EmergencyCall_NormalService) {
+        if (p_TestConfiguration == IPCAN_SpeechAndEmergencyCall) { // @sic R5-225426 sic@
+          f_NR5GC_ModifyPDUSession_RemoveEmergency(p_NR_CellId);
+        } else {
+          f_NR5GC_EmergencyCallReleaseMT(p_NR_CellId, false);  // @sic R5s220531, R5s220789, R5-225362 sic@ If MO, UT & IMS msgs will already have been sent
+        }
+      }
+      case (IPCAN_EmergencyCall_OptionalPDNRelease) {  // @sic R5-225362 sic@
+        f_NR5GC_EmergencyCallRelease(p_NR_CellId, false, false);  // @sic R5s220531, R5s220789 sic@ If MO, UT & IMS msgs will already have been sent
+      }
+      case (IPCAN_EmergencyCall_LimitedService) {
+      }
+      case (IPCAN_MO_SpeechCall, IPCAN_MT_SpeechCall) {
+        if (p_CallEstablishmentResult == NORMAL) {       // NOTE: in test cases for unsuccessful behaviour no speech flow is established */
+          f_NR5GC_ModifyPDUSession_RemoveIMSVoice(p_NR_CellId);  // @sic R5s210096: f_NR5GC_ModifyPDUSession_RemoveIMSVoice instead of f_NR5GC_CallRelease sic@
+        }
+      }
+      case (IPCAN_MO_VideoCall, IPCAN_MT_VideoCall) {
+        if (p_CallEstablishmentResult == NORMAL) {       // @sic R5s210877 sic@
+          f_NR5GC_ModifyPDUSession_RemoveIMSVideo(p_NR_CellId);
+        }
+      }
+      case (IPCAN_XCAP_Signalling) {
+        // just release RRC connection
+      }
+    }
+
+  }
+
+  /*
+   * @desc      Release connection(s) at the end of a procedure
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @param     p_TestConfiguration
+   * @param     p_ProcedureType
+   * @param     p_CallEstablishmentResult
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_ConnectionRelease(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                           NR_CellId_Type p_NR_CellId,
+                                           IMS_TestConfiguration_Type p_TestConfiguration,
+                                           IMS_TestProcedure_Type p_ProcedureType,
+                                           TriggerResult_Type p_CallEstablishmentResult) runs on NR5GC_PTC
+  { // @sic R5-216220 sic@ split into 2 functions
+    f_NR5GC_IPCAN_ProcedureEnd (p_Port,
+                                p_NR_CellId,
+                                p_ProcedureType,
+                                p_TestConfiguration,
+                                p_CallEstablishmentResult);
+
+    f_NR_RRCRelease(p_NR_CellId);
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      Release a call but not the connection
+   * @param     p_Port
+   * @param     p_NR_CellId
+    * @param     p_TestConfiguration
+  * @param     p_ProcedureType
+   * @param     p_CallEstablishmentResult
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_EndCall(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                   NR_CellId_Type p_NR_CellId,
+                                   IMS_TestConfiguration_Type p_TestConfiguration,
+                                   IMS_TestProcedure_Type p_ProcedureType,
+                                   TriggerResult_Type p_CallEstablishmentResult) runs on NR5GC_PTC
+  {
+    if (p_TestConfiguration != IPCAN_SignallingOnly) {
+      f_NR5GC_IPCAN_ProcedureEnd (p_Port,
+                                  p_NR_CellId,
+                                  p_ProcedureType,
+                                  p_TestConfiguration, // @sic R5-225426 sic@
+                                  p_CallEstablishmentResult);
+    }
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      postamble for IPCAN
+   * @param     p_Port
+   * @param     p_NR_CellId
+   * @param     p_IPCAN_Registered
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_Release(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                 NR_CellId_Type p_NR_CellId,
+                                 boolean p_IPCAN_Registered ) runs on NR5GC_PTC
+  {
+    if (p_IPCAN_Registered) { // @sic R5s211495 sic@
+      f_NR_Postamble(p_NR_CellId, STATE_IDLE_1A);
+    } else {
+      f_NR_Postamble(p_NR_CellId, STATE_DEREGISTERED);
+    }
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      UE may optionally release PDN or deregister at NAS level after deregistering from IMS
+   * @param     p_NR_CellId
+   * @param     p_ReceivedAsp
+   * @return    boolean
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_AfterIMSDeregister(NR_CellId_Type p_NR_CellId,
+                                            NR_SRB_COMMON_IND p_ReceivedAsp ) runs on NR5GC_PTC return boolean
+  {
+    var boolean v_IPCAN_Registered := true;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    
+    if (ischosen(p_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.deregistration_RequestMO)) {
+      if (not f_Check_NG_DeregistrationReqMOMsg (p_ReceivedAsp.Signalling.Nas[0].Pdu, crs_DeregisterType('0'B, '0'B))) { // @sic R5s240531 Baseline Moving sic@
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Deregistration Request Message Failed");
+      }
+      v_IPCAN_Registered := false;
+    } else { // Not a Detach Req
+      if (not f_Check_NG_PDUSessionReleaseReq (v_GSM_MobilityInfo, f_NR5GC_MobileInfo_GetSessionInfoList(),
+                                               p_ReceivedAsp.Signalling.Nas[0].Pdu, ?)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Request Message Failed");
+      }
+      f_NR5GC_PDUSessionRelease(p_NR_CellId,
+                                v_GSM_MobilityInfo.SessionId);
+    }
+    return v_IPCAN_Registered;
+  }
+
+  /*
+   * @desc      Main loop to handle commands from the IMS PTC:
+   *            - IPCAN_INIT
+   *            - IPCAN_STARTPROCEDURE  (procedure)
+   *            - IPCAN_ENDPROCEDURE    (procedure)
+   *            - IPCAN_RELEASE
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_IPCAN_MainLoop() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_CellId := tsc_IMS_NR5GC_CellId;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_Coordination_MSG;
+    var IMS_IPCAN_Command_Type v_Command;
+    var IMS_TestConfiguration_Type v_TestConfiguration;
+    var TriggerResult_Type v_StartProcedureResult;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var integer v_PdnIndex;
+    var boolean v_ConnectionEstablished := false;
+    var boolean v_IPCAN_Registered := false;   // @sic R5s211495 sic@
+    var boolean v_Done := false;
+
+    while (not v_Done) {
+      alt {
+        [] IMS[tsc_Index_IMS1].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS1;
+        }
+        [] IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS2;
+        }
+        // @sic R5s211495 sic@
+        [v_ConnectionEstablished]SRB.receive(car_NR_SRB_NasPdu_IND(v_CellId, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered)))) -> value v_ReceivedAsp {
+          v_IPCAN_Registered := f_NR5GC_IPCAN_AfterIMSDeregister(v_CellId, v_ReceivedAsp);
+          repeat;
+        }
+      }
+      v_Command := v_IMS_IPCAN_Coordination_MSG.IMS_IPCAN_Command;
+      select (v_Command.Name) {
+        case (IPCAN_INIT) {
+          if (isvalue(v_Command.TestProcedure)) { // @sic R5s220611 sic@
+            if (v_Command.TestProcedure == IPCAN_UseVPLMN) {
+              v_CellId := tsc_IMS_NR5GC_CellId_VPLMN;
+            }
+          }
+          f_NR5GC_IPCAN_Init(IMS[v_PdnIndex], v_CellId);
+          v_TestConfiguration := v_Command.TestConfiguration;
+        }
+        case (IPCAN_PROVIDELOCATIONINFORMATION) {
+          f_NR5GC_IPCAN_LocationInformation(IMS[v_PdnIndex], v_CellId);
+        }
+        case (IPCAN_STARTPROCEDURE) {
+          v_StartProcedureResult := f_NR5GC_IPCAN_StartProcedure(IMS[v_PdnIndex],
+                                                                 v_CellId,
+                                                                 v_Command.TestProcedure,
+                                                                 v_Command.TestConfiguration,
+                                                                 v_ConnectionEstablished);
+          v_ConnectionEstablished := true;
+          if ( v_Command.TestProcedure == IPCAN_InitialRegistration) {    // @sic R5s211495 sic@
+             v_IPCAN_Registered := true;
+          }
+        }
+        case (IPCAN_ENDPROCEDURE) {
+          if (v_TestConfiguration == IPCAN_SpeechAndEmergencyCall and isvalue(v_Command.TestConfiguration)) { // @sic R5-216220 sic@
+            // Just end the procedure as there's 2 calls ongoing, don't release the connection
+            f_NR5GC_IPCAN_EndCall(IMS[v_PdnIndex], v_CellId, valueof(v_Command.TestConfiguration), v_Command.TestProcedure, v_StartProcedureResult);
+          } else {
+            f_NR5GC_IPCAN_ConnectionRelease(IMS[v_PdnIndex], v_CellId, v_TestConfiguration, v_Command.TestProcedure, v_StartProcedureResult); // @sic R5-225426 sic@
+            /* => RRC connection is released */
+            v_ConnectionEstablished := false;
+          }
+        }
+        case (IPCAN_RELEASE) {
+          f_NR5GC_IPCAN_Release(IMS[v_PdnIndex], v_CellId, v_IPCAN_Registered); // @sic R5s211495 sic@
+          v_Done := true;
+        }
+        case (IPCAN_QUERY) {  /* @sic R5s130133 additional changes: handling of queries from the IMS PTC sic@ */
+          IMS[v_PdnIndex].send(cms_IPCAN_IMS_QueryResponse(f_NR_IMS_IpcanInfo()));
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "invalid command");
+        }
+      }
+    }
+  }
+
+}

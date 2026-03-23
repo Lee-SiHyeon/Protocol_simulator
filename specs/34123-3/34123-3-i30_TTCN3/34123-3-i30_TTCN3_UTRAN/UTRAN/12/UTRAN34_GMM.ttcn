@@ -1,0 +1,229 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2023-05-04 17:38:01 +0200 (Thu, 04 May 2023) $
+// $Rev: 35902 $
+/******************************************************************************/
+module UTRAN34_GMM {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN34_CellInfo all;
+  import from UTRAN34_CommonDefs all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_ConfigurationSteps all;
+  import from UTRAN34_NAS_PDU_Templates all;
+  import from UTRAN34_Parameters all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  template (value) RRCDataReqType cs_RAUpdReject_T3346  :=
+  { /* @status    APPROVED (LTE_IRAT, UTRAN) */
+    routingAreaUpdateReject := cs_RAUpdReject_Common(cs_GMM_Cause(tsc_GMM_Cause_Congestion),
+                                                     cs_GPRS_Timer2_3_IEI ('3A'O, tsc_GprsTimerUnit_1min, '00101'B))  // 5 minutes @sic R5s150329 Baseline Moving sic@
+  };
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 12.4.1.4f
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_12_4_1_4f_UTRAN() runs on UTRAN_PTC
+  {
+    //Initialise UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // cell B: MCC1/MNC1/LAC1/RAC2 (RAI-4)
+    f_UTRAN_CellInfo_SetRAC(utran34_CellB, '02'O);      //RAC2
+    
+    // CellA started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_CellA);
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_CellA);
+    
+    // CellB started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_CellB);
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_CellB);
+    
+    //The UE has a valid P-TMSI-1 and RAI-1. MS is Idle Updated on cell A
+    f_UTRAN34_Preamble(utran34_CellA);
+    f_UTRAN34_SwitchPower_Off(utran34_CellA, U1_IDLE, NotSpecified);
+    
+    //Set UE in operation Mode C or A
+    if (px_SupportOpModeC) {
+      f_UTRAN34_SetUE_OperationMode(opModeC );
+    } else {
+      f_UTRAN34_SetUE_OperationMode(opModeA );
+      //Both cells are operating in network operation mode II (in case of UE operation mode A)
+      f_UTRAN_CellInfo_SetNMO (utran34_CellA, tsc_NMO_II);
+      f_UTRAN_CellInfo_SetNMO (utran34_CellB, tsc_NMO_II);
+    }
+    
+    //The SIB1 IE "CN domain specific NAS system information", for the CS Domain, is set to value "00 00" (T3212 value is set to 0 and ATT flag is set to FALSE) in both cells.
+    f_UTRAN34_CellInfo_SetAttFlag( utran34_CellA, tsc_AttOff );
+    f_UTRAN34_CellInfo_SetT3212( utran34_CellA, '00'O );
+    f_UTRAN_SysInfoModifySIB1(utran34_CellA, false);
+    f_UTRAN34_CellInfo_SetAttFlag( utran34_CellB, tsc_AttOff );
+    f_UTRAN34_CellInfo_SetT3212( utran34_CellB, '00'O );
+    f_UTRAN_SysInfoModifySIB1(utran34_CellB, false);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_12_4_1_4f_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    //Release UTRAN Cells
+    f_UTRAN34_Postamble(utran34_CellB, U1_IDLE);
+    f_UTRAN_ReleaseCell(utran34_CellA, f_UTRAN_CellInfo_GetConfigType (utran34_CellA) );
+  }
+
+  /*
+   * @desc      test body of TC_12_4_1_4f
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_12_4_1_4f_Body () runs on UTRAN_PTC
+  {
+    var template (value) MobileIdentity v_MobileIdPTMSI_1;
+    var RRC_DATA_IND v_RRC_DataInd_PS;
+    var START_Value v_START_Value_ps := '00000000000000000000'B;
+    var octetstring v_PLMN_A;
+    var octetstring v_LAC_A;
+    var octetstring v_RAC_A;
+    var template (present) RoutingAreaId v_RAI_1;
+    
+    timer t_T3346:= f_UG_SetTimerToleranceMin (5.0 * 60.0); // T3346=5min
+    
+    v_PLMN_A := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(utran34_CellA));
+    v_LAC_A := f_UTRAN_CellInfo_GetLAC(utran34_CellA);
+    v_RAC_A := f_UTRAN_CellInfo_GetRAC(utran34_CellA);
+    v_RAI_1 :=   cr_RAI (omit, cr_LAI(omit, v_PLMN_A, v_LAC_A), v_RAC_A);
+    v_MobileIdPTMSI_1 := cs_MobileIdTMSIorPTMSI (omit, px_PTMSI_Def); //@sic R5s141355 sic@
+    
+    // The following messages are sent and shall be received on cell A.
+    // The SS is set in network operation mode II - Done in the premable
+    // Set the cell type of cell A to the "Serving cell".
+    // Set the cell type of cell B to the "Non-Suitable cell".
+    //@siclog "Steps 1-2" siclog@
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationNonSuitableCell);
+    
+    //The UE is set in UE operation mode C (see ICS)
+    // done in the preamble
+    
+    //The UE is powered up or switched on and initiates an attach (see ICS). Cell A is preferred by the UE.
+    //@siclog "Step 3" siclog@
+    f_UT_SwitchOnUE(UT, false);
+    
+    f_UTRAN34_RRC_ConnEst (utran34_CellA);
+    //@sic R5s141355 sic@
+    U_Dc.receive(car_PS_InitDirectTransfer( utran_CellDedicated,
+                                            tsc_RB3,
+                                            cr_U34_AttachReq(cr_AttachType(?, tsc_I_AttachTypeGPRSAtt),
+                                                             v_MobileIdPTMSI_1,
+                                                             v_RAI_1))) -> value v_RRC_DataInd_PS;
+    // ATTACH REQUEST
+    // Attach type = 'GPRS attach'-Mobile identity =P-TMSI-1-Old Routing area identity = RAI-1
+    //@siclog "Step 5" siclog@
+    v_START_Value_ps := v_RRC_DataInd_PS.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+    
+    // AUTHENTICATION AND CIPHERING REQUEST - AUTHENTICATION AND CIPHERING RESPONSE
+    //@siclog "Steps 6-7" siclog@
+    f_UTRAN_GMM_Authentication();
+    // The SS starts integrity protection.
+    //@siclog "Step 8" siclog@
+    f_UTRAN34_RRC_Security(utran34_CellA,     // SECURITY MODE COMMAND, SECURITY MODE COMPLETE
+                           true,  //New key
+                           ps_domain);
+    
+    //@siclog "Steps 9-10" siclog@
+    // ATTACH ACCEPT: Attach result = 'GPRS only attached' Allocated P-TMSI = P-TMSI-2 P-TMSI Signature = P-TMSI-2 signature Routing area identity = RAI-1
+    f_UTRAN34_AttachAccept(utran34_CellA, v_RRC_DataInd_PS.msg.attachRequest.attachType.attachType, tsc_PTMSI_2, tsc_PTMSISig_2); // ATTACH ACCEPT, ATTACH COMPLETE
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    
+    // Set the cell type of cell A to the " Suitable neighbour cell".
+    // Set the cell type of cell B to the "Serving cell".
+    // Cell B is preferred by the UE.
+    //@siclog "Steps 11" siclog@
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationSuitableNeighbourCell);
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationServingCell);
+    
+    //Configure cell for RRC Connection establishment
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellB, utran34_CellA);
+    f_UTRAN34_RRC_ConnEst (utran34_CellB);
+    
+    //@siclog "Step 13" siclog@
+    /* ROUTING AREA UPDATE REQUEST - Update type = 'RA updating' - Old P-TMSI signature=P-TMSI-2 signature - Old Routing area identity = RAI-1  */
+    U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,   //@sic R5s141355 sic@
+                                             tsc_RB3,
+                                             cr_U34_RA_UpdReqAny(cr_GMM_UpdateType(?, tsc_I_UpdateTypeRAOnly),   //@sic R5s150682 sic@
+                                                                 v_RAI_1,     //@sic R5s141355 sic@
+                                                                 cr_PTMSI_Signature(tsc_PTMSISig_2)))) -> value v_RRC_DataInd_PS;
+    v_START_Value_ps := v_RRC_DataInd_PS.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+    
+    //@siclog "Step 13A" siclog@
+    // The SS starts integrity protection
+    f_UTRAN34_RRC_Security(utran34_CellB,     // SECURITY MODE COMMAND, SECURITY MODE COMPLETE
+                           false,  //No New key
+                           ps_domain);
+    
+    // ROUTING AREA UPDATE REJECT - GMM cause = Congestion - T3346 value = 5 minutes */
+    //@siclog "Step 14" siclog@
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_RAUpdReject_T3346)); // cause Congestion
+    t_T3346.start;
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    
+    // The SS verifies that the MS does not initiate the routing area update procedure before timer T3346 has expired
+    //@siclog "Step 14" siclog@
+    alt {
+      [] U_TM.receive(car_RRC_ConnReq(?,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8(?)))
+        {
+          f_UTRAN_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 14");
+        }
+      [] t_T3346.timeout
+        {
+          f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 15");//@sic R5s141355 sic@
+        }
+    }
+    
+    // ROUTING AREA UPDATE REQUEST
+    // Update type = RA updating - Old P-TMSI signature=P-TMSI-2 signature Old Routing area identity = RAI-1
+    //@siclog "Steps 15-18" siclog@
+    f_UTRAN34_GMM_RAU( utran34_CellB,
+                       registration,
+                       -,
+                       v_RAI_1,   //@sic R5s141355 sic@
+                       px_PTMSI_Def,
+                       tsc_PTMSISig_2,
+                       -,
+                       false //No authentication
+                       )
+    
+    
+  }  // fl_TC_12_4_1_4f_Body
+
+}

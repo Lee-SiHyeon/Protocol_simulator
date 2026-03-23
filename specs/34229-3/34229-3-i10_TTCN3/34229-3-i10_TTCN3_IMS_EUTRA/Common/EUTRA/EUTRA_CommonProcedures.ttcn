@@ -1,0 +1,441 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-12-08 20:48:36 +0100 (Sun, 08 Dec 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module EUTRA_CommonProcedures {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from EUTRA_SecuritySteps all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      This function should be used at the end of every test case to ensure the UE
+   *            detaches and release the RRC connection as it is turned off and only then will it
+   *            take down the cell the UE is currently camped on
+   * @param     p_CellId
+   * @param     p_E_State ... values: E1_IDLE, E2_CONNECTED, E3_TESTMODE, E4_DEREGISTERED, E5_MANUAL is handled in it's own function: f_EUTRA_Postamble_E5Manual
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_DRB               (default value: tsc_DRB1)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, POS)
+   */
+  function f_EUTRA_Postamble(EUTRA_CellId_Type p_CellId,
+                             EUTRA_POSTAMBLE_STATE_Type p_E_State,
+                             EUTRA_ATTACH_Type p_ForcedAttach := NORMAL,
+                             template (omit) IP_DrbId_Type p_DRB := tsc_DRB1) runs on EUTRA_PTC // @sic R5s160739 sic@
+  { /* @sic This function has been completely changed in R5-103847 sic@ */
+    // @sic R5s11046: new parameter p_SelectedPlmnId sic@
+    //@sic R5S160376 deleted parameter p_SelectedPlmnId sic@
+
+    if (pc_SwitchOnOff) { // The UE can actually be switched off
+      select (p_E_State) {
+        case (E1_IDLE) {
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_IDLE, p_ForcedAttach, omit, -, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E2_CONNECTED, E3_TESTMODE) {
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_CONNECTED, p_ForcedAttach, omit,-, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E2_T3440) { // @sic R5s110007 sic@
+          //Expect the UE to release RRC connection
+          f_EUTRA_RRC_ConnectionRelease(p_CellId);
+          f_Delay (5.0); // @sic R5-110803 sic@
+          //Expect the UE to detach and release RRC connection
+          f_EUTRA_UE_Detach_SwitchOffUe(p_CellId, RRC_IDLE, p_ForcedAttach, omit, -, p_DRB); // @sic R5s110176, R5s110468, R5s160739 sic@
+        }
+        case (E4_DEREGISTERED) {
+          f_UT_SwitchOffUE (UT, false);
+        }
+      }
+    }
+    else { // The power must be removed from the UE
+      f_UT_PowerOffUE (UT);
+    }
+    //And now remove the cell(s)
+    f_EUTRA_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      Activate a default DRB connected to an additional PDN
+   *            see 36.508 clause 6.4.3.2 / 4.5A.14
+   *            This is called by f_EUTRA_508_ActivateAdditionalPDN
+   * @param     p_CellId
+   * @param     p_EpsBearerId2
+   * @param     p_RRCState          (default value: RRC_IDLE)
+   * @param     p_EstablishmentCause (default value: ?)
+   * @param     p_PDN_RequestType   (default value: '001'B)
+   * @param     p_ExpectedAccessPointName (default value: cr_AccessPointName(tsc_APN1))
+   * @param     p_StepNo            (default value: "")
+   * @status    APPROVED (IMS, LTE)
+   */
+  function f_EUTRA_ActivateAdditionalPDNOnDef(EUTRA_CellId_Type p_CellId,
+                                              EPS_BearerIdentity p_EpsBearerId2, // Identity of the 2nd Default Bearer that will be configured to connect to the additional PDN
+                                              EUTRA_RRC_STATE_Type p_RRCState := RRC_IDLE,
+                                              template (present) EstablishmentCause p_EstablishmentCause := ?, // Set to emergency to establish a PDN for an emergency bearer
+                                              B3_Type p_PDN_RequestType := '001'B, // Set to 100 to establish a PDN for an emergency bearer
+                                              template AccessPointName p_ExpectedAccessPointName := cr_AccessPointName(tsc_APN1), // Set to omit to establish a PDN for an emergency bearer
+                                              charstring p_StepNo := "") runs on EUTRA_PTC // Set to the verdict step no if required after the RRC Connection Establishment
+  { // @sic R5s100326 sic@ @sic R5s100520 sic@
+    var ProcedureTransactionIdentifier v_PTId_UE;
+    var template (omit) ProtocolConfigOptions v_Pco;  // @sic R5s100761 sic@
+    var PDN_Address v_PDN_Address2;
+    var NAS_MSG_Indication_Type v_NasInd;
+    var PDN_CONNECTIVITY_REQUEST v_PDNConnReq;
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_Info := f_EUTRA_CellInfo_GetFDD_TDD_Info (p_CellId); //Get FDD or TDD mode from Cell-configuration
+    var EUTRA_SecurityParams_Type v_SecurityParams := f_EUTRA_Security_Get();
+    var NasCount_Type v_NasCountUL;
+    var template (value) PhysicalConfigDedicated_AntennaInfo_Type v_AntennaInfo := f_EUTRA_CellInfo_GetAntennaInfoDedicated (p_CellId); //@sic R5-100786 sic@
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    var template (value) AccessPointName v_AccessPointNameToSend := cs_AccessPointName(tsc_APN1);
+    var PdnTypeValue v_PdnTypeValue := f_GetPdnType();
+
+    // RRC configuration for first default EPS bearer context is released during RRC connection release procedure at the end of preamble,
+    // and therefore needs to be restored during the  additional PDN procedure.
+    v_DRB_ToAddModList[0] := cs_508_DRB_ToAddMod_DEFAULT_AM (tsc_DRB1); // @sic R5s130648 sic@  @sic R5s130880 sic@
+    
+    // The UE transmits a SERVICE REQUEST
+    // The UE transmits a PDN CONNECTIVITY REQUEST message as specified to request an additional PDN.
+    if (p_RRCState == RRC_IDLE) {
+      // UE is in RRC Idle mode
+      // Steps 2a1 to 2a7
+      v_NasInd := f_EUTRA_RRC_ConnEst_DefWithNas(p_CellId,
+                                                 tsc_RRC_TI_Def,
+                                                 p_EstablishmentCause, // @sic R5-131807 sic@
+                                                 cr_NAS_Indication (tsc_SHT_IntegrityProtected,
+                                                                    cr_508_SERVICE_REQUEST(f_EUTRA_SecurityKSIasme_Get())));
+      if (p_StepNo != "") { // @sic R5-115673 sic@
+        f_EUTRA_PreliminaryPass (__FILE__, __LINE__, p_StepNo);
+      }
+      
+      // activate security in AS with parameters from AKA performed in preamble
+      v_NasCountUL := v_NasInd.SecurityProtection.NasCount;
+      // @sic R5s160341 sic@
+      v_SecurityParams := f_EUTRA_RRC_ActivateSecurity(p_CellId, v_SecurityParams, v_NasCountUL);
+      f_EUTRA_Security_Set(v_SecurityParams);
+      
+      SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId,
+                                   cs_TimingInfo_Now,
+                                   cs_RRCConnectionReconfiguration_Common(tsc_RRC_TI_Def,
+                                                                          omit,
+                                                                          omit,
+                                                                          cs_508_RadioResourceConfigDedicated_SRB2( v_DRB_ToAddModList,
+                                                                                                                    cs_508_MAC_MainConfig_Explicit_RBC_DrxL,
+                                                                                                                    cs_508_PhysicalConfigDedicated_Default_RBC(v_EUTRA_FDD_TDD_Info.cqi_ReportConfig,
+                                                                                                                                                               v_EUTRA_FDD_TDD_Info.soundingRS_UL_Config,
+                                                                                                                                                               v_AntennaInfo)),
+                                                                          omit)));
+      
+      // receive RRCConnectionReconfigurationComplete
+      SRB.receive(car_SRB1_RrcPdu_IND(p_CellId,
+                                      cr_508_RRCConnectionReconfigurationComplete(tsc_RRC_TI_Def)));
+      
+    } // end of if RRC_Idle
+    // UE is now in RRC connected mode
+    
+    // Step 3. The UE transmits an ULInformationTransfer message including the PDN CONNECTIVITY REQUEST message.
+    SRB.receive(car_SRB2_NasPdu_IND(p_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_PDNConnReqAdditionalPDN(v_PdnTypeValue, p_ExpectedAccessPointName, p_PDN_RequestType))))-> value v_ReceivedAsp;  // @sic R5-131807 sic@
+    
+    v_NasInd := v_ReceivedAsp.Signalling.Nas[0];
+    v_PDNConnReq := v_NasInd.Pdu.Msg.pDN_CONNECTIVITY_REQUEST;
+    v_PTId_UE := v_PDNConnReq.procedureTransactionIdentifier;
+    v_Pco := v_PDNConnReq.protocolConfigurationOptions;
+    if (ispresent(v_PDNConnReq.accessPointName)) { // @sic R5-131807 sic@
+      v_AccessPointNameToSend := v_PDNConnReq.accessPointName;
+      v_AccessPointNameToSend.iei := omit;  // @sic R5s130431 sic@
+    }
+    
+    // Change from DRB1 to DRB2 to handle U Plane data
+    f_EUTRA_StartIPfor2ndPDN(p_CellId, -, f_EUTRA_NB_EpsBearerAssociatedDRB(p_EpsBearerId2));  // @sic R5s110449, R5-113734 change 8, R5-115673, R5s141351 change 3 sic@
+    
+    // Step 4 and 5. The SS transmits an RRCConnectionReconfiguration message including
+    // the ACTIVATE DEFAULT EPS BEARER CONTEXT REQUEST message to establish the
+    // default EPS bearer context.
+    v_PDN_Address2 := f_EUTRA_GetPDNAddress (f_CheckPCOforIPallocationViaNas (v_Pco), PDN_2); // @sic R5s110011 R5-120234 sic@
+    f_EUTRA_TxActivateDefaultEpsBearerCtxtReq_DrbReconfig(p_CellId,
+                                                          p_EpsBearerId2, // Default bearer ID to additional PDN
+                                                          v_PTId_UE,  // use value as defined by the UE
+                                                          v_AccessPointNameToSend,
+                                                          v_PDN_Address2,
+                                                          f_GetDefaultProtocolConfigOptions(v_Pco, PDN_2));  // @sic R5s141051 change 9: PDN_2 sic@ */
+    
+    // Step 6. The UE transmits an ULInformationTransfer message including the ACTIVATE DEFAULT EPS BEARER CONTEXT ACCEPT message
+    SRB.receive(car_SRB2_NasPdu_IND(p_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_ActivateDefEpsBearerContextAccept(p_EpsBearerId2))));
+  }
+
+  /*
+   * @desc      Establish an IMS Emergency Call in EUTRA
+   *            see 36.508 4.5A.4 steps 2-15
+   * @param     p_CellId
+   * @param     p_StepNo            (default value: "")
+   * @param     p_EpsDefBearerId2   (default value: '6'H)
+   * @param     p_StartIPfor2ndPDN  (default value: true)
+   * @param     p_PdnIndex          (default value: PDN_2)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps2_15(EUTRA_CellId_Type p_CellId,
+                                                           charstring p_StepNo := "", // Set to the verdict step no if required after the RRC Connection Establishment
+                                                           EPS_BearerIdentity p_EpsDefBearerId2 := '6'H, // in the default case the default AM bearer is 6; in any case the UM bearer is defaulted to p_EpsBearerId2 + 1
+                                                           boolean p_StartIPfor2ndPDN := true,
+                                                           PDN_Index_Type p_PdnIndex := PDN_2) runs on EUTRA_PTC
+  { /* @sic 19_5_1: new parameter p_PdnIndex sic@ */
+    var NAS_MSG_Indication_Type v_NasInd;
+
+    // Steps 2 - 4
+    v_NasInd := f_EUTRA_508_EstablishIMSEmergencyCall_Steps2_4(p_CellId, p_StepNo); /* @sic R5s150692 add. change 5 sic@ */
+   
+    // Steps 5 - 8
+    f_EUTRA_508_EstablishIMSEmergencyCall_Steps5_8(p_CellId, v_NasInd);
+
+    // Step 9 - 15
+    f_EUTRA_508_EstablishIMSEmergencyCall_Steps9_15(p_CellId, p_EpsDefBearerId2, p_StartIPfor2ndPDN, p_PdnIndex); /* @sic R5s140490 change 7 MCC160 implementation sic@ */
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Steps 2-4
+   * @param     p_CellId
+   * @param     p_StepNo            (default value: "")
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps2_4(EUTRA_CellId_Type p_CellId,
+                                                          charstring p_StepNo := "") runs on EUTRA_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+
+    v_NasInd := f_EUTRA_RRC_ConnEst_DefWithNas(p_CellId,
+                                               tsc_RRC_TI_Def,
+                                               emergency, /* @sic R5s150692 add. change 7 sic@ */
+                                               cr_NAS_Indication(tsc_SHT_IntegrityProtected,
+                                                                 cr_508_SERVICE_REQUEST(f_EUTRA_SecurityKSIasme_Get())));
+    if (p_StepNo != "") { // @sic R5-115673 sic@
+      f_EUTRA_PreliminaryPass (__FILE__, __LINE__, p_StepNo);
+    }
+    return v_NasInd;
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Steps 5-8
+   * @param     p_CellId
+   * @param     p_NasInd
+   * @status    APPROVED (IMS, IMS_IRAT, LTE)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps5_8(EUTRA_CellId_Type p_CellId,
+                                                          NAS_MSG_Indication_Type p_NasInd) runs on EUTRA_PTC
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var template (value) EUTRA_FDD_TDD_CellInfo_Type v_EUTRA_FDD_TDD_Info := f_EUTRA_CellInfo_GetFDD_TDD_Info(p_CellId); //Get FDD or TDD mode from Cell-configuration
+    var EUTRA_SecurityParams_Type v_SecurityParams := f_EUTRA_Security_Get();
+    var NasCount_Type v_NasCountUL;
+    var template (value) PhysicalConfigDedicated_AntennaInfo_Type v_AntennaInfo := f_EUTRA_CellInfo_GetAntennaInfoDedicated(p_CellId); //@sic R5-100786 sic@
+    var template (value) DRB_ToAddModList v_DRB_ToAddModList;
+    
+    v_NasInd := p_NasInd;
+    v_DRB_ToAddModList[0] := cs_508_DRB_ToAddMod_DEFAULT_AM(tsc_DRB1);   //@sic R5s140169 change 1 sic@
+    
+    // activate security in AS with parameters from AKA performed in preamble
+    v_NasCountUL := v_NasInd.SecurityProtection.NasCount;
+    // @sic R5s160341 sic@
+    v_SecurityParams := f_EUTRA_RRC_ActivateSecurity(p_CellId, v_SecurityParams, v_NasCountUL);
+    f_EUTRA_Security_Set(v_SecurityParams);
+    
+    SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId,
+                                 cs_TimingInfo_Now,
+                                 cs_RRCConnectionReconfiguration_Common(tsc_RRC_TI_Def,
+                                                                        omit,
+                                                                        omit,
+                                                                        cs_508_RadioResourceConfigDedicated_SRB2(v_DRB_ToAddModList,
+                                                                                                                 cs_508_MAC_MainConfig_Explicit_RBC_DrxL,
+                                                                                                                 cs_508_PhysicalConfigDedicated_Default_RBC(v_EUTRA_FDD_TDD_Info.cqi_ReportConfig,
+                                                                                                                                                            v_EUTRA_FDD_TDD_Info.soundingRS_UL_Config,
+                                                                                                                                                            v_AntennaInfo)),
+                                                                        omit)));
+      
+    // receive RRCConnectionReconfigurationComplete
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_RRCConnectionReconfigurationComplete(tsc_RRC_TI_Def)));
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Steps 9-15
+   * @param     p_CellId
+   * @param     p_EpsDefBearerId2   (default value: '6'H)
+   * @param     p_StartIPfor2ndPDN  (default value: true)
+   * @param     p_PdnIndex          (default value: PDN_2)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps9_15(EUTRA_CellId_Type p_CellId,
+                                                           EPS_BearerIdentity p_EpsDefBearerId2 := '6'H, // in the default case the default AM bearer is 6; in any case the UM bearer is defaulted to p_EpsBearerId2 + 1
+                                                           boolean p_StartIPfor2ndPDN := true,
+                                                           PDN_Index_Type p_PdnIndex := PDN_2) runs on EUTRA_PTC
+  { /* @sic 19_5_1: new parameter p_PdnIndex sic@ */
+    var NAS_MSG_Indication_Type v_NasInd;
+    var EPS_BearerIdentity v_EpsDefBearerId2 := p_EpsDefBearerId2;
+
+    // Step 9
+    v_NasInd := f_EUTRA_508_EstablishIMSEmergencyCall_Step9(p_CellId);
+
+    // Steps 10 - 15
+    f_EUTRA_508_EstablishIMSEmergencyCall_Steps10_15(p_CellId, v_EpsDefBearerId2, v_NasInd, p_StartIPfor2ndPDN, p_PdnIndex);
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Step 9
+   * @param     p_CellId
+   * @return    NAS_MSG_Indication_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Step9(EUTRA_CellId_Type p_CellId) runs on EUTRA_PTC return NAS_MSG_Indication_Type
+  {
+    var NAS_MSG_Indication_Type v_NasInd;
+    var SRB_COMMON_IND v_ReceivedAsp;
+    var B3_Type v_PDN_RequestType := '100'B; // @sic R5s130561 sic@
+    var PdnTypeValue v_PdnTypeValue := f_GetPdnType();
+    
+    // Step 9. The UE transmits an ULInformationTransfer message including the PDN CONNECTIVITY REQUEST message.
+    SRB.receive(car_SRB2_NasPdu_IND(p_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_PDNConnReqAdditionalPDN(v_PdnTypeValue, omit, v_PDN_RequestType)))) -> value v_ReceivedAsp; // @sic R5s130561 sic@
+    
+    v_NasInd := v_ReceivedAsp.Signalling.Nas[0];
+    return v_NasInd;
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Steps 10-14
+   * @param     p_CellId
+   * @param     p_EpsDefBearerId2
+   * @param     p_NasInd
+   * @param     p_StartIPfor2ndPDN  (default value: true)
+   * @param     p_PdnIndex          (default value: PDN_2)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps10_15(EUTRA_CellId_Type p_CellId,
+                                                            EPS_BearerIdentity p_EpsDefBearerId2,
+                                                            NAS_MSG_Indication_Type p_NasInd,
+                                                            boolean p_StartIPfor2ndPDN := true,
+                                                            PDN_Index_Type p_PdnIndex := PDN_2) runs on EUTRA_PTC
+  { /* @sic 19_5_1: new parameter p_PdnIndex sic@ */
+    /* @sic R5-153746: by usage of f_EUTRA_ActivateDedicatedEpsBearer_Speech step 15 is automatically included => function renamed to "Steps10_15" sic@ */
+    var EPS_BearerIdentity v_EpsDedicatedBearerId := f_EUTRA_IncrementEpsBearerId(p_EpsDefBearerId2); // the bearer id following the EPS default bearer @sic R5s151011 sic@
+
+    f_EUTRA_508_EstablishIMSEmergencyCall_Steps10_12(p_CellId,
+                                                     p_EpsDefBearerId2,
+                                                     p_NasInd,
+                                                     p_StartIPfor2ndPDN,
+                                                     p_PdnIndex);
+    f_EUTRA_508_EstablishIMSEmergencyCall_Steps13_15(p_CellId,
+                                                     p_EpsDefBearerId2,
+                                                     v_EpsDedicatedBearerId,
+                                                     p_PdnIndex);  /* @sic R5-153746: "Steps13_14" ->  "Steps13_15" sic@ */
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.58 cl. 4.5A.4 Steps 10-12
+   * @param     p_CellId
+   * @param     p_EpsDefBearerId2
+   * @param     p_NasInd
+   * @param     p_StartIPfor2ndPDN  (default value: true)
+   * @param     p_PdnIndex          (default value: PDN_2)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps10_12(EUTRA_CellId_Type p_CellId,
+                                                            EPS_BearerIdentity p_EpsDefBearerId2,
+                                                            NAS_MSG_Indication_Type p_NasInd,
+                                                            boolean p_StartIPfor2ndPDN := true,
+                                                            PDN_Index_Type p_PdnIndex := PDN_2) runs on EUTRA_PTC
+  { /* @sic 19_5_1: new parameter p_PdnIndex sic@ */
+    var ProcedureTransactionIdentifier v_PTId_UE;
+    var template (omit) ProtocolConfigOptions v_Pco;  // @sic R5s100761 sic@
+    var PDN_Address v_PDN_Address2;
+    var NAS_MSG_Indication_Type v_NasInd;
+    var PDN_CONNECTIVITY_REQUEST v_PDNConnReq;
+    var octetstring v_APN_Value := f_DomainName_Encode("sos");      // @sic R5-151104 sic@
+    var DRB_Identity v_DRB_Id;
+
+    v_NasInd := p_NasInd;
+    v_PDNConnReq := v_NasInd.Pdu.Msg.pDN_CONNECTIVITY_REQUEST;
+    v_PTId_UE := v_PDNConnReq.procedureTransactionIdentifier;
+    v_Pco := v_PDNConnReq.protocolConfigurationOptions;
+    
+    // Change from DRB1 to DRB2 to handle U Plane data
+    if (p_StartIPfor2ndPDN == true) {
+      v_DRB_Id := f_EUTRA_NB_EpsBearerAssociatedDRB(p_EpsDefBearerId2);  // @sic R5s141286 change 3 sic@
+      f_EUTRA_StartIPfor2ndPDN(p_CellId, p_PdnIndex, v_DRB_Id);       /* @sic R5s110449, R5-113734 change 8, R5-115673 sic@
+                                                                       * NOTE: in parallel to the configuration of PDN2 there should be no IMS behaviour at PDN1 (see IMS test case 19.3.3)
+                                                                       *       even though but multiplexing of DATA and CTRL at IP_PTC/IPMUX_PTC parallel behaviour should be possible (@sic R5s150900 - MCC160 implementation sic@)
+                                                                       *       (nevertheless when there is UL IP data in parallel to socket configuration the UL may be delayed as configuration will be done to last CNF first) */
+    }
+    
+    // Step 10 and 11. The SS transmits an RRCConnectionReconfiguration message including
+    // the ACTIVATE DEFAULT EPS BEARER CONTEXT REQUEST message to establish the
+    // default EPS bearer context.
+    v_PDN_Address2 := f_EUTRA_GetPDNAddress(f_CheckPCOforIPallocationViaNas (v_Pco), p_PdnIndex); // @sic R5s110011 R5-120234 sic@
+    f_EUTRA_TxActivateDefaultEpsBearerCtxtReq_DrbReconfig(p_CellId,
+                                                          p_EpsDefBearerId2, // Default bearer ID to additional PDN
+                                                          v_PTId_UE,  // use value as defined by the UE
+                                                          cs_AccessPointName(v_APN_Value),
+                                                          v_PDN_Address2,
+                                                          f_GetDefaultProtocolConfigOptions(v_Pco, p_PdnIndex)); // @sic R5s130561 sic@
+    
+    // Step 12 The UE transmits an ULInformationTransfer message including the ACTIVATE DEFAULT EPS BEARER CONTEXT ACCEPT message
+    SRB.receive(car_SRB2_NasPdu_IND(p_CellId,
+                                    cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                      cr_508_ActivateDefEpsBearerContextAccept(p_EpsDefBearerId2))));
+    
+    // EXCEPTION: (IP address allocation), steps 1 - 4 of annex C.20 and steps 1 - 5 of annex C.22 should be performed in parallel
+    
+  }
+
+  /*
+   * @desc      Establishment of an IMS Emergency Call, Normal Service, according to 36.508 cl. 4.5A.4 Steps 13-14
+   * @param     p_CellId
+   * @param     p_EpsDefBearerId2
+   * @param     p_EpsDedicatedBearerId
+   * @param     p_PdnIndex          (default value: PDN_2)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_PRO, LTE_A_R12)
+   */
+  function f_EUTRA_508_EstablishIMSEmergencyCall_Steps13_15(EUTRA_CellId_Type p_CellId,
+                                                            EPS_BearerIdentity p_EpsDefBearerId2,
+                                                            EPS_BearerIdentity p_EpsDedicatedBearerId,
+                                                            PDN_Index_Type p_PdnIndex := PDN_2) runs on EUTRA_PTC
+  { /* @sic 19_5_1: new parameter p_PdnIndex sic@ */
+    /* @sic R5-153746: by usage of f_EUTRA_ActivateDedicatedEpsBearer_Speech step 15 is automatically included => function renamed to "Steps13_15" sic@ */
+    f_EUTRA_ActivateDedicatedEpsBearer_Speech(p_CellId, p_EpsDefBearerId2, p_EpsDedicatedBearerId, p_PdnIndex);  /* @sic R5-153746: loopback mode for RTP/RTCP; replacing f_EUTRA_RRCConnectionReconfigurationWithPiggyNAS_DrbReconfig sic@ */
+  }
+
+}

@@ -1,0 +1,173 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-18 11:30:22 +0200 (Wed, 18 Jun 2025) $
+// $Rev: 41494 $
+/******************************************************************************/
+
+module IMS_CommonFunctions {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonTemplates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from NAS_AuthenticationCommon all;
+
+  external function fx_MD5_Hex(octetstring p_Data) return octetstring;
+
+  /*
+   * @desc      IMS specifc wrapper function for f_AuthenticationInit
+   * @param     p_Rand
+   * @param     p_AuthenticationError (default value: noError)
+   * @return    Common_AuthenticationParams_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_AuthenticationInit(template (value) B128_Type p_Rand,
+                                    AuthenticationError_Type p_AuthenticationError := noError) return Common_AuthenticationParams_Type
+  {
+    var Common_AuthenticationParams_Type v_AuthenticationParams := valueof(cs_CommonAuthParams_Init(p_Rand));
+    return f_AuthenticationInit(v_AuthenticationParams, p_AuthenticationError);    // as defined for NAS (NAS_AuxiliaryDefsAndFunctions)
+  }
+
+  /*
+   * @desc      check digest response sent by the UE
+   * @param     p_Method            (default value: "REGISTER")
+   * @param     p_DigestResponse
+   * @param     p_XRES
+   * @param     p_XRESLength .. length of XRES in octets
+   * @param     p_MessageBody       (default value: omit)
+   * @return    octetstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Authorization_CalculateDigestResponse(charstring p_Method := "REGISTER",
+                                                       CommaParam_List p_DigestResponse,
+                                                       bitstring p_XRES,
+                                                       integer p_XRESLength,
+                                                       template (omit) charstring p_MessageBody := omit) return octetstring
+  { /* input is the comma separated parameter list: digestResponse from the Authorization header and the value of XRES calculated in ts_AuthenticationInit
+       This function calculates the digest response (v_RequestDigest) for p_XRES according to RFC 2617 and compares it with the response received from the UE (v_Dresponse) */
+    /* @sic R5s130794 change 6: additional parameter p_Method to allow function to be used for HTTP Digest XCAP authentication sic@ */
+    /* @sic R5s150945, R5-155995 change 6: new parameter p_MessageBody sic@ */
+
+    var charstring  v_QopString := f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "qop");
+    var octetstring v_METHOD    := char2oct(p_Method);
+    var octetstring v_Username  := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "username"));
+    var octetstring v_Realm     := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "realm"));
+    var octetstring v_DigestUri := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "uri"));
+    var octetstring v_Nonce     := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "nonce"));
+    var octetstring v_NC        := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "nc"));
+    var octetstring v_CNonce    := char2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "cnonce"));
+    var octetstring v_Qop       := char2oct(v_QopString);
+
+    var octetstring v_Passwd    := substr(bit2oct(p_XRES), 0, p_XRESLength); // @sic R5s120907 sic@
+
+    var octetstring v_Secret;
+    var octetstring v_HA2;
+    var octetstring v_Data;
+    
+    var octetstring v_A1;
+    var octetstring v_A2;
+    var octetstring v_SecretData;
+    var octetstring v_EntityBody := ''O;
+    
+    // RFC 2617 3.2.2.2
+    // A1 = unq(username-value) ":" unq(realm-value) ":" passwd
+    v_A1 := v_Username & tsc_COLON_HEX & v_Realm & tsc_COLON_HEX & v_Passwd;
+    
+    // H(A1)
+    v_Secret := char2oct(f_StringToLower(oct2str(fx_MD5_Hex(v_A1))));
+    
+    // RFC 2617 3.2.2.3
+    // A2 = Method ":" digest-uri-value
+    v_A2 := v_METHOD & tsc_COLON_HEX & v_DigestUri;
+    if (v_QopString == "auth-int") {
+      if (isvalue(p_MessageBody)) {
+        v_EntityBody := char2oct(valueof(p_MessageBody));
+      }
+      v_EntityBody := char2oct(f_StringToLower(oct2str(fx_MD5_Hex(v_EntityBody))));    /* @sic R5s160442 change 3: fx_MD5_Hex to be applied even when there is no message-body sic@ */
+      v_A2 := v_A2 & tsc_COLON_HEX & v_EntityBody;
+    }
+    v_HA2 := char2oct(f_StringToLower(oct2str(fx_MD5_Hex(v_A2))));
+    
+    // RFC 2617 3.2.2.1
+    //   unq(nonce-value)
+    //   ":" nc-value
+    //   ":" unq(cnonce-value)
+    //   ":" unq(qop-value)
+    //   ":" H(A2)
+    // (unq means unquoted acc. RFC 2617)
+    
+    v_Data := v_Nonce & tsc_COLON_HEX & v_NC & tsc_COLON_HEX & v_CNonce & tsc_COLON_HEX & v_Qop & tsc_COLON_HEX & v_HA2;
+    
+    //now apply KD function described in RFC 2617 section 3.2.1
+    //KD(secret, data) = H(concat(secret, ":", data))
+    v_SecretData := v_Secret & tsc_COLON_HEX & v_Data;
+
+    return fx_MD5_Hex(v_SecretData);
+  }
+
+  /*
+   * @desc      check digest response sent by the UE
+   * @param     p_Method            (default value: "REGISTER")
+   * @param     p_DigestResponse
+   * @param     p_XRES
+   * @param     p_XRESLength .. length of XRES in octets
+   * @param     p_MessageBody       (default value: omit)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_Authorization_CheckDigestResponse(charstring p_Method := "REGISTER",
+                                                   CommaParam_List p_DigestResponse,
+                                                   bitstring p_XRES,
+                                                   integer p_XRESLength,
+                                                   template (omit) charstring p_MessageBody := omit) return boolean
+  {
+    var octetstring v_Dresponse := str2oct(f_SIP_CommaParamList_GetParamValue (p_DigestResponse, "response"));
+    var octetstring v_RequestDigest := f_IMS_Authorization_CalculateDigestResponse(p_Method, p_DigestResponse, p_XRES, p_XRESLength, p_MessageBody);
+    return (v_RequestDigest == v_Dresponse);
+  }
+
+  /*
+   * @desc      convert transport protocol to string to be used in IMS messages
+   * @param     p_Protocol
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_ConvertTransportProtocolToString(InternetProtocol_Type p_Protocol) return charstring
+  {
+    var charstring v_ProtocolString := "";
+
+    select (p_Protocol) {
+      case (tcp) {
+        v_ProtocolString := "TCP";
+      }
+      case (udp) {
+        v_ProtocolString := "UDP";
+      }
+    }
+    return v_ProtocolString;
+  }
+
+  /*
+   * @desc      return routing information for DL data corresponding to the routing information received in UL;
+   *            NOTE: in DL we never send any IP addresses
+   * @param     p_RoutingInfo_UL
+   * @return    template (value) IMS_RoutingInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_RoutingInfo_ULtoDL(IMS_RoutingInfo_Type p_RoutingInfo_UL) return template (value) IMS_RoutingInfo_Type
+  {
+    return cs_IMS_RoutingInfo(p_RoutingInfo_UL.Protocol,
+                              p_RoutingInfo_UL.Security,
+                              p_RoutingInfo_UL.UE_Address,        // may be omit
+                              p_RoutingInfo_UL.NW_Address);       // may be omit
+  }
+
+}

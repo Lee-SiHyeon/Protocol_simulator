@@ -1,0 +1,906 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-06-12 15:37:11 +0200 (Thu, 12 Jun 2025) $
+// $Rev: 41486 $
+/******************************************************************************/
+
+module RRCReconfig_ENDC_NR {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G all;
+  import from Common4G5G_Templates all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit_ENDC all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_CommonFunctions_ENDC all;
+  import from NR_Component_Base all;
+  import from NR_Component_ENDC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_HandoverCommonFunctions all;
+  import from NR_Handover_ENDC all;
+  import from NR_PDCP_Common all;
+  import from NR_PDCP_Templates all;
+  import from NR_PDCP_TypeDefs all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+
+   type enumerated NR_ENDC_RadioBearerReconfig_Type {MCGToSplit, MCGToSCG, SCGToSplit, SCGToMCG, SplitToMCG, SplitToSCG}; /* @status    APPROVED (ENDC) */
+
+ /*
+  * @desc      Returns the RLC Bearer-Config for the NR Cell dependig on the Reconfiguration type
+  * @param     p_NR_CellId
+  * @param     p_ReconfigType
+  * @param     p_OtherCellId       (default value: eutra_Cell_NonSpecific)
+  * @return    template (value) NR_RadioBearer_Type
+  * @status    APPROVED (ENDC)
+  */
+  function f_NR_ENDC_GetRadioBearerConfig_Reconfig(NR_CellId_Type p_NR_CellId,
+                                                   NR_ENDC_RadioBearerReconfig_Type p_ReconfigType,
+                                                   EUTRA_CellId_Type p_OtherCellId := eutra_Cell_NonSpecific) runs on NR_BASE_PTC return template (value) NR_RadioBearer_Type
+  { /* NOTE: eutra_Cell_NonSpecific is just a place holder in case that p_OtherCellId is not needed */
+    var DRB_Identity v_DrbId := tsc_NR_DRB2;
+    var NR_LogicalChannelId_Type v_LogicalChannelId := f_NR_LogicalChannelId_DRB(v_DrbId);
+    var template (value) NR_PDCP_Configuration_Type v_PDCP_Configuration;
+    var template (omit) RlcBearerRouting_Type v_LinkToOtherCellGroup := omit;           // omit means "keep as it is"
+    var template (omit) NR_RlcBearerConfig_Type v_RlcBearerConfig := omit;              // omit means "keep as it is"
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_NR_CellId);
+    
+    select (p_ReconfigType) {
+      case (MCGToSplit) {
+        v_RlcBearerConfig := cs_NR_RlcBearerConfig_AM(v_IsFR1, -, v_LogicalChannelId);  // add local RLC bearer, link to other cell group still there
+      }
+      case (MCGToSCG) {
+        v_LinkToOtherCellGroup := crs_RlcBearerRouting_None;                            // remove link to other cell group
+        v_RlcBearerConfig := cs_NR_RlcBearerConfig_AM(v_IsFR1, -, v_LogicalChannelId);  // add local RLC bearer
+      }
+      case (SCGToSplit) {
+        v_LinkToOtherCellGroup := crs_RlcBearerRouting_Eutra(p_OtherCellId);            // add link to other cell group, RLC/MAC/PDCP not changed
+      }
+      case (SCGToMCG) {
+        v_LinkToOtherCellGroup := crs_RlcBearerRouting_Eutra(p_OtherCellId);            // add link to other cell group
+        v_RlcBearerConfig := cs_NR_RlcBearerConfig_None;                                // remove local RLC bearer
+      }
+      case (SplitToMCG) {
+        v_RlcBearerConfig := cs_NR_RlcBearerConfig_None;                                // remove local RLC bearer, link to other cell group still there
+      }
+      case (SplitToSCG) {
+        v_LinkToOtherCellGroup := crs_RlcBearerRouting_None;                            // remove link to other cell group
+      }
+    }
+    v_PDCP_Configuration := cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB, v_LinkToOtherCellGroup);
+    return cs_NR_SS_DRB_Config(v_DrbId, v_PDCP_Configuration, v_RlcBearerConfig);
+  }
+
+  template (value) RLC_BearerConfig cs_RLC_BearerConfig_SRB_ReestablishRLC(SRB_Identity p_SRB_Id) := /* @status    APPROVED (ENDC) */
+    /* @sic R5s201387 BASELINE MOVING 2020 sic@ */
+    cs_NR_BearerConfigDef(f_NR_LogicalChannelId_SRB(p_SRB_Id), cs_NR_ServedRadioBearerSRB(p_SRB_Id), omit, cs_38508_LogicalChannelConfig_SRB(p_SRB_Id), true_);
+
+  template (value) PDCP_Config cs_PDCP_Config_SRB(template (omit) NR_PDCP_T_Reordering_Type p_T_Reordering := omit) :=
+    /* @status    APPROVED (ENDC) */
+    //@sic R5s200419 R5s201387 BASELINE MOVING 2020 sic@ */
+    cs_PDCP_Config_Def(omit, omit, p_T_Reordering);
+
+  /*
+   * @desc      test body of TC_8_2_2_1_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_1_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) NR_RLC_BearerToReleaseList_Type v_Rlc_BearerToReleaseList := {3};
+    var template (omit) octetstring v_EncodedSCG_Config := omit;
+    var SubFrameTiming_Type v_Timing;
+    var template (value) SpCellConfig v_SpCellConfig;
+
+    //@siclog "Steps 1 - 2" siclog@
+    //Set the NR ENDC Configuration for SRB3
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef({cs_NR_SRB_ToAddMod(tsc_SRB3)},-, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary)); //@sic R5s200419, R5s201115, R5-203397, R5s201464 sic@
+                                         
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, {cs_38508_RLC_BearerConfig_SRB(tsc_SRB3)});
+    //Configure SRB3 in SS
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB3, cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsSRB),
+                                                cs_NR_RlcBearerConfig_SRB1SRB2SRB3(f_NR_LogicalChannelId_SRB(tsc_SRB3), tsc_NR_SRB3_LogicalChannelPriority) ,omit)});//@sic R5s200419, R5s201218 sic@
+
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig);  // Now send octetstrings to EUTRA
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA);
+    
+    //@siclog "Step 3" siclog@
+    //The SS transmits an RRCReconfiguration message to reconfigure NR MAC sent on SRB3/NR Cell 1.
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, -, cs_NR_MAC_CellGroupConfig(-, -, cs_NR_BSR_ConfigDef(sf5, sf40)));
+    v_EncodedSCG_Config := bit2oct(encvalue(v_SCGConfig));
+    v_Timing := f_NR_GetNextSendOccasion_DL(nr_Cell1);
+    SRB.send(cas_NR_SRB3_RrcPdu_REQ(nr_Cell1, cs_TimingInfo_NR(v_Timing), cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, -, v_EncodedSCG_Config)));
+    //Reconfigure SS with mac_CellGroupConfig
+    f_NR_SS_ServingCellConfig(nr_Cell1, cs_TimingInfo_NR(v_Timing), cs_NR_ServingCellConfig_SpCell(cs_NR_SS_SpCellConfig(omit, omit, v_SCGConfig.mac_CellGroupConfig, omit)));
+
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE transmit an RRCReconfigurationComplete message on SRB3/NR Cell 1?
+    SRB.receive(car_NR_SRB3_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    //@siclog "Steps 5-6" siclog@
+    //@sic R5-190465, R5-199030, R5-201230 sic@
+    //The SS transmits an RRCReconfiguration message to reconfigure NR PDCP sent on SRB3/NR Cell 1.
+    //Check: Does the UE transmit an RRCReconfigurationComplete message on SRB3/NR Cell 1?
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef({cs_NR_SRB_ToAddMod(tsc_SRB3, cs_PDCP_Config_SRB(ms20))},//@sic R5s200419 sic@
+                                                         -,
+                                                         -,
+                                                         omit); //@sic R5s210187 sic@
+    SRB.send(cas_NR_SRB3_RrcPdu_REQ(nr_Cell1, -, cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig)));
+    SRB.receive(car_NR_SRB3_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+
+    // @siclog "Steps 7 - 8" siclog@
+    v_RadioBearerConfig := cs_NR_RadioBearer_ReleaseSRB3;
+    v_SpCellConfig := f_NR_GetSpCellConfigDef(nr_Cell1);
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, v_Rlc_BearerToReleaseList, -, -, v_SpCellConfig); //@sic R5-225282 sic@
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig);  // Now send octetstrings to EUTRA
+
+    //Release SRB3 in SS
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {cs_NR_SS_RadioBearer_Release(tsc_NR_RbId_SRB3)});
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.1.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_1_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // SRB3 Establishment, Reconfiguration and Release / NR addition, modification and release / EN-DC
+    f_ENDC_NR_Init();
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_SCG);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_1_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_2_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_2_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  { //@sic R5-201204 R5s210283 R5-217772 sic@
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) NR_RLC_BearerToReleaseList_Type v_Rlc_BearerToReleaseList := {1, 2};
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerToAddModList;
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList;
+    var template (value) SRB_ToAddModList v_SRB_ToAddModList;
+
+    var NR_PhysicalParameters_Type v_NR_PhysicalParameters := f_NR_CellInfo_GetPhysicalParameters(nr_Cell1);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := cs_NR_RachProcedureConfig_CRNTI_HO(v_NR_PhysicalParameters, tsc_C_RNTI_Value3);
+
+    
+    // @siclog "Step 1" siclog@
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertCiphAlg2Bitstring(f_NR_AS_CipheringAlgorithm_Get())), "NR Ciphering Alg"));
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertIntAlg2Bitstring(f_NR_AS_IntegrityAlgorithm_Get())), "NR Integrity Alg"));
+    //Set the NR ENDC Configuration for SRB1/2
+    v_SRB_ToAddModList := { //@sic R5-201203 sic@
+      cs_NR_SRB_ToAddMod(tsc_SRB1, cs_NR_PDCP_Config_SplitSRB(-, f_NR_LogicalChannelId_SRB(tsc_SRB1), 0, true)),
+      cs_NR_SRB_ToAddMod(tsc_SRB2, cs_NR_PDCP_Config_SplitSRB(-, f_NR_LogicalChannelId_SRB(tsc_SRB2), 0, true))
+    };
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList,
+                                                         -, -,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+    v_RLC_BearerToAddModList := {
+      cs_38508_RLC_BearerConfig_SRB(tsc_SRB1),
+      cs_38508_RLC_BearerConfig_SRB(tsc_SRB2)
+    };
+    v_SCGConfig := f_NR_GetCellGroupConfigHO( nr_Cell1, //CellGroupConfig-SplitSRB with condition EN-DC_HO
+                                              v_RLC_BearerToAddModList
+                                              );
+
+    //Configure RACH procedure with tsc_C_RNTI_Value3 used by default in f_NR_GetCellGroupConfigHO
+    f_NR_CellInfo_SetRNTI(nr_Cell1, tsc_C_RNTI_Value3);
+    f_NR_SS_C_RNTI_Config(nr_Cell1, tsc_C_RNTI_Value3);
+    f_NR_SS_RachProcedureConfigHO(nr_Cell1, v_RachProcedureConfig);
+    
+
+    //SS : configure SRB1 and SRB2 with RLCAckProhibit
+    v_RadioBearerList := {
+      cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB1, cs_NR_PDCP_Configuration_Proxy(crs_RlcBearerRouting_Eutra(eutra_Cell1)), cs_NR_RlcBearerConfig_SRB1SRB2SRB3(tsc_NR_SRB1_LogicalChannelId, tsc_NR_SRB1_LogicalChannelPriority, cs_NR_RLC_TestModeConfig_AckProhibit(Prohibit))),
+      cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB2, cs_NR_PDCP_Configuration_Proxy(crs_RlcBearerRouting_Eutra(eutra_Cell1)), cs_NR_RlcBearerConfig_SRB1SRB2SRB3(tsc_NR_SRB2_LogicalChannelId, tsc_NR_SRB2_LogicalChannelPriority, cs_NR_RLC_TestModeConfig_AckProhibit(Prohibit)))
+    };
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, v_RadioBearerList, cs_TimingInfo_Now); //Configure SRB1/2 in NR with PDCP set to proxy
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig, -, -, false);  // Now send octetstrings to EUTRA
+
+
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    // @siclog "Step 5" siclog@
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, v_Rlc_BearerToReleaseList);
+    //Keep SRB1/2 configured on SS side to ensure Ue is not transmiiting the RRCReconfiguration msg on SCg side
+    f_NR_SendRRCReconfigurationContentsToEUTRA (omit, v_SCGConfig, -, -, false);  // Now send octetstrings to EUTRA
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.2.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_2_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Split SRB Establishment and Release / EN-DC
+    f_ENDC_NR_Init();
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_SCG);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_2_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.3.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_3_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Simultaneous SRB3 and Split SRB / Sequential message flow on SRB3 and Split SRB with one UL path / EN-DC
+    f_ENDC_NR_Init();
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_SCG);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_3_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_3_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_3_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  {// @sic R5-202647, R5-206340, R5s201348 sic@
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig1;
+    var template (value) RadioBearerConfig v_RadioBearerConfig2;
+    var template (omit) octetstring v_EncodedSCG_Config := omit;
+    var template (value) SRB_ToAddModList v_SRB_ToAddModList;
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerToAddModList;
+    var template (value) NR_RadioBearerList_Type v_RadioBearerList;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(nr_Cell1);
+    var template (value) UL_AM_RLC v_ParametersTX := f_NR_UL_AM_RLC(v_IsFR1);
+    var template (value) DL_AM_RLC v_ParametersRX := f_NR_DL_AM_RLC(v_IsFR1);
+    var template (value) SpCellConfig v_SpCellConfig := f_NR_GetSpCellConfigDef(nr_Cell1); // @sic R5s210439 sic@
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(nr_Cell1); // @sic R5s210439 sic@
+    var template (value) PhysicalCellGroupConfig v_PhysicalCellGroupConfig := f_NR_CellInfo_GetPhysicalCellGroupConfig(nr_Cell1); // @sic R5s210439 sic@
+    
+    // @siclog "Step 1" siclog@
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertCiphAlg2Bitstring(f_NR_AS_CipheringAlgorithm_Get())), "NR Ciphering Alg"));
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertIntAlg2Bitstring(f_NR_AS_IntegrityAlgorithm_Get())), "NR Integrity Alg"));
+    //Set the NR ENDC Configuration for SRB1
+    v_SRB_ToAddModList := {
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB1, cs_NR_PDCP_Config_SplitSRB(-, f_NR_LogicalChannelId_SRB(tsc_SRB1))),
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB2)
+    };
+
+    v_RadioBearerConfig1 := cs_38508_RadioBearerConfigDef({cs_NR_SRB_ToAddMod(tsc_SRB3)}, -, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary));
+    v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList, -, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+    v_RLC_BearerToAddModList := {
+      cs_RLC_BearerConfig_SRB_ReestablishRLC(tsc_SRB1),
+      cs_38508_RLC_BearerConfig_SRB(tsc_SRB3),
+      cs_38508_RLC_BearerConfig_DRB(tsc_NR_DRB2,
+                                    cs_38508_RLC_Config_AM_DRB(v_ParametersTX, v_ParametersRX),
+                                    cs_38508_LogicalChannelConfig_DRB,
+                                    true_)
+    };
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, v_RLC_BearerToAddModList, omit, v_MAC_CellGroupConfig, v_PhysicalCellGroupConfig, v_SpCellConfig); // @sic R5s210439 sic@
+    //SS : configure SRB1 with RLCAckProhibit
+    v_RadioBearerList := {
+      cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB1, cs_NR_PDCP_Configuration_Proxy(crs_RlcBearerRouting_Eutra(eutra_Cell1)), cs_NR_RlcBearerConfig_SRB1SRB2SRB3(tsc_NR_SRB1_LogicalChannelId, tsc_NR_SRB1_LogicalChannelPriority)), // @sic R5s210083 sic@
+      cs_NR_SS_RadioBearer_Config(tsc_NR_RbId_SRB3, cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsSRB), cs_NR_RlcBearerConfig_SRB1SRB2SRB3(f_NR_LogicalChannelId_SRB(tsc_SRB3), tsc_NR_SRB3_LogicalChannelPriority)) // @sic R5s211166 sic@
+    };
+
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, v_RadioBearerList, cs_TimingInfo_Now); //Configure SRB1 in NR with PDCP set to proxy + SRB3 on NR
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig1, v_SCGConfig, -, -, false);  // Now send octetstrings to EUTRA
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig2, omit);  // Now send octetstrings to EUTRA
+   
+    // Get latest security info from EUTRA
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA); // @sic R5s210083 sic@
+
+   // @siclog "Step 3" siclog@
+   // SS transmits an NR RRCReconfiguration message to reconfigure SCG DRB on SRB3/NR Cell 1
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, -, cs_NR_MAC_CellGroupConfig(-, -, cs_NR_BSR_ConfigDef(sf5, sf40)));
+    v_EncodedSCG_Config := bit2oct(encvalue(v_SCGConfig));
+    SRB.send(cas_NR_SRB3_RrcPdu_REQ(nr_Cell1, -, cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, -, v_EncodedSCG_Config)));
+    
+    // @siclog "Step 4" siclog@
+    // Check: Does the UE transmit an NR RRCReconfigurationComplete message on SRB3/NR Cell 1?
+    SRB.receive(car_NR_SRB3_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger);
+
+    // @siclog "Step 5" siclog@
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, { f_NR_LogicalChannelId_SRB(tsc_SRB3) }, -, -, v_SpCellConfig); // @sic R5-231412 sic@
+    // Now send octetstrings to EUTRA
+    f_NR_SendRRCReconfigurationContentsToEUTRA (cs_NR_RadioBearer_ReleaseSRB3, v_SCGConfig, -, -, false);
+
+    // @siclog "Step 7-8" siclog@
+    v_SCGConfig := cs_38508_CellGroupConfig(tsc_NR_CellGroupId_SCG, -, { f_NR_LogicalChannelId_SRB(tsc_SRB1) });
+    f_NR_SendRRCReconfigurationContentsToEUTRA (omit, v_SCGConfig, -, -, false); // Now send octetstrings to EUTRA
+
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_4_1and5_ENDC_NR
+   * @param     p_DRB_Type
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_4_1and5_ENDC_NR_TestBody(ENDC_Bearer_Type p_DRB_Type) runs on ENDC_NR_PTC
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) RlcBearerRouting_Type v_Routing;
+
+    // @siclog "Step 1" siclog@
+    if (p_DRB_Type == MCG_Split) {
+      f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_GetRadioBearerConfig_FullAM_DRB2_Split(nr_Cell1, eutra_Cell1)});
+      v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(-,
+                                                          {cs_38508_DRB_ToAddMod(tsc_NR_DRB2,
+                                                                                 cs_NR_PDCP_Config_Split(cs_38508_PDCP_Config_DRB, f_NR_LogicalChannelId_DRB(tsc_NR_DRB2), tsc_NR_CellGroupId_SCG))},
+                                                          -,
+                                                          cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary));  // @sic R5s190188, 190529 sic@
+      v_Routing := cs_RlcBearerRouting_NR(nr_Cell1);
+    } else {
+      f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_GetRadioBearerConfig_FullAM_DRB2(nr_Cell1)});
+      v_RadioBearerConfig := cs_NR_RadioBearer(tsc_NR_DRB2, secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()); // @sic R5s190188 sic@
+      v_Routing := cs_RlcBearerRouting_NR(nr_Cell1); // @sic R5s190401 sic@
+    }
+    v_SCGConfig := f_NR_GetSCGConfigDef(nr_Cell1);
+    
+    // Get Security info from EUTRA, calculate latest keys and configure SS
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA);
+
+    // Now send octetstrings to EUTRA
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig, -, -, -, reconfigurationWithSync_CheckRACH); // @sic R5s190541 sic@
+    
+    // @siclog "Step 5" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, v_Routing,  -, "Step 5", 5);
+
+    // @siclog "Step 6" siclog@
+    // Don't need to change SS config for PDCP discard timer
+    v_RadioBearerConfig.drb_ToAddModList[0].pdcp_Config.drb.discardTimer := ms500;
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+
+    // @siclog "Step 8" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, v_Routing, -, "Step 8", 8);
+
+    // @siclog "Step 9" siclog@
+    f_NR_SendRRCReconfigurationContentsToEUTRA(cs_NR_RadioBearer_ReleaseDRB(tsc_NR_DRB2), omit);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.4.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_4_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // PSCell addition, modification and release / SCG DRB / EN-DC
+    f_ENDC_NR_Init();
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_Only);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_4_1and5_ENDC_NR_TestBody (MCG_SCG);
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.5.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_5_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // PSCell addition, modification and release / Split DRB / EN-DC
+    f_ENDC_NR_Init();
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_Only);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_4_1and5_ENDC_NR_TestBody (MCG_Split);
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.6.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_6_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Bearer Modification / MCG DRB / SRB / PDCP version change / EN-DC
+    f_ENDC_NR_Init();
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_Only);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_6_1_ENDC_NR_TestBody();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_6_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_6_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  {
+    var DRB_Identity v_DrbId := tsc_NR_DRB8;    // EUTRA38_DRB
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) SRB_ToAddModList v_SRB_ToAddModList;
+
+    // @siclog "Step 1" siclog@
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertCiphAlg2Bitstring(f_NR_AS_CipheringAlgorithm_Get())), "NR Ciphering Alg"));
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_OctetData (bit2oct(f_NR_ConvertIntAlg2Bitstring(f_NR_AS_IntegrityAlgorithm_Get())), "NR Integrity Alg"));
+    v_SRB_ToAddModList := {
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB1),  // @sic R5-202574 sic@
+      cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB2)
+    };
+
+    //f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA);  // @sic R5s200650, R5s230423 sic@
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList,
+                                                         -,
+                                                         -,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig( f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);       //@sic R5-198928 sic@
+    // Nothing to configure on NR for SRB 1 & 2
+    
+    // @siclog "Step 5" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);// @sic R5s200650, R5s201070 sic@
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList,     // @sic R5s201070 sic@
+                                                        {cs_38508_DRB_ToAddMod(8, cs_38508_PDCP_Config)}, // @sic R5s201070 sic@
+                                                         -,
+                                                         cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig( f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+    // Now send octetstrings to EUTRA
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+
+    // @siclog "Step 7" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);// @sic R5s200650, R5s201070 sic@
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(v_SRB_ToAddModList,
+                                                         -,
+                                                         {v_DrbId}); // @sic R5s201435 sic@
+    // Now send octetstrings to EUTRA
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.7.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_7_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Bearer Modification / Handling for bearer type change without security key change / EN-DC
+    f_ENDC_NR_Init();
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_SCG);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_7_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_7_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_7_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+
+    // @siclog "Step 1" siclog@
+    // SCG to Split DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SCGToSplit, eutra_Cell1)});
+    v_RadioBearerConfig := cs_NR_SplitBearer(tsc_NR_DRB2, secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+    
+    // @siclog "Step 3" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 3", 3);
+    // @siclog "Step 4" siclog@
+    // Split to MCG DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SplitToMCG)});
+    v_RadioBearerConfig := cs_NR_RadioBearer_Split_To_MCG(secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit); // @sic R5-200579 sic@
+    
+    // @siclog "Step 6" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    // MCG with NR PDCP: data only sent/received on EUTRA leg
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, crs_RlcBearerRouting_Eutra(eutra_Cell1), -,  "Step 6", 6);
+
+    // @siclog "Step 7" siclog@
+    // MCG to Split DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, MCGToSplit)});
+    v_SCGConfig := f_NR_GetSCGConfigDef(nr_Cell1);  // @sic R5-200579 sic@
+    v_RadioBearerConfig := cs_NR_SplitBearer(tsc_NR_DRB2, secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig, -, -, -, reconfigurationWithSync_CheckRACH); // @sic R5s210869 sic@
+    
+    // @siclog "Step 9" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -,  "Step 9", 9);
+    
+    // @siclog "Step 10" siclog@
+    // Split to SCG DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SplitToSCG)});
+    v_RadioBearerConfig := cs_NR_RadioBearer_Split_To_MCG(secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()); // @sic R5-202646 sic@
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+    
+    // @siclog "Step 12" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -,  "Step 12", 12);
+
+    // @siclog "Step 13" siclog@
+    // SCG to MCG DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SCGToMCG, eutra_Cell1)});
+    v_RadioBearerConfig :=  cs_38508_RadioBearerConfigDef(-, {cs_NR_DRB_ToAddMod_RecoverPDCP(tsc_NR_DRB2, cs_38508_PDCP_Config)}, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary)); // @sic R5-202646 sic@
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit); // @sic R5-200579 sic@
+    
+    // @siclog "Step 15" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, crs_RlcBearerRouting_Eutra(eutra_Cell1), -, "Step 15", 15);
+
+    // @siclog "Step 16" siclog@
+    // MCG to SCG DRB
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, MCGToSCG)});
+    v_SCGConfig := f_NR_GetSCGConfigDef(nr_Cell1);  // @sic R5-200579 sic@
+    v_RadioBearerConfig := cs_NR_RadioBearerRecoverPDCP(secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, v_SCGConfig, -, -, -, reconfigurationWithSync_CheckRACH); // @sic R5s210869 sic@
+    
+    // @siclog "Step 18" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 18", 18);
+    
+    // Test body now finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.8.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_8_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Bearer Modification / Handling for bearer type change with security key change / EN-DC
+    f_ENDC_NR_Init();
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_SCG);
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_8_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_8_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_8_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  {
+    //@sic R5-198928 sic@
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) NR_RadioBearer_Type v_SS_RadioBearer := f_NR_GetRadioBearerConfig_FullAM_DRB2(nr_Cell1);
+    var template (value) NR_RadioBearer_Type v_SS_RadioBearerDRB2 := f_NR_GetRadioBearerConfig_FullAM_DRB2(nr_Cell1);
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := f_NR_GetRACHProcedureConfigPSCell( nr_Cell1);
+    var template (value) NR_RadioBearer_Type v_SS_RadioBearerToRelease := cs_NR_SS_DRB_Release(tsc_NR_DRB2);
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList;
+    
+    // @siclog "Step 1" siclog@
+    // SN SCG s-KgNB to MN SCG KeNB
+    // @sic R5-198928 sic@
+    v_SCGConfig := f_NR_CellGroupConfig_PSCellChange(nr_Cell1);
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP (master, omit, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {v_SS_RadioBearerToRelease},
+                                              {v_SS_RadioBearer});
+    //Receive and activate KeNB keys
+    f_ENDC_GetKeysActivateSecurity_KeNB(nr_Cell1, EUTRA);
+                     
+    // @siclog "Step 3" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 3", 3); // @sic R5s200910 sic@
+
+    // @siclog "Step 4" siclog@
+    // MN SCG KeNB to SN Split s-KgNB
+    // v_SCGConfig same as step 1
+    v_SS_RadioBearer := f_NR_GetRadioBearerConfig_FullAM_DRB2_Split (nr_Cell1, eutra_Cell1);
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP(secondary,
+                                                      cs_NR_PDCP_Config_Split(cs_38508_PDCP_Config_DRB),
+                                                      f_NR_AS_CipheringAlgorithm_Get(),
+                                                      f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {v_SS_RadioBearerToRelease},
+                                              {v_SS_RadioBearer});
+
+    // @siclog "Step 6" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 6", 6);
+
+    // @siclog "Step 7" siclog@
+    // modify SN terminated Split DRB with security key s-KgNB to MN terminated Split DRB with security key change to keNB
+    //@sic R5-201101 sic@
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP (master, cs_38508_NR_PDCP_Config(cs_38508_PDCP_Config_DRB), f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {v_SS_RadioBearerToRelease},
+                                              {v_SS_RadioBearer});
+    //Receive and activate KeNB keys
+    f_ENDC_GetKeysActivateSecurity_KeNB(nr_Cell1, EUTRA);
+    
+    // @siclog "Step 9" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 9", 9);
+
+    // @siclog "Step 10" siclog@
+    // MN Split KeNB to SN terminated MCG DRB with security key change to s-KgNB
+    //@sic R5-201101 R5s200317 sic@
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP(secondary,
+                                                      cs_38508_PDCP_Config,
+                                                      f_NR_AS_CipheringAlgorithm_Get(),
+                                                      f_NR_AS_IntegrityAlgorithm_Get());
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(nr_Cell1, {v_SS_RadioBearerDRB2}, true);
+    f_NR_SendRRCReconfigurationContentsToEUTRA(v_RadioBearerConfig, omit);
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {cs_NR_SS_DRB_Release(tsc_NR_DRB2)});
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SCGToMCG, eutra_Cell1)});
+    f_NR_SS_PdcpCount_Set(nr_Cell1, v_NR_PdcpCountInfoList);
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA);
+
+    //@sic R5s200171 change 4.1 sic@
+                                              
+    // @siclog "Step 12" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    // MCG with NR PDCP: data only sent/received on EUTRA leg
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, crs_RlcBearerRouting_Eutra(eutra_Cell1), -, "Step 12", 12);
+    
+    // @siclog "Step 13" siclog@
+    // modify SN terminated MCG DRB with security key s-KgNB to MN terminated MCG DRB with security key change to keNB.
+    //@sic R5s200317 R5-201101 sic@
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP (master, cs_38508_NR_PDCP_Config(cs_38508_PDCP_Config_DRB), f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(nr_Cell1, {v_SS_RadioBearerDRB2}, true);
+    f_NR_SendRRCReconfigurationContentsToEUTRA(v_RadioBearerConfig, omit);
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {cs_NR_SS_DRB_Release(tsc_NR_DRB2)});
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SCGToMCG, eutra_Cell1)});
+    f_NR_SS_PdcpCount_Set(nr_Cell1, v_NR_PdcpCountInfoList);
+    //receive and activate keys as these will be sent from NR
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA); // @sic R5s200910 sic@
+    //Receive and activate KeNB keys
+    f_ENDC_GetKeysActivateSecurity_KeNB(nr_Cell1, EUTRA);
+    
+    // @siclog "Step 15" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, crs_RlcBearerRouting_Eutra(eutra_Cell1), -, "Step 15", 15);
+
+    // @siclog "Step 16" siclog@
+    // modify MN terminated MCG DRB with security key keNB to SN terminated Split DRB with security key change to s-KgNB
+    v_SCGConfig := f_NR_GetSCGConfigDef(nr_Cell1);
+    v_SS_RadioBearerToRelease := cs_NR_SS_DRB_Release(tsc_NR_DRB2);
+    v_SS_RadioBearer:= f_NR_GetRadioBearerConfig_FullAM_DRB2_Split (nr_Cell1, eutra_Cell1);
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP(secondary,
+                                                      cs_NR_PDCP_Config_Split(cs_38508_PDCP_Config_DRB),
+                                                      f_NR_AS_CipheringAlgorithm_Get(),
+                                                      f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {v_SS_RadioBearerToRelease},
+                                              {v_SS_RadioBearer});
+    
+    // @siclog "Step 18" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 18", 18);
+
+    // @siclog "Step 19" siclog@
+    // modify SN terminated Split DRB with security key s-KgNB to MN terminated SCG DRB with security key change to keNB
+    v_SCGConfig := f_NR_CellGroupConfig_PSCellChange(nr_Cell1);
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP(master,
+                                                      cs_38508_PDCP_Config,
+                                                      f_NR_AS_CipheringAlgorithm_Get(),
+                                                      f_NR_AS_IntegrityAlgorithm_Get());
+    v_SS_RadioBearerToRelease := cs_NR_SS_DRB_Release(tsc_NR_DRB2);
+    v_SS_RadioBearer:= f_NR_GetRadioBearerConfig_FullAM_DRB2(nr_Cell1);
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {v_SS_RadioBearerToRelease},
+                                              {v_SS_RadioBearer});
+    //Receive and activate KeNB keys
+    f_ENDC_GetKeysActivateSecurity_KeNB(nr_Cell1, EUTRA);
+    
+    // @siclog "Step 21" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 21", 21);
+    
+    // @siclog "Step 22" siclog@
+    // modify MN terminated SCG DRB with security key keNB to SN terminated MCG DRB with security key change to s-KgNB.
+    //@sic R5-201101 R5s200317 sic@
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP(secondary, cs_38508_PDCP_Config, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(nr_Cell1, {v_SS_RadioBearerDRB2}, true);
+    f_NR_SendRRCReconfigurationContentsToEUTRA(v_RadioBearerConfig, omit);
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {cs_NR_SS_DRB_Release(tsc_NR_DRB2)});
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell1, {f_NR_ENDC_GetRadioBearerConfig_Reconfig (nr_Cell1, SCGToMCG, eutra_Cell1)});
+    f_NR_SS_PdcpCount_Set(nr_Cell1, v_NR_PdcpCountInfoList);
+    f_ENDC_GetKeysActivateSecurity(nr_Cell1, EUTRA);  //@sic R5s200570 change 2.1 sic@
+    
+    // @siclog "Step 24" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, crs_RlcBearerRouting_Eutra(eutra_Cell1), -, "Step 24", 24);
+
+    // @siclog "Step 25" siclog@
+    // modify SN terminated MCG DRB with security key s-KgNB to MN terminated SCG DRB with security key change to keNB.
+    v_SCGConfig := f_NR_CellGroupConfig_PSCellChange(nr_Cell1);
+    v_RadioBearerConfig := cs_NR_RadioBearerReestPDCP (master, omit, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get());
+    f_NR_RRC_PSCellChange_IntraCell_CommonSS( nr_Cell1,
+                                              -,
+                                              v_RadioBearerConfig,
+                                              -,
+                                              v_SCGConfig,
+                                              true,
+                                              v_RachProcedureConfig,
+                                              {cs_NR_SS_DRB_Release(tsc_NR_DRB2)},
+                                              {f_NR_GetRadioBearerConfig_FullAM_DRB2 (nr_Cell1)});
+    
+    //Receive and activate KeNB keys
+    f_ENDC_GetKeysActivateSecurity_KeNB(nr_Cell1, EUTRA);
+
+    // @siclog "Step 27" siclog@
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath (nr_Cell1, PDN_2, dedicatedBearer, tsc_NR_DRB2, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 27", 27);
+
+    // Test body now finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.2.9.1.ENDC
+   * @status    APPROVED (ENDC)
+   */
+  function f_TC_8_2_2_9_1_ENDC_NR() runs on ENDC_NR_PTC
+  { // Bearer Modification / Uplink data path / Split DRB Reconfiguration / EN-DC
+    f_ENDC_NR_Init();
+
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Get NR capabilities sent during EUTRA preamble
+    f_NR_ENDC_PreambleOnEUTRA(nr_Cell1, MCG_Split, eutra_Cell1); // @sic R5s201174 sic@
+    f_NR_TestBody_Set(true);
+    fl_TC_8_2_2_9_1_ENDC_NR_TestBody ();
+    f_NR_TestBody_Set(false);
+    
+    //Wait from coordination AFTER the connection is released in E-UTRA
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+    //Postamble
+    f_NR_ReleaseAllCells();
+  }
+
+  /*
+   * @desc      test body of TC_8_2_2_9_1_ENDC_NR
+   * @status    APPROVED (ENDC)
+   */
+  function fl_TC_8_2_2_9_1_ENDC_NR_TestBody() runs on ENDC_NR_PTC
+  { // @sic R5-185151 sic@
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var DRB_Identity v_DrbId := tsc_NR_DRB2;   //ENDC DRB2 is used
+    
+    // @sic R5s190909 sic@
+    //The SS transmits an RRCConnectionReconfiguration message containing NR RadioBearerConfig to change the primaryPath of the Split DRB to E-UTRA radio path from NR.
+    v_RadioBearerConfig := cs_NR_SplitBearer(v_DrbId, secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get(), tsc_NR_CellGroupId_MCG); // @sic R5s190188 sic@
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+
+    // @siclog "Steps 3" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.1 indicate that the UE is capable of exchanging IP data on Split DRB#2 using E-UTRA radio path in the uplink?
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath(nr_Cell1, PDN_2, dedicatedBearer, v_DrbId, cs_RlcBearerRouting_NR(nr_Cell1),crs_RlcBearerRouting_Eutra(eutra_Cell1), "Step 3"); // @sic R5s190161 Ch. 3, R5s190196 sic@
+    
+    //The SS transmits an RRCConnectionReconfiguration message containing NR RadioBearerConfig to change the primaryPath of the Split DRB from E-UTRA radio path to NR.
+    v_RadioBearerConfig := cs_NR_SplitBearer(v_DrbId, secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get(), tsc_NR_CellGroupId_SCG); // @sic R5s190188 sic@
+    f_NR_SendRRCReconfigurationContentsToEUTRA (v_RadioBearerConfig, omit);
+    
+    // @siclog "Steps 6" siclog@
+    // Check: Does the test result of generic test procedure in TS 38.508-1 subclause 4.9.1 indicate that the UE is capable of exchanging IP data on the Split DRB#2 using NR radio path in the uplink?
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA);
+    f_NR_CheckDataPath(nr_Cell1, PDN_2, dedicatedBearer, v_DrbId, cs_RlcBearerRouting_NR(nr_Cell1), -, "Step 6");
+    
+    // Test body now finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger);
+  }
+
+}

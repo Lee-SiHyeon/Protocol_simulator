@@ -1,0 +1,310 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2021-12-09 11:38:27 +0100 (Thu, 09 Dec 2021) $
+// $Rev: 32304 $
+/******************************************************************************/
+
+module MTC_Main_POS {
+
+  import from CommonDefs all;
+  import from EUTRA_Component all;
+  import from EUTRA_OTDOA_POS_Component all;
+  import from EUTRA_POS_Component all;
+  import from IMS_Component all;
+  import from IMS_DefaultHandler all;
+  import from IP_PTC_Component all;
+  import from IP_PTC_Main all;
+  import from MTC_Base all;
+  import from MTC_Component_POS all;
+  import from MTC_UpperTester all;
+  import from NR5GC_POS_Component all;
+  import from NR_Component_Base all;
+  import from NasEmu5G_Component_NRNG all;
+  import from NasEmu5G_Main_NRNG all;
+  import from NasEmu_Component_EUTRA all;
+  import from NasEmu_Main_EUTRA all;
+  import from PosSystem_ASP_TypeDefs all;
+  import from TestcaseProperties all;
+  import from UTRAN_Component all;
+  import from UTRAN_POS_Component all;
+  import from UpperTesterSystemCmds all;
+
+  template (present) POS_SYSTEM_CTRL_CNF car_POS_SYSTEM_CTRL_CNF :=
+  { /* @status    APPROVED (POS) */
+    PositioningSystemList := ?,
+    Confirm := ?
+  };
+
+  template (present) POS_SYSTEM_CTRL_REQ car_POS_SYSTEM_CTRL_REQ :=
+  { /* @status    APPROVED (POS) */
+    PositioningSystemList := ?,
+    CnfFlag := ?,
+    Request := ?
+  };
+
+  /*
+   * @desc      set index of the coordination port from which the latest Positioning commond has been received
+   * @param     p_CoordPortIndex
+   * @status    APPROVED (POS)
+   */
+    function fl_MTC_POS_CoordPortIndex_Set(integer p_CoordPortIndex) runs on MTC_POS
+   {
+    vc_POS_Ctrl.CoordPortIndex := p_CoordPortIndex;
+   }
+
+   /*
+   * @desc      get index of the coordination port from which the latest Positioning commond has been received to send back the confirmation
+   * @return    integer
+   * @status    APPROVED (POS)
+   */
+  function fl_MTC_POS_CoordPortIndex_Get() runs on MTC_POS return integer
+  {
+    return vc_POS_Ctrl.CoordPortIndex;
+  }
+
+  /*
+   * @desc      return true when waiting for any confirmation for a POS command
+   * @return    boolean
+   * @status    APPROVED (POS)
+   */
+  function fl_MTC_POS_IsWaitingForCnf() runs on MTC_POS return boolean
+  {
+    return (vc_POS_Ctrl.CoordPortIndex >= 0);
+  }
+
+  /*
+   * @desc      Connect all PTCs (positioning test cases)
+   * @param     p_System
+   * @param     p_Eutra
+   * @param     p_Utran
+   * @param     p_Nr
+   * @param     p_EutraOtdoa
+   * @status    APPROVED (POS)
+   */
+  function f_MTC_ConnectPTCs_POS(SYSTEM_POS p_System,
+                                 EUTRA_POS_PTC p_Eutra,
+                                 UTRAN_POS_PTC p_Utran,
+                                 NR5GC_POS_PTC p_Nr,//NR addition
+                                 EUTRA_OTDOA_POS_PTC p_EutraOtdoa) runs on MTC_POS //NR addition
+  {
+    var IP_PTC v_IP_PTC;
+    var IMS_PTC v_IMS_PTC;
+    var NASEMU_EUTRA_PTC v_NASEMU_PTC;
+    var NASEMU_NRNG_PTC v_NASEMU_NR_PTC; //NR addition
+    var boolean v_MapPOSSYS := f_GetTestcaseAttrib_SpecificMTC_SatPort(testcasename());
+
+
+    vc_Components.Eutra := p_Eutra;
+    vc_Components.Utran := p_Utran;
+    vc_Components.Nr := p_Nr; //NR addition
+    vc_Components.EutraOtdoa := p_EutraOtdoa; //@sic R5s201391 sic@
+
+    // ***** MTC *****
+    f_MTC_BASE_Map(p_System);
+    if (v_MapPOSSYS) {
+      map(mtc:POSSYS, p_System:POSSYS);
+    }
+
+    if (((p_Eutra != null) or (p_Utran != null)) and (p_Nr != null)) {//NR addition
+      FatalError (__FILE__, __LINE__, "wrong PTC configuration specified in test case");
+    }
+    
+    // ***** EUTRA PTC *****
+    if (p_Eutra != null) {
+      f_EUTRA_POS_PTC_Map(p_System, p_Eutra);                                   // map EUTRA system ports
+      v_NASEMU_PTC := f_NasEmu_CreateConnectAndMap_EUTRA(p_System, p_Eutra);    // create NasEmu, map system ports and connect with EUTRA PTC
+      v_NASEMU_PTC.start(f_NASEMU_MainLoop_EUTRA());                            // start NASEMU
+
+      v_IP_PTC := f_IP_PTC_CreateAndMap(p_System);                              // Assumption: IP handling only needed for EUTRA
+      connect(p_Eutra:IP, v_IP_PTC:EUTRA_CTRL);
+      v_IP_PTC.start(f_IP_PTC_MainLoop());
+
+      v_IMS_PTC := f_IMS_PTC_Create();                                          // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_CTRL,      v_IP_PTC:IMS_CTRL[tsc_Index_IMS1]);      // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_Server,    v_IP_PTC:IMS_Server[tsc_Index_IMS1]);    // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_Client,    v_IP_PTC:IMS_Client[tsc_Index_IMS1]);    // @sic R5s150222: support of IMS capable UEs sic@
+      
+      connect(v_IMS_PTC:IPCAN,         p_Eutra:IMS[tsc_Index_IMS1]);            // @sic R5s150222: support of IMS capable UEs sic@
+
+      v_IMS_PTC.start(f_IMS_DefaultHandler());                                  // @sic R5s150222: support of IMS capable UEs sic@
+
+      connect(mtc:PTC_Ut    [tsc_MTC_PortIndex_EUTRA], p_Eutra:UT);
+      connect(mtc:PTC_POSSYS[tsc_MTC_PortIndex_EUTRA], p_Eutra:POSSYS);
+    }
+
+    // ***** UTRAN PTC *****
+    if (p_Utran != null) {
+      f_UTRAN_PTC_Map(p_System, p_Utran);
+
+      connect(mtc:PTC_Ut    [tsc_MTC_PortIndex_UTRAN], p_Utran:UT);
+      connect(mtc:PTC_POSSYS[tsc_MTC_PortIndex_UTRAN], p_Utran:POSSYS);
+    }
+    
+    // ***** NR5GC PTC *****
+   //NR addition
+    if (p_Nr != null) {
+      f_NR_BASE_PTC_Map(p_System, p_Nr);                                        // map NR5GC system ports
+      v_NASEMU_NR_PTC := f_NasEmu5G_CreateConnectAndMap_NRNG(p_System, p_Nr);   // create NasEmu, map system ports and connect with NR PTC
+      v_NASEMU_NR_PTC.start(f_NASEMU_MainLoop_NRNG());                          // start NASEMU
+
+      v_IP_PTC := f_IP_PTC_CreateAndMap(p_System);                              // Assumption: IP handling only needed for NR
+      connect(p_Nr:IP, v_IP_PTC:NR_CTRL);
+      v_IP_PTC.start(f_IP_PTC_MainLoop());
+
+      v_IMS_PTC := f_IMS_PTC_Create();                                          // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_CTRL,      v_IP_PTC:IMS_CTRL[tsc_Index_IMS1]);      // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_Server,    v_IP_PTC:IMS_Server[tsc_Index_IMS1]);    // @sic R5s150222: support of IMS capable UEs sic@
+      connect(v_IMS_PTC:IMS_Client,    v_IP_PTC:IMS_Client[tsc_Index_IMS1]);    // @sic R5s150222: support of IMS capable UEs sic@
+      
+      connect(v_IMS_PTC:IPCAN,         p_Nr:IMS[tsc_Index_IMS1]);               // @sic R5s150222: support of IMS capable UEs sic@
+
+      v_IMS_PTC.start(f_IMS_DefaultHandler());                                  // @sic R5s150222: support of IMS capable UEs sic@
+
+      connect(mtc:PTC_Ut    [tsc_MTC_PortIndex_NR], p_Nr:UT);
+      connect(mtc:PTC_POSSYS[tsc_MTC_PortIndex_NR], p_Nr:POSSYS);
+
+      if (f_GetTestcaseAttrib_SpecificEUTRA_OTDOA_Port(testcasename())) {
+        if ((p_EutraOtdoa == null)) {
+          FatalError (__FILE__, __LINE__, "wrong PTC configuration specified in test case");
+        }
+        f_EUTRA_PTC_Map(p_System, p_EutraOtdoa);    // map EUTRA_OTDOA system ports
+        map(p_EutraOtdoa:SYS_POSEXT, p_System:E_SYS_POSEXT);
+        connect(p_Nr:OTDOA, p_EutraOtdoa:NR); // connect coordination ports between NR and EUTRA_OTDOA
+      }
+     
+      if (f_GetTestcaseAttrib_SpecificOTDOA_Port(testcasename())) { //Rel-16 upgrade
+        map(p_Nr:SYS_POSEXT, p_System:NR_SYS_POSEXT);
+      }
+    }
+
+    f_UT_InitialPowerOffUE(Ut); /* @sic R5s120520 sic@ */
+  }
+
+  /*
+   * @desc      stop mtc, NAS emulator, IP PTC etc. when all test case components have finished
+   * @status    APPROVED (POS)
+   */
+  function fl_MTC_StopIfFinished_POS () runs on MTC_POS
+  {
+    if ((vc_Components.Eutra == null) and
+        (vc_Components.Utran == null) and
+        (vc_Components.Nr == null) and  //NR addition
+        (vc_Components.EutraOtdoa == null)) //NR addition
+      {
+        f_MTC_Stop(pass);                      // 'pass' will overrule 'none' only
+      }
+  }
+
+  /*
+   * @desc      Interface to control the other components
+   * @status    APPROVED (POS)
+   */
+  altstep a_PTC_Control_POS() runs on MTC_POS
+  { /* NOTEs:
+       - acc. to ES 201 873-1 Annex F.1.1 an error verdict shall be assignd when "running" is applied on any uninitialised component
+       - it seems that "running" cannot be used in the "[]" */
+
+    [] any component.killed
+      { // at a component something's gone wrong and it killed itself, so have to stop everything else
+        all component.kill;
+        mtc.stop;
+      }
+
+    /* since the NAS emulator is a parallel component which does not terminate on its own we need to check all components
+       @sic R5s100751 change 9 sic@ */
+    [vc_Components.Eutra != null] vc_Components.Eutra.done
+      {
+        vc_Components.Eutra := null;
+        fl_MTC_StopIfFinished_POS();
+      }
+    [vc_Components.Utran != null] vc_Components.Utran.done
+      {
+        vc_Components.Utran := null;
+        fl_MTC_StopIfFinished_POS();
+      }
+    [vc_Components.Nr != null] vc_Components.Nr.done //NR addition
+      {
+        vc_Components.Nr := null;
+        fl_MTC_StopIfFinished_POS();
+      }
+    [vc_Components.EutraOtdoa != null] vc_Components.EutraOtdoa.done //NR addition
+      {
+        vc_Components.EutraOtdoa := null;
+        fl_MTC_StopIfFinished_POS();
+      }
+  }
+
+  /*
+   * @desc      message handler to deal with messages from the positioning system at the system interface
+   * @status    APPROVED (POS)
+   */
+  altstep a_POS_ReceiveFromSystem_SendToPTC() runs on MTC_POS
+  {
+    var POS_SYSTEM_CTRL_CNF v_POS_SYSTEM_CTRL_CNF;
+    var integer v_CoordPortIndex;
+    
+    [] POSSYS.receive (car_POS_SYSTEM_CTRL_CNF)    -> value v_POS_SYSTEM_CTRL_CNF
+      {
+        if (fl_MTC_POS_IsWaitingForCnf()) {
+          v_CoordPortIndex := fl_MTC_POS_CoordPortIndex_Get();
+          PTC_POSSYS[v_CoordPortIndex].send(v_POS_SYSTEM_CTRL_CNF);
+          fl_MTC_POS_CoordPortIndex_Set(tsc_UT_NoCnfExpected);
+        } // else: just discard the CNF
+      }
+  }
+
+  /*
+   * @desc      message handler to deal with requests of the UTRAN/EUTRA/NR5GC PTC to the positioning system
+   * @param     p_CoordPortIndex
+   * @status    APPROVED (POS)
+   */
+  altstep a_POS_ReceiveFromPTC_SendToSystem(integer p_CoordPortIndex) runs on MTC_POS
+  {
+    var POS_SYSTEM_CTRL_REQ v_POS_SYSTEM_CTRL_REQ;
+
+    [] PTC_POSSYS[p_CoordPortIndex].receive (car_POS_SYSTEM_CTRL_REQ)    -> value v_POS_SYSTEM_CTRL_REQ
+      {
+         POSSYS.send(v_POS_SYSTEM_CTRL_REQ);
+         // Store index of coordination to be used for sending back the confirmation
+         if (v_POS_SYSTEM_CTRL_REQ.CnfFlag) {
+           fl_MTC_POS_CoordPortIndex_Set( p_CoordPortIndex );
+         }
+      }
+  }
+
+  /*
+   * @desc      Main loop of the MTC
+   * @param     p_GuardTimer timer
+   * @status    APPROVED (POS)
+   */
+  function f_MTC_MainLoop_POS(timer p_GuardTimer) runs on MTC_POS
+  { /* @sic R5s120520: f_UT_InitialPowerOffUE moved to f_MTC_ConnectPTCs_POS sic@ */
+
+    f_MTC_BASE_Init();
+
+    while (true) {      /* mtc will be stopped by a_PTC_Control_POS or due to timeout of the guard timer;
+                           => neither a_PTC_Control_POS nor a_UpperTester needs to use 'repeat' */
+      alt {
+        [] a_PTC_Control_POS();             // handle 'done' and 'killed' of PTCs: MTC will be stopped, when all PTCs are terminated or a fatal error occurs
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_EUTRA);    // handle upper tester for PTC 0 (EUTRA)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_UTRAN);    // handle upper tester for PTC 1 (UTRAN)
+        [] a_MTC_ReceiveFromPTC_SendToUT(tsc_MTC_PortIndex_NR);       // handle upper tester for PTC 8 (NR)    //NR addition
+        [] a_MTC_ReceiveFromUT_SendToPTC();
+ 
+        [] a_POS_ReceiveFromPTC_SendToSystem(tsc_MTC_PortIndex_EUTRA);       // handle position system
+        [] a_POS_ReceiveFromPTC_SendToSystem(tsc_MTC_PortIndex_UTRAN);       // handle position system
+        [] a_POS_ReceiveFromPTC_SendToSystem(tsc_MTC_PortIndex_NR);          // handle position system       //NR addition
+        [] a_POS_ReceiveFromSystem_SendToPTC();                              // handle position system
+
+        [] p_GuardTimer.timeout {f_MTC_Stop(fail);}    /* acc. to the assumption that preamble and postamble are short compared to the testbody
+                                                          a FAIL verdict is assigned (rather than an INCONC) */
+      }
+    }
+  }
+
+}

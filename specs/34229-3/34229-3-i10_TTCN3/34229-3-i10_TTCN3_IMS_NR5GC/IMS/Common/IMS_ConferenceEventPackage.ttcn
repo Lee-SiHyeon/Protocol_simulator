@@ -1,0 +1,390 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2021-09-13 12:21:34 +0200 (Mon, 13 Sep 2021) $
+// $Rev: 31458 $
+/******************************************************************************/
+
+module IMS_ConferenceEventPackage {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_Procedures_RegistrationCommon all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from urn_ietf_params_xml_ns_conference_info language "XSD" all;
+
+  template (value) Media_type cs_Media(charstring p_Id,
+                                       charstring p_Type,
+                                       charstring p_Label,
+                                       charstring p_SsrcId) :=
+  { /* @status    APPROVED (IMS) */
+    id  := p_Id,
+    attr := omit,
+    display_text := omit,
+    type_ := p_Type,
+    label_ := p_Label,
+    src_id := p_SsrcId,
+    status := sendrecv,
+    elem_list := {}
+  };
+
+  const CharStringList_Type tsc_MediaTypeList_Audio := {"audio"};                    /* @status    APPROVED (IMS) */
+
+  const CharStringList_Type tsc_MediaTypeList_AudioVideo := {"audio", "video"};      /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      return media type list for audio ("audio") or audio and video ("audio", "video")
+   * @param     p_TestProcedure
+   * @return    CharStringList_Type
+   * @status    APPROVED (IMS)
+   */
+   function f_IMS_ConferenceEventPackage_MediaTypeList(IMS_TestProcedure_Type p_TestProcedure) return CharStringList_Type
+  {
+    var CharStringList_Type v_MediaTypeList;
+
+    select (p_TestProcedure) {
+      case (IPCAN_MO_SpeechCall) { v_MediaTypeList := tsc_MediaTypeList_Audio; }
+      case (IPCAN_MO_VideoCall)  { v_MediaTypeList := tsc_MediaTypeList_AudioVideo; }
+    }
+    return v_MediaTypeList;
+  }
+
+  /*
+   * @desc      media list used in NOTIFY acc. to A.5.3
+   * @param     p_MediaTypeList
+   * @param     p_Version
+   * @param     p_State
+   * @return    template (value) Endpoint_type.media_list
+   * @status    APPROVED (IMS)
+   */
+  function fl_ConferenceInfo_MediaList(CharStringList_Type p_MediaTypeList,
+                                       integer p_Version,
+                                       State_type p_State) return template (value) Endpoint_type.media_list
+  {
+    var template (value) Endpoint_type.media_list v_MediaList := {};
+    var charstring v_Id;
+    var charstring v_MediaType;
+    var integer v_Label;
+    var integer v_SsrcId;
+    var integer i;
+    
+    select (p_State) { // set Conference Data depending on the kind of notification (see RFC 4575)
+      case (full) {             // state attribute (RFC 4575 cl. 5.2): "full" in case of initial notification
+        v_Label := 34567;       // label (RFC 4575 cl. 5.8.3): value acc. to A.5.3
+      }
+      case (partial) {          // state attribute (RFC 4575 cl. 5.2): "full" in case of initial notification
+        v_Label := 11223 + p_Version - 1;       /* label (RFC 4575 cl. 5.8.3): value acc. to C.19 for p_Version==1;
+                                                   NOTE: acc. to RFC 4575 the label has to be unique */
+      }
+    }
+    
+    for (i := 0; i < lengthof(p_MediaTypeList); i := i + 1) {
+      v_Id := int2str(i + 1);
+      v_MediaType := p_MediaTypeList[i];
+      v_SsrcId := v_Label + 1;      // src-id (RFC 4575 cl. 5.8.4): value arbitrarily selected
+      v_MediaList[i] := cs_Media(v_Id, v_MediaType, int2str(v_Label), int2str(v_SsrcId));
+      v_Label := v_Label + 1;
+    }
+
+    return v_MediaList;
+  }
+
+  template (value) Endpoint_type cs_Endpoint(charstring p_EndPointEntity,
+                                             template (value) Endpoint_type.media_list p_MediaList) :=
+  { /* @status    APPROVED (IMS) */
+    entity := p_EndPointEntity,
+    state := omit,
+    attr := omit,
+    display_text := omit,
+    referred := omit,
+    status := connected,          // Endpoint_status_type status optional,
+    joining_method := dialed_in,  // Joining_type joining_method optional,
+    joining_info := omit,         // Execution_type joining_info optional,
+    disconnection_method := omit, // Disconnection_type disconnection_method optional,
+    disconnection_info := omit,   // Execution_type disconnection_info optional,
+    media_list := p_MediaList,    // record of Media_type media_list,
+    call_info := omit,            // Call_type call_info optional,
+    elem_list := {}
+  };
+
+  template (value) Conference_type cs_XmlBody_ConfInfo(charstring p_ConferenceUri,  // conference URI: SIP URI that an interested entity needs to SUBSCRIBE to in order to get the conference package information (RFC 4575 clause 5.2)
+                                                       charstring p_UserEntity,     // URI for the user in the conference: corresponds to the call signaling authenticated identity of the participant (RFC 4575 clause 5.6)
+                                                       charstring p_EndPointEntity, // 'entity' key: e.g. User's contact URI (RFC 4575 clause 5.7)
+                                                       CharStringList_Type p_MediaTypeList,
+                                                       integer p_Version,
+                                                       State_type p_State) :=
+  { /* <conference-info> acc. to RFC 4575 clause 5.2 */
+    /* @status    APPROVED (IMS) */
+    entity := p_ConferenceUri,                         // XSD.AnyURI entity,
+    state := p_State,                                  // state_type state optional,
+    version := p_Version,                              // XSD.UnsignedInt version optional,
+    attr := omit,                                      // record (1..infinity) of XSD.String attr optional,
+    conference_description := omit,                    // Conference_description_type conference_description optional,
+    host_info := omit,                                 // optional,
+    conference_state := omit,                          // Conference_state_type conference_state optional,
+    users := {                                         // RFC 4575 clause 5.6
+      state := omit,
+      attr :=  omit,
+      user_list := {
+        {
+          entity := p_UserEntity,
+          state := omit,
+          attr := omit,
+          display_text := omit,
+          associated_aors := omit,
+          roles := omit,
+          languages := omit,
+          cascaded_focus := omit,
+          endpoint_list := {cs_Endpoint(p_EndPointEntity, fl_ConferenceInfo_MediaList(p_MediaTypeList, p_Version, p_State))},
+          elem_list := {}
+        }
+      },
+      elem_list := {}
+    },
+    sidebars_by_ref := omit, // Uris_type sidebars_by_ref optional,
+    sidebars_by_val := omit, // Sidebars_by_val_type sidebars_by_val optional,
+    elem_list := {} // record of XSD.String elem_list
+  };
+
+  template (value) MessageBody cs_MessageBody_Conference(template (value) Conference_info p_Conference) :=
+  /* @status    APPROVED (IMS) */
+  /* @sic R5s170046: formal parameter p_Conference has to be of type Conference_info instead of Conference_type to ensure correct encoding sic@ */
+    cs_MessageBody_XML_Bitstring(encvalue(p_Conference));
+
+  /*
+   * @desc      UE subscribes to conference event package acc. to 34.229-1 A.5.1 and A.5.2
+   * @param     p_IMS_SUBSCRIBE_REQ (by reference)
+   * @param     p_ConferenceUri
+   * @status    APPROVED (IMS)
+   */
+  altstep a_ConferenceEventPackage_ReceiveSubscribeA51SendOK(out IMS_DATA_REQ p_IMS_SUBSCRIBE_REQ,
+                                                             charstring p_ConferenceUri) runs on IMS_PTC
+  { /* @sic R5-153986: new parameter p_SubscribeCreatingDialog sic@ */
+    /* @sic R5-160553: p_SubscribeCreatingDialog removed (SUBSCRIBE shall always create a separate dialog) sic@ */
+    var template (present) SipUrl v_ConferenceSipUrlRX := f_SIP_BuildSipUri_RX(p_ConferenceUri);
+    var template (present) charstring v_ExpireTime := ?;
+    var template (present) MessageHeader v_MessageHeader_Subscribe := f_IMS_SubscribeRequest_MessageHeaderRX("conference", v_ConferenceSipUrlRX, v_ExpireTime); // @sic R5s211251 sic@
+    var MessageHeader v_MessageHeader_SubscribeValue;
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var charstring v_ContactHostname;
+    var charstring v_ToTag;
+
+    [] a_IMS_ReceiveRequest(car_IMS_Subscribe_Request(cr_SUBSCRIBE_Request(v_ConferenceSipUrlRX, v_MessageHeader_Subscribe)), v_IMS_SUBSCRIBE_REQ_ByRef)
+      {
+        v_MessageHeader_SubscribeValue := v_IMS_SUBSCRIBE_REQ_ByRef.Request.Subscribe.msgHeader;
+
+        f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader_SubscribeValue, v_IMS_SUBSCRIBE_REQ_ByRef.RoutingInfo.Protocol);
+        f_IMS_MessageHeader_CheckContactAddr(v_MessageHeader_SubscribeValue);
+        
+        f_IMS_MessageHeader_CheckTo(v_MessageHeader_SubscribeValue, noToTag);
+        v_ToTag := f_IMS_GenerateTag("SUBSCRIBE-to-conference-package");
+        f_IMS_PTC_ImsInfo_DialogInit(dialogRemote, v_MessageHeader_SubscribeValue, confEventDialog);
+        f_IMS_PTC_ImsInfo_DialogSetLocalTag(v_ToTag, confEventDialog);
+
+        v_ContactHostname := f_SIP_SipUrl_GetDomainName(v_ConferenceSipUrlRX);  /* @sic R5s160325 - additional changes: f_SIP_SipUrl_GetDomainName sic@ */
+        f_IMS_SUBSCRIBE_Response(confEventDialog, v_IMS_SUBSCRIBE_REQ_ByRef, "7200", v_ContactHostname);
+
+        p_IMS_SUBSCRIBE_REQ := v_IMS_SUBSCRIBE_REQ_ByRef; // return message by ref
+      }
+  }
+
+  /*
+   * @desc      Prepare NOTIFY header according. to 34.229-1 Annex A.5.3
+   * @param     p_DialogIndex
+   * @param     p_ConferenceUri
+   * @param     p_SubscriptionState
+   * @param     p_ContentType       (default value: omit)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_NotifyRequest_MessageHeader_A_5_3(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                                   charstring p_ConferenceUri,
+                                                   template (value) SubscriptionState p_SubscriptionState,
+                                                   template (omit) ContentType p_ContentType := omit) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5-153986: dialog needs to be considered sic@ */
+    /* @sic R5-153756, R5-153986: use of f_IMS_NotifyRequest_MessageHeader_Common sic@ */
+
+    var charstring v_NW_AddrStr := f_IMS_PTC_NW_Address_GetAddrStr();
+    var CharStringList_Type v_ViaAddressList := {v_NW_AddrStr, tsc_IMS_Scscf};
+    var template (value) Via v_Via := f_IMS_NotifyRequest_ViaTX(v_ViaAddressList);    /* @sic R5-153986: new function f_IMS_NotifyRequest_ViaTX sic@ */
+    var template (value) SipUrl v_ContactSipUrl := f_SIP_BuildSipUri_TX(p_ConferenceUri);
+
+    return f_IMS_NotifyRequest_MessageHeader_Common(p_DialogIndex, v_Via, cs_Contact(v_ContactSipUrl), "conference", p_SubscriptionState, p_ContentType);
+  }
+
+  /*
+   * @desc      send NOTIFY acc. to A.5.3
+   * @param     p_SubscribeRequest
+   * @param     p_Protocol
+   * @param     p_FinalConferenceUri
+   * @param     p_SubscriptionState
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_MessageBody       (default value: omit)
+   * @return    MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ConferenceEventPackage_SendNotify(SUBSCRIBE_Request p_SubscribeRequest,
+                                                   InternetProtocol_Type p_Protocol,
+                                                   charstring p_FinalConferenceUri,
+                                                   template (value) SubscriptionState p_SubscriptionState,
+                                                   template (omit) ContentType p_ContentType := omit,
+                                                   template (omit) MessageBody p_MessageBody := omit)
+    runs on IMS_PTC return MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_Notify;
+    var SipUrl v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_SubscribeRequest.msgHeader);
+    var template (omit) IMS_PTC_DialogIndex_Type v_DialogIndex := confEventDialog;
+
+    v_MessageHeader_Notify := f_IMS_NotifyRequest_MessageHeader_A_5_3(v_DialogIndex, p_FinalConferenceUri, p_SubscriptionState, p_ContentType);
+    IMS_Client.send(cas_IMS_Notify_Request(cs_IMS_RoutingInfo(p_Protocol), cs_NOTIFY_Request(v_ContactUrl, v_MessageHeader_Notify, p_MessageBody)));
+    
+    return valueof(v_MessageHeader_Notify);
+  }
+
+  /*
+   * @desc      send NOTIFY acc. to A.5.3 with condition A3 to indicate subscription to the conference event package
+   * @param     p_SubscribeRequest
+   * @param     p_Protocol
+   * @param     p_FinalConferenceUri
+   * @param     p_ParticipantUri
+   * @param     p_ParticipantContactUri
+   * @param     p_MediaTypeList     (default value: {"audio"})
+   * @param     p_Version           (default value: 0)
+   * @param     p_State             (default value: full)
+   * @return    MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ConferenceEventPackage_SendNotifySubscribe(SUBSCRIBE_Request p_SubscribeRequest,
+                                                            InternetProtocol_Type p_Protocol,
+                                                            charstring p_FinalConferenceUri,
+                                                            charstring p_ParticipantUri,
+                                                            charstring p_ParticipantContactUri,
+                                                            CharStringList_Type p_MediaTypeList := {"audio"},
+                                                            integer p_Version := 0,
+                                                            State_type p_State := full)
+    runs on IMS_PTC return MessageHeader
+  { /* PROSE ISSUE: prose specifies hard-coded value for the label of the NOTIFY's message body but it seems that the label shall be different for different users (->  RFC 4575 clause 5.8.3)
+       => parameter p_Version is used to increment the version for each notification and also to generate distinct labels to distinguish subsequent users joining the conference call */
+    /* @sic R5-153986: new parameter p_SubscribeCreatingDialog sic@ */
+    /* @sic R5-160553: p_SubscribeCreatingDialog removed (SUBSCRIBE shall always create a separate dialog) sic@ */
+    var template (value) SubscriptionState v_SubscriptionState := cs_SubscriptionState_Active("7200");
+    var template (value) ContentType v_ContentType := cs_ContentType("application/conference-info+xml");
+    var template (value) Conference_type v_ConferenceBody := cs_XmlBody_ConfInfo(p_FinalConferenceUri, p_ParticipantUri, p_ParticipantContactUri, p_MediaTypeList, p_Version, p_State);
+
+    return f_IMS_ConferenceEventPackage_SendNotify(p_SubscribeRequest, p_Protocol, p_FinalConferenceUri, v_SubscriptionState, v_ContentType, cs_MessageBody_Conference(v_ConferenceBody));
+  }
+
+  /*
+   * @desc      send NOTIFY acc. to A.5.3 with condition A4 to indicate termination of subscription to the conference event package
+   * @param     p_SubscribeRequest
+   * @param     p_Protocol
+   * @param     p_FinalConferenceUri
+   * @return    MessageHeader
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ConferenceEventPackage_SendNotifyUnsubscribe(SUBSCRIBE_Request p_SubscribeRequest,
+                                                              InternetProtocol_Type p_Protocol,
+                                                              charstring p_FinalConferenceUri)
+    runs on IMS_PTC return MessageHeader
+  {
+    var template (value) SemicolonParam_List v_SubStateParams := { cs_GenericParam("reason", "noresource") }
+    var template (value) SubscriptionState v_SubscriptionState := cs_SubscriptionState("terminated", v_SubStateParams);
+
+    return f_IMS_ConferenceEventPackage_SendNotify(p_SubscribeRequest, p_Protocol, p_FinalConferenceUri, v_SubscriptionState);
+  }
+
+  type enumerated ConferenceEventPackage_SubscribeState_Type {notSubscribed, subscribeWaitFor200OK, subscribed}; /* @status    APPROVED (IMS) */
+
+  type record ConferenceEventPackage_SubscribeInfo_Type { /* @status    APPROVED (IMS) */
+    ConferenceEventPackage_SubscribeState_Type State,
+    SUBSCRIBE_Request SubscribeRequest optional,
+    MessageHeader HeaderInitialNotify optional
+  };
+
+  template (value) ConferenceEventPackage_SubscribeInfo_Type cs_ConferenceEventPackage_SubscribeInfo_Init :=
+  { /* @status    APPROVED (IMS) */
+    State := notSubscribed,
+    SubscribeRequest := omit,
+    HeaderInitialNotify := omit
+  };
+
+  /*
+   * @desc      UE subscribes to conference event package acc. to steps 10 .. 13 of C.10/38
+   * @param     p_SubscribeInfo     (by reference)
+   * @param     p_FinalConferenceUri
+   * @status    APPROVED (IMS)
+   */
+  altstep a_ConferenceEventPackage_Subscribe(inout ConferenceEventPackage_SubscribeInfo_Type p_SubscribeInfo,
+                                             charstring p_FinalConferenceUri) runs on IMS_PTC
+  { /* @sic R5-153986: new parameter p_SubscribeCreatingDialog sic@ */
+    /* @sic R5-160553: p_SubscribeCreatingDialog removed (SUBSCRIBE shall always create a separate dialog) sic@ */
+    var IMS_DATA_REQ v_IMS_SUBSCRIBE_REQ_ByRef;
+    var ConferenceEventPackage_SubscribeState_Type v_State := p_SubscribeInfo.State;
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var MessageHeader v_MessageHeader_Subscribe;
+    var SipUrl v_ContactUri;
+    var SipUrl v_FromUri;
+    var charstring v_ParticipantUri;
+    var charstring v_ParticipantContactUri;
+
+    [v_State == notSubscribed] a_ConferenceEventPackage_ReceiveSubscribeA51SendOK(v_IMS_SUBSCRIBE_REQ_ByRef, p_FinalConferenceUri) {
+
+      p_SubscribeInfo.SubscribeRequest := v_IMS_SUBSCRIBE_REQ_ByRef.Request.Subscribe;
+      v_MessageHeader_Subscribe := p_SubscribeInfo.SubscribeRequest.msgHeader;
+      v_FromUri := f_Addr_Union_GetSipUrl(v_MessageHeader_Subscribe.fromField.addressField);
+      v_ContactUri := f_MessageHeader_GetContactSipUrl(v_MessageHeader_Subscribe);
+      v_ParticipantUri := f_SIP_SipUrl_GetPublicUserIdentity(v_FromUri);
+      v_ParticipantContactUri := f_SIP_SipUrl_GetPublicUserIdentity(v_ContactUri);
+
+      p_SubscribeInfo.HeaderInitialNotify := f_IMS_ConferenceEventPackage_SendNotifySubscribe(p_SubscribeInfo.SubscribeRequest,
+                                                                                              v_Protocol,
+                                                                                              p_FinalConferenceUri,
+                                                                                              v_ParticipantUri,
+                                                                                              v_ParticipantContactUri);
+      p_SubscribeInfo.State := subscribeWaitFor200OK;
+
+    }
+    [v_State == subscribeWaitFor200OK] a_IMS_ReceiveResponse200OK(p_SubscribeInfo.HeaderInitialNotify, v_Protocol) {
+      p_SubscribeInfo.HeaderInitialNotify := omit;   // for completeness
+      p_SubscribeInfo.State := subscribed;           // => no further message will be handled by this altstep
+    }
+  }
+
+  /*
+   * @desc      notification about un-subscribe from conference event package
+   * @param     p_SubscribeRequest
+   * @param     p_FinalConferenceUri
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_ConferenceEventPackage_Unsubscribe(template (omit) SUBSCRIBE_Request p_SubscribeRequest,
+                                                    charstring p_FinalConferenceUri) runs on IMS_PTC
+  {
+    var InternetProtocol_Type v_Protocol;
+    var SUBSCRIBE_Request v_SubscribeRequest;
+    var template (value) MessageHeader v_MessageHeader_Notify;
+
+    if (ispresent(p_SubscribeRequest)) {
+      v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+      v_SubscribeRequest := valueof(p_SubscribeRequest);
+      v_MessageHeader_Notify := f_IMS_ConferenceEventPackage_SendNotifyUnsubscribe(v_SubscribeRequest, v_Protocol, p_FinalConferenceUri);
+      a_IMS_ReceiveResponse200OK(v_MessageHeader_Notify, v_Protocol);
+    }
+  }
+
+}

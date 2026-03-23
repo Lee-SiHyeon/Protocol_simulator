@@ -1,0 +1,133 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-05-04 17:38:01 +0200 (Thu, 04 May 2023) $
+// $Rev: 35902 $
+/******************************************************************************/
+
+module IMS_IRAT_CSFB_EUTRA {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_IRATFunctions all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_CommonTemplates all;
+  import from Parameters all;
+
+  /*
+   * @desc      If CS Fallback is perfomed, the UE sends service request with Service type set to mobile originating CS fallback as defined in 24.301 clause 9.9.3.27.
+                If UTRA/GERAN is supported UE performs CS fallback or cell reselection to a cell supporting CS domain (UTRAN/GERAN) and performs a call in CS domain
+   * @param     p_SysInfo
+   * @param     p_PDN
+   * @param     p_EPS_ServiceTypeValue (default value: tsc_EST_CsFallback_EC)
+   * @status    APPROVED (IMS_IRAT)
+   */
+  function f_IMS_CSFB_EUTRA(IRAT_CoOrd_SysInfo_Type p_SysInfo,
+                            integer p_PDN,
+                            EPS_ServiceTypeValue p_EPS_ServiceTypeValue := tsc_EST_CsFallback_EC) runs on EUTRA_PTC // @sic R5s160076 sic@
+  {
+    var GutiParameters_Type v_GutiParams; // @sic R5s140788 sic@
+    var template (value) RedirectedCarrierInfo v_RedirectedCarrierInfo; //@sic R5s150061 sic@
+    var boolean v_AckReceived;
+    var boolean v_TimerExpired;
+    var boolean v_EsrReceived;
+    timer t_WaitforExtServiceReq := 2.0; // @sic R5-145792 sic@ @sic R5-150699 sic@ @sic R5-150700 sic@ @sic R5-150704 sic@
+    
+    // EXCEPTION: Within 2 seconds of step 7 the UE may transmit EXTENDED SERVICE REQUEST
+    t_WaitforExtServiceReq.start; // @sic R5-145792 sic@
+    v_GutiParams := f_EUTRA_CellInfo_GetGuti(eutra_CellA);
+    
+    v_AckReceived := false;
+    v_TimerExpired := false;
+    v_EsrReceived := false;
+    
+    // @sic R5-150699 sic@ @sic R5-150700 sic@ @sic R5-150704 sic@
+    // If CS Fallback is perfomed, the UE sends Extended service request with Service type set to mobile originating CS fallback emergency call as defined in 24.301 clause 9.9.3.27
+    
+    alt { // @sic R5-145792 sic@
+      [] SRB.receive(car_SRB2_NasPdu_IND(eutra_CellA, // @sic R5s140788 sic@
+                                         cr_NAS_Indication(tsc_SHT_IntegrityProtected_Ciphered,
+                                                           cr_EXT_SERVICE_REQUEST_Common(f_EUTRA_SecurityKSIasme_Get(),
+                                                                                         p_EPS_ServiceTypeValue, // @sic R5s160076 sic@
+                                                                                         bit2oct(v_GutiParams.M_TMSI),
+                                                                                         omit))))
+        {
+          t_WaitforExtServiceReq.stop;
+          v_EsrReceived := true;
+          if (not v_AckReceived) {
+            v_TimerExpired:= true;
+            repeat;
+          }
+        }
+      [] t_WaitforExtServiceReq.timeout // CS fallback is not developed: ESR is not received.
+        {
+          if (not v_AckReceived) {
+            v_TimerExpired := true;
+            repeat;
+          }
+        }
+      [] IMS[p_PDN].receive(cmr_IMS_IPCAN_Trigger) // Receive Trigger indicating receipt of ACK in parallel with EXTENDED SERVICE REQUEST
+        {
+          v_AckReceived := true;
+          if(not v_TimerExpired) {
+            repeat; // In case not ESR received and not timeout, then repeat until one of these conditions is satisfied.
+          }
+        }
+    }
+
+    f_Delay(2.0); // @sic R5s160856 sic@
+
+    // IF px_RATComb_Tested = EUTRA_UTRA UE performs CS fallback or cell reselection to a cell supporting CS domain (UTRAN) and performs emergency(19.3.2, 19.3.2c)/normal (19.3.2b) call in CS domain together with MM/GMM registration
+    if (px_RATComb_Tested == EUTRA_UTRA) { // @sic R5-160076 sic@
+      f_EUTRA_SendAuthParameters(eutra_CellA, UTRAN, true, true);
+      
+      if (not v_EsrReceived) { // CS fallback is not developed.
+        f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+      }
+      else { // CS fallback is developed
+        if (f_IRAT_GetUTRAN_FDD_TDD_Mode() == UTRAN_FDD) {
+          v_RedirectedCarrierInfo := cs_RedirectionInfo_UtraFdd(p_SysInfo.Utran[0].FDD.Freq);      //[0] corresponds to Utran cell 5 according to the Init-function. @sic R5s150061 sic@
+        }
+        else {
+          v_RedirectedCarrierInfo := cs_RedirectionInfo_UtraTdd(p_SysInfo.Utran[0].TDD.Freq);
+        }
+        f_EUTRA_RRC_ConnectionRelease_Common(eutra_CellA, cs_RRCConnectionRelease(tsc_RRC_TI_Def, other, v_RedirectedCarrierInfo));
+      }
+      f_EUTRA_SetCellPower(eutra_CellA, tsc_NonSuitableCellRS_EPRE); //@sic R5s150273 sic@
+      f_IRAT_WaitForCoOrd_Trigger(UTRAN);
+    }
+    //IF px_RATComb_Tested = EUTRA_GERAN UE performs CS fallback or cell reselection to a cell supporting CS domain (GERAN cell) and performs emergency (19.1.3, 19.3.2, 19.3.2c)/normal (19.3.2b) call in CS domain
+    else if (px_RATComb_Tested == EUTRA_GERAN) { // @sic R5-160076 sic@
+      f_EUTRA_SendAuthParameters(eutra_CellA, GERAN); //@sic R5s160754 sic@
+      if (not v_EsrReceived) { // CS fallback is not developed.
+        f_EUTRA_RRC_ConnectionRelease(eutra_CellA);
+      }
+      else {
+        v_RedirectedCarrierInfo := cs_RedirectionInfo_Geran_NoNeighCells(p_SysInfo.Geran[0].Arfcn, //@sic R5s150061 sic@
+                                                                         p_SysInfo.Geran[0].BandIndicator );
+        f_EUTRA_RRC_ConnectionRelease_Common(eutra_CellA, cs_RRCConnectionRelease(tsc_RRC_TI_Def, other, v_RedirectedCarrierInfo));
+      }
+      f_EUTRA_SetCellPower(eutra_CellA, tsc_NonSuitableCellRS_EPRE); //@sic R5s150273 sic@
+      f_IRAT_WaitForCoOrd_Trigger(GERAN);
+    }
+    else {
+      FatalError(__FILE__, __LINE__, "Invalid RAT combination configured");
+    }
+  }
+
+}

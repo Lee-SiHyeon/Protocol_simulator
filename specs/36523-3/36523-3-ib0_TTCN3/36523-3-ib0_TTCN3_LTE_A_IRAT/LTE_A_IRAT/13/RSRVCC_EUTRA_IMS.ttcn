@@ -1,0 +1,324 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2024-12-08 20:48:36 +0100 (do., 08 dic. 2024) $
+// $Rev: 40156 $
+/******************************************************************************/
+
+module RSRVCC_EUTRA_IMS {
+
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_Procedures_Registration all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  const charstring tsc_ATCF_URI := "sip:sti-sr@atcf.visited2.net";  /* @status    APPROVED (LTE_A_IRAT) */
+
+  /*
+   * @desc      Build SDP record to be sent to the UE at step 1 according to 34.229-1 Annex C.42
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_BuildSDP_AnnexC42_Step1() runs on IMS_PTC return template (value) SDP_Message
+  {
+    var charstring v_FmtAMR16000 := f_SDP_AudioCodec_GetFmt(AMR_16000);   /* @sic R5-197050: fix mapping of fmt values sic@ */
+    var charstring v_FmtAMR8000  := f_SDP_AudioCodec_GetFmt(AMR_8000);    /* @sic R5-197050: fix mapping of fmt values sic@ */
+    var SDP_fmt_list v_Fmts := { v_FmtAMR16000, v_FmtAMR8000 };           /* @sic R5-168059 sic@ */
+    var template (value) SDP_bandwidth_list v_MediaBandwidth_List := cs_SDP_Bandwidth_List_Media(37, 0, 2000);      /* @sic R5-172126: RR=2000 sic@ */
+    var template (omit) SDP_attribute_list v_SDP_MediaAttributes;
+    var IP_AddrInfo_Type v_UE_Address := f_IMS_PTC_UE_Address_Get();
+    var template (value) SDP_Message v_SDP_Message;
+    
+    v_SDP_MediaAttributes := f_SDP_MediaAttributes_AudioDef(v_FmtAMR8000);   /* @sic R5-168059, R5-144693: new function f_SDP_MediaAttributes_AudioDef sic@ */
+    v_SDP_MediaAttributes := f_SDP_MediaAttributes_AMR_WB_AudioCommon(v_FmtAMR16000, v_SDP_MediaAttributes); /* @sic R5-168059 sic@ */
+    
+    v_SDP_Message := f_IMS_BuildSDP_TX(cs_SDP_Media_MultiAudio(v_Fmts), v_MediaBandwidth_List, v_SDP_MediaAttributes, omit);
+    
+    // overwrite with specific addresses for this message
+    if (ischosen(v_UE_Address.V4)) {
+      v_SDP_Message.connection.conn_addr := cs_SDP_Conn_Addr("0.0.0.0");
+    } else {
+      v_SDP_Message.connection.conn_addr := cs_SDP_Conn_Addr("dfgrrgr.invalid");
+    }
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      Build SDP record to be received from the UE at step 3 according to 34.229-1 Annex C.42
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_BuildSDP_AnnexC42_Step3() runs on IMS_PTC return template (present) SDP_Message
+  {
+    var template (present) SDP_media_field v_SDP_Media_Field := cr_SDP_Media_Audio;
+    var template (present) SDP_attribute_list v_SDP_PreconditionAttributes := {};
+    var template (present) SDP_attribute_list v_SDP_MediaAttributes := {
+      cr_SDP_Attribute_rtpmap(cr_SDP_AnyMediaFormatDescr, cr_RTPMAP_AMR_16000), // @sic R5-168059 sic@
+      cr_SDP_Attribute_rtpmap(cr_SDP_AnyMediaFormatDescr, cr_RTPMAP_AMR_8000), // @sic R5-168059 sic@
+      cr_SDP_Attribute_fmtp(cr_SDP_AnyMediaFormatDescr)
+    };
+    return f_IMS_BuildSDP_RX(-, v_SDP_Media_Field, v_SDP_MediaAttributes, v_SDP_PreconditionAttributes);
+  }
+
+  /*
+   * @desc      MESSAGE UE receiving the ATGW information for CS to PS SRVCC (34.229-1 Annex A.8.1)
+   * @param     p_Protocol
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_MessageRequest_MessageHeaderTX_RSRVCC(InternetProtocol_Type p_Protocol) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var charstring v_P_CSCF_Address := f_IMS_PTC_Pcscf_Get();
+    var template (value) SipUrl v_SipUrlTo := f_IMS_PTC_ImsInfo_GetSipUriTX(defaultId);
+    var charstring v_ProtocolString := f_IMS_ConvertTransportProtocolToString(p_Protocol);
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var template (value) MessageHeader v_MessageHeader_Message := cs_MessageHeader_Dummy;
+    var charstring v_CallIdString := f_IMS_PTC_GenerateCallId("MESSAGE");
+    var template (value) ViaBody_List v_ViaBodyList := { cs_ViaBody(v_ProtocolString, cs_HostPort(v_P_CSCF_Address, v_Port_ps), f_ViaParamsTX(f_IMS_PTC_ImsInfo_GetNextBranch())) };
+    
+    v_MessageHeader_Message.via             := cs_Via(v_ViaBodyList);
+    v_MessageHeader_Message.fromField       := cs_From(f_SIP_BuildSipUri_TX(tsc_ATCF_URI), f_IMS_GenerateTag("MESSAGE", "From"));
+    v_MessageHeader_Message.toField         := cs_ToDef(v_SipUrlTo);
+    v_MessageHeader_Message.callId          := cs_CallId(v_CallIdString);
+    v_MessageHeader_Message.cSeq            := cs_CseqDef(tsc_MESSAGE_CSeqValue, "MESSAGE");
+    v_MessageHeader_Message.maxForwards     := cs_MaxForwardsDef;
+    v_MessageHeader_Message.contentDisposition := cs_ContentDisposition("render");
+    v_MessageHeader_Message.contentType     := cs_ContentType(c_sdpApplication);
+    v_MessageHeader_Message.pAssertedID     := cs_PAssertedId(f_SIP_BuildSipUri_TX(tsc_ATCF_URI));   // same as in From header
+    
+    return v_MessageHeader_Message;
+  }
+
+  /*
+   * @desc      MESSAGE UE providing information for CS to PS SRVCC (34.229-1 Annex A.8.2)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_MessageRequest_MessageHeaderRX_RSRVCC() runs on IMS_PTC return template (present) MessageHeader
+  {
+    var template (present) MessageHeader v_MessageHeader_Message := cr_MessageHeader_Dummy;
+    var integer v_Port_us := f_IMS_PTC_GetPort_us();
+    var integer v_Port_ps := f_IMS_PTC_GetPort_ps();
+    var charstring v_Pcscf := f_IMS_PTC_Pcscf_Get();
+    
+    v_MessageHeader_Message.via             := cr_ViaDef(-, cr_HostPort(?, v_Port_us));
+    v_MessageHeader_Message.fromField       := cr_FromWithTag(?);
+    v_MessageHeader_Message.toField         := cr_ToDef(f_SIP_BuildSipUri_RX(tsc_ATCF_URI));
+    v_MessageHeader_Message.callId          := cr_CallId(?);             /* to be checked when message has been received */
+    v_MessageHeader_Message.cSeq            := cr_CseqDef(?, "MESSAGE");
+    v_MessageHeader_Message.maxForwards     := cr_MaxForwardsDef;
+    v_MessageHeader_Message.contentType     := cr_ContentType(c_sdpApplication); // @sic R5s150704 sic@
+    
+    if (f_IMS_PTC_SecurityScheme_IsImsSecurity()) {        // @sic R5s240677: f_IMS_PTC_SecurityScheme_IsImsSecurity instead of f_IMS_PTC_SecurityScheme_IsGiba sic@
+      v_MessageHeader_Message.pAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    }
+    v_MessageHeader_Message.route := cr_Route(cr_RouteBodyList_InitialReq(v_Port_ps, v_Pcscf));
+    
+    return v_MessageHeader_Message;
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.42
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_AnnexC42() runs on IMS_PTC
+  {
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var SipUrl v_ContactUrl := f_IMS_PTC_ImsInfo_GetContactUrlUE();
+    var template (value) MessageHeader v_MessageHeader_MessageMT;
+    var template (value) MessageHeader v_MessageHeader_MessageResponse_200OK;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (present) SipUrl v_SipUrlStep3RequestLine;
+    var template (present) MessageHeader v_MessageHeaderRX;
+    var template (value) MessageBody v_MessageBody;
+    var MESSAGE_Request v_MESSAGE_RequestRX;
+    var MessageHeader v_MessageHeader;
+    
+    // Annex C.42 Step 1
+    v_MessageBody := cs_MessageBody_SDP (f_IMS_BuildSDP_AnnexC42_Step1 ());
+    v_MessageHeader_MessageMT := f_IMS_MessageRequest_MessageHeaderTX_RSRVCC(v_Protocol);
+    IMS_Client.send(cas_IMS_Message_Request(cs_IMS_RoutingInfo(v_Protocol), cs_MESSAGE_Request(v_ContactUrl, v_MessageHeader_MessageMT, v_MessageBody)));
+    
+    // Annex C.42 Step 2. UE responds with 200 OK
+    f_IMS_ReceiveResponse(v_MessageHeader_MessageMT, v_Protocol, cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_MessageMT)));
+    
+    // Annex C.42 Step 3
+    v_SipUrlStep3RequestLine := f_SIP_BuildSipUri_RX(tsc_ATCF_URI);
+    v_MessageHeaderRX := f_IMS_MessageRequest_MessageHeaderRX_RSRVCC();
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Message_Request(cr_MESSAGE_Request(v_SipUrlStep3RequestLine, v_MessageHeaderRX, cr_MessageBody_SDP)));
+    v_MESSAGE_RequestRX := v_IMS_DATA_REQ.Request.Message;
+    v_MessageHeader := v_IMS_DATA_REQ.Request.Message.msgHeader;
+    v_Protocol := v_IMS_DATA_REQ.RoutingInfo.Protocol;
+    f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol);           // check whether via contains "SIP URI with IP address or FQDN"
+    f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_MESSAGE_RequestRX.messageBody, f_IMS_BuildSDP_AnnexC42_Step3());  // @sic R5w140112 sic@
+    
+    // Annex C.42 Step 4
+    v_MessageHeader_MessageResponse_200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_MESSAGE_RequestRX.msgHeader);
+    IMS_Server.send(cas_IMS_DATA_RSP(f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ.RoutingInfo), cs_Response(c_statusLine200, v_MessageHeader_MessageResponse_200OK)));
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.39/ C.40 / Step 2
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_AnnexC39_C40_Step2() runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  {
+    var IMS_SDP_AudioCodecList_Type v_IMS_SDP_AudioCodecList_C39C40 := {AMR_16000, DTMF_16000}; /* @sic R5-168053, R5-168054 sic@ */
+    var boolean v_PreconditionsRequired := false;
+    var template (present) SDP_Message v_SDP_Message_Step2 := f_IMS_BuildSDP_InitialOfferAudio_RX(v_PreconditionsRequired, v_IMS_SDP_AudioCodecList_C39C40);
+    var template (present) SipUrl v_CalleeUri := f_SIP_BuildSipUri_RX(tsc_ATCF_URI);
+
+    return f_IMS_MOCallSetup_ReceiveINVITE_Common(v_CalleeUri, v_SDP_Message_Step2, v_IMS_SDP_AudioCodecList_C39C40, v_PreconditionsRequired);
+  }
+
+  /*
+   * @desc      return template for SDP message at step 4 according to 34.229-1 Annex C.39/C.40
+   * @param     p_SDP_MessageInvite
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_BuildSDP_AnnexC39_C40_Step4(SDP_Message p_SDP_MessageInvite) runs on IMS_PTC return template (value) SDP_Message
+  {
+    var boolean v_PreconditionsRequired := false;
+    return f_IMS_BuildSDP_InitialAnswerAudio_TX(p_SDP_MessageInvite, v_PreconditionsRequired);
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.39 / Steps 3-5
+   * @param     p_InviteRequestWithSdp
+   * @param     p_Step5             (default value: true)
+   * @param     p_TI
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_IMS_AnnexC39_Step3_5(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                  boolean p_Step5 := true,
+                                  charstring p_TI) runs on IMS_PTC
+  {
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var SDP_Message v_SDP_MessageInvite := p_InviteRequestWithSdp.SdpOffer;
+    var template (value) SDP_Message v_SDP_Message_Step4 := f_IMS_BuildSDP_AnnexC39_C40_Step4(v_SDP_MessageInvite);
+    var template (value) MessageHeader v_MessageHeader_InviteResponse_200;
+    var template (present) SipUrl v_CalleeContactSipUri;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    
+    // Annex C.39 Step 3
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+    
+    // Annex C.39 Step 4
+    v_MessageHeader_InviteResponse_200 := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, cs_ContentTypeSDP);
+    v_CalleeContactSipUri := f_Addr_Union_GetSipUrl(v_MessageHeader_InviteResponse_200.contact.contactBody.contactAddresses[0].addressField);
+    v_MessageHeader_InviteResponse_200.featureCaps   := cs_FeatureCaps({ cs_GenericParam("+g.3gpp.ti", p_TI)}); // @sic R5-153466 sic@
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_InviteResponse_200, cs_MessageBody_SDP(v_SDP_Message_Step4))));
+    
+    if (p_Step5) {
+      // Annex C.39 Step 5
+      v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200);
+      f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_CalleeContactSipUri, v_MessageHeader_Ack)));
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.32
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_32_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var charstring v_TI;
+    
+    f_IMS_PTC_Init();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 2-5" siclog@
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    f_IMS_AnnexC42();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    // Wait for TI value to be sent from UTRAN
+    v_TI := f_IMS_IPCAN_WaitForData(OtherIPCAN); // @sic R5s150704 sic@
+    
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    // Receive INVITE message after the rSRVCC Handover
+    // Table 13.4.3.32.3.2-3
+    v_InviteRequestWithSdp := f_IMS_AnnexC39_C40_Step2();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);  // @sic R5s150807 sic@
+    
+    // Complete IMS signalling after DRBs for voice have been established
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    
+    f_IMS_AnnexC39_Step3_5(v_InviteRequestWithSdp, -, v_TI); // @sic R5s150704 sic@
+    
+    f_IMS_TestBody_Set(false);
+    
+    // Postamble
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    f_IMS_IpcanReleaseWithOptionalDeregistration();
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.4.3.34
+   * @status    APPROVED (LTE_A_IRAT)
+   */
+  function f_TC_13_4_3_34_IMS1()runs on IMS_PTC
+  {
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+    var charstring v_TI;
+    
+    f_IMS_PTC_Init();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    f_IMS_Registration();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    f_IMS_TestBody_Set(true);
+    
+    // @siclog "Step 2-5" siclog@
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    f_IMS_AnnexC42();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    
+    // Wait for TI value to be sent from UTRAN
+    v_TI := f_IMS_IPCAN_WaitForData(OtherIPCAN); // @sic R5s150751 sic@
+    
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    // Receive INVITE message after the rSRVCC Handover
+    v_InviteRequestWithSdp := f_IMS_AnnexC39_C40_Step2();
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);  // @sic R5s150807 sic@
+    
+    // Complete IMS signalling after DRBs for voice have been established
+    f_IMS_IPCAN_WaitForTrigger(IPCAN);
+    
+    f_IMS_AnnexC39_Step3_5(v_InviteRequestWithSdp, -, v_TI); // @sic R5s150751 sic@;
+    
+    f_IMS_TestBody_Set(false);
+    
+    // Postamble
+    f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+    f_IMS_IpcanReleaseWithOptionalDeregistration();
+  }
+
+}

@@ -1,0 +1,145 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-11-25 13:23:03 +0100 (lu., 25 nov. 2024) $
+// $Rev: 39875 $
+/******************************************************************************/
+
+module RRC_Processing_delay_NRDC_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRCSteps_NRDC all;
+  import from NR5GC_RRC_Templates all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_PDCP_Templates all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from SDAP_TypeDefs all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.6.2.2
+   * @status    APPROVED (NR5GC)
+   */
+   function f_TC_8_2_6_2_2_NR5GC() runs on NR5GC_PTC
+  { //Processing delay / Latency check / NR-DC
+
+    f_NR5GC_Init_NRDC(NR_1, {nr_Cell1, nr_Cell10});
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10, -, tsc_NRDC_SCG_Cell);  //@sic R5s210891 sic@
+
+    //The UE is in state NR RRC_CONNECTED using generic procedure parameter Connectivity (NR), according to TS 38.508-1 [4], clause 4.5.4.
+    f_NR5GC_Preamble (nr_Cell1, STATE_CONNECTED_3A);
+
+    f_NR_SetCellPower(nr_Cell10, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_NR_TestBody_Set(true);
+
+    f_TC_8_2_6_2_2_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    // Switch/Power off UE
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  } //end of f_TC_8_2_6_2_2_NR5GC
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.6.2.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_2_6_2_2_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+    var template (omit) RadioBearerConfig v_RadioBearerConfig1 := omit;
+    var template (omit) RadioBearerConfig v_RadioBearerConfig2 := omit;
+    var template (omit) CellGroupConfig v_CellGroupConfigMCG := omit;
+    var template (value) CellGroupConfig v_CellGroupConfigSCG;
+    var template (omit) NR_RadioBearerList_Type v_SS_ConfigMCG := omit;
+    var template (omit) NR_RadioBearerList_Type v_SS_ConfigSCG := omit;
+    var template (value) SDAP_Config v_SDAP_ConfigSCG;
+    var integer v_SCG_DRB_Id := f_NR_GetNextSCGDRBId();
+    var boolean v_IsFR1_SCG := f_NR_CellInfo_GetIsFR1(nr_Cell10);
+    var template (value) DRB_ToAddMod v_DRBToAddMod_SCG;
+    var template (value) SDAP_Configuration_Type v_SDAP_ConfigurationSCG;
+    var RNTI_Value v_RNTI_ValueSecondary :=  tsc_C_RNTI_Value4;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+    var template (value) QoS_Flow v_QoSFlow;
+    var template (value) NG_NAS_DL_Pdu_Type v_NG_NAS_DL_Pdu;
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var template (value) NR_RRC_MSG_Request_Type v_RrcMsg;
+
+    // @siclog "Step 1" siclog@
+    // SS stops default uplink grant transmission.
+    f_NR_ULGrantConfiguration_Stop(nr_Cell1);
+
+    //@siclog "Step 2-5" siclog@
+    //The SS transmits an RRCReconfiguration message and a PDU SESSION MODIFICATION COMMAND to add NR PSCell with SCG DRB.
+    //The SS transmits one uplink grant after (16*2microsec+1+TDL) slots after step 2 to schedule PUSCH.
+    //Check: Does the UE transmit an RRCReconfigurationComplete message within (16*2microsec+1+TDL+K2) slots after successful completion of step 2?
+    //The UE transmits a ULInformationTransfer message and an PDU SESSION MODIFICATION COMPLETE message.
+
+    if (isvalue(v_GSM_MobilityInfo)) {
+      v_QoSFlow := cs_QoS_Flow5;
+      v_QoSFlow.qfi := '000101'B;  // QFI = 5
+      v_NG_NAS_DL_Pdu := f_Get_NG_PDUSessionModificationCommand(v_GSM_MobilityInfo.SessionId, -, -, -, -, -, f_BuildDefaultQoSRules("5", '7A'O), cs_QoSFlowDescr({v_QoSFlow}));
+      // SDAP parameter for the new SCG DRB Id
+      // The SDAP needs to include the QFI of the QoS Flow of the SCG bearer.  This will never be a default bearer
+      v_SDAP_ConfigSCG := cs_SDAP_Config(oct2int(valueof(v_GSM_MobilityInfo.SessionId)), false, {5});
+      v_SDAP_ConfigurationSCG:= f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(v_SDAP_ConfigSCG));
+      v_DRBToAddMod_SCG := cs_38508_NRDRB_ToAddMod(v_SDAP_ConfigSCG, v_SCG_DRB_Id, cs_38508_PDCP_Config);
+    } else {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "No internet PDU session found to modify");
+    }
+
+    v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(omit, {v_DRBToAddMod_SCG}, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary));
+    v_SS_ConfigSCG := { cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                            cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB),
+                                            cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                            v_SDAP_ConfigurationSCG) };
+
+    v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(nr_Cell10, v_SCG_DRB_Id, v_RNTI_ValueSecondary);
+
+    // Build info for SCG and store in DRB list
+    fl_StoreSCG_InDRBList (valueof(v_DRBToAddMod_SCG), valueof(v_SS_ConfigSCG[0]), valueof(v_CellGroupConfigSCG));
+
+    // Calculate security keys for SCG
+    v_SecurityParams := f_NR_Security_InitSCG(v_SecurityParams);
+    f_NR_Security_Set(v_SecurityParams);
+
+    f_ReconfigureSS_DRBs_NRDC( nr_Cell1, nr_Cell10, -, v_SS_ConfigMCG, v_SS_ConfigSCG, MCG_SCG_SecondaryKeys );
+
+    v_V1530Ext := f_NRDC_BuildRRCReconfiguration_v1530( v_CellGroupConfigSCG, v_CellGroupConfigMCG, v_RadioBearerConfig2, -, 0 );//@sic R5s230158 sic@
+    v_RrcMsg := cs_NR_RRC_MSG_Request_DCCH(cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, v_RadioBearerConfig1, -, omit, v_V1530Ext));
+    f_NR5GC_RRC_ProcedureDelay(nr_Cell1,
+                               cas_NR_RrcNasPduList_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, v_RrcMsg, { cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_NG_NAS_DL_Pdu) }, -, -, cs_RlcBearerRouting_NR(nr_Cell1)),
+                               car_NR_SRB1_RrcPdu_IND(nr_Cell1, cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?)))),
+                               16, "Step 4", -, true);//@sic R5s230158 sic@
+
+    f_NR_ULGrantConfiguration_Start(nr_Cell1);//@sic R5s230158 sic@
+  }
+
+}

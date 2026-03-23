@@ -1,0 +1,1393 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-03 20:05:47 +0100 (Tue, 03 Mar 2026) $
+// $Rev: 43170 $
+/******************************************************************************/
+
+module Emergency_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_SecurityFunctions all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_Parameters all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SysInfo_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  template (value) NG_ListOfPartialTaiList cs_NG_NotAllowedNonConsecutivePartialTaiList (NAS_PlmnId  p_PlmnId,
+                                                                                         NG_NAS_TacList p_TacList):=
+  { /* @status    APPROVED (NR5GC) */
+    allowedType      := '1'B,
+    typeOfList       := tsc_NonConsecutiveTacs,
+    numberOfElements := int2bit(lengthof(p_TacList) - 1, 5),
+    partialTaiList   := cs_NG_NonConsecutivePartialTaiList (p_PlmnId, p_TacList)
+  };
+
+  template (value) ServiceAreaIdList cs_NG_ServiceAreaIdList(NAS_PlmnId  p_PlmnId,
+                                                             NG_NAS_TacList p_TacList):=
+  { /* @status    APPROVED (NR5GC) */
+    iei := '27'O,
+    lvPart := {   // @sic R5s221179 Baseline Moving sic@
+      iel := int2oct(4 + 3 * lengthof(p_TacList), 1),
+      listOfPartialTais := {cs_NG_NotAllowedNonConsecutivePartialTaiList(p_PlmnId,p_TacList)}
+    }
+  };
+
+  /*
+   * @desc      establishment and release of an emergency Call using a specific number
+   * @param     p_NR_CellId
+   * @param     p_NumToDial
+   * @param     p_StepNo
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_EmergencyCallAndRelease (NR_CellId_Type p_NR_CellId,
+                                       charstring p_NumToDial,
+                                       charstring p_StepNo) runs on NR5GC_PTC
+  {
+    //Step 1
+    f_UT_RequestIMSEmergencyCall (UT, p_NumToDial);
+
+    //Step 2
+    f_NR5GC_EmergencyCallWithRegistration(p_NR_CellId);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, p_StepNo);
+    
+    //Steps 3-4
+    f_NR5GC_EmergencyCallRelease(p_NR_CellId);
+    
+    //Step 5
+    f_NR_RRCRelease(p_NR_CellId);
+    
+    // PDN now released with release of PDU @sic R5s211524 sic@
+  }
+
+  /*
+   * @desc      establishment and release of an MO Speech Call using a specific number
+   * @param     p_NR_CellId
+   * @param     p_NumToDial
+   * @param     p_StepNo
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_MOSpeechCallAndRelease (NR_CellId_Type p_NR_CellId,
+                                       charstring p_NumToDial,
+                                       charstring p_StepNo) runs on NR5GC_PTC
+   {
+    //Step 1 - 2
+    f_NR5GC_SpeechCall(p_NR_CellId, p_NumToDial);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, p_StepNo);
+    
+    //Step 3 - 4
+    f_NR5GC_CallRelease(p_NR_CellId, IPCAN_SpeechCall);
+
+    //Step 5
+    f_NR_RRCRelease(p_NR_CellId);
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_1_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / 5GMM-IDLE / Emergency call / Utilising emergency number stored on the USIM/
+    //New emergency PDU session / Network failing the authentication check (5G AKA)
+    //@sic R5-220560 sic@
+    
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cells
+    //@sic R5-220560 sic@
+    f_NR_CellConfig_Def(nr_Cell1);
+    //The UE is equipped with a USIM configuration as defined in TS 38.508-1 [4] Table 6.4.1-20.
+    f_UT_USIM_Insert(UT, "USIM configuration 20 specified in table 6.4.1-20 TS 38.508-1");
+
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_11_4_1_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_1_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var PLMN_Identity v_ASN_PLMN := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    var NAS_PlmnId v_PLMN_Cell1 := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    var NG_NAS_SecurityParams_Type v_NAS_SecurityParams := f_NR5GC_Security_Get();
+    var B3_Type v_KSI_InUse := v_NAS_SecurityParams.KSIamf;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var PDUSessionInfoList_Type v_PDUSessionInfo;
+    var O1_Type v_PDUSessionIdToRelease;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var integer i;
+    var float v_T3520 := f_NR_SetTimerToleranceMin(nr_Cell1, nasTimer, 15.0); //@sic R5s221039 sic@
+    var ProcedureTransactionIdentifier v_PTI; //@sic R5s240233 sic@
+
+    //@siclog "Step 1" siclog@
+    //Make the UE attempt an IMS emergency call dialling the number 144 which is stored on the USIM.
+    f_UT_RequestIMSEmergencyCall (UT, "144");
+    //@siclog "Step 2" siclog@
+    //Check: Does the UE performs Generic Test Procedure for IMS Emergency call establishment with IMS emergency registration?
+    f_NR5GC_EmergencyCallWithRegistration(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    //@siclog "Step 2A" siclog@
+    //The SS initiates the 5G AKA based primary authentication and key agreement procedure by sending an AUTHENTICATION REQUEST message;
+    v_MsgToSend := f_Get_5GAKA_AuthenticationReqMsg(v_NAS_SecurityParams, v_PLMN_Cell1);
+    v_MsgToSend.authentication_Request.ngNasKeySetId.nasKeySetId := v_KSI_InUse;
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1,
+                                   tsc_NR_RbId_SRB2, //@sic R5s221039 sic@
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    //@siclog "Step 2B" siclog@
+    //The UE sends an AUTHENTICATION FAILURE message with 5GMM cause #71 "ngKSI already in use"
+    SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell1, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; //@sic R5s221039 sic@
+      if (match (v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_NG_AUTHENTICATION_FAILURE(cr_GMM_GSM_Cause(omit, '01000111'B)))) {  // ngKSI already in use
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2B");
+      }
+    //@siclog "Step 2BA" siclog@
+    //Wait for T3520 expires.
+    f_Delay(v_T3520); //@sic R5s221039 sic@
+    //@siclog "Step 2C" siclog@
+    //PDU session release procedure to release non-IMS Emergency relevant PDUs.
+    //Make the UE to transmit a PDU SESSION RELEASE REQ
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList();
+    //@sic R5s230143 sic@
+    //Reset the stored messages, to capture the PDU Session Release REQs
+    f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq();
+    for ( i := 0; i<(lengthof(v_PDUSessionInfo) - 1); i:=i+1) //Capture PDU Session Release REQs
+    {
+       SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell1, ?, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+       f_NR5GC_MsgInDefault_StoreNASMessageReq (v_ReceivedAsp);
+    }
+    v_PTI := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg.pdu_Session_Release_Request.procedureTransactionIdentifier; //@sic R5s240233 sic@
+    
+    for ( i := 0; i<(lengthof(v_PDUSessionInfo) - 1); i:=i+1) //Now release fully the captured PDU Session Release REQs
+    {
+      if (v_PDUSessionInfo[i].PDUType != Emergency_PDN) {
+        v_PDUSessionIdToRelease := v_PDUSessionInfo[i].SessionId;
+        v_ReceivedAsp := f_NR5GC_MsgInDefault_GetOneNASMessageReq(i+1);
+        if (not f_Check_NG_PDUSessionReleaseReq (v_GSM_MobilityInfo, v_PDUSessionInfo,
+                                                 v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease)) {
+              f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Request Message Failed");
+            } else {
+              f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2C-1");
+            }
+        
+            f_NR5GC_PDUSessionRelease(nr_Cell1,
+                                      v_PDUSessionIdToRelease,
+                                      cs_GMM_GSM_Cause (omit, '00100100'B), -, -, -, -,v_PTI); //@sic R5s240233 sic@
+
+      }
+    }
+    //@siclog "Step 2CA" siclog@
+    //@sic R5-237482 sic@
+    //The SS is configured to Stop RA response
+    f_NR_SS_RachProcedureConfig(nr_Cell1, cs_NR_RachProcedureConfig_NoResponse);
+    f_NR_ULGrantConfiguration_Start(nr_Cell1); //@sic R5s240136 sic@
+    //@siclog "Step 3-3BA" siclog@
+    //@sic R5-253194 R5-261254sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Trigger MO Call Release"));
+    f_NR5GC_CallRelease_DeRegistration(nr_Cell1);
+    //@siclog "Step 3Ca1-3E" siclog@
+    //Void @sic R5-253194 sic@
+    f_Delay(0.1);
+    //@siclog "Step 3EA" siclog@
+    //@sic R5-237482 sic@
+    //The SS transmits an RRCRelease message
+    f_NR_RRCRelease(nr_Cell1);
+    f_NR5GC_ResetIMS(PDN_1); //@sic R5s240026 sic@
+    //@siclog "Step 3EB" siclog@
+    //@sic R5-237482 sic@
+    //SS configures the RA Response.
+    f_NR_SS_RachProcedureConfig_Def(nr_Cell1);
+    //@siclog "Step 3F-9A2" siclog@
+    //Void
+    //@sic R5-237482 sic@
+    //@siclog "Step 9A3 - 9A21a1" siclog@
+    //Steps 2-20a1 of Table 4.5.2.2- 2: Registration procedure for initial registration as specified in TS 38.508-1 [4] are performed on NR Cell 1.
+    f_NR5GC_RRC_IdleState1N_Def(nr_Cell1, -, -, Initial_NoSecurity); //@sic R5s230748 sic@
+    //@siclog "Step 9A22-23" siclog@
+    //Void
+    //@sic R5-237482 sic@
+  
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_2_NR5GC() runs on NR5GC_PTC
+  {
+    var template (omit) NR_BcchToPdschConfig_Type v_NR_BcchToPdschConfig; //@sic R5s211321 sic@
+
+    f_NR5GC_Init(NR_1);// System information combination NR-1 as defined in TS 38.508-1 [4], subclause 4.4.3.1.2. SIB1 indicates ims-EmergencySupport.
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //The UE is equipped with a USIM configuration as defined in TS 38.508-1 [4] Table 6.4.1-15.
+    f_UT_USIM_Insert(UT, "USIM configuration 15 specified in table 6.4.1-15 TS 38.508-1");
+
+    //The UE is in test state 0N-B (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2. Prior to being switched off the UE is registered on PLMN1.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0B);
+ 
+    f_NR_CellInfo_SetPLMN(nr_Cell1, tsc_NR_HPLMN_002_11);//PLMN2
+
+    //@sic R5s211321 sic@
+    v_NR_BcchToPdschConfig := f_NR_InitialiseBcchToPdschConfig(nr_Cell1);
+    f_NR_SS_ConfigureSysinfo(nr_Cell1, -, v_NR_BcchToPdschConfig);
+   
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_2_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_EMERGENCY_RELEASE_IDLE);//@sic R5s211321 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_2_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_2_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+
+    //@siclog "Step 1" siclog@
+    //The SS configures:- "NR Cell 1 as "Serving cell".
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    //@siclog "Step 2" siclog@
+    //Switch the UE on.
+    f_UT_SwitchOnUE(UT);
+
+    //@siclog "Step 3" siclog@
+    //Make the UE attempt an IMS emergency call dialling a number which is stored on the ME.
+    f_UT_RequestIMSEmergencyCall(UT);
+    
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE performs Generic Test Procedure for IMS Emergency call establishment without IMS emergency registration as specified in TS 38.508-1 [4], subclause 4.9.12?
+    f_NR5GC_EmergencyCallLimitedService(nr_Cell1);
+
+    
+    f_ReleaseEmergencyCallWithOptDeregisterOrPDURelease(nr_Cell1, 6.0);// @sic R5-223439 R5-235301 sic@
+    
+    //@siclog "Step 9" siclog@
+    //The SS releases RRC connection.
+    f_NR_RRCRelease(nr_Cell1);
+
+    //@siclog "Steps 9A" siclog@
+    //@sic R5-216198 sic@
+    // Make the UE attempt an IMS none-emergency call.
+    f_UT_RequestIMSCall(UT, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+
+    //@siclog "Step 10" siclog@
+    //@sic R5-216198 sic@
+    //Check: Does the UE transmit an RRCSetupRequest message in the next 30sec?
+    f_NR_CheckNoRRCSetupReq (nr_Cell1, 10.0);
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.3
+   * @status    APPROVED (NR5GC)
+   */
+   function f_TC_11_4_3_NR5GC() runs on NR5GC_PTC
+  {
+  
+    f_NR5GC_Init(NR_1);// System information combination NR-1 as defined in TS 38.508-1 [4], subclause 4.4.3.1.2. SIB1 indicates ims-EmergencySupport.
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_UT_USIM_Remove(UT);
+
+    //The UE is in test state 0N-B (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);//@sic R5s211328 sic@
+       
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_3_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_EMERGENCY_RELEASE_CONNECTED); // @sic R5-216199 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_3_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_3_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+
+    //@siclog "Step 1" siclog@
+    //Switch the UE on.
+    f_UT_SwitchOnUE(UT);
+
+    //@siclog "Step 2" siclog@
+    //Make the UE attempt an IMS emergency call dialling a number which is stored on the ME (e.g. 112 or 911). (NOTE 1)
+    f_UT_RequestIMSEmergencyCall(UT);
+
+    //@siclog "Step 3" siclog@
+    //Check: Does the UE performs Generic Test Procedure for IMS Emergency call establishment without IMS emergency registration as specified in TS 38.508-1 [4], subclause 4.9.12?
+    f_NR5GC_EmergencyCallLimitedService(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "step 3");//@sic R5-217821 sic@
+
+    //@siclog "Step 4-5" siclog@
+    //@siclog "Step 6" siclog@
+    //@siclog "Step 7a1-7b1" siclog@
+    f_ReleaseEmergencyCallWithOptDeregisterOrPDURelease(nr_Cell1);//@sic R5s220174 sic@
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.4
+   * @status    APPROVED (NR5GC)
+   */
+ function f_TC_11_4_4_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.ATTEMPTING-REGISTRATION-UPDATE T3346 running / Emergency call establishment / 5GMM-REGISTERED.NORMAL-SERVICE / Emergency call establishment before T3396 expiry
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+    
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A);
+   
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_4_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell11, STATE_IDLE_1A);
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_4_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_4_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var O1_Type v_PDUSessionIdToRelease;
+    var PDUSessionInfoList_Type v_PDUSessionInfo;
+    var integer i;
+    var integer v_NoOfSessions;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var template (omit) PDN_Index_Type v_PDN_Index := omit; //@sic R5-220042 sic@
+    var NR_DRBInfoList_Type v_ExistingDRBs;
+    var IntegerList_Type v_DRBIdList;
+    var integer j;
+
+    // @siclog "Step 1" siclog@
+    // The SS configures:
+    //  - NR Cell 11 as "Serving cell"
+    //  - NR Cell 1 as "Non-Suitable "Off" cell".
+
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    
+    // @siclog "Steps 2 - 4" siclog@
+    // The UE transmits an RRCSetupRequest message.
+    // SS transmit an RRCSetup message.
+    // The UE transmits an RRCSetupComplete message to confirm the successful completion of the connection establishment and
+    // a REGISTRATION REQUEST message indicating "mobility registration updating" is sent to update the registration of the actual tracking area.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell11, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    //@siclog "Step 5" siclog@
+    // SS sends a REGISTRATION REJECT message containing 5GMM cause value = #22 (Congestion).
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell11,
+                                   tsc_NR_RbId_SRB1, // No SRB2 so must be on SRB1
+                                   cs_TimingInfo_Now,
+                                   cs_NG_NAS_Request(tsc_SHT_NoSecurityProtection, cs_NG_REGISTRATION_REJECT(cs_GMM_GSM_Cause(omit, tsc_NR5GCCause_Congestion), cs_GPRS_Timer2_3_IEI('5F'O, '001'B, '00011'B)))));
+    
+    //@siclog "Step 6" siclog@
+    // The SS transmits an RRCConnectionRelease message.
+    f_NR_RRCRelease(nr_Cell11);
+    
+    //@siclog "Step 7" siclog@
+    //Make the UE attempt an IMS emergency call dialling an emergency number e.g. 112 or 911). (NOTE 1)
+    f_UT_RequestIMSEmergencyCall(UT, px_EmergencyCallNumber);
+    
+    //@siclog "Step 8" siclog@
+    //@sic R5-213508 sic@
+    //Check: Does the UE perform steps 1-3 from the Registration procedure for mobility registration update as specified in TS 38.508-1 [4] subclause 4.9.5
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell11, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) { //@sic R5-213508 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    //@sic R5-213508 sic@
+    //@siclog "Step 8AA - 8AB" siclog@
+    //The SS transmits a SecurityModeCommand message.
+    //The UE transmits a SecurityModeComplete message.
+    f_NR_RRC_ActivateSecurity (nr_Cell11, v_ReceivedMsg.SecurityProtection.NasCount);
+    f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell11, v_GMM_MobilityInfo, -, -, noRrcConnectionRelease);
+    
+    // @siclog "Step 8A - 9D" siclog@
+    //Check: Does the UE transmit an UL NAS TRANSPORT message with 'Request type' set to 'initial emergency request', and, a PDU SESSION ESTABLISHMENT REQUEST for establishing an emergency PDU?
+    // Steps 9-13 from Generic Test Procedure for IMS Emergency call establishment with IMS Emergency registration as specified in TS 38.508-1 [4], subclause 4.9.11, including the parallel behaviour specified in table 4.9.11.2.2-2 are performed.
+    //f_NR5GC_EmergencyCallWithRegistration(nr_Cell11);
+    f_NR5GC_EmergencyCallPDUSession(nr_Cell11, tsc_NR_RbId_SRB1); //@sic R5s210515 sic@
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Emergency Call Established"); // @sic R5-225362 sic@
+    // Emergency call now active
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8A");
+    
+    // @siclog "Step 10 - 11" siclog@
+    // Make the UE release the emergency call. (NOTE 1)
+    f_NR5GC_EmergencyCallRelease(nr_Cell11);
+    
+    // @sic R5s211524 sic@
+
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_NoOfSessions := f_NR5GC_MobileInfo_GetNoOfSessions();
+    // @siclog "Step 12" siclog@
+    for (i := 0; i<v_NoOfSessions; i:=i+1)
+    {
+      // @sic R5s210515 R5-216200 sic@
+      v_PDUSessionIdToRelease := v_PDUSessionInfo[0].SessionId; // @sic R5s220614 sic@
+      v_MsgToSend := f_Get_NG_PDUSessionReleaseCommand(v_PDUSessionIdToRelease,
+                                                       cs_GMM_GSM_Cause (omit, '00011010'B), //5GSM cause Insufficient resources
+                                                       cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00101'B)); //T3396 = 5 minutes //                                                                p_NGSM_CongestionReattemptInd,
+      SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell11, tsc_NR_RbId_SRB2, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));//@sic R5s210808sic@
+      SRB.receive(car_NR_SRB_NasPdu_IND(nr_Cell11,
+                                        tsc_NR_RbId_SRB2, //@sic R5s210808sic@
+                                        cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp;
+      v_PDN_Index := f_Get_PDN_IndexForPDUSessionId (v_PDUSessionInfo, v_PDUSessionIdToRelease); //@sic R5-220042 sic@
+      if (isvalue(v_PDN_Index)) {
+       f_IP_Handling_StopPDN(IP, cs_IP_StopPDN(valueof(v_PDN_Index)));
+      } else {
+       f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Cannot find PDN Index of PDU Session being released");
+      }
+      if (not f_Check_NG_PDUSessionReleaseComplete (v_PDUSessionInfo, v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Complete failed");
+      }
+    
+      //@sic R5s220829 sic@
+      //Clear stored DRB info for this session
+      v_DRBIdList := f_NR_GetDRBList_ForGivenPDUSession(oct2int(v_PDUSessionIdToRelease));
+      v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+      for (j:= 0; j < lengthof(v_DRBIdList); j := j+1 ) {
+          v_ExistingDRBs := f_NR_DRBInfo_RemoveEntry (v_ExistingDRBs, v_DRBIdList[j]);
+      }
+   
+      // Store updated DRB information
+      f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);
+    }
+     //Store updated PDU session information
+    f_NR5GC_MobileInfo_SetSessionInfoList (v_PDUSessionInfo);
+
+    // @siclog "Step 13" siclog@
+    // Void
+    
+    // @siclog "Step 14" siclog@
+    // The SS releases the RRC connection.
+    f_NR_RRCRelease(nr_Cell11);
+    
+    //@siclog "Step 15" siclog@
+    //Make the UE attempt an IMS emergency call dialling an emergency number e.g. 112 or 911). (NOTE 1)
+    f_UT_RequestIMSEmergencyCall (UT, px_EmergencyCallNumber);
+    
+    // @sic R5-223350 sic@
+    //@siclog "Steps 16A - 16E" siclog@
+    //Check: Does the UE performs steps 1-5 of Generic Test Procedure for IMS Emergency call establishment with IMS Emergency registration as specified in TS 38.508-1 [4], subclause 4.9.11?
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell11, tsc_NR_RRC_TI_Def, emergency);
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu, cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), tsc_NasKsi_NativeSecurityContext), f_NG_S_TMSI2MobileIdentity(omit, f_NR5GC_CellInfo_GetGutiParameters (nr_Cell11)), '0011'B)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+    }
+   
+    // RRC Security Mode pocedure
+    f_NR_RRC_ActivateSecurity (nr_Cell11, v_ReceivedMsg.SecurityProtection.NasCount);
+    
+    //@siclog "Step 16F" siclog@
+    //The SS transmits a SERVICE ACCEPT message.
+    SRB.send (cas_NR_SRB_NasPdu_REQ(nr_Cell11, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, f_Get_NG_ServiceAcceptMsg(v_ReceivedMsg.Pdu.Msg.service_Request.pduSessionStatus))));
+   
+    
+    //@siclog "Steps 16G-16L" siclog@
+    //Check: Does the UE perform steps 8-13 of Generic Test Procedure for IMS Emergency call establishment with IMS Emergency registration as specified in TS 38.508-1 [4], subclause 4.9.11?
+    // Steps 8-13
+    f_NR5GC_EmergencyCallPDUSession(nr_Cell11, tsc_NR_RbId_SRB1);
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Emergency Call Established"); // @sic R5-225362 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "IMS Emergency Call Established");
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Steps 16G-16L ");
+ 
+    //@siclog "Step 17 - 18" siclog@
+    //Make the UE release the emergency call. (NOTE 1)
+    //The Generic test procedure for IMS MO Emergency call release as specified in TS 38.508-1 [4], subclause 4.9.12A takes place
+    f_NR5GC_EmergencyCallRelease(nr_Cell11);
+
+    f_NR_RRCRelease(nr_Cell11);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_5_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.LIMITED-SERVICE / 5GMM-IDLE / Emergency call establishment and release / Handling of 5GS forbidden tracking areas for roaming
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cells//@sic R5s210875 sic@
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);//@sic R5-217820 sic@
+    //Set power for the cells//@sic R5s210875 sic@
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //The UE is in test state 1N-A as defined in TS 38.508-1 [4], subclause 4.4A.2 on NR Cell 1
+    //In the list of tracking areas provided by the AMF (IE 'TAI list') contains only the TAI of NR Cell 1.
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_5_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);//@sic R5s210875 R5s221111 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_5_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_5_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NR_SecurityParams_Type v_RRC_SecurityParams;
+    var TypeOfRegistration_Type v_TypeOfRegistration;
+    //var NR_SRB_COMMON_IND v_ReceivedAsp; //@sic R5-253195 sic@
+    //var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo_IMS;
+    //var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    //var PDUSessionInfoList_Type v_PDUSessionInfo;
+    //var O1_Type v_PDUSessionId;
+    //var PDN_Index_Type v_PDNIndex;//@sic R5-240509 R5s240045 sic@
+    //var NG_NAS_UL_Pdu_Type v_RxdMsg;
+    //var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;//@sic R5-240509 R5s240045 sic@
+    //var boolean v_FinishedIMS := false;//@sic R5-240509 R5s240045 sic@
+
+    //timer t_Wait := 5.0; //@sic R5-253195 sic@
+    //timer t_Wait_t2 := 5.0;
+    //@siclog "Step 1" siclog@
+    //The SS configures:NR Cell 11 as "Serving cell" NR Cell 1 as "Non-Suitable "Off" cell".//@sic R5s210875 R5-217820 sic@
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    //@siclog "Step 2" siclog@
+    //The UE transmits an RRCSetupRequest message.    //@sic R5-216201 sic@
+    //@siclog "Step 3" siclog@
+    //SS transmit an RRCSetupRequest message.//@sic R5-216201 sic@
+    //@siclog "Step 4" siclog@
+    //The UE transmits an RRCSetupComplete message to confirm the successful completion of the connection establishment and a REGISTRATION REQUEST message indicating "mobility registration updating" is sent to update the registration of the actual tracking area.
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell11, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Req failed");
+    }
+    //@siclog "Step 5" siclog@
+    //SS sends a REGISTRATION REJECT message containing 5GMM cause value = #15 (No suitable cells in tracking area).
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell11,
+                                   tsc_NR_RbId_SRB1, // No SRB2 so must be on SRB1
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_REGISTRATION_REJECT(cs_GMM_GSM_Cause(omit, tsc_NR5GCCause_NoSuitableCellsInTA)))));
+    //@siclog "Step 6" siclog@
+    //The SS transmits an RRCRelease message.//@sic R5-216201 sic@
+    f_NR_RRCRelease(nr_Cell11);
+    //@siclog "Steps 7" siclog@
+    //Make the UE attempt an IMS emergency call dialling an emergency number e.g. 112 or 911). (NOTE 1)
+     f_UT_RequestIMSEmergencyCall(UT);//@sic R5s210875 sic@
+    //@siclog "Step 8" siclog@
+    //Check: Does the UE performs Generic Test Procedure for IMS Emergency call establishment without IMS Emergency registration as specified in TS 38.508-1 [4], subclause 4.9.11?
+    f_NR5GC_EmergencyCallLimitedService(nr_Cell11);//@sic R5-216201 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "step 8");//@sic R5-216201 sic@
+    //@siclog "Step 9-10" siclog@
+    //@siclog "Step 10A" siclog@//@sic R5-240509 R5s240045 sic@
+    //Void
+    //@siclog "Steps 10A1-10C1A" siclog@//@sic R5-240509 R5s240045 R5-253195 sic@
+    //Step 1 of the Generic test procedure for IMS MO Emergency call release as specified in TS 38.508-1 [4], subclause 4.9.12A takes place.
+    //Start Timer T2=5 seconds.
+    //- EXCEPTION: In parallel to step 10C1A below, the steps specified in Tables 11.4.5.3.2-4 and 11.4.5.3.2-5 may take place.
+    //Timer T2=5 seconds expires.
+    f_ReleaseEmergencyCallWithOptDeregisterOrPDURelease(nr_Cell11);
+    //@siclog "Step 10C2a1-12b1" siclog@    //@sic R5-225410 R5-253195 sic@
+    //Void
+    //@siclog "Step 12A" siclog@
+    //SS releases the RRC connection
+    f_NR_RRCRelease(nr_Cell11);//@sic R5-216201 sic@//@sic R5s210875 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1],cms_IPCAN_IMS_Reset);//@sic R5s210875 R5s211354 sic@
+    //@siclog "Step 12B" siclog@
+    //Make the UE attempt an IMS non-emergency call.
+    f_UT_RequestIMSCall(UT, -, LOCAL_CNF_REQUIRED);//@sic R5-216201 sic@//@sic R5s210875, R5s230789 sic@
+    //@siclog "Step 12C" siclog@
+    //Check: Does the UE transmit an RRCSetupRequest message for initial registration procedure on NR Cell 11 within the next 10 seconds?
+    f_NR_CheckNoRRCSetupReq (nr_Cell11, 10.0);//@sic R5-216201 sic@//@sic R5s210875 sic@
+    //@siclog "Step 13" siclog@
+    //The SS configures: NR Cell 1 as "Suitable neighbour intra-frequency cell",NR Cell 11 as "Serving cell"//@sic R5-217820 sic@
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2);//@sic R5s210875 R5s211354 sic@
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_NonSuitableCellSSS_EPRE_FR1, tsc_NR_NonSuitableCellSSS_EPRE_FR2);//@sic R5-225410 R5-217820 sic@
+    //@siclog "Step 14" siclog@
+    //Check: Does the UE perform on NR Cell 1 the Registration procedure for initial registration as specified in TS 38.508-1 [4] subclause 4.5.2.2-2, 'connected without release'?
+    SRB.check(receive(car_NR_SRB0_RrcPdu_IND(nr_Cell1, cr_38508_RRCSetupRequest(cr_NR_EstablishmentCause_Any))));
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 14 passed");
+
+    f_NR5GC_MobileInfo_Init();//@sic R5s210875 sic@
+    f_NR5GC_Security_Init();//@sic R5s210875 sic@
+    v_RRC_SecurityParams := f_NR_Security_Get();//@sic R5s210875 sic@
+    v_RRC_SecurityParams.AS_Integrity.Algorithm := px_NR_IntegrityProtAlgorithm;//@sic R5s210875 sic@
+    v_RRC_SecurityParams.AS_Ciphering.Algorithm := px_NR_CipheringAlgorithm;//@sic R5s210875 sic@
+    f_NR_Security_Set(v_RRC_SecurityParams);//@sic R5s210875 sic@
+    v_TypeOfRegistration := f_NR5GC_InitialOrMobilityRegistrationRequest (v_GMM_MobilityInfo, v_ReceivedMsg, nr_Cell1);//@sic R5-225410 sic@
+    //@siclog "17a1-17b3a1" siclog@  @sic R5-202600 sic@
+    //NOTE: The 5GS registration type shall be only set as Mobility Registration for R16 UEs according to TS 24.501 subclause 5.2.3.2.5 specified in Release 16. The EXCEPTION description applies only to R15 UEs.
+    if ((v_TypeOfRegistration == Initial_NoSecurity) or (v_TypeOfRegistration == Initial_Secure) ) {//@sic R5s240317 sic@
+      //@siclog "17a1-17a16a1" siclog@
+      //IF 5GS registration type is set as Initial Registration in step 22, THEN steps 5 to 20a1 of the registration procedure described in TS 38.508-1 [4] Table 4.5.2.2-2 are performed on NR Cell 12.
+      f_NR5GC_RRC_Idle_Steps5_20(v_GMM_MobilityInfo, nr_Cell1, v_ReceivedMsg, TESTMode_OFF,-, v_TypeOfRegistration); //@sic R5-225410 sic@
+    }
+    else if (v_TypeOfRegistration == Mobility) {
+      //@siclog "17b1-17b3a1" siclog@
+      // IF 5GS registration type is set as Mobility Registration in step 22, THEN steps 5 to 6a1 of the generic test procedure in TS 38.508-1 [4] Table 4.9.5.2.2-1 are performed on NR Cell 11.
+      f_NR5GC_MobilityRegistration_Steps4_6(nr_Cell1, v_GMM_MobilityInfo); //@sic R5-225410 sic@
+  }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.6
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_6_NR5GC() runs on NR5GC_PTC
+  {
+    var NAS_PlmnId v_PLMN_cell1;
+    var NAS_PlmnId v_PLMN_cell11;
+    var TrackingAreaCode v_TAC_cell1;
+    var TrackingAreaCode v_TAC_cell11;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) ServiceAreaIdList v_ServiceAreaIdList;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+
+    // System information combination NR-1 as defined in TS 38.508-1 clause 4.4.3.1.2 is used in NR Cells
+    f_NR5GC_Init(NR_2); //@sic R5s210635 sic@
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell11);
+
+    v_PLMN_cell1 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1));
+    v_PLMN_cell11 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    v_TAC_cell1 := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_TAC_cell11 := f_NR_CellInfo_GetTAC (nr_Cell11);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN_cell1, {bit2oct(v_TAC_cell1)});
+    v_ServiceAreaIdList := cs_NG_ServiceAreaIdList(v_PLMN_cell11, {bit2oct(v_TAC_cell11)});
+
+    // Preamble
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(nr_Cell1);
+
+    // Registration Accept
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   v_TAIList,
+                                                   -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_ServiceAreaIdList);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    f_NR5GC_RRC_Idle_Steps15_20 (nr_Cell1, TESTMode_OFF);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_6_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell11, STATE_EMERGENCY_RELEASE_IDLE); //@sic R5s210635 R5s210770 R5s211344 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_6_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_6_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    // @sic R5s210770 sic@
+    var TrackingAreaCode v_TAC_cell11 := f_NR_CellInfo_GetTAC (nr_Cell11);
+    var NAS_PlmnId v_PLMN_cell11 := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell11));
+    var template (value) ServiceAreaIdList v_ServiceAreaIdList := cs_NG_ServiceAreaIdList(v_PLMN_cell11, {bit2oct(v_TAC_cell11)});
+
+    //@siclog "Steps 1" siclog@
+    // NR Cell 11 as "Serving cell", NR Cell 1/2 as "Non-Suitable "Off" cell"
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Steps 2" siclog@
+    // Check: Does in the next 5 sec the UE transmit an RRCSetupRequest message?
+    f_NR5GC_MobilityRegistration(nr_Cell11, -, -, -, -, -, -, v_ServiceAreaIdList); // @sic R5s210635 R5s210770 sic@
+    f_IP_ChangeNrCell(IP, nr_Cell11);        // @sic R5s210635 sic@
+
+
+    //@siclog "Steps 3 - 7" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell11, px_EmergencyCallNumber, "Step 4"); // @sic R5s230544 sic@
+
+    //@siclog "Steps 8" siclog@
+    // Make the UE attempt an IMS none-emergency call.
+    f_UT_RequestIMSCall(UT, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+
+    //@siclog "Steps 9" siclog@
+    // Check: Does the UE transmit in the next 10 sec an RRCSetupRequest message?
+    f_NR_CheckNoRRCSetupReq(nr_Cell11, 10.0);
+
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.7
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_7_NR5GC() runs on NR5GC_PTC
+  { //Handling of Local and Extended emergency numbers / Mobility
+  
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var TrackingAreaCode v_TAC;
+    var NG_NAS_GutiParameters_Type v_GutiParams;
+    var NAS_PlmnId v_PLMN;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_MobileIdentity v_GUTIToSend;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) EmergNumList v_EmergNumList; // emergency numbers in format as per 24.008
+    var template (value) ExtdEmergNumList v_XtdEmergNumList; // emergency numbers in format as per 24.301
+
+    f_NR5GC_Init(NR_1);
+
+    f_NR_CellInfo_SetPLMN(nr_Cell3, tsc_NR_HPLMN_001_11);//PLMN15
+    f_NR_CellInfo_SetPLMN(nr_Cell11, tsc_NR_HPLMN_Def);//PLMN1
+    f_NR_CellInfo_SetPLMN(nr_Cell12, tsc_NR_HPLMN_002_21);//PLMN2
+    // Emergency support set in default message contents
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);
+    f_NR_CellConfig_Def(nr_Cell11);
+    f_NR_CellConfig_Def(nr_Cell12);
+    
+    // The UE is equipped with a USIM configuration as defined in TS 38.508-1 [4] Table 6.4.1-20.
+    f_UT_USIM_Insert(UT, "USIM configuration 20 specified in table 6.4.1-20 TS 38.508-1");
+
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(nr_Cell12);
+    
+    // Registration Accept
+    v_TAC := f_NR_CellInfo_GetTAC (nr_Cell12);
+    v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell12);
+    v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell12));
+    v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+    
+    v_EmergNumList := f_Build_EmergNumList (1, {'120'H});
+    v_XtdEmergNumList := f_Build_ExtdEmergNumList (1, {'10'H}, '0'B);
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_EmergNumList,
+                                                   v_XtdEmergNumList);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    f_NR5GC_RRC_Idle_Steps15_20 (nr_Cell12, TESTMode_OFF);
+
+    // cell powers will already be: All off expect Cell 12 = Serving Cell
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_7_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell3, STATE_IDLE_1A); // @sic R5s210603 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_7_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_7_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var PLMN_Identity v_ASN_PLMN_1 := f_NR_CellInfo_GetPLMN (nr_Cell1);
+    var TrackingAreaCode v_TAC_1 := f_NR_CellInfo_GetTAC (nr_Cell1);
+    var NAS_PlmnId v_PLMN_1 := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN_1);
+    var template (value) NG_MobileIdentity v_GUTI_1 := f_NG_GutiParameters2MobileIdentity (v_PLMN_1, f_NR5GC_CellInfo_GetGutiParameters(nr_Cell1));
+    var template (value) NG_TrackingAreaIdList v_TAIList_1 := cs_NG_TAIListNonConsecutive(v_PLMN_1, {bit2oct(v_TAC_1)});
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template (value) EmergNumList v_EmergNumList; // emergency numbers in format as per 24.008
+    var template (value) ExtdEmergNumList v_XtdEmergNumList; // emergency numbers in format as per 24.301
+
+    //@siclog "Steps 1 - 5" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell12, "120", "Step 2");
+    
+    //@siclog "Steps 6 - 10" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell12, "10", "Step 7");
+    
+    //Cells 11 and 3 are still off
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 11" siclog@
+    // Steps 1 - 3
+    // RRC Registration Req
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 11 Registration Request Message Failed");
+    }
+       
+    v_EmergNumList := f_Build_EmergNumList (1, {'1001'H});
+    v_XtdEmergNumList := f_Build_ExtdEmergNumList (1, {'12345'H}, '0'B);
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   v_GUTI_1,
+                                                   v_TAIList_1,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_EmergNumList,
+                                                   v_XtdEmergNumList);
+    
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    // Step 5
+    f_NR5GC_Registration_Complete(nr_Cell1, tsc_NR_RbId_SRB1);
+    
+    f_IP_ChangeNrCell(IP, nr_Cell1);  // @sic R5s210603 sic@
+    
+    //Step 6
+    f_NR_RRCRelease(nr_Cell1);
+
+    //@siclog "Steps 12 - 16" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell1, "1001", "Step 13");
+    
+    //@siclog "Steps 17 - 21" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell1, "120", "Step 18");
+    
+    //@siclog "Steps 22 - 26" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell1, "12345", "Step 23");
+    
+    //@siclog "Steps 27 - 31" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell1, "10", "Step 28");
+    
+    //Cells 12 and 3 are still off
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 32" siclog@
+    // Default Registration Accept is sent
+    f_NR5GC_MobilityRegistration(nr_Cell11);
+    f_IP_ChangeNrCell(IP, nr_Cell11);  // @sic R5s210603 sic@
+
+    //@siclog "Steps 33 - 37" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell11, "1001", "Step 34");
+    
+    //@siclog "Steps 38 - 42" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell11, "12345", "Step 39");
+    
+    //Cells 1 and 12 are still off
+    f_NR_SetCellPower (nr_Cell3, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell11, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 43" siclog@
+    // Default Registration Accept is sent
+    f_NR5GC_MobilityRegistration(nr_Cell3);
+    f_IP_ChangeNrCell(IP, nr_Cell3);  // @sic R5s210603 sic@
+
+    //@siclog "Steps 44 - 48" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell3, "1001", "Step 45");
+    
+    //@siclog "Steps 49 - 53" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell3, "12345", "Step 50");
+    
+    //Cells 1 and 11 are still off
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell3, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 54" siclog@
+    // Default Registration Accept is sent
+    f_NR5GC_MobilityRegistration(nr_Cell12);
+    f_IP_ChangeNrCell(IP, nr_Cell12);  // @sic R5s210603 sic@
+
+    //@siclog "Steps 55 - 59" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell12, "1001", "Step 56");
+    
+    //@siclog "Steps 60 - 64" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell12, "12345", "Step 61");
+    
+    //Cells 3 and 11 are still off
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 65" siclog@
+    // Steps 1 - 3
+    // RRC Registration Req
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 11 Registration Request Message Failed");
+    }
+       
+    v_EmergNumList := f_Build_EmergNumList (1, {'1001'H});
+    v_XtdEmergNumList := f_Build_ExtdEmergNumList (1, {'12345'H}, '1'B);
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   v_GUTI_1,
+                                                   v_TAIList_1,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_EmergNumList,
+                                                   v_XtdEmergNumList);
+    
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    // Step 5
+    f_NR5GC_Registration_Complete(nr_Cell1, tsc_NR_RbId_SRB1);
+    
+    //Step 6
+    f_NR_RRCRelease(nr_Cell1);
+
+    //Cells 11 and 12 are still off
+    f_NR_SetCellPower (nr_Cell3, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 66" siclog@
+    // Default Registration Accept is sent
+    f_NR5GC_MobilityRegistration(nr_Cell3);
+    f_IP_ChangeNrCell(IP, nr_Cell3);  // @sic R5s210603 sic@
+
+    //@siclog "Steps 67 - 71" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell3, "12345", "Step 67");
+    
+    //@siclog "Steps 72 - 76" siclog@
+    fl_EmergencyCallAndRelease(nr_Cell3, "1001", "Step 73");
+    
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.8
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_8_NR5GC() runs on NR5GC_PTC
+  { //Handling of Local and Extended emergency numbers / Switch-off and maximum local numbers storage
+  
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var TrackingAreaCode v_TAC;
+    var NG_NAS_GutiParameters_Type v_GutiParams;
+    var NAS_PlmnId v_PLMN;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_MobileIdentity v_GUTIToSend;
+    var template (value) NG_TrackingAreaIdList v_TAIList;
+    var template (value) EmergNumList v_EmergNumList; // emergency numbers in format as per 24.008
+    var template (value) ExtdEmergNumList v_XtdEmergNumList; // emergency numbers in format as per 24.301
+
+    f_NR5GC_Init(NR_1);
+    // Emergency support set in default message contents
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell12);
+    
+    // The UE is equipped with a USIM configuration as defined in TS 38.508-1 [4] Table 6.4.1-20.
+    f_UT_USIM_Insert(UT, "USIM configuration 20 specified in table 6.4.1-20 TS 38.508-1");
+
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(nr_Cell1);
+    
+    // Registration Accept
+    v_TAC := f_NR_CellInfo_GetTAC (nr_Cell1);
+    v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1);
+    v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1));
+    v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+    
+    v_EmergNumList := f_Build_EmergNumList (1, {'120'H});
+    v_XtdEmergNumList := f_Build_ExtdEmergNumList (1, {'10'H}, '0'B);
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_EmergNumList,
+                                                   v_XtdEmergNumList);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    f_NR5GC_RRC_Idle_Steps15_20 (nr_Cell1, TESTMode_OFF);
+    
+    f_NR_UE_DeRegisterOnSwitchOff (nr_Cell1, STATE_IDLE_1A);
+    // Tell IMS PTC to stop waiting for De-register
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // @sic R5s211343 sic@
+
+    // cell powers will already be: All off expect Cell 1 = Serving Cell
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_8_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell12, STATE_IDLE_1A);
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_8_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_8_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var PLMN_Identity v_ASN_PLMN_12 := f_NR_CellInfo_GetPLMN (nr_Cell12); // @sic R5s210810 sic@
+    var TrackingAreaCode v_TAC_12 := f_NR_CellInfo_GetTAC (nr_Cell12); // @sic R5s210810 sic@
+    var NAS_PlmnId v_PLMN_12 := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN_12); // @sic R5s210810 sic@
+    var template (value) NG_MobileIdentity v_GUTI_12 := f_NG_GutiParameters2MobileIdentity (v_PLMN_12, f_NR5GC_CellInfo_GetGutiParameters(nr_Cell12)); // @sic R5s210810 sic@
+    var template (value) NG_TrackingAreaIdList v_TAIList_12 := cs_NG_TAIListNonConsecutive(v_PLMN_12, {bit2oct(v_TAC_12)}); // @sic R5s210810 sic@
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template (value) EmergNumList v_EmergNumList; // emergency numbers in format as per 24.008
+    var EmergencyNumList v_LocalNumList := {'120'H, '121'H, '122'H, '123'H, '124'H, '125'H, '126'H, '127'H, '128'H, '129'H};
+    var EmergencyNumList v_ExtdNumList := {'130'H, '131'H, '132'H, '133'H, '134'H, '135'H, '136'H, '137'H, '138'H, '139'H,
+                                           '140'H, '141'H, '142'H, '143'H, '144'H, '145'H, '146'H, '147'H, '148'H, '149'H};  // @sic R5-216203 sic@
+    var template (value) ExtdEmergNumList v_XtdEmergNumList; // emergency numbers in format as per 24.301
+    var integer i;
+    
+    //@siclog "Step 1" siclog@
+    f_NR5GC_SwitchOnAndResetIMS();  // @sic R5s210810 sic@
+
+    //@siclog "Step 2" siclog@
+    f_NR5GC_RRC_IdleState1N_Def (nr_Cell1);
+    
+    //@siclog "Steps 3 - 7" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell1, "120", "Step 4");
+    
+    //@siclog "Steps 8 - 12" siclog@
+    fl_MOSpeechCallAndRelease(nr_Cell1, "10", "Step 9");
+    
+    f_NR_SetCellPower (nr_Cell12, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+
+    //@siclog "Step 13" siclog@
+    // Steps 1 - 3
+    // RRC Registration Req
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell12, tsc_NR_RRC_TI_Def, ?);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 13 Registration Request Message Failed");
+    }
+       
+    v_EmergNumList := f_Build_EmergNumList (10, v_LocalNumList);
+    v_XtdEmergNumList := f_Build_ExtdEmergNumList (20, v_ExtdNumList, '0'B);    // @sic R5s210810 sic@
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,                    // @sic R5s210810 sic@
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTI_12,
+                                                   v_TAIList_12,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   v_EmergNumList,
+                                                   v_XtdEmergNumList);
+    
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell12, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    // Step 5
+    f_NR5GC_Registration_Complete(nr_Cell12, tsc_NR_RbId_SRB1);
+    
+    //Step 6
+    f_NR_RRCRelease(nr_Cell12);
+
+    //@siclog "Steps 14 - 18" siclog@
+    for (i := 0; i < 10; i := i+1) {
+      fl_EmergencyCallAndRelease(nr_Cell12, hex2str(v_LocalNumList[i]), "Step 15, i = " & int2str(i));
+    }
+    //@siclog "Steps 19 - 23" siclog@
+    for (i := 0; i < 20; i := i+1) {
+      fl_EmergencyCallAndRelease(nr_Cell12, hex2str(v_ExtdNumList[i]), "Step 20, i = " & int2str(i));
+    }
+    
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.9
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_9_NR5GC() runs on NR5GC_PTC
+  { //5GMM-DEREGISTERED.LIMITED-SERVICE No suitable cells in tracking area / Emergency call establishment and release
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    //The UE is in test state 1N-A as defined in TS 38.508-1 [4], subclause 4.4A.2 on NR Cell 1
+    //In the list of tracking areas provided by the AMF (IE 'TAI list') contains only the TAI of NR Cell 1.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0B);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_4_9_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_EMERGENCY_RELEASE_IDLE);//@sic R5s211323 sic@
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_9_NR5GC
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_9_NR5GC_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+
+    //@siclog "Step 1" siclog@
+    //Switch the UE on.
+    f_UT_SwitchOnUE(UT);
+    //@siclog "Steps 2-4" siclog@
+    //Steps 2-4 of Table 4.5.2.2-2 NR RRC_IDLE in TS38.508-1 [4] take place (the UE initiates an initial registration procedure).
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_Secure)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Req failed");
+    }
+    //@siclog "Steps 5" siclog@
+    //SS sends a REGISTRATION REJECT message containing 5GMM cause value = #15 (No suitable cells in tracking area).
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1,
+                                   tsc_NR_RbId_SRB1, // No SRB2 so must be on SRB1
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_REGISTRATION_REJECT(cs_GMM_GSM_Cause(omit, tsc_NR5GCCause_NoSuitableCellsInTA)))));
+    //@siclog "Step 6" siclog@
+    //The SS transmits an RRCRelease message.//@sic R5-216202 sic@
+    f_NR_RRCRelease(nr_Cell1);
+    //@siclog "Step 7" siclog@
+    //Make the UE attempt an IMS emergency call dialling a number which is stored on the ME (e.g. 112 or 911). (NOTE 1)
+    f_UT_RequestIMSEmergencyCall (UT);//Defaut value is px_EmergencyCallNumber
+    //@siclog "Step 8" siclog@
+    //Check: Does the UE performs Generic Test Procedure for IMS Emergency call establishment without IMS emergency registration as specified in TS 38.508-1 [4], subclause 4.9.12?
+    f_NR5GC_EmergencyCallLimitedService(nr_Cell1);
+    //@siclog "Steps 9-10" siclog@
+    //@siclog "Steps 10A-10C" siclog@
+    //@siclog "Steps 11-12" siclog@
+    f_ReleaseEmergencyCallWithOptDeregisterOrPDURelease(nr_Cell1);//@sic R5-223439 sic@
+
+    //@siclog "Step 13" siclog@
+    //SS releases the RRC connection
+    f_NR_RRCRelease(nr_Cell1);
+    //@siclog "Step 13A" siclog@//@sic R5-216202 sic@
+    //Make the UE attempt an IMS none-emergency call. (NOTE 2)
+    f_UT_RequestIMSCall(UT, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+    //@siclog "Step 14" siclog@
+    //Check: Does the UE transmit an RRCSetupRequest message in the next 10second?//@sic R5-216202 sic@
+    //NOTE: This is an arbitrary value to wait for catching not allowed UE behaviour.
+    f_NR_CheckNoRRCSetupReq (nr_Cell1, 10.0);//@sic R5-216202 R5s211323 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.14
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_14_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / 5GMM-IDLE / Emergency call /Deregistration upon emergency registration expiration
+    //@sic R5-227446 sic@
+    
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cells
+    f_NR_CellInfo_SetSIB1_ImsEmergencySupport(nr_Cell1, true_);
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    
+    f_NR_TestBody_Set(true);
+    fl_TC_11_4_14_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_14
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_14_TestBody() runs on NR5GC_PTC
+  {
+    //@siclog "Step 1" siclog@
+    //Make the UE attempt an IMS emergency call.
+    f_UT_RequestIMSEmergencyCall (UT);
+    //@siclog "Step 2 - 4" siclog@
+    //UE performs Generic Test Procedure for IMS Emergency call establishment with IMS emergency registration?
+    f_NR5GC_EmergencyCallWithRegistration(nr_Cell1);
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Trigger MT Call Release"));
+    //@siclog "Step 5" siclog@
+    //The UE performs Generic Test Procedure for IMS MT Emergency call release as specified in TS 38.508-1 [4], subclause 4.9.12B.2.2-1.
+    f_NR5GC_EmergencyCallReleaseMT(nr_Cell1);
+    //@siclog "Step 6" siclog@
+    //SS releases the RRC connection
+    f_NR_RRCRelease(nr_Cell1);
+    //@siclog "Step 7" siclog@
+    //Check: Does the UE transmits an RRCSetupRequest message with 'establishmentCause' set to 'emergency' for IMS emergency Reregistration in the next 20 seconds?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, 20.0, emergency, "Step 7");
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.4.1a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_11_4_1a_NR5GC() runs on NR5GC_PTC
+  { //5GMM-REGISTERED.NORMAL-SERVICE / 5GMM-IDLE / Emergency call / Utilising emergency number stored on the USIM / New emergency PDU session / PEIPS assistance information
+    
+    f_NR5GC_Init(NR_1);
+
+    f_NR_CellInfo_SetSIB1_PEI(nr_Cell1, cs_SubgroupConfig_r17(2,omit));
+    //Create and configure cells
+    f_NR_CellConfig_Def(nr_Cell1);
+    //The UE is equipped with a USIM configuration as defined in TS 38.508-1 [4] Table 6.4.1-20.
+    f_UT_USIM_Insert(UT, "USIM configuration 20 specified in table 6.4.1-20 TS 38.508-1");
+
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0A);
+    
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_11_4_1a_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A);
+
+  }
+
+  /*
+   * @desc      test body of TC_11_4_1a
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_11_4_1a_TestBody() runs on NR5GC_PTC
+  {
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var TrackingAreaCode v_TAC := f_NR_CellInfo_GetTAC (nr_Cell1);
+    var NAS_PlmnId v_PLMN:= f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1));
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters(nr_Cell1);
+    var template (value) NG_MobileIdentity v_GUTIToSend := f_NG_GutiParameters2MobileIdentity (v_PLMN, v_GutiParams);
+    var template (value) NG_TrackingAreaIdList v_TAIList := cs_NG_TAIListNonConsecutive(v_PLMN, {bit2oct(v_TAC)});
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    
+    //@siclog "Step 1" siclog@
+    //The UE is switched on
+    f_NR5GC_SwitchOnAndResetIMS();
+    
+    //@siclog "Step 2 - 21a1" siclog@
+    //The UE performs steps 1-20a1 of the RRC_IDLE procedure specified in TS 38.508-1 [4], table 4.5.2.2-2.
+    
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, (tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected));
+    f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_NoSecurity);
+  
+    //@sic R5s250341 sic@
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo, nr_Cell1, v_ReceivedMsg, v_PLMN, TESTMode_OFF, Initial_NoSecurity, NOT_SUPPORTED);
+    v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo();
+    
+    if (v_GMM_MobilityInfo.GMMCap.nrPSSI == '1'B) {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 9");
+    }else{
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,
+                                                   v_GUTIToSend,
+                                                   v_TAIList,
+                                                   omit,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                                   cs_PEIPS_AssistInfo('33'O, '01'O,{{'000'B,'00001'B}}));
+                                                   
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    f_NR5GC_RRC_Idle_Steps15_20 (nr_Cell1, TESTMode_OFF);
+
+   
+    //@siclog "Step 22" siclog@
+    //Make the UE attempt an IMS emergency call dialling the number 144 which is stored on the USIM. (NOTE 1)
+    f_UT_RequestIMSEmergencyCall (UT, "144");
+   
+    //@siclog "Step 23" siclog@
+    //The UE performs Generic Test Procedure for IMS Emergency call establishment with IMS emergency registration as specified in TS 38.508-1 [4], subclause 4.9.11.
+    f_NR5GC_EmergencyCallWithRegistration(nr_Cell1);
+    
+    //@siclog "Step 24" siclog@
+    //The Test procedure for IMS MT Emergency call release as specified in TS 34.508-1 [4], subclause 4.9.12B takes place with "keep emergency PDU session"
+    f_NR5GC_EmergencyCallReleaseMT(nr_Cell1); //@sic R5s250341 R5-254904 sic@
+    
+    //@siclog "Step 25" siclog@
+    //SS releases the RRC connection
+    f_NR_RRCRelease(nr_Cell1);
+    
+    //@siclog "Step 26" siclog@
+    //The SS transmits a PEI with the bit corresponding for the subgroup the UE belongs to indicated as 0 and the Paging message including a matched identity
+    f_NR_Paging_Trigger_DCI_2_7(nr_Cell1, -,'11'B, 22 );
+    //@siclog "Step 27" siclog@
+    //Check: Does the UE transmit an RRCSetupRequest message?
+    f_NR_RRC_SetupRequest_Def(nr_Cell1, mt_Access);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 27");
+    
+    //@siclog "Step 28" siclog@
+    //The SS transmits an RRCSetup message.
+    f_NR_RRCSetup_Def (nr_Cell1);
+    
+    //@siclog "Step 29" siclog@
+    //The UE transmit an RRCSetupComplete message including SERVICE REQUEST to confirm the successful completion of the connection establishment.
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell1,
+                                          cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                          tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu, cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), tsc_NasKsi_NativeSecurityContext), f_NG_S_TMSI2MobileIdentity(omit, f_NR5GC_CellInfo_GetGutiParameters (nr_Cell1)),'0010'B)) {  // @sic R5s200654 sic@
+         f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+    }
+    
+    //@siclog "Step 30" siclog@
+    //Steps 5 to 8 of the NR RRC_CONNECTED procedure in TS 38.508-1 Table 4.5.4.2-3 are executed to successfully complete the service request procedure.
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(nr_Cell1, v_ReceivedMsg);
+    
+    //@siclog "Step 31" siclog@
+    //The SS transmits an RRCRelease message
+    f_NR_RRCRelease(nr_Cell1);
+
+  }
+
+}

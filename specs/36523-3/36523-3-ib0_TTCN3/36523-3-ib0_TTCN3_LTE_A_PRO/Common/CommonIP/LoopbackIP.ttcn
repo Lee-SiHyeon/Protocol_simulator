@@ -1,0 +1,193 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-18 11:30:22 +0200 (Wed, 18 Jun 2025) $
+// $Rev: 41494 $
+/******************************************************************************/
+
+module LoopbackIP {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from Parameters all;
+
+  /*
+   * @desc      auxiliary function
+   * @param     p_UseIPv4
+   * @param     p_IPv4Addr
+   * @param     p_IPv6Addr
+   * @return    charstring
+   * @status    APPROVED (ENDC, LTE, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT)
+   */
+  function fl_LoopbackModeB_IPv4IPv6Address(boolean p_UseIPv4,
+                                            charstring p_IPv4Addr,
+                                            charstring p_IPv6Addr) return charstring
+  {
+    if (p_UseIPv4) { return p_IPv4Addr; }
+    else           { return p_IPv6Addr; }
+  }
+
+  /*
+   * @desc      returns IP address to be used for IP packets in loopback mode B depending on IPv4/v6 for the given PDN
+   * @param     p_UseIPv4           (default value: not pc_IPv6)
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @return    charstring
+   * @status    APPROVED (ENDC, LTE, LTE_A_PRO, LTE_A_R12, NBIOT, NR5GC, NR5GC_IRAT)
+   */
+  function f_LoopbackModeB_IP_Address_NW(boolean p_UseIPv4 := not pc_IPv6,
+                                         PDN_Index_Type p_PdnIndex := PDN_1) return charstring
+  { /* @sic R5s130362 - MCC160 Implementation: tsc_PDN_AddressInfo sic@ */
+    /* @sic R5s190411: not pc_IPv6 instead of pc_IPv4 sic@ */
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+    return fl_LoopbackModeB_IPv4IPv6Address(p_UseIPv4, v_PDN_AddressInfo.PCSCF_IPAddressIPv4, v_PDN_AddressInfo.PCSCF_IPAddressIPv6);
+  }
+
+  /*
+   * @desc      create an IPv4 packet ( currently with typical settings for UDP or ICMP packet)
+   * @param     p_Identification    (default value: '6d7d'O)
+   * @param     p_TOS               (default value: '00'O)
+   * @param     p_Protocol
+   * @param     p_SourceAddr
+   * @param     p_DestAddr
+   * @param     p_IPPayload
+   * @return    octetstring
+   * @status    APPROVED (ENDC, LTE, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NBIOT, NR5GC, NR5GC_IRAT, UTRAN)
+   */
+  function f_IPv4Packet_Create(O2_Type p_Identification := '6d7d'O, // Identification; random value (can be used to generate different packets
+                               O1_Type p_TOS := '00'O,              // Differentiated services (RFC 2474), Explicit Congestion Notification (ECN, RFC 3168), former TOS (RFC 791)
+                               UInt8_Type p_Protocol,
+                               charstring p_SourceAddr,
+                               charstring p_DestAddr,
+                               octetstring p_IPPayload)
+    return octetstring
+  {
+    var integer v_TotalLength := lengthof(p_IPPayload) + 20;  // 20 bytes IP header
+    var O4_Type v_SourceAddrStr := f_Convert_IPv4Addr2OctString(p_SourceAddr);
+    var O4_Type v_DestAddrStr := f_Convert_IPv4Addr2OctString(p_DestAddr);
+    var octetstring v_OctetString;
+    
+    // IP header
+    v_OctetString := '45'O;            // version and header length
+    v_OctetString := v_OctetString & p_TOS;
+    v_OctetString := v_OctetString & int2oct(v_TotalLength, 2);
+    v_OctetString := v_OctetString & p_Identification;
+    v_OctetString := v_OctetString & '0000'O; // flags (3 bits; typically 0 for UDP) and fragment offset (13 bits; typically 0 for UDP)
+    v_OctetString := v_OctetString & '80'O;   // Time to live (random value)
+    v_OctetString := v_OctetString & int2oct(p_Protocol, 1);
+    v_OctetString := v_OctetString & f_IpChecksum(v_OctetString & '0000'O & v_SourceAddrStr & v_DestAddrStr);
+    v_OctetString := v_OctetString & v_SourceAddrStr;
+    v_OctetString := v_OctetString & v_DestAddrStr;
+    v_OctetString := v_OctetString & p_IPPayload;
+    
+    return v_OctetString;
+  }
+
+  /*
+   * @desc      build an IPv4 UDP datagram
+   * @param     p_SourceAddr
+   * @param     p_DestAddr
+   * @param     p_SourcePort
+   * @param     p_DestPort
+   * @param     p_UdpPayload
+   * @return    octetstring
+   * @status    APPROVED (LTE, LTE_A_PRO, NBIOT, NR5GC, UTRAN)
+   */
+  function f_IPv4UdpDatagram_Create(charstring p_SourceAddr,
+                                    charstring p_DestAddr,
+                                    UInt16_Type p_SourcePort,
+                                    UInt16_Type p_DestPort,
+                                    octetstring p_UdpPayload)
+    return octetstring
+  { /* @desc create UDP datagram */
+    var integer v_UdpDatagramLength := lengthof(p_UdpPayload) + 8;  // 8 bytes UDP header
+    // Pseudo Header:
+    var O4_Type v_SourceAddrStr := f_Convert_IPv4Addr2OctString(p_SourceAddr);
+    var O4_Type v_DestAddrStr := f_Convert_IPv4Addr2OctString(p_DestAddr);
+    var O2_Type v_LengthStr := int2oct(v_UdpDatagramLength, 2);
+    var O1_Type v_Protocol := '11'O; // UDP
+    var octetstring v_PseudoHeader := v_SourceAddrStr & v_DestAddrStr &'00'O & v_Protocol & v_LengthStr;
+    var O2_Type v_ChecksumDummy := '0000'O;
+    var octetstring v_OctetString := ''O;
+    
+    v_OctetString := v_OctetString & int2oct(p_SourcePort, 2);
+    v_OctetString := v_OctetString & int2oct(p_DestPort, 2);
+    v_OctetString := v_OctetString & v_LengthStr;
+    v_OctetString := v_OctetString & f_IpChecksum(v_PseudoHeader & v_OctetString & v_ChecksumDummy & p_UdpPayload);  /* Note: the UDP checksum can also be '0000'O what means "no chcksum"; but that is not the usual case */
+    v_OctetString := v_OctetString & p_UdpPayload;
+
+    return v_OctetString;
+  }
+
+  /*
+   * @desc      create UDP datagram
+   * @param     p_SourceAddr
+   * @param     p_DestAddr
+   * @param     p_SourcePort
+   * @param     p_DestPort
+   * @param     p_UdpPayload
+   * @return    octetstring
+   * @status    APPROVED (LTE, LTE_A_PRO, NBIOT, NR5GC, UTRAN)
+   */
+  function f_IPv6UdpDatagram_Create(charstring p_SourceAddr,
+                                    charstring p_DestAddr,
+                                    UInt16_Type p_SourcePort,
+                                    UInt16_Type p_DestPort,
+                                    octetstring p_UdpPayload)
+    return octetstring
+  {
+    var integer v_UdpDatagramLength := lengthof(p_UdpPayload) + 8;  // 8 bytes UDP header
+    var O16_Type v_SourceAddrStr := f_Convert_IPv6Addr2OctString(p_SourceAddr);
+    var O16_Type v_DestAddrStr := f_Convert_IPv6Addr2OctString(p_DestAddr);
+    var O4_Type v_LengthStr := int2oct(v_UdpDatagramLength, 4); // RFC 2460 clause 8.1
+    var octetstring v_PseudoHeader;
+    var octetstring v_OctetString;
+    
+    // Prepare the pseudo header, see RFC 2460 and illustration in Wikipedia
+    v_PseudoHeader := v_SourceAddrStr & v_DestAddrStr & v_LengthStr;
+    v_PseudoHeader := v_PseudoHeader & v_LengthStr; // UDP length
+    v_PseudoHeader := v_PseudoHeader & '000000'O & '11'O; // Zeros and Next header (= Protocol)
+    v_PseudoHeader := v_PseudoHeader & int2oct(p_SourcePort, 2) & int2oct(p_DestPort, 2) &  int2oct(v_UdpDatagramLength, 2) & '0000'O;
+    v_PseudoHeader := v_PseudoHeader & p_UdpPayload;
+    
+    // Now set the UDP packet
+    v_OctetString := int2oct(p_SourcePort, 2);
+    v_OctetString := v_OctetString & int2oct(p_DestPort, 2);
+    v_OctetString := v_OctetString & int2oct(v_UdpDatagramLength, 2);
+    v_OctetString := v_OctetString & f_IpChecksum(v_PseudoHeader);
+    v_OctetString := v_OctetString & p_UdpPayload;
+    
+    return v_OctetString;
+  }
+
+  /*
+   * @desc      depending on whether p_UE_Addr is an IPv4 or an IPv6 address an IPv4 or IPv6 packet is returned with a UDP datagram as payload
+   * @param     p_SourceAddr
+   * @param     p_DestAddr
+   * @param     p_SourcePort
+   * @param     p_DestPort
+   * @param     p_Payload           (default value: tsc_IP_AnyData)
+   * @return    octetstring
+   * @status    APPROVED (LTE, LTE_A_PRO, NBIOT)
+   */
+  function f_IPv4IPv6_AnyUdpPacket(charstring p_SourceAddr,
+                                   charstring p_DestAddr,
+                                   UInt16_Type p_SourcePort,
+                                   UInt16_Type p_DestPort,
+                                   octetstring p_Payload := tsc_IP_AnyData) return octetstring
+  {
+    var UInt8_Type v_Protocol := tsc_IP_Protocol_UDP;
+    var octetstring v_IpPacket;
+
+    if (f_IpAddressIsIPv4(p_SourceAddr)) {
+      v_IpPacket := f_IPv4Packet_Create(-, -, v_Protocol, p_SourceAddr, p_DestAddr, f_IPv4UdpDatagram_Create(p_SourceAddr, p_DestAddr, p_SourcePort, p_DestPort, p_Payload));
+    } else {
+      v_IpPacket := f_IPv6Packet_Create(-, -, v_Protocol, -, p_SourceAddr, p_DestAddr, f_IPv6UdpDatagram_Create(p_SourceAddr, p_DestAddr, p_SourcePort, p_DestPort, p_Payload));
+    }
+    return v_IpPacket;
+  }
+
+}

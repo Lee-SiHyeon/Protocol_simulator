@@ -1,0 +1,398 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-05-19 16:34:20 +0200 (Sun, 19 May 2024) $
+// $Rev: 38497 $
+/******************************************************************************/
+
+module IMS_Procedures_CallHold {
+
+  import from CommonDefs all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControl4G5G all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SDP_MessagesVideo all;
+  import from IMS_SDP_Templates all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+
+  /*
+   * @desc      Acc. to 34.229-1 C.8 the UE shall use the same SDP body as for step 5 of C.21 or C.25 except from
+   *            - direction-tag for the current-status remote segment shall be "sendrecv" (handled in f_IMS_BuildSDP_UpdatedOfferAudio_RX/f_IMS_BuildSDP_UpdatedOfferAudioVideo_RX)
+   *            - specific direction attribute (either on session level or on media description level)
+   *              this is checked by fl_IMS_MOCallHoldResume_CheckSendRecvMode after the message has been received
+   *              (=> no changes needed compared to step 5 of C.21 or C.25)
+   * @param     p_SDP_Message_PrevOffer
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallHoldResume_BuildSDP_OfferRX(SDP_Message p_SDP_Message_PrevOffer) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5-145726: use of f_IMS_BuildSDP_UpdatedOfferAudio_RX, f_IMS_BuildSDP_UpdatedOfferAudioVideo_RX sic@ */
+    var template (present) SDP_Message v_SDP_Message;
+    var boolean v_ResourcesEstablished := true;
+    var IMS_SDP_AudioCodec_Type v_AudioCodec;
+    var IMS_SDP_VideoCodec_Type v_VideoCodec;
+    var SDP_EVS_Configuration_MOCallSetup_Type v_EvsConfiguration;
+
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {    // @sic R5s230862: EVS_16000 and H265_90000 hardcoded for 5G sic@
+      v_AudioCodec := EVS_16000;
+      v_VideoCodec := H265_90000;
+      v_EvsConfiguration := EVS_A2;
+    } else {                             // @sic R5s230862: AMR_16000 and H264_90000 hardcoded for 4G sic@
+      v_AudioCodec := AMR_16000;
+      v_VideoCodec := H264_90000;
+      v_EvsConfiguration := NO_EVS;
+    }
+
+    if (lengthof(p_SDP_Message_PrevOffer.media_list) == 1) {    // => audio only
+      v_SDP_Message := f_IMS_BuildSDP_UpdatedOfferAudio_RX(p_SDP_Message_PrevOffer, v_ResourcesEstablished, v_AudioCodec, v_EvsConfiguration);
+    } else {
+      v_SDP_Message := f_IMS_BuildSDP_UpdatedOfferAudioVideo_RX(CallHold, p_SDP_Message_PrevOffer, v_AudioCodec, v_VideoCodec);
+    }
+
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      build up SDP message for step 3 of C.8
+   * @param     p_HoldResume
+   * @param     p_SDP_Message_PrevOffer
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallHoldResume_BuildSDP_AnswerTX(IMS_CallHoldResume_Type p_HoldResume,
+                                                    SDP_Message p_SDP_Message_PrevOffer) runs on IMS_PTC return template (value) SDP_Message
+  {
+    var template (value) SDP_Message v_SDP_Message := f_IMS_BuildSDP_CommonResponseToOfferTX(p_SDP_Message_PrevOffer);
+
+    if (p_HoldResume == HOLD) {
+      // invert "sendonly" to "recvonly" in the session attributes (if the UE uses session attribute to hold the call)
+      v_SDP_Message.attributes := f_SDP_ExchangeAttribute(v_SDP_Message.attributes, cr_SDP_Attribute_sendonly, cs_SDP_Attribute_recvonly);  // change session attributes
+      v_SDP_Message.media_list := f_IMS_SDP_MediaList_ExchangeAttribute(v_SDP_Message.media_list, cr_SDP_Attribute_sendonly, cs_SDP_Attribute_recvonly);  // change media lines
+    }
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      Check recv mode for call hold/resume acc. to C.8
+   * @param     p_HoldResume
+   * @param     p_HoldResumeOffer
+   * @param     p_OriginalOffer
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MOCallHoldResume_CheckSendRecvMode(IMS_CallHoldResume_Type p_HoldResume,
+                                                     SDP_Message p_HoldResumeOffer,
+                                                     SDP_Message p_OriginalOffer) runs on IMS_PTC
+  {
+    var SDP_attribute_list v_HoldResumeOffer_AttributeList;
+    var SDP_attribute_list v_OriginalOffer_AttributeList;
+    var template (omit) SDP_attribute v_SendRecvAttribute;
+    var SDP_attribute v_SendRecvAttributeVal;
+    var integer i;
+
+    v_SendRecvAttribute := f_SDP_AttributeList_GetAttribute(p_HoldResumeOffer.attributes, cr_SDP_Attribute_AnySendRecvMode);   // session attribute
+    if (ispresent(v_SendRecvAttribute)) {
+      // Hold/Resume offer has session attribute for send/recv mode
+      v_SendRecvAttributeVal := valueof(v_SendRecvAttribute);
+      select (p_HoldResume) {
+        case (HOLD) {
+          if (match(v_SendRecvAttributeVal, cs_SDP_Attribute_inactive)) {          // => check all media streams of the original offer to be recvonly
+            if (not f_SDP_CheckMediaListAttributes(p_OriginalOffer.media_list, cs_SDP_Attribute_recvonly)) {
+              f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold has session attribute 'inactive' and but not all media streams of the original offer have been 'recvonly' ");
+              return;
+            }
+          } else if (match(v_SendRecvAttributeVal, cs_SDP_Attribute_sendonly)) {   // => check all media streams of the original offer to be sendrecv
+            if (not f_SDP_CheckMediaListAttributes(p_OriginalOffer.media_list, cs_SDP_Attribute_sendrecv)) {
+              f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold has session attribute 'sendonly' and but not all media streams of the original offer have been 'sendrecv' ");
+              return;
+            }
+          } else {   // send/recv mode is neither inactive nor sendonly
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold has session attribute being neither 'sendonly' not 'inactive'");
+            return;
+          }
+        }
+        case (RESUME) {  // all media streams of the original offer shall be the same and the same as in the "RESUME offer"
+          if (not f_SDP_CheckMediaListAttributes(p_OriginalOffer.media_list, v_SendRecvAttributeVal)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call resume has session attribute not matching with all media streams of the original offer");
+            return;
+          }
+        }
+      }
+      // check that Hold/Resume offer does not have further send/recv mode attributes in any media stream
+      if (f_SDP_CheckMediaListAttributes(p_HoldResumeOffer.media_list, cr_SDP_Attribute_AnySendRecvMode)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold/resume has session attribute for send/recv mode but also send/recv mode attributes for media streams");
+        return;
+      }
+    } else {
+      // Hold/Resume offer has no session attribute for send/recv mode => check stream by stream
+      if (lengthof(p_HoldResumeOffer.media_list) != lengthof(p_OriginalOffer.media_list)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold/resume has different number of media streams than the original offer");
+        return;
+      }
+      for (i := 0; i < lengthof(p_HoldResumeOffer.media_list); i:=i+1) {
+        v_HoldResumeOffer_AttributeList := p_HoldResumeOffer.media_list[i].attributes;
+        v_OriginalOffer_AttributeList := p_OriginalOffer.media_list[i].attributes;
+        select (p_HoldResume) {
+          case (HOLD) {
+            if (f_SDP_AttributeList_CheckAttribute(v_HoldResumeOffer_AttributeList, cs_SDP_Attribute_inactive)) {
+              v_SendRecvAttribute := cs_SDP_Attribute_recvonly;
+            }
+            else if (f_SDP_AttributeList_CheckAttribute(v_HoldResumeOffer_AttributeList, cs_SDP_Attribute_sendonly)) {
+              v_SendRecvAttribute := cs_SDP_Attribute_sendrecv;
+            }
+          }
+          case (RESUME) {
+            v_SendRecvAttribute := f_SDP_AttributeList_GetAttribute(v_HoldResumeOffer_AttributeList, cr_SDP_Attribute_AnySendRecvMode);
+          }
+        }
+        if (not ispresent(v_SendRecvAttribute) or not f_SDP_AttributeList_CheckAttribute(v_OriginalOffer_AttributeList, v_SendRecvAttribute)) { // compiler warning cannot be avoided for v_SendRecvAttribute
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "SDP offer for call hold/resume has invalid send/recv mode attribute for single media stream");
+          return;
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      MO call hold according to Annex C.8 (TS 34.229-1)
+   * @param     p_HoldResume
+   * @param     p_PrevInviteRequest
+   * @param     p_MessageHeader_Prev183Response
+   * @param     p_SDP_OriginalOffer
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MOCallHoldResume(IMS_CallHoldResume_Type p_HoldResume,
+                                  INVITE_Request p_PrevInviteRequest,
+                                  MessageHeader p_MessageHeader_Prev183Response,
+                                  SDP_Message p_SDP_OriginalOffer,
+                                  charstring p_ContactUri := px_IMS_CalleeContactUri) runs on IMS_PTC return SDP_Message
+  { /* @sic R5-150702: p_PrevSessionVersion removed; session version now is checked in generic way in f_IMS_SIP_DecodeMatchAndCheckSDP sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) MessageHeader v_MessageHeader_Invite;
+    var template (present) MessageHeader v_MessageHeader_Update;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var template (value) SDP_Message v_SDP_HoldResumeResponse;
+    var MessageBody v_MessageBody;
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var INVITE_Request v_InviteRequest;
+    var UPDATE_Request v_UpdateRequest;
+    var MessageHeader v_MessageHeader;
+    var SDP_Message v_SDP_HoldResumeOffer;
+    var SipUrl v_RequestSipUrl := f_MessageHeader_GetContactSipUrl(p_MessageHeader_Prev183Response);           // get the contact URI out of the Contact header being sent to the UE in the earlier 183 response
+    var SipUrl v_ToHeaderSipUrl := f_Addr_Union_GetSipUrl(p_PrevInviteRequest.msgHeader.toField.addressField); // SIP URI in the To header of the INVITE needs to be the same SIP URI as been used in the previous INVITE
+    var integer v_CseqValue := f_IMS_PTC_ImsInfo_CseqGetValue(dialogRemote);   /* @sic R5s140121 change 7: CSeq Value is incremented in f_IMS_InviteRequest_MessageHeaderRX and in f_IMS_UpdateRequest_MessageHeaderRX but shall be the same for both sic@ */
+    
+    // Steps 1 and 2 - Receive Invite Request or Update Request
+    v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderRX(v_ToHeaderSipUrl, -, A_2_1_A5);
+    f_IMS_PTC_ImsInfo_CseqSet(dialogRemote, v_CseqValue);                 /* @sic R5s140121 change 7: restore CSeq Value sic@ */
+    v_MessageHeader_Update := f_IMS_UpdateRequest_MessageHeaderRX(p_PrevInviteRequest);
+    
+    alt {
+      // INVITE
+      [] a_IMS_ReceiveRequest(car_IMS_Invite_Request(cr_INVITE_Request(v_RequestSipUrl, v_MessageHeader_Invite, cr_MessageBody_SDP)), v_IMS_DATA_REQ_ByRef)
+        {
+          v_InviteRequest := v_IMS_DATA_REQ_ByRef.Request.Invite;
+          v_MessageHeader := v_InviteRequest.msgHeader;
+          v_MessageBody := v_InviteRequest.messageBody;
+          
+          f_IMS_A_2_1_Invite_CommonChecks(v_IMS_DATA_REQ_ByRef, A_2_1_A5);
+        }
+      // UPDATE
+      [] a_IMS_ReceiveRequest(car_IMS_Update_Request(cr_UPDATE_Request(v_RequestSipUrl, v_MessageHeader_Update, cr_MessageBody_SDP)), v_IMS_DATA_REQ_ByRef)
+        {
+          v_UpdateRequest := v_IMS_DATA_REQ_ByRef.Request.Update;
+          v_MessageHeader := v_UpdateRequest.msgHeader;
+          v_MessageBody := v_UpdateRequest.messageBody;
+        }
+    }
+
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ_ByRef.RoutingInfo);
+    v_SDP_HoldResumeOffer := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_MessageBody, f_IMS_MOCallHoldResume_BuildSDP_OfferRX(p_SDP_OriginalOffer));  /* @sic R5s140324 - additional change 2 sic@ */
+    f_IMS_MessageHeader_CheckPreconditionIndicationForOffer(v_MessageHeader, PreconditionSupported);                                                        /* @sic R5-160792: PreconditionSupported sic@ */
+
+    /* @sic R5-150702: session version is checked in generic way in f_IMS_SIP_DecodeMatchAndCheckSDP sic@ */
+
+    // Check bandwidth
+    /* @sic R5-160906: no check of bandwidth anymore sic@ */
+
+    // Check send/receive mode
+    fl_IMS_MOCallHoldResume_CheckSendRecvMode(p_HoldResume, v_SDP_HoldResumeOffer, p_SDP_OriginalOffer);
+
+    if (isbound(v_InviteRequest)) {
+      // Step 2. Send 100 Trying
+      IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+    }
+
+    // Step 3. Respond with 200 OK (A.3.1 condition A5: Any response sent by the UE within a dialog
+    v_SDP_HoldResumeResponse := f_IMS_MOCallHoldResume_BuildSDP_AnswerTX(p_HoldResume, v_SDP_HoldResumeOffer);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200,
+                                                                   f_IMS_OtherResponse_200_MessageHeaderTX(v_MessageHeader,
+                                                                                                           cs_ContentTypeSDP,
+                                                                                                           -,
+                                                                                                           p_ContactUri,
+                                                                                                           tsc_SDP_WithPreconditions),  /* @sic R5-160792: PreconditionRequired sic@ */
+                                                                   cs_MessageBody_SDP(v_SDP_HoldResumeResponse))));
+    if (isbound(v_InviteRequest)) {
+      // Step 4. Receive ACK
+      v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200);
+      f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_RequestSipUrl, v_MessageHeader_Ack)));
+    }
+
+    return v_SDP_HoldResumeOffer;
+  }
+
+  /*
+   * @desc      build up SDP message for step 1 of C.9
+   * @param     p_HoldResume
+   * @param     p_SDP_LatestMessageBySSBeforeHold
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MTCallHoldResume_BuildSDP_OfferTX(IMS_CallHoldResume_Type p_HoldResume,
+                                                    template (value) SDP_Message p_SDP_LatestMessageBySSBeforeHold) runs on IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-160906: p_RtcpDuringHold removed, no change of any bandwidth anymore sic@ */
+    var template (value) SDP_Message v_SDP_Message := p_SDP_LatestMessageBySSBeforeHold;
+    var template (omit) SDP_media_desc_list v_SDP_Media_Desc_List;
+    var boolean v_AddIfNotPresent := true;
+    
+    select (p_HoldResume) {
+      case (HOLD) {
+        v_SDP_Media_Desc_List := f_IMS_SDP_MediaList_ExchangeAttribute(v_SDP_Message.media_list, cr_SDP_Attribute_AnySendRecvMode, cs_SDP_Attribute_sendonly, v_AddIfNotPresent); /* @sic R5-142993: cr_SDP_Attribute_AnySendRecvMode sic@
+                                                                                                                                                                                     @sic R5s180229: v_AddIfNotPresent sic@ */
+      }
+      case (HOLDINACTIVE) {
+        v_SDP_Media_Desc_List := f_IMS_SDP_MediaList_ExchangeAttribute(v_SDP_Message.media_list, cr_SDP_Attribute_AnySendRecvMode, cs_SDP_Attribute_inactive, v_AddIfNotPresent); /*  @sic R5s180548 sic@ */
+      }
+      case (RESUME) {
+        v_SDP_Media_Desc_List := f_IMS_SDP_MediaList_ExchangeAttribute(v_SDP_Message.media_list, cr_SDP_Attribute_AnySendRecvMode, cs_SDP_Attribute_sendrecv, v_AddIfNotPresent); /* @sic R5-142993: cr_SDP_Attribute_AnySendRecvMode sic@
+                                                                                                                                                                                     @sic R5s180229: v_AddIfNotPresent sic@ */
+      }
+    }
+    v_SDP_Message.origin.session_version := f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX();    // @sic R5s211703: session version maitained sic@
+    v_SDP_Message.media_list := v_SDP_Media_Desc_List;
+    
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      build up SDP message for step 3 of C.9
+   * @param     p_LatestSdpBySSBeforeHold
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MTCallHoldResume_BuildSDP_AnswerRX(template (value) SDP_Message p_LatestSdpBySSBeforeHold) runs on IMS_PTC return template (present) SDP_Message
+  { /* @sic R5s150371: parameter p_LatestSdpBySSBeforeHold sic@ */
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var template (present) charstring v_IPAddrOrigin := ?;
+    var template (present) charstring v_IPAddrConnection := ?;
+    var template SDP_bandwidth_list v_SDP_bandwidth_list := *;
+    var template SDP_attribute_list v_SDP_Attribute_List := *;      /* NOTE: direction attribute is checked after message has been received */
+    var template (present) SDP_media_desc v_SDP_Media_Desc_Audio := cr_SDP_Media_Desc(cr_SDP_Media_Audio(cr_SDP_AnyMediaFormatDescr, ?, ?),
+                                                                                      cr_SDP_Connection(v_AddrType, ?),
+                                                                                      v_SDP_bandwidth_list,
+                                                                                      v_SDP_Attribute_List);
+    var template (present) SDP_media_desc v_SDP_Media_Desc_Video := cr_SDP_Media_Desc(cr_SDP_Media_Video(cr_SDP_AnyMediaFormatDescr, ?, ?),
+                                                                                      cr_SDP_Connection(v_AddrType, ?),
+                                                                                      v_SDP_bandwidth_list,
+                                                                                      v_SDP_Attribute_List);
+    var template (present) SDP_media_desc_list v_SDP_Media_Desc_List;
+    
+    select (lengthof(p_LatestSdpBySSBeforeHold.media_list)) {    /* @sic R5s150371 change 1 sic@ */
+      case (1) {
+        v_SDP_Media_Desc_List := { v_SDP_Media_Desc_Audio };
+      }
+      case (2) {
+        v_SDP_Media_Desc_List := { v_SDP_Media_Desc_Audio, v_SDP_Media_Desc_Video };
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "");
+      }
+    }
+    return cr_SDP_Message_Common(-, v_AddrType, v_IPAddrOrigin, v_IPAddrConnection, -, -, v_SDP_Media_Desc_List);
+  }
+
+  /*
+   * @desc      Check recv mode for call hold/resume acc. to C.9
+   * @param     p_HoldResume
+   * @param     p_SDP_Message
+   * @status    APPROVED (IMS)
+   */
+  function fl_IMS_MTCallHoldResume_CheckSendRecvMode(IMS_CallHoldResume_Type p_HoldResume,
+                                                     SDP_Message p_SDP_Message) runs on IMS_PTC
+  {
+    var template (present) SDP_attribute v_ExpectedDirectionAttribute;
+    
+    select (p_HoldResume) {
+      case (HOLD)   { v_ExpectedDirectionAttribute := cr_SDP_Attribute_recvonly; }
+      case (RESUME) { v_ExpectedDirectionAttribute := cr_SDP_Attribute_sendrecv; }
+      case (HOLDINACTIVE) { v_ExpectedDirectionAttribute := cr_SDP_Attribute_inactive; } /* @sic R5s180548 sic@ */
+    }
+    
+    if (not f_SDP_CheckMediaListAttributes(p_SDP_Message.media_list, v_ExpectedDirectionAttribute) and
+        not f_SDP_AttributeList_CheckAttribute(p_SDP_Message.attributes, v_ExpectedDirectionAttribute)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing expected direction attribute");
+    }
+  }
+
+  /*
+   * @desc      MT call hold according to Annex C.9 (TS 34.229-1)
+   * @param     p_HoldResume
+   * @param     p_UEContactUrl
+   * @param     p_LatestSdpBySSBeforeHold
+   * @param     p_SSContactUrl      (default value: omit)
+   * @status    APPROVED (IMS)
+   */
+  function f_IMS_MTCallHoldResume(IMS_CallHoldResume_Type p_HoldResume,
+                                  SipUrl p_UEContactUrl,
+                                  template (value) SDP_Message p_LatestSdpBySSBeforeHold,
+                                  template (omit) SipUrl p_SSContactUrl := omit) runs on IMS_PTC
+  {
+    /* @sic R5s180548 sic@- added p_SSContactUrl for cases where the SS simulates a different peer UE than default (tsc_IMS_CallerSipAddrStr)
+     */
+    var template (value) MessageHeader v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderTX(-, A_2_1_A5);
+    var template (value) SDP_Message v_SDP_MessageTX := fl_IMS_MTCallHoldResume_BuildSDP_OfferTX(p_HoldResume, p_LatestSdpBySSBeforeHold);
+    var template (value) INVITE_Request v_InviteRequest := cs_INVITE_Request(p_UEContactUrl, v_MessageHeader_Invite, cs_MessageBody_SDP(v_SDP_MessageTX));
+    var template (value) MessageHeader v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderTX(v_InviteRequest);
+    var InternetProtocol_Type v_Protocol := f_IMS_PTC_ImsInfo_GetTransportProtocol();
+    var template (present) IMS_Response_Type v_ExpectedResponse;
+    var IMS_DATA_RSP v_IMS_DATA_RSP;
+    var SDP_Message v_SDP_MessageRX;
+    
+    // Step 1 - Send INVITE
+    if (ispresent(p_SSContactUrl)) { /* @sic R5s180548 sic@ */
+      v_InviteRequest.msgHeader.contact := cs_Contact(valueof(p_SSContactUrl));
+    }
+    IMS_Client.send(cas_IMS_Invite_Request(cs_IMS_RoutingInfo(v_Protocol), v_InviteRequest));
+    
+    // Step 2/3 - Receive optional 100 Trying, Receive 200 OK
+    v_ExpectedResponse := cr_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Invite, cr_ContentTypeSDP), cr_MessageBody_SDP);  /* @sic R5s140571: cr_MessageBody_SDP sic@
+                                                                                                                                                                    @sic R5-160793, R5-162930: PreconditionRequired sic@ */
+    v_IMS_DATA_RSP := f_IMS_ReceiveResponse_OptionalTrying(v_InviteRequest.msgHeader, v_Protocol, v_ExpectedResponse);                       /* @sic R5s160540: further improvement sic@ */
+    v_SDP_MessageRX := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP(v_IMS_DATA_RSP.Response.messageBody,
+                                                                       fl_IMS_MTCallHoldResume_BuildSDP_AnswerRX(p_LatestSdpBySSBeforeHold));  /* @sic R5s140324 - additional change 1 sic@
+                                                                                                                                                  @sic R5s150371: parameter p_LatestSdpBySSBeforeHold sic@ */
+    fl_IMS_MTCallHoldResume_CheckSendRecvMode(p_HoldResume, v_SDP_MessageRX);
+    // @sic R5-142993: no bandwidth to be checked sic@
+    
+    // Step 4. Send ACK. The SS acknowledges the receipt of 200 OK for INVITE.
+    IMS_Client.send(cas_IMS_Ack_Request(cs_IMS_RoutingInfo(v_Protocol), cs_ACK_Request(p_UEContactUrl, v_MessageHeader_Ack)));
+  }
+
+}

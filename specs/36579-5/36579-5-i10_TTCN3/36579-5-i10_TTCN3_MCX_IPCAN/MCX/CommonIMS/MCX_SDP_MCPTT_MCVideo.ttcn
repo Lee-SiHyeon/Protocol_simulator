@@ -1,0 +1,1269 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-03-05 11:06:19 +0100 (Tue, 05 Mar 2024) $
+// $Rev: 37885 $
+/******************************************************************************/
+
+module MCX_SDP_MCPTT_MCVideo {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_SDP_Templates all;
+  import from IP_ASP_Common all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SDPTypes all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_Parameters all;
+  import from MCX_SDP_Common all;
+
+  type enumerated MCX_MediaControlCondition_Type {                      /* @status    APPROVED (MCX) */
+    withoutFloorControl,                        /* MCPTT call without media control; in case of preestablished session there is still a media description for media control  */
+    withoutTransmissionControl,                 /* MCVideo call without media control; in case of preestablished session there is still a media description for media control  */
+    optionalMediaControl,                       /* media description for media control is optional */
+    withoutImplictGrantRequest,                 /* media description for media control is expected without implicit grant request */
+    withImplictGrantRequest                     /* media description for media control is expected with implicit grant request (condition IMPLICIT_GRANT_REQUESTED) */
+  };
+
+  type enumerated MCX_MediaControlConditionSdpAnswer_Type {             /* @status    APPROVED (MCX) */
+    implicitRequestGranted,                     /* if requested in the SDP offer, the implicit floor/transmission request gets granted in the SDP answer (conditions IMPLICIT_GRANT_REQUESTED, IMPLICIT_FLOOR_GRANTED */
+    implicitRequestNoted,                       /* if requested in the SDP offer, the implicit floor/transmission request gets accepted but not granted (condition IMPLICIT_GRANT_REQUESTED only) */
+    implicitRequestRejected                     /* even when if requested in the SDP offer, the SDP answer does neither contain the mc_implicit_request nor the mc_granted parameter */
+  };
+
+  type enumerated MCX_SDP_OfferAnswer_Type { SDP_OFFER, SDP_ANSWER };                   /* @status    APPROVED (MCX) */
+
+  type record MCPTT_MCVideo_SdpCheckInfo_Type {                                         /* @status    APPROVED (MCX) */
+    MCX_SessionType_Type                SessionType,
+    MCX_SDP_OfferAnswer_Type            OfferAnswer,
+    SDP_attribute                       DirectionAudio,
+    SDP_attribute                       DirectionVideo,
+    MCX_MediaControlCondition_Type      MediaControlCondition,
+    boolean                             EndToEndSecurity,
+    boolean                             IsInitialOffer,
+    integer                             NonDefaultPriority optional                     /* @sic R5s220129: mc_priority to be used in SDP answer e.g. for test case 5.4 sic@ */
+  };
+
+  type record MCPTT_MCVideo_SdpInfoRX_Type {                                            /* structure with information to receive and check SDP messages
+                                                                                           @status    APPROVED (MCX) */
+    SDP_Message                         SdpTemplate optional,
+    MCPTT_MCVideo_SdpCheckInfo_Type     CheckInfo
+  };
+
+  template (value) MCPTT_MCVideo_SdpCheckInfo_Type cs_MCPTT_MCVideo_SdpCheckInfo(MCX_SessionType_Type p_SessionType,
+                                                                                 MCX_SDP_OfferAnswer_Type p_OfferAnswer,
+                                                                                 template (value) SDP_attribute p_DirectionAudio,
+                                                                                 template (value) SDP_attribute p_DirectionVideo,
+                                                                                 MCX_MediaControlCondition_Type p_MediaControlCondition,
+                                                                                 boolean p_EndToEndSecurity,
+                                                                                 boolean p_IsInitialOffer) :=
+  { /* @status    APPROVED (MCX) */
+    SessionType            := p_SessionType,
+    OfferAnswer            := p_OfferAnswer,
+    DirectionAudio         := p_DirectionAudio,
+    DirectionVideo         := p_DirectionVideo,
+    MediaControlCondition  := p_MediaControlCondition,
+    EndToEndSecurity       := p_EndToEndSecurity,
+    IsInitialOffer         := p_IsInitialOffer,                 /* if the SdpInfoRX is used more than once in a test case, the flag may need to be reset */
+    NonDefaultPriority     := omit
+  };
+
+  /*
+   * @desc      return <format> for fmtp attribute of the MCPTT or MCVideo media control channel
+   * @param     p_ServiceType
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaControl_Fmt(MCX_ServiceType_Type p_ServiceType) return charstring
+  {
+    var charstring v_Fmt := "";
+    select (p_ServiceType) {
+      case (MCPTT)   { v_Fmt := "MCPTT"; }
+      case (MCVideo) { v_Fmt := "MCVideo"; }
+    }
+    return v_Fmt;
+  }
+
+  /*
+   * @desc      return i= line (media title) for audio media description
+   * @param     p_ServiceType
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaTitleAudio(MCX_ServiceType_Type p_ServiceType) return charstring
+  {
+    var charstring v_MediaTitle := "";
+    select (p_ServiceType) {
+      case (MCPTT)   { v_MediaTitle := "speech"; }
+      case (MCVideo) { v_MediaTitle := "audio component of MCVideo"; }
+    }
+    return v_MediaTitle;
+  }
+
+  /*
+   * @desc      return i= line (media title) for video media description
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaTitleVideo() return charstring
+  {
+    var charstring v_MediaTitle := "video component of MCVideo";
+    return v_MediaTitle;
+  }
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_queueing := "mc_queueing";                       /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_priority := "mc_priority";                       /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_reception_priority := "mc_reception_priority";   /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_granted := "mc_granted";                         /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_implicit_request := "mc_implicit_request";       /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_ssrc := "mc_ssrc";                               /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_no_floor_ctrl := "mc_no_floor_ctrl";             /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_floor_ssrc := "mc_floor_ssrc";                   /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_audio_ssrc := "mc_audio_ssrc";                   /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_video_ssrc := "mc_video_ssrc";                   /* @status    APPROVED (MCX) */
+
+  const charstring tsc_MCX_SDP_Fmtp_mc_transmission_ssrc := "mc_transmission_ssrc";     /* @status    APPROVED (MCX) */
+
+  type record MCX_SDP_MediaControlFmtparameters_Type {          /* fmtp parameters for MCPTT (24.380 clause 12, 14) and MCVideo (24.581 clause 12, 14)
+                                                                   @status    APPROVED (MCX) */
+    Null_Type mc_queueing optional,
+    integer   mc_priority optional,
+    integer   mc_reception_priority optional,                   /* MCVideo only */
+    Null_Type mc_granted optional,
+    Null_Type mc_implicit_request optional,
+    integer   mc_ssrc optional,                                 /* MCPTT only and DL only */
+    Null_Type mc_no_floor_ctrl optional,                        /* MCPTT only */
+    integer   mc_floor_ssrc optional,                           /* @sic R5-236321: MCPTT only (Rel-18) sic@ */
+    integer   mc_audio_ssrc optional,                           /* @sic R5-236321: MCVideo only (Rel-18) and DL only sic@ */
+    integer   mc_video_ssrc optional,                           /* @sic R5-236321: MCVideo only (Rel-18) and DL only sic@ */
+    integer   mc_transmission_ssrc optional                     /* @sic R5-236321: MCVideo only (Rel-18 sic@ */
+  };
+
+  template (value) MCX_SDP_MediaControlFmtparameters_Type cs_MCX_SDP_MediaControlFmtparameters_Init(template (omit) Null_Type p_NoFloorCtrl := omit) :=
+  { /* @status    APPROVED (MCX) */
+    mc_queueing := omit,
+    mc_priority := omit,
+    mc_reception_priority := omit,
+    mc_granted := omit,
+    mc_implicit_request := omit,
+    mc_ssrc := omit,
+    mc_no_floor_ctrl := p_NoFloorCtrl,
+    mc_floor_ssrc := omit,
+    mc_audio_ssrc := omit,
+    mc_video_ssrc := omit,
+    mc_transmission_ssrc := omit
+  };
+
+  template (value) MCX_SDP_MediaControlFmtparameters_Type crs_MCX_SDP_MediaControlFmtparameters_NoFloorControl := cs_MCX_SDP_MediaControlFmtparameters_Init(true);  /* @status    APPROVED (MCX) */
+
+  template (present) MCX_SDP_MediaControlFmtparameters_Type cr_MCX_SDP_MediaControlFmtparameters_OFFER(template Null_Type p_Queuing,
+                                                                                                       template integer p_Priority,
+                                                                                                       template integer p_ReceptionPriority := omit,
+                                                                                                       template Null_Type p_InitialOffer,
+                                                                                                       template Null_Type p_ImplicitRequest) :=
+  { /* @status    APPROVED (MCX) */
+    mc_queueing := p_Queuing,
+    mc_priority := p_Priority,
+    mc_reception_priority := p_ReceptionPriority,
+    mc_granted := p_InitialOffer,
+    mc_implicit_request := p_ImplicitRequest,
+    mc_ssrc := omit,      // @sic R5-222026 sic@ @sic R5-236321: omit sic@
+    mc_no_floor_ctrl := omit,
+    mc_floor_ssrc := *,
+    mc_audio_ssrc := omit,
+    mc_video_ssrc := omit,
+    mc_transmission_ssrc := *
+  };
+
+  template (present) MCX_SDP_MediaControlFmtparameters_Type cr_MCX_SDP_MediaControlFmtparameters_ANSWER(template Null_Type p_Queuing,
+                                                                                                        template integer p_Priority,
+                                                                                                        template integer p_ReceptionPriority := omit) :=
+  { /* @status    APPROVED (MCX) */
+    /* NOTE: per default (36.579-1 Table 5.5.3.1.1-2) the mc_reception_priority is not present in the DL SDP offer => according to 36.579-1 Table 5.5.3.1.2-2 it is not present in the answer either */
+    mc_queueing := p_Queuing,
+    mc_priority := p_Priority,
+    mc_reception_priority := p_ReceptionPriority,
+    mc_granted := omit,
+    mc_implicit_request := omit,
+    mc_ssrc := omit,
+    mc_no_floor_ctrl := omit,
+    mc_floor_ssrc := *,
+    mc_audio_ssrc := omit,
+    mc_video_ssrc := omit,
+    mc_transmission_ssrc := *
+  };
+
+  /*
+   * @desc      Decode fmtp parameters for floor/transmission control
+   * @param     p_ServiceType
+   * @param     p_MediaDescription
+   * @return    MCX_SDP_MediaControlFmtparameters_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_MediaDescription_MediaControlFmtpParameters_Decode(MCX_ServiceType_Type p_ServiceType,
+                                                                        template (value) SDP_media_desc p_MediaDescription) runs on IMS_PTC return MCX_SDP_MediaControlFmtparameters_Type
+  {
+    var template (value) MCX_SDP_MediaControlFmtparameters_Type v_MediaControlParameters := cs_MCX_SDP_MediaControlFmtparameters_Init;
+    var charstring v_Fmt := fl_MCX_SDP_MediaControl_Fmt(p_ServiceType);
+    var SemicolonParam_List v_ParameterList := f_SDP_MediaDescr_GetCodecParameters(p_MediaDescription.attributes, v_Fmt);
+    var GenericParam v_GenericParam;
+    var integer i;
+    
+    for (i := 0; i < lengthof(v_ParameterList); i := i + 1) {
+      v_GenericParam := v_ParameterList[i];
+      select (v_GenericParam.id) {
+        case (tsc_MCX_SDP_Fmtp_mc_queueing)           { v_MediaControlParameters.mc_queueing := true; }
+        case (tsc_MCX_SDP_Fmtp_mc_priority)           { v_MediaControlParameters.mc_priority := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_reception_priority) { v_MediaControlParameters.mc_reception_priority := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_granted)            { v_MediaControlParameters.mc_granted := true; }
+        case (tsc_MCX_SDP_Fmtp_mc_implicit_request)   { v_MediaControlParameters.mc_implicit_request := true; }
+        case (tsc_MCX_SDP_Fmtp_mc_ssrc)               { v_MediaControlParameters.mc_ssrc := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_no_floor_ctrl)      { v_MediaControlParameters.mc_no_floor_ctrl := true; }
+        case (tsc_MCX_SDP_Fmtp_mc_floor_ssrc)         { v_MediaControlParameters.mc_floor_ssrc := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_audio_ssrc)         { v_MediaControlParameters.mc_audio_ssrc := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_video_ssrc)         { v_MediaControlParameters.mc_video_ssrc := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case (tsc_MCX_SDP_Fmtp_mc_transmission_ssrc)  { v_MediaControlParameters.mc_transmission_ssrc := str2int(f_GenericParam_GetValue(v_GenericParam)); }
+        case else { f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Unknown floor control parameter"); }
+      }
+    }
+    return valueof(v_MediaControlParameters);
+  }
+
+  /*
+   * @desc      Encode fmtp parameters for floor/transmission control to be sent to the client
+   * @param     p_MediaControlParameters
+   * @return    template (value) SemicolonParam_List
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_MediaDescription_MediaControlFmtpParameters_Encode(MCX_SDP_MediaControlFmtparameters_Type p_MediaControlParameters) return template (value) SemicolonParam_List
+  {
+    var template (value) SemicolonParam_List v_ParameterList := {};
+
+    if (isvalue(p_MediaControlParameters.mc_queueing))           { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_queueing)); }
+    if (isvalue(p_MediaControlParameters.mc_priority))           { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_priority, int2str(p_MediaControlParameters.mc_priority))); }
+    if (isvalue(p_MediaControlParameters.mc_reception_priority)) { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_reception_priority, int2str(p_MediaControlParameters.mc_reception_priority))); }
+    if (isvalue(p_MediaControlParameters.mc_granted))            { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_granted)); }
+    if (isvalue(p_MediaControlParameters.mc_implicit_request))   { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_implicit_request)); }
+    if (isvalue(p_MediaControlParameters.mc_ssrc))               { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_ssrc, int2str(p_MediaControlParameters.mc_ssrc))); }
+    if (isvalue(p_MediaControlParameters.mc_no_floor_ctrl))      { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_no_floor_ctrl)); }
+    if (isvalue(p_MediaControlParameters.mc_floor_ssrc))         { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_floor_ssrc, int2str(p_MediaControlParameters.mc_floor_ssrc))); }
+    if (isvalue(p_MediaControlParameters.mc_audio_ssrc))         { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_audio_ssrc, int2str(p_MediaControlParameters.mc_audio_ssrc))); }
+    if (isvalue(p_MediaControlParameters.mc_video_ssrc))         { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_video_ssrc, int2str(p_MediaControlParameters.mc_video_ssrc))); }
+    if (isvalue(p_MediaControlParameters.mc_transmission_ssrc))  { v_ParameterList := f_SemicolonParam_List_Add_TX(v_ParameterList, cs_GenericParam(tsc_MCX_SDP_Fmtp_mc_transmission_ssrc, int2str(p_MediaControlParameters.mc_transmission_ssrc))); }
+
+    return v_ParameterList;
+  }
+
+  template (present) SDP_attribute_list cr_MCX_SDP_Audio_MandatoryAttributes(template (present) SemicolonParam_List p_FmtpParams := ?) :=
+  { /* @status    APPROVED (MCX) */
+    cr_SDP_Attribute_rtpmap(-, cr_RTPMAP_AMR_16000),
+    cr_SDP_Attribute_fmtp(-, cr_Fmtp_ParamList(p_FmtpParams)),
+    cr_SDP_Attribute_ptime(?),
+    cr_SDP_Attribute_maxptime(?)
+  };
+
+  template (present) SDP_attribute_list cr_MCX_SDP_Video_MandatoryAttributes(template (present) SemicolonParam_List p_FmtpParams := ?) :=
+  { /* @status    APPROVED (MCX) */
+    cr_SDP_Attribute_rtpmap(-, cr_RTPMAP_H264_90000),
+    cr_SDP_Attribute_fmtp(-, cr_Fmtp_ParamList(p_FmtpParams))
+  };
+
+  template (present) SDP_attribute cr_SDP_Attribute_ssrc :=
+  { /* @status    APPROVED (MCX) */
+    ssrc := {
+      ssrc_id := ?,
+      attribute := ?
+    }
+  };
+
+  /*
+   * @desc      return "RTP/SAVP" or "RTP/AVP" depending on whether or not security is applied on the audio channel
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_Audio_TransportProtocol() return charstring
+  {
+    var charstring v_TransportProtocol := "RTP/SAVP";    /* would need to be set to c_rtpAvp if there is no security */
+    return v_TransportProtocol;
+  }
+
+  /*
+   * @desc      return ("RTP/SAVPF", "RTP/SAVP") or ("RTP/AVPF", "RTP/AVP") depending on whether or not security is applied on the audio channel
+   * @return    template (present) charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_Video_TransportProtocolRX() return template (present) charstring
+  {
+    var template (present) charstring v_TransportProtocol := ("RTP/SAVPF", "RTP/SAVP");    /* would need to be set to ("RTP/AVPF", "RTP/AVP") if there is no security */
+    return v_TransportProtocol;
+  }
+
+  /*
+   * @desc      return "RTP/SAVPF" or "RTP/AVPF" depending on whether or not security is applied on the audio channel
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_Video_TransportProtocolTX() return charstring
+  {
+    var charstring v_TransportProtocol := "RTP/SAVPF";    /* would need to be set to "RTP/AVPF" if there is no security */
+    return v_TransportProtocol;
+  }
+
+  /*
+   * @desc      Get fmt value for audio
+   * @param     p_MediaDescription
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaDescriptionAudio_GetFmt(SDP_media_desc p_MediaDescription) runs on IMS_PTC return charstring
+  {
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParametersForAMR := ?;  // => any fmtp parameters
+    var charstring v_Fmt := f_SDP_MediaDescr_GetAMR_WB_16000_1(p_MediaDescription, v_FmtpParametersForAMR);
+    
+    if (v_Fmt == "") {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid codec");
+    }
+    
+    return v_Fmt;
+  }
+
+  /*
+   * @desc      Get fmt value for audio
+   * @param     p_SdpOffer
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SdpOffer_GetFmtAudio(SDP_Message p_SdpOffer) runs on IMS_PTC return charstring
+  {
+    var SDP_media_desc v_SDP_Media_Audio := valueof(f_MCX_SDP_GetMediaDescription_Audio(p_SdpOffer));
+    return f_MCX_MediaDescriptionAudio_GetFmt(v_SDP_Media_Audio);
+  }
+
+  /*
+   * @desc      Get fmt value for video
+   * @param     p_MediaDescription
+   * @return    charstring
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_MediaDescriptionVideo_GetFmt(SDP_media_desc p_MediaDescription) runs on IMS_PTC return charstring
+  {
+    var template (present) SDP_attribute_fmtp_format_specific_params v_FmtpParametersForH264 := ?;  // => any fmtp parameters
+    var charstring v_Fmt := f_SDP_MediaDescr_GetH264_90000(p_MediaDescription, v_FmtpParametersForH264);
+    
+    if (v_Fmt == "") {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid codec");
+    }
+    
+    return v_Fmt;
+  }
+
+  /*
+   * @desc      Get media description for audio from given SDP message
+   * @param     p_SdpMessage
+   * @return    template (omit) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_GetMediaDescription_Audio(SDP_Message p_SdpMessage) return template (omit) SDP_media_desc
+  {
+    return f_IMS_SDP_MediaList_GetMediaStream(p_SdpMessage.media_list, c_audio);
+  }
+
+  /*
+   * @desc      Get media description for video from given SDP message
+   * @param     p_SdpMessage
+   * @return    template (omit) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_GetMediaDescription_Video(SDP_Message p_SdpMessage) return template (omit) SDP_media_desc
+  {
+    return f_IMS_SDP_MediaList_GetMediaStream(p_SdpMessage.media_list, c_video);
+  }
+
+  /*
+   * @desc      Get media description for media control from given SDP message
+   * @param     p_SdpMessage
+   * @return    template (omit) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SDP_GetMediaDescription_MediaControl(SDP_Message p_SdpMessage) return template (omit) SDP_media_desc
+  {
+    return f_IMS_SDP_MediaList_GetMediaStream(p_SdpMessage.media_list, "application");
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.1-1/2: Media description for audio
+   * @param     p_ServiceType
+   * @param     p_Connection
+   * @param     p_FurtherMandatoryAttributes
+   * @return    template (present) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_Audio_RX(MCX_ServiceType_Type p_ServiceType,
+                                                template (present) SDP_connection p_Connection,
+                                                template (present) SDP_attribute_list p_FurtherMandatoryAttributes) return template (present) SDP_media_desc
+  {
+    var template (present) charstring v_TransportProtocol := fl_MCX_SDP_Audio_TransportProtocol();
+    var template SDP_connection_list v_ConnectionList := { p_Connection } ifpresent;
+    var charstring v_MediaTitle := fl_MCX_SDP_MediaTitleAudio(p_ServiceType);
+    var template SDP_bandwidth_list v_BandwidthList := (cr_SDP_Bandwidth_List_ASonly, cr_SDP_Bandwidth_List_Media);  // @sic R5-217965, R5s211193 - Additional change: (cr_SDP_Bandwidth_List_ASonly, cr_SDP_Bandwidth_List_Media) instead of cr_SDP_Bandwidth_List_AS sic@
+    var template (present) SemicolonParam_List v_FmtpParams := {
+      cr_AMR_ModeChangeCapability,
+      cr_AMR_MaxRed("0"),
+      *
+    };
+    var template (present) SDP_attribute_list v_MandatoryAttributes := cr_MCX_SDP_Audio_MandatoryAttributes(v_FmtpParams);  /* further checks: fl_MCX_SDP_MediaDescription_CheckAudio */
+    var template (present) SDP_attribute_list v_MediaAttributes;
+
+    v_MandatoryAttributes := v_MandatoryAttributes & p_FurtherMandatoryAttributes;
+    v_MediaAttributes := superset(all from v_MandatoryAttributes);
+
+    return cr_SDP_Media_Desc_Common(cr_SDP_Media_Audio(-, -, v_TransportProtocol),              // m=line
+                                    v_MediaTitle,                                               // i=line
+                                    v_ConnectionList,                                           // c=line
+                                    v_BandwidthList,                                            // b=line
+                                    v_MediaAttributes);                                         // a=lines
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.1-2: Media description for video
+   * @param     p_OfferAnswer
+   * @param     p_Connection
+   * @param     p_FurtherMandatoryAttributes
+   * @return    template (present) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_Video_RX(MCX_SDP_OfferAnswer_Type p_OfferAnswer,
+                                                template (present) SDP_connection p_Connection,
+                                                template (present) SDP_attribute_list p_FurtherMandatoryAttributes) return template (present) SDP_media_desc
+  {
+    var template (present) charstring v_TransportProtocol := fl_MCX_SDP_Video_TransportProtocolRX();
+    var template SDP_connection_list v_ConnectionList := { p_Connection } ifpresent;
+    var charstring v_MediaTitle := fl_MCX_SDP_MediaTitleVideo();
+    var template SDP_bandwidth_list v_BandwidthList := (cr_SDP_Bandwidth_List_ASonly, cr_SDP_Bandwidth_List_Media);
+    var template (present) SemicolonParam_List v_MandatoryFmtpParams := { cr_Video_Fmtp_ProfileLevelId };
+    var template (present) SemicolonParam_List v_FmtpParams;
+    var template (present) SDP_attribute_list v_MandatoryAttributes;  /* further checks: fl_MCX_SDP_MediaDescription_CheckVideo */
+    var template (present) SDP_attribute_list v_MediaAttributes;
+
+    if (p_OfferAnswer == SDP_ANSWER) {
+      v_MandatoryFmtpParams := f_SemicolonParam_List_Add_RX(v_MandatoryFmtpParams, cr_Video_Fmtp_PacketizationMode);
+    }
+    v_FmtpParams := superset(all from v_MandatoryFmtpParams);
+    v_MandatoryAttributes := cr_MCX_SDP_Video_MandatoryAttributes(v_FmtpParams) & p_FurtherMandatoryAttributes;
+    v_MediaAttributes := superset(all from v_MandatoryAttributes);
+
+    return cr_SDP_Media_Desc_Common(cr_SDP_Media_Video(-, -, v_TransportProtocol),              // m=line
+                                    v_MediaTitle,                                               // i=line
+                                    v_ConnectionList,                                           // c=line
+                                    v_BandwidthList,                                            // b=line
+                                    v_MediaAttributes);                                         // a=lines
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.1-1/2: Media description for floor/transmission control
+   * @param     p_ServiceType
+   * @param     p_Connection
+   * @return    template (present) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_MediaControl_RX(MCX_ServiceType_Type p_ServiceType,
+                                                       template (present) SDP_connection p_Connection) return template (present) SDP_media_desc
+  {
+    var charstring v_Fmt := fl_MCX_SDP_MediaControl_Fmt(p_ServiceType);
+    var template (present) charstring v_TransportProto := "udp";       // in RFC 4566 "udp" is in lower case => prose CR needed when upper case shall be accepted too
+    var template (present) SDP_media_field v_SDP_Media := cr_SDP_Media("application", -, v_TransportProto, {v_Fmt});
+    var template SDP_connection_list v_ConnectionList := { p_Connection } ifpresent;
+    var template (present) SDP_attribute_list v_MediaAttributes := { cr_SDP_Attribute_fmtp(v_Fmt), * }; /* any fmtp parameters; fmtp parameters are checked in fl_MCX_SDP_MediaDescription_CheckMediaControl;
+                                                                                                           in addition there can be ice candidates in case of pre-established session establishment */
+    return cr_SDP_Media_Desc_Common(v_SDP_Media,            // m=line
+                                    -,                      // no i=line
+                                    v_ConnectionList,       // c=line
+                                    -,                      // no b=line
+                                    v_MediaAttributes);     // a=lines
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.1-1/2: SDP Message from the UE for MCPTT/MCVideo
+   * @param     p_ServiceType
+   * @param     p_OfferAnswer
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_MediaControlCondition
+   * @param     p_OptionalSessionLevelAttributes
+   * @param     p_FurtherMandatoryAttributesAudio
+   * @param     p_FurtherMandatoryAttributesVideo
+   * @return    template (present) SDP_Message
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SdpMessage_RX(MCX_ServiceType_Type p_ServiceType,
+                                MCX_SDP_OfferAnswer_Type p_OfferAnswer,
+                                boolean p_PRE_ESTABLISHED_SESSION,
+                                MCX_MediaControlCondition_Type p_MediaControlCondition,
+                                template (present) SDP_attribute_list p_OptionalSessionLevelAttributes,
+                                template (present) SDP_attribute_list p_FurtherMandatoryAttributesAudio,
+                                template (present) SDP_attribute_list p_FurtherMandatoryAttributesVideo) runs on IMS_PTC return template (present) SDP_Message
+  { /* p_FurtherMandatoryAttributesAudio, p_FurtherMandatoryAttributesVideo .. mainly to carry cr_SDP_Attribute_sendonly or cr_SDP_Attribute_recvonly (ambient listening) */
+    var charstring v_AddrType := f_IMS_PTC_NW_Address_GetTypeStr();
+    var template (present) charstring v_IPAddrUE := ?;               /* IP address of the UE is checked in f_MCX_SDP_CheckIpAddresses as IPv6 addresses may use different notations */
+    var template (present) SDP_connection v_Connection := cr_SDP_Connection(v_AddrType, v_IPAddrUE);
+
+    var template (present) SDP_media_desc v_MediaDescrAudio := fl_MCX_SDP_MediaDescription_Audio_RX(p_ServiceType, v_Connection, p_FurtherMandatoryAttributesAudio);
+    var template (present) SDP_media_desc v_MediaDescrVideo := fl_MCX_SDP_MediaDescription_Video_RX(p_OfferAnswer, v_Connection, p_FurtherMandatoryAttributesVideo);
+    var template (present) SDP_media_desc v_MediaDescrMediaControl := fl_MCX_SDP_MediaDescription_MediaControl_RX(p_ServiceType, v_Connection);
+
+    var template (present) SDP_media_desc_list v_MediaDescListWithoutMediaControl;
+    var template (present) SDP_media_desc_list v_MediaDescListWithMediaControl;
+    var template (present) SDP_media_desc_list v_SDP_Media_Desc_List;
+    var template (present) SDP_Message v_SDP_Message;
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_MediaDescListWithoutMediaControl := { v_MediaDescrAudio }; }
+      case (MCVideo) { v_MediaDescListWithoutMediaControl := { v_MediaDescrAudio, v_MediaDescrVideo }; }
+    }
+    v_MediaDescListWithMediaControl := v_MediaDescListWithoutMediaControl;
+    v_MediaDescListWithMediaControl[lengthof(v_MediaDescListWithMediaControl)] := v_MediaDescrMediaControl;
+
+    if (p_PRE_ESTABLISHED_SESSION) {     /* @sic R5-222026 introduction of mc_no_floor_ctrl sic@ */
+      v_SDP_Media_Desc_List := v_MediaDescListWithMediaControl;
+    } else {
+      select (p_MediaControlCondition) {
+        case (withoutFloorControl, withoutTransmissionControl) {
+          v_SDP_Media_Desc_List := v_MediaDescListWithoutMediaControl;
+        }
+        case (optionalMediaControl) {
+          v_SDP_Media_Desc_List := (v_MediaDescListWithoutMediaControl, v_MediaDescListWithMediaControl);
+        }
+        case else {
+          v_SDP_Media_Desc_List := v_MediaDescListWithMediaControl;
+        }
+      }
+    }
+    v_SDP_Message := cr_SDP_Message_Common(-, v_AddrType, v_IPAddrUE, v_IPAddrUE, -, -, v_SDP_Media_Desc_List);
+    v_SDP_Message.attributes := subset(all from p_OptionalSessionLevelAttributes) ifpresent;     // => session level attributes are optional in the first place
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      function to build common receive template and the correponding information to check the SDP message after receiption;
+   *            NOTE 1: p_CallType := ANY as e.g. for establishment of preestablished session there is no CallType yet
+   *            NOTE 2: even though the function returns "template (present)" only the SDP template may contain matching pattern but not the check information
+   * @param     p_ServiceType
+   * @param     p_SessionType
+   * @param     p_CallType          (default value: ANY)
+   * @param     p_OfferAnswer
+   * @param     p_MediaControlCondition (default value: withoutImplictGrantRequest)
+   * @param     p_DirectionAudio    (default value: cs_SDP_Attribute_sendrecv)
+   * @param     p_DirectionVideo    (default value: cs_SDP_Attribute_sendrecv)
+   * @param     p_EndToEndSecurity  (default value: omit)
+   * @return    template (present) MCPTT_MCVideo_SdpInfoRX_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SdpInfo_RX(MCX_ServiceType_Type p_ServiceType,
+                            MCX_SessionType_Type p_SessionType,
+                            MCX_CallType_Type p_CallType := ANY,
+                            MCX_SDP_OfferAnswer_Type p_OfferAnswer,
+                            MCX_MediaControlCondition_Type p_MediaControlCondition := withoutImplictGrantRequest,
+                            template (value) SDP_attribute p_DirectionAudio := cs_SDP_Attribute_sendrecv,
+                            template (value) SDP_attribute p_DirectionVideo := cs_SDP_Attribute_sendrecv,
+                            template (omit) boolean p_EndToEndSecurity := omit) runs on IMS_PTC return template (present) MCPTT_MCVideo_SdpInfoRX_Type
+  { /* @sic R5-222026: p_SessionType sic@ */
+
+    var boolean v_IsInitialOffer := not isvalue(f_IMS_PTC_ImsInfo_DialogGetPrevSdpMessageRX()); /* NOTE: f_IMS_PTC_ImsInfo_DialogGetPrevSdpMessageRX needs to be called before f_IMS_SIP_DecodeMatchAndCheckSDP,
+                                                                                                   as f_IMS_SIP_DecodeMatchAndCheckSDP will set SdpMessagePrevRX */
+    var boolean v_PRE_ESTABLISHED_SESSION := (p_SessionType == PRE_ESTABLISHED);
+    var template (present) SDP_Message v_SdpTemplate;
+    var template (present) SDP_attribute_list v_OptionalSessionLevelAttributes := {};
+    var template (present) SDP_attribute_list v_FurtherMandatoryAttributesAudio := {};
+    var template (present) SDP_attribute_list v_FurtherMandatoryAttributesVideo := {};
+    var template (value) MCPTT_MCVideo_SdpCheckInfo_Type v_CheckInfo;
+    var boolean v_EndToEndSecurity := false;
+    
+    if (not ischosen(p_DirectionAudio.sendrecv)) {
+      v_FurtherMandatoryAttributesAudio := { p_DirectionAudio };
+    }
+    if (not ischosen(p_DirectionVideo.sendrecv)) {
+      v_FurtherMandatoryAttributesVideo := { p_DirectionVideo };
+    }
+    if (isvalue(p_EndToEndSecurity)) {
+      v_EndToEndSecurity := valueof(p_EndToEndSecurity);
+    } else {
+      select (p_CallType) {
+        case (PRIVATE_CALL) {
+          if (p_OfferAnswer == SDP_OFFER) {
+            v_EndToEndSecurity := true;
+          }
+        }
+      }
+    }
+    if (p_CallType == GROUP_REJOIN) {                         /* @sic R5-241595: GROUP_REJOIN (MCVideo test case 6.1.1.14) sic@
+                                                                 According to Table 6.1.1.14.3.3-9 the condition is SDP_OFFER rather than INITIAL_SDP_OFFER
+                                                                 and therefore the UE is expected not to include mc_granted */
+      v_IsInitialOffer := false;
+    }
+
+    v_OptionalSessionLevelAttributes := f_SDP_Attributes_Add_RX(v_OptionalSessionLevelAttributes, cr_SDP_Attribute_Mikey, v_EndToEndSecurity);              // "a=key-mgmt:mikey" session level attribute added for private call with end-to-end security
+    v_OptionalSessionLevelAttributes := f_SDP_Attributes_Add_RX(v_OptionalSessionLevelAttributes, crs_SDP_Attribute_ice_lite, v_PRE_ESTABLISHED_SESSION);   // "a=ice-lite" session level attribute added for condition PRE_ESTABLISHED_SESSION
+
+    v_SdpTemplate := fl_MCX_SdpMessage_RX(p_ServiceType, p_OfferAnswer, v_PRE_ESTABLISHED_SESSION, p_MediaControlCondition, v_OptionalSessionLevelAttributes, v_FurtherMandatoryAttributesAudio, v_FurtherMandatoryAttributesVideo);
+    v_CheckInfo := cs_MCPTT_MCVideo_SdpCheckInfo(p_SessionType, p_OfferAnswer, p_DirectionAudio, p_DirectionVideo, p_MediaControlCondition, v_EndToEndSecurity, v_IsInitialOffer);
+
+    return { v_SdpTemplate, v_CheckInfo };
+  }
+
+  /*
+   * @desc      Common checks for audio and video
+   * @param     p_MediaDescription
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_IpAddr
+   * @param     p_MediaSpecificAttributes
+   * @param     p_AllowedDirection
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_CheckAudioVideoCommon(SDP_media_desc p_MediaDescription,
+                                                             boolean p_PRE_ESTABLISHED_SESSION,
+                                                             charstring p_IpAddr,
+                                                             template (present) SDP_attribute_list p_MediaSpecificAttributes,
+                                                             template (present) SDP_attribute p_AllowedDirection) runs on IMS_PTC
+  {
+    var template (present) SDP_attribute_list v_AllowedMediaAttributes;
+    var template (present) integer v_PreviousSSRC := ?;
+    var integer v_CurrentSSRC;
+    var integer v_RtpPort;
+    var integer i;
+
+    // Check that there are no unappropriate attributes
+    v_AllowedMediaAttributes := p_MediaSpecificAttributes;
+    v_AllowedMediaAttributes := f_SDP_Attributes_Add_RX(v_AllowedMediaAttributes, cr_SDP_Attribute_Mikey);
+    v_AllowedMediaAttributes := f_SDP_Attributes_Add_RX(v_AllowedMediaAttributes, p_AllowedDirection);
+    v_AllowedMediaAttributes := f_SDP_Attributes_Add_RX(v_AllowedMediaAttributes, cr_SDP_Attribute_ssrc);
+    v_AllowedMediaAttributes := f_SDP_Attributes_Add_RX(v_AllowedMediaAttributes, cr_SDP_Attribute_candidate_any, p_PRE_ESTABLISHED_SESSION);
+    f_MCX_SDP_MediaDescription_CheckAllowedAttributes(p_MediaDescription, v_AllowedMediaAttributes);
+
+    // Check that all ssrc attributes have the same ssrc-id
+    for (i := 0; i < lengthof(p_MediaDescription.attributes); i := i + 1) {
+      if (match(p_MediaDescription.attributes[i], cr_SDP_Attribute_ssrc)) {
+        v_CurrentSSRC := p_MediaDescription.attributes[i].ssrc.ssrc_id;
+        if (not match(v_CurrentSSRC, v_PreviousSSRC)) {                 /* @sic R5-236320, R5-236323: sic@
+                                                                           there is no reset of SSRCs anymore, media SSRC and RTCP SSRC are no correlated
+                                                                           => it only needs to be checked that the a=ssrc attributes all have the same SSRC value */
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "ssrc attributes with different ssrc-id");
+        }
+        v_PreviousSSRC := v_CurrentSSRC;
+      }
+    }
+    // Check ICE candidates
+    if (p_PRE_ESTABLISHED_SESSION) {
+      v_RtpPort := p_MediaDescription.media_field.ports.port_number;
+      f_MCX_SDP_CheckIceCandidate(p_MediaDescription, 1, p_IpAddr, v_RtpPort);
+      f_MCX_SDP_CheckIceCandidate(p_MediaDescription, 2, p_IpAddr, v_RtpPort + 1);
+    }
+  }
+
+  /*
+   * @desc      Check media description for audio (Wrapper function)
+   * @param     p_MediaDescription
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_IpAddr
+   * @param     p_AllowedDirection
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_CheckAudio(SDP_media_desc p_MediaDescription,
+                                                  boolean p_PRE_ESTABLISHED_SESSION,
+                                                  charstring p_IpAddr,
+                                                  template (present) SDP_attribute p_AllowedDirection) runs on IMS_PTC
+  {
+    var template (present) SDP_attribute_list v_MediaSpecificAttributes := cr_MCX_SDP_Audio_MandatoryAttributes;
+    fl_MCX_SDP_MediaDescription_CheckAudioVideoCommon(p_MediaDescription, p_PRE_ESTABLISHED_SESSION, p_IpAddr, v_MediaSpecificAttributes, p_AllowedDirection);
+  }
+
+  /*
+   * @desc      Check media description for video
+   * @param     p_MediaDescription
+   * @param     p_OfferAnswer
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_IpAddr
+   * @param     p_AllowedDirection
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_CheckVideo(SDP_media_desc p_MediaDescription,
+                                                  MCX_SDP_OfferAnswer_Type p_OfferAnswer,
+                                                  boolean p_PRE_ESTABLISHED_SESSION,
+                                                  charstring p_IpAddr,
+                                                  template (present) SDP_attribute p_AllowedDirection) runs on IMS_PTC
+  {
+    var template (present) SDP_attribute_list v_TcapPcfgAttributes := {};
+    var template (present) SDP_attribute_list v_MediaSpecificAttributes;
+    var integer i;
+
+    if (p_MediaDescription.media_field.transport == c_rtpAvp) {
+      v_TcapPcfgAttributes := {
+        cr_SDP_Attribute_tcap(1, c_rtpAvpf),
+        cr_SDP_Attribute_pcfg(1, "t=1")
+      }
+    }
+    v_MediaSpecificAttributes := cr_MCX_SDP_Video_MandatoryAttributes & v_TcapPcfgAttributes;
+
+    fl_MCX_SDP_MediaDescription_CheckAudioVideoCommon(p_MediaDescription, p_PRE_ESTABLISHED_SESSION, p_IpAddr, v_MediaSpecificAttributes, p_AllowedDirection);
+
+    for (i := 0; i < lengthof(v_TcapPcfgAttributes); i := i + 1) {
+      if (f_SDP_AttributeList_CheckAttribute(p_MediaDescription.attributes, v_TcapPcfgAttributes[i])) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Missing tcap/pcfg attribute");
+      }
+    }
+    if (p_OfferAnswer == SDP_ANSWER) {
+
+
+    }
+  }
+
+  /*
+   * @desc      Check given media description for media control
+   * @param     p_ServiceType
+   * @param     p_MediaDescription
+   * @param     p_CheckInfo
+   * @param     p_IpAddr
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_CheckMediaControl(MCX_ServiceType_Type p_ServiceType,
+                                                         SDP_media_desc p_MediaDescription,
+                                                         MCPTT_MCVideo_SdpCheckInfo_Type p_CheckInfo,
+                                                         charstring p_IpAddr) runs on IMS_PTC
+  {
+    var charstring v_Fmt := fl_MCX_SDP_MediaControl_Fmt(p_ServiceType);
+    var MCX_SDP_MediaControlFmtparameters_Type v_MediaControlParameters := f_MCX_SDP_MediaDescription_MediaControlFmtpParameters_Decode(p_ServiceType, p_MediaDescription);
+    var template (present) SDP_attribute_list v_AllowedMediaAttributes := { cr_SDP_Attribute_fmtp(v_Fmt) };
+    var boolean v_PRE_ESTABLISHED_SESSION := (p_CheckInfo.SessionType == PRE_ESTABLISHED);
+    var template (present) MCX_SDP_MediaControlFmtparameters_Type v_ExpectedMediaControlParameters;
+    var template Null_Type v_ImplicitGrantRequest;
+    var template (omit) Null_Type v_InitialOffer := omit;
+    var template (omit) Null_Type v_Queuing := omit;
+    var template integer v_Priority;
+    var template integer v_ReceptionPriority := omit;
+
+    if (v_PRE_ESTABLISHED_SESSION and (p_CheckInfo.MediaControlCondition == withoutFloorControl)) {  /* @sic R5-222026: p_CheckInfo sic@ */
+      // Open issues: withoutTransmissionControl for MCVideo
+      v_ExpectedMediaControlParameters := crs_MCX_SDP_MediaControlFmtparameters_NoFloorControl;
+    }
+    else {
+
+      if (((p_ServiceType==MCPTT) and pc_MCPTT_FloorRequestQueueing) or
+          ((p_ServiceType==MCVideo) and pc_MCVideo_TransmissionRequestQueueing)) {   // @sic R5-217965 sic@
+        v_Queuing := true;
+      }
+      
+      if (ispresent(p_CheckInfo.NonDefaultPriority)) {  /* @sic R5s220129: NonDefaultPriority: omit => default value depending on OfferAnswer sic@ */
+        v_Priority := p_CheckInfo.NonDefaultPriority;
+      }
+      
+      // Check media control parameters
+      select (p_CheckInfo.OfferAnswer) {
+        case (SDP_OFFER) {
+          if (p_CheckInfo.IsInitialOffer) { v_InitialOffer := true; }
+          if (not isbound(v_Priority)) {
+            select (p_ServiceType) {
+              case (MCPTT)   { v_Priority := (1..255); }                                // any allowed value
+              case (MCVideo) { v_Priority := (1..255) ifpresent; }                      // any allowed value if present
+            }
+          }
+          if (p_ServiceType == MCPTT) { v_ReceptionPriority := (1..255) ifpresent; }    // any allowed value if present
+
+          select (p_CheckInfo.MediaControlCondition) {
+            case (withoutImplictGrantRequest) { v_ImplicitGrantRequest := omit; }
+            case (withImplictGrantRequest)    { v_ImplicitGrantRequest := true; }
+            case (optionalMediaControl)       { v_ImplicitGrantRequest := *; }
+            case else { f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected media description for media control"); }
+          }
+          v_ExpectedMediaControlParameters := cr_MCX_SDP_MediaControlFmtparameters_OFFER(v_Queuing, v_Priority, v_ReceptionPriority, v_InitialOffer, v_ImplicitGrantRequest);
+        }
+        case (SDP_ANSWER) {
+          if (not isbound(v_Priority)) {
+            select (p_ServiceType) {
+              case (MCPTT)   { v_Priority := tsc_MCX_User_A_Priority; }                 // same value as used in offer (tsc_MCX_User_A_Priority:=3, 36.579-1 Table 5.5.3.1.2-1)
+              case (MCVideo) { v_Priority := 5; }                                       // same value as used in offer (36.579-1 Table 5.5.3.1.2-1)
+            }
+          }
+          v_ExpectedMediaControlParameters := cr_MCX_SDP_MediaControlFmtparameters_ANSWER(v_Queuing, v_Priority);
+        }
+      }
+    }
+
+    if (not match(v_MediaControlParameters, v_ExpectedMediaControlParameters)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid media control parameters");
+    }
+
+    // Check that there are no unappropriate attributes
+    v_AllowedMediaAttributes := f_SDP_Attributes_Add_RX(v_AllowedMediaAttributes, cr_SDP_Attribute_candidate_any, v_PRE_ESTABLISHED_SESSION);
+    f_MCX_SDP_MediaDescription_CheckAllowedAttributes(p_MediaDescription, v_AllowedMediaAttributes);
+
+    // Check ICE candidates
+    if (v_PRE_ESTABLISHED_SESSION) {
+      f_MCX_SDP_CheckIceCandidate(p_MediaDescription, 1, p_IpAddr, p_MediaDescription.media_field.ports.port_number);
+    }
+  }
+
+  /*
+   * @desc      Check received SDP message
+   * @param     p_ServiceType
+   * @param     p_SdpMessage
+   * @param     p_SdpInfoRX
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_CheckSDP(MCX_ServiceType_Type p_ServiceType,
+                          template (omit) SDP_Message p_SdpMessage,
+                          template MCPTT_MCVideo_SdpInfoRX_Type p_SdpInfoRX) runs on MCX_IMS_PTC
+  { /* p_SdpMessage ..  omit when there is no SDP message which is checked when receiving the SIP message
+       p_SdpInfoRX  ..  is omit if no SDP message is expected */
+    var boolean v_PRE_ESTABLISHED_SESSION;
+    var charstring v_IPAddrUE := f_IP_AddrInfo_AddrStr(f_IMS_PTC_UE_Address_Get());             /* IP address of the UE: used as unicast-address in the origin, as session-level connection-address (if present) and as media-level connection-address (if present) */
+    var MCPTT_MCVideo_SdpCheckInfo_Type v_CheckInfo;
+    var SDP_Message v_SDP_Message;
+    var template (omit) SDP_media_desc v_MediaDescAudio;
+    var template (omit) SDP_media_desc v_MediaDescVideo;
+    var template (omit) SDP_media_desc v_MediaDescApplication;
+    var template (omit) SDP_attribute_list v_MediaAttributesAudio := omit;
+    var template (omit) SDP_attribute_list v_MediaAttributesVideo := omit;
+    var SDP_media_desc v_MediaDescValue;
+    var PortNumber_Type v_PortNumberUE;
+    var MCX_SecurityKey_Type v_PCK;
+    
+    if (isvalue(p_SdpMessage)) {
+      v_SDP_Message := valueof(p_SdpMessage);
+      v_MediaDescAudio := f_MCX_SDP_GetMediaDescription_Audio(v_SDP_Message);
+      v_MediaDescVideo := f_MCX_SDP_GetMediaDescription_Video(v_SDP_Message);
+      v_MediaDescApplication := f_MCX_SDP_GetMediaDescription_MediaControl(v_SDP_Message);
+
+      /* @sic R5-236321: sic@
+         According to 24.380 clauses 14.2 and 14.3 the "mc_ssrc" fmtp attribute is included ony in the SDP answer sent to the client but not in the SDP offer sent from the client;
+         in addition media SSRC and RTCP SSRC are no correlated => no need to check/store the media SSRC provided by the client */
+      
+      if (ispresent(p_SdpInfoRX.CheckInfo)) {
+        v_CheckInfo := valueof(p_SdpInfoRX.CheckInfo);
+        v_PRE_ESTABLISHED_SESSION := (v_CheckInfo.SessionType == PRE_ESTABLISHED);
+        
+        // Check Connections
+        f_MCX_SDP_CheckIpAddresses(v_SDP_Message, v_IPAddrUE);     /* check IP addresses in origin and c= lines at session and media level;
+                                                                      NOTE: f_IMS_SDP_CheckConnections checks that there is a session-level address or a media-level address for each media or both, but it does not check the value */
+        if (isvalue(v_MediaDescAudio)) {
+          v_MediaDescValue := valueof(v_MediaDescAudio);
+          fl_MCX_SDP_MediaDescription_CheckAudio(v_MediaDescValue, v_PRE_ESTABLISHED_SESSION, v_IPAddrUE, v_CheckInfo.DirectionAudio);
+          v_MediaAttributesAudio := v_MediaDescValue.attributes;
+        }
+        if (isvalue(v_MediaDescVideo)) {
+          v_MediaDescValue := valueof(v_MediaDescVideo);
+          fl_MCX_SDP_MediaDescription_CheckVideo(v_MediaDescValue, v_CheckInfo.OfferAnswer, v_PRE_ESTABLISHED_SESSION, v_IPAddrUE, v_CheckInfo.DirectionVideo);
+          v_MediaAttributesVideo := v_MediaDescValue.attributes;
+        }
+        if (isvalue(v_MediaDescApplication)) {
+          v_MediaDescValue := valueof(v_MediaDescApplication);
+          fl_MCX_SDP_MediaDescription_CheckMediaControl(p_ServiceType, v_MediaDescValue, v_CheckInfo, v_IPAddrUE);
+          v_PortNumberUE := v_MediaDescValue.media_field.ports.port_number;
+          f_MCX_IMS_PTC_UE_MediaControlPort_Set(v_PortNumberUE);
+        }
+        if (v_CheckInfo.EndToEndSecurity) {
+          v_PCK := f_MCX_SDP_GetPCK(p_ServiceType, v_SDP_Message.attributes, v_MediaAttributesAudio, v_MediaAttributesVideo);
+          f_MCX_IMS_PTC_SecurityParameters_SetKey(PCK, v_PCK);
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.2-1/2: Media description for audio
+   * @param     p_ServiceType
+   * @param     p_MediaDescriptionOffer (default value: omit)
+   * @param     p_FmtAudio          (default value: "99")
+   * @param     p_Connection
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_EncodedMikeyMsg   (default value: omit)
+   * @return    template (value) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_Audio_TX(MCX_ServiceType_Type p_ServiceType,
+                                                template (omit) SDP_media_desc p_MediaDescriptionOffer := omit,
+                                                charstring p_FmtAudio := "99",
+                                                template (value) SDP_connection p_Connection,
+                                                boolean p_PRE_ESTABLISHED_SESSION,
+                                                template (omit) bitstring p_EncodedMikeyMsg := omit) runs on IMS_PTC return template (value) SDP_media_desc
+  {
+    var charstring v_TransportProtocol := fl_MCX_SDP_Audio_TransportProtocol();
+    var charstring v_Foundation := "1234";
+    var charstring v_MediaTitle := fl_MCX_SDP_MediaTitleAudio(p_ServiceType);
+    var integer v_PortnumberRTP := tsc_MCX_MediaPort_Audio;
+    var template (value) SDP_media_field v_SDP_Media;
+    var template (value) SDP_connection_list v_ConnectionList := { p_Connection };
+    var integer v_BandwidthAS;
+    var template (omit)  SDP_bandwidth_list v_BandwidthList;
+    var template (value) SemicolonParam_List v_FmtpParams;
+    var template (omit)  SDP_attribute_list v_MediaAttributes;
+    var template (omit)  SDP_attribute_list v_AdditionalMediaAttributes := omit;
+    var SDP_media_desc v_MediaDescriptionOffer;
+    var charstring v_FmtAudio;
+    
+    if (isvalue(p_MediaDescriptionOffer)) {                     // SDP_ANSWER
+      v_MediaDescriptionOffer := valueof(p_MediaDescriptionOffer);
+      v_FmtAudio := f_MCX_MediaDescriptionAudio_GetFmt(v_MediaDescriptionOffer);
+      
+      if (p_ServiceType == MCPTT) {
+        if (f_SDP_AttributeList_CheckAttribute(v_MediaDescriptionOffer.attributes, cr_SDP_Attribute_recvonly)) {
+          v_AdditionalMediaAttributes := f_SDP_Attributes_Add_TX(v_AdditionalMediaAttributes, cs_SDP_Attribute_sendonly);       // According to 24.379 clause 6.2.2 (SDP answer generation)
+        } else if (f_SDP_AttributeList_CheckAttribute(v_MediaDescriptionOffer.attributes, cr_SDP_Attribute_sendonly)) {
+          v_AdditionalMediaAttributes := f_SDP_Attributes_Add_TX(v_AdditionalMediaAttributes, cs_SDP_Attribute_recvonly);       // According to 24.379 clause 6.2.2 (SDP answer generation)
+        }
+      }
+    } else {                                                    // SDP_OFFER
+      v_FmtAudio := p_FmtAudio;
+    }
+
+    v_SDP_Media := cs_SDP_Media_Audio(v_FmtAudio, v_PortnumberRTP, v_TransportProtocol);
+
+    select (p_ServiceType) {
+      case (MCPTT)   { v_BandwidthAS := 38; }
+      case (MCVideo) { v_BandwidthAS := 37; }
+    }
+    v_BandwidthList := cs_SDP_Bandwidth_List_Media(v_BandwidthAS, 0, 2000);
+
+    v_FmtpParams := {
+      cs_AMR_ModeChangeCapability,
+      cs_AMR_MaxRed("0")                                        // different compared to IMS
+    };
+    
+    v_MediaAttributes := {
+      cs_SDP_Attribute_rtpmap(v_FmtAudio, cs_RTPMAP_AMR_16000),
+      cs_SDP_Attribute_fmtp(v_FmtAudio, cs_Fmtp_ParamList(v_FmtpParams)),
+      cs_SDP_Attribute_ptime,
+      cs_SDP_Attribute_maxptime
+    };
+
+    if (isvalue(p_EncodedMikeyMsg)) {
+      v_AdditionalMediaAttributes := f_SDP_Attributes_Add_TX(v_AdditionalMediaAttributes, cs_SDP_Attribute_Mikey(valueof(p_EncodedMikeyMsg)));
+    }
+    
+    v_MediaAttributes := f_SDP_Attributes_Concat_TX(v_MediaAttributes, v_AdditionalMediaAttributes);
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_candidate_host(v_Foundation, 1, p_Connection, v_PortnumberRTP),     p_PRE_ESTABLISHED_SESSION);   // RTP
+    v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_candidate_host(v_Foundation, 2, p_Connection, v_PortnumberRTP + 1), p_PRE_ESTABLISHED_SESSION);   // RTCP
+    
+    return cs_SDP_Media_Desc_Common(v_SDP_Media,            // m=line
+                                    v_MediaTitle,           // i=line
+                                    v_ConnectionList,       // c=line
+                                    v_BandwidthList,        // b=line
+                                    v_MediaAttributes);     // a=lines
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.2-2: Media description for video
+   * @param     p_ServiceType
+   * @param     p_MediaDescriptionOffer (default value: omit)
+   * @param     p_FmtVideo          (default value: "100")
+   * @param     p_Connection
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @param     p_EncodedMikeyMsg   (default value: omit)
+   * @return    template (omit) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_Video_TX(MCX_ServiceType_Type p_ServiceType,
+                                                template (omit) SDP_media_desc p_MediaDescriptionOffer := omit,
+                                                charstring p_FmtVideo := "100",
+                                                template (value) SDP_connection p_Connection,
+                                                boolean p_PRE_ESTABLISHED_SESSION,
+                                                template (omit) bitstring p_EncodedMikeyMsg := omit) runs on IMS_PTC return template (omit) SDP_media_desc
+  {
+    var charstring v_TransportProtocol := fl_MCX_SDP_Video_TransportProtocolTX();
+    var charstring v_Foundation := "2345";
+    var charstring v_MediaTitle := fl_MCX_SDP_MediaTitleVideo();
+    var integer v_PortnumberRTP := tsc_IMS_MediaPort_M2;
+    var template (value) SDP_media_field v_SDP_Media;
+    var template (value) SDP_connection_list v_ConnectionList := { p_Connection };
+    var template (omit)  SDP_bandwidth_list v_BandwidthList := cs_SDP_Bandwidth_List_Media(315, 0, 2500);
+    var template (omit)  SDP_attribute_list v_AdditionalMediaAttributes := omit;
+    var template (value) SemicolonParam_List v_FmtpParams;
+    var template (omit)  SDP_attribute_list v_MediaAttributes;
+    var SDP_media_desc v_MediaDescriptionOffer;
+    var charstring v_FmtVideo;
+
+    if (p_ServiceType==MCVideo) {
+      if (isvalue(p_MediaDescriptionOffer)) {                     // SDP_ANSWER
+        v_MediaDescriptionOffer := valueof(p_MediaDescriptionOffer);
+        v_FmtVideo := f_MCX_MediaDescriptionVideo_GetFmt(v_MediaDescriptionOffer);
+        v_FmtpParams := f_SDP_MediaDescr_GetCodecParameters(v_MediaDescriptionOffer.attributes, v_FmtVideo);
+        if (v_MediaDescriptionOffer.media_field.transport == c_rtpAvp) {
+          v_AdditionalMediaAttributes := {
+            cs_SDP_Attribute_acfg(1, "t=1")
+          }
+        }
+      } else {                                                    // SDP_OFFER
+        v_FmtVideo := p_FmtVideo;
+        v_FmtpParams := cs_Fmtp_VideoParamsH264;
+        v_AdditionalMediaAttributes := {
+          cs_SDP_Attribute_rtcp_fb("*", "trr-int 5000"),
+          cs_SDP_Attribute_rtcp_fb("*", "nack"),
+          cs_SDP_Attribute_rtcp_fb("*", "nack pli"),
+          cs_SDP_Attribute_rtcp_fb("*", "ccm fir"),
+          cs_SDP_Attribute_rtcp_fb("*", "ccm tmmbr")
+        };
+      }
+      
+      v_SDP_Media := cs_SDP_Media_Video(v_FmtVideo, v_PortnumberRTP, v_TransportProtocol);
+      
+      v_MediaAttributes := {
+        cs_SDP_Attribute_rtpmap(v_FmtVideo, cs_RTPMAP_H264_90000),
+        cs_SDP_Attribute_fmtp(v_FmtVideo, cs_Fmtp_ParamList(v_FmtpParams))
+      };
+      
+      if (isvalue(p_EncodedMikeyMsg)) {
+        v_AdditionalMediaAttributes := f_SDP_Attributes_Add_TX(v_AdditionalMediaAttributes, cs_SDP_Attribute_Mikey(valueof(p_EncodedMikeyMsg)));
+      }
+    
+      v_MediaAttributes := f_SDP_Attributes_Concat_TX(v_MediaAttributes, v_AdditionalMediaAttributes);
+      v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_candidate_host(v_Foundation, 1, p_Connection, v_PortnumberRTP),     p_PRE_ESTABLISHED_SESSION);   // RTP
+      v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_candidate_host(v_Foundation, 2, p_Connection, v_PortnumberRTP + 1), p_PRE_ESTABLISHED_SESSION);   // RTCP
+      
+      return cs_SDP_Media_Desc_Common(v_SDP_Media,            // m=line
+                                      v_MediaTitle,           // i=line
+                                      v_ConnectionList,       // c=line
+                                      v_BandwidthList,        // b=line
+                                      v_MediaAttributes);     // a=lines
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Table 5.5.3.1.2-1/2: Media description for floor/transmission control
+   * @param     p_ServiceType
+   * @param     p_MediaControlParameters
+   * @param     p_Connection
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @return    template (omit) SDP_media_desc
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_SDP_MediaDescription_MediaControl_TX(MCX_ServiceType_Type p_ServiceType,
+                                                       template (omit) MCX_SDP_MediaControlFmtparameters_Type p_MediaControlParameters,
+                                                       template (value) SDP_connection p_Connection,
+                                                       boolean p_PRE_ESTABLISHED_SESSION) return template (omit) SDP_media_desc
+  {
+    var charstring v_Fmt := fl_MCX_SDP_MediaControl_Fmt(p_ServiceType);
+    var template (value) SDP_connection_list v_ConnectionList := { p_Connection };
+    var template (omit) SDP_attribute_list v_MediaAttributes := {};
+    var template (value) SemicolonParam_List v_FmtpParams;
+    var template (value) SDP_media_field v_SDP_Media;
+
+    if (isvalue(p_MediaControlParameters)) {
+      v_FmtpParams := f_MCX_SDP_MediaDescription_MediaControlFmtpParameters_Encode(valueof(p_MediaControlParameters));
+      v_SDP_Media := cs_SDP_Media("application", tsc_MCX_MediaControlPortNW, "udp", { v_Fmt });
+      v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_fmtp(v_Fmt, cs_Fmtp_ParamList(v_FmtpParams)));
+      v_MediaAttributes := f_SDP_Attributes_Add_TX(v_MediaAttributes, cs_SDP_Attribute_candidate_host("4321", 1, p_Connection, tsc_MCX_MediaControlPortNW), p_PRE_ESTABLISHED_SESSION);
+
+      return cs_SDP_Media_Desc_Common(v_SDP_Media,            // m=line
+                                      -,                      // no i=line
+                                      v_ConnectionList,       // c=line
+                                      -,                      // no b=line
+                                      v_MediaAttributes);     // a=lines
+    }
+    return omit;
+  }
+
+  /*
+   * @desc      Common function to build SDP Message from the SS for MCPTT/MCVideo
+   * @param     p_ServiceType
+   * @param     p_Origin
+   * @param     p_MediaDescriptionAudio
+   * @param     p_MediaDescriptionVideo
+   * @param     p_MediaDescriptionMediaControl
+   * @param     p_PRE_ESTABLISHED_SESSION
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_BuildSDP_TX(MCX_ServiceType_Type p_ServiceType,
+                              template (value) SDP_Origin p_Origin,
+                              template (value) SDP_media_desc p_MediaDescriptionAudio,
+                              template (omit) SDP_media_desc p_MediaDescriptionVideo,
+                              template (omit) SDP_media_desc p_MediaDescriptionMediaControl,
+                              boolean p_PRE_ESTABLISHED_SESSION) runs on IMS_PTC return template (value) SDP_Message
+  {
+    var charstring v_Sessionname := " ";                                        // single empty space indicating no session name
+    var template (value) SDP_bandwidth_list v_SessionBandwidthList;
+    var template (value) SDP_media_desc_list v_SDP_Media_Desc_List;
+    var template (value) SDP_Message v_SDP_Message;
+    var integer i := 0;
+    
+    select (p_ServiceType) {
+      case (MCPTT)   { v_SessionBandwidthList := cs_SDP_Bandwidth_List_AS(38); }
+      case (MCVideo) { v_SessionBandwidthList := cs_SDP_Bandwidth_List_AS(352); }
+    }
+
+    v_SDP_Media_Desc_List[0] := p_MediaDescriptionAudio;
+    i := i + 1;
+    if (isvalue(p_MediaDescriptionVideo)) {
+      v_SDP_Media_Desc_List[i] := valueof(p_MediaDescriptionVideo);
+      i := i + 1;
+    }
+    if (isvalue(p_MediaDescriptionMediaControl)) {
+      v_SDP_Media_Desc_List[i] := valueof(p_MediaDescriptionMediaControl);
+      i := i + 1;
+    }
+
+    v_SDP_Message := cs_SDP_Message_Common(p_Origin, v_Sessionname, -, v_SessionBandwidthList, -, v_SDP_Media_Desc_List);                 // @sic R5s220869 Change 3: no c= line sic@
+    v_SDP_Message.attributes := f_SDP_Attributes_Add_TX(v_SDP_Message.attributes, crs_SDP_Attribute_ice_lite, p_PRE_ESTABLISHED_SESSION); // "a=ice-lite" session level attribute added for condition PRE_ESTABLISHED_SESSION
+    
+    f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageTX(v_SDP_Message);                                                         /* @sic R5-225427, R5-225258 sic@ */
+
+    return v_SDP_Message;
+  }
+
+  /*
+   * @desc      Build SDP Message from the SS according to 36.579-1 Table 5.5.3.1.2-1/2 for condition SDP_OFFER
+   * @param     p_ServiceType
+   * @param     p_SessionType
+   * @param     p_CallType          (default value: ANY)
+   * @param     p_FmtAudio          (default value: "99")
+   * @param     p_FmtVideo          (default value: "100")
+   * @param     p_MediaControlCondition (default value: withoutImplictGrantRequest)
+   * @param     p_MC_Priority       (default value: omit)
+   * @param     p_PrivateCallWithoutEndToEndSecurity (default value: false)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SdpOffer_TX(MCX_ServiceType_Type p_ServiceType,
+                             MCX_SessionType_Type p_SessionType,
+                             MCX_CallType_Type p_CallType := ANY,
+                             charstring p_FmtAudio := "99",
+                             charstring p_FmtVideo := "100",
+                             MCX_MediaControlCondition_Type p_MediaControlCondition := withoutImplictGrantRequest,
+                             template (omit) integer p_MC_Priority := omit,
+                             boolean p_PrivateCallWithoutEndToEndSecurity := false) runs on MCX_IMS_PTC return template (value) SDP_Message
+  { /* @sic R5-222026: p_SessionType sic@ */
+    var boolean v_PRE_ESTABLISHED_SESSION := (p_SessionType == PRE_ESTABLISHED);
+    var template (value) SDP_Origin v_Origin := f_MCX_SDP_Origin_TX();
+    var template (value) SDP_connection v_Connection := cs_SDP_Connection(v_Origin.addr_type, v_Origin.addr);
+    var template (value) SDP_media_desc v_MediaDescriptionAudio;
+    var template (omit)  SDP_media_desc v_MediaDescriptionVideo := omit;
+    var template (omit)  SDP_media_desc v_MediaDescriptionMediaControl := omit;
+    var template (omit)  MCX_SDP_MediaControlFmtparameters_Type v_MediaControlParameters := omit;
+    var template (omit)  bitstring v_EncodedMikeyMessage := omit;
+    var integer v_MC_Priority;
+    
+    select (p_MediaControlCondition) {     // may be withoutFloorControl, withoutTransmissionControl or withoutImplictGrantRequest but should not be withImplictGrantRequest
+      case (withoutFloorControl) {
+        if (p_SessionType == PRE_ESTABLISHED) {
+          v_MediaControlParameters := crs_MCX_SDP_MediaControlFmtparameters_NoFloorControl;
+        }
+      }
+      case (withoutTransmissionControl) {
+        if (p_SessionType == PRE_ESTABLISHED) {
+          FatalError(__FILE__, __LINE__, "Pre-established session without transmission control is not supported yet");
+        }
+      }
+      case (withoutImplictGrantRequest) {
+        if (isvalue(p_MC_Priority)) {
+          v_MC_Priority := valueof(p_MC_Priority);
+        } else {
+          select (p_ServiceType) {
+            case (MCPTT)   { v_MC_Priority := tsc_MCX_User_A_Priority; }
+            case (MCVideo) { v_MC_Priority := 5; }
+          }
+        }
+        v_MediaControlParameters := cs_MCX_SDP_MediaControlFmtparameters_Init;
+        v_MediaControlParameters.mc_queueing := true;
+        v_MediaControlParameters.mc_priority := v_MC_Priority;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid media control condition");
+      }
+    }
+
+    select (p_CallType) {
+      case (PRIVATE_CALL) {
+        if (not p_PrivateCallWithoutEndToEndSecurity) {
+          v_EncodedMikeyMessage := f_MCX_EncodedMikeyMessage(p_ServiceType);
+        }
+      }
+    }
+    v_MediaDescriptionAudio := fl_MCX_SDP_MediaDescription_Audio_TX(p_ServiceType, -, p_FmtAudio, v_Connection, v_PRE_ESTABLISHED_SESSION, v_EncodedMikeyMessage);
+    v_MediaDescriptionVideo := fl_MCX_SDP_MediaDescription_Video_TX(p_ServiceType, -, p_FmtVideo, v_Connection, v_PRE_ESTABLISHED_SESSION, v_EncodedMikeyMessage);
+    v_MediaDescriptionMediaControl := fl_MCX_SDP_MediaDescription_MediaControl_TX(p_ServiceType, v_MediaControlParameters, v_Connection, v_PRE_ESTABLISHED_SESSION);
+
+    return fl_MCX_BuildSDP_TX(p_ServiceType, v_Origin, v_MediaDescriptionAudio, v_MediaDescriptionVideo, v_MediaDescriptionMediaControl, v_PRE_ESTABLISHED_SESSION);
+  }
+
+  /*
+   * @desc      Build SDP Message from the SS according to 36.579-1 Table 5.5.3.1.2-1/2 for condition SDP_ANSWER
+   * @param     p_ServiceType
+   * @param     p_SessionType
+   * @param     p_SDP_Offer
+   * @param     p_MediaControlCondition (default value: implicitRequestNoted)
+   * @param     p_EncodedMikeyMessage   (default value: omit)
+   * @return    template (value) SDP_Message
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_SdpAnswer_TX(MCX_ServiceType_Type p_ServiceType,
+                              MCX_SessionType_Type p_SessionType,
+                              SDP_Message p_SDP_Offer,
+                              MCX_MediaControlConditionSdpAnswer_Type p_MediaControlCondition := implicitRequestNoted,
+                              template (omit) bitstring p_EncodedMikeyMessage := omit) runs on IMS_PTC return template (value) SDP_Message
+  { /* NOTE: SDP answer may contain security key in case of a first-to-answer call */
+    /* @sic R5s210779 - additional changes: p_MediaControlCondition instead of p_ImplicitFloorGranted sic@ */
+    /* @sic R5-222026: p_SessionType sic@ */
+    var boolean v_PRE_ESTABLISHED_SESSION := (p_SessionType == PRE_ESTABLISHED);
+    var template (value) SDP_Origin v_Origin := f_MCX_SDP_Origin_TX();
+    var template (value) SDP_connection v_Connection := cs_SDP_Connection(v_Origin.addr_type, v_Origin.addr);
+    var template (omit)  SDP_media_desc v_MediaDescriptionAudio_Offer := f_MCX_SDP_GetMediaDescription_Audio(p_SDP_Offer);
+    var template (omit)  SDP_media_desc v_MediaDescriptionVideo_Offer := f_MCX_SDP_GetMediaDescription_Video(p_SDP_Offer);
+    var template (omit)  SDP_media_desc v_MediaDescriptionMediaControl_Offer := f_MCX_SDP_GetMediaDescription_MediaControl(p_SDP_Offer);
+
+    var template (value) SDP_media_desc v_MediaDescriptionAudio_Answer;
+    var template (omit)  SDP_media_desc v_MediaDescriptionVideo_Answer := omit;
+    var template (omit)  SDP_media_desc v_MediaDescriptionMediaControl_Answer := omit;
+    var template (omit)  MCX_SDP_MediaControlFmtparameters_Type v_MediaControlParameters := omit;
+    var MCX_SDP_MediaControlFmtparameters_Type v_MediaControlParameterValues;
+
+    if (isvalue(v_MediaDescriptionMediaControl_Offer)) {
+      v_MediaControlParameterValues := f_MCX_SDP_MediaDescription_MediaControlFmtpParameters_Decode(p_ServiceType, valueof(v_MediaDescriptionMediaControl_Offer));
+
+      if (not ispresent(v_MediaControlParameterValues.mc_no_floor_ctrl)) {      // @sic R5-222026: p_SessionType; NOTE: if mc_no_floor_ctrl is present there are no further fmtp attributes for media control sic@
+        v_MediaControlParameterValues.mc_granted := omit;
+        v_MediaControlParameterValues.mc_ssrc := omit;
+        if (isvalue(v_MediaControlParameterValues.mc_priority)) {               // mc_priority: if a value is provided in the offer: "3" or the value provided in the offer, whichever is the lower value; otherwise not present
+          if (v_MediaControlParameterValues.mc_priority > 3) {
+            v_MediaControlParameterValues.mc_priority := 3;
+          }
+        }
+        if (isvalue(v_MediaControlParameterValues.mc_implicit_request)) {       // implicit grant requested
+          if (p_MediaControlCondition == implicitRequestRejected) {             // IMPLICIT_GRANT_REQUESTED == false
+            v_MediaControlParameterValues.mc_implicit_request := omit;
+          } else {                                                              // IMPLICIT_GRANT_REQUESTED == true
+            if (p_ServiceType==MCPTT) {                                         // mc_ssrc is not specified in 24.281 yet
+              v_MediaControlParameterValues.mc_ssrc := oct2int(tsc_MCX_MediaSSRC_ClientA);              // @sic R5-236323: tsc_MCX_MediaSSRC_ClientA sic@
+            }
+            if (p_MediaControlCondition == implicitRequestGranted) {            // IMPLICIT_FLOOR_GRANTED == true
+              v_MediaControlParameterValues.mc_granted := true;
+            }
+          }
+        }
+      }
+      v_MediaControlParameters := v_MediaControlParameterValues
+    }
+
+    v_MediaDescriptionAudio_Answer := fl_MCX_SDP_MediaDescription_Audio_TX(p_ServiceType, v_MediaDescriptionAudio_Offer, -, v_Connection, v_PRE_ESTABLISHED_SESSION, p_EncodedMikeyMessage);
+    v_MediaDescriptionVideo_Answer := fl_MCX_SDP_MediaDescription_Video_TX(p_ServiceType, v_MediaDescriptionVideo_Offer, -, v_Connection, v_PRE_ESTABLISHED_SESSION, p_EncodedMikeyMessage);
+    v_MediaDescriptionMediaControl_Answer := fl_MCX_SDP_MediaDescription_MediaControl_TX(p_ServiceType, v_MediaControlParameters, v_Connection, v_PRE_ESTABLISHED_SESSION);
+
+    return fl_MCX_BuildSDP_TX(p_ServiceType, v_Origin, v_MediaDescriptionAudio_Answer, v_MediaDescriptionVideo_Answer, v_MediaDescriptionMediaControl_Answer, v_PRE_ESTABLISHED_SESSION);
+  }
+
+}

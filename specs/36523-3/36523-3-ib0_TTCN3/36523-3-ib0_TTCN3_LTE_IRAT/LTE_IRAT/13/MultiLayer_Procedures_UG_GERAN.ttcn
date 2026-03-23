@@ -1,0 +1,168 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2019-12-17 18:27:35 +0100 (ma., 17 dic. 2019) $
+// $Rev: 26774 $
+/******************************************************************************/
+
+module MultiLayer_Procedures_UG_GERAN {
+
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from GERAN_CellInfo all;
+  import from GERAN_CommonFunctions all;
+  import from GERAN_Component all;
+  import from GERAN_Templates all;
+  import from GERAN_TypeDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.1.19.20
+   * @param     p_IMSReg
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_13_1_19_20_GERAN_Common(boolean p_IMSReg) runs on GERAN_PTC
+  {
+    var G_L2_DATAMESSAGE_IND v_ServReq;
+    var G_L2_DATAMESSAGE_IND v_SetUp;
+    var SubChannelNumber v_SubChannel;
+    var G_LogicChType v_ChannelType;
+    var G_LogicChType v_TchType;
+    var TI v_Ti_R;
+    var RFN v_RFN;
+    var integer v_RR_RA;
+    var G_L2_DATAMESSAGE_IND v_ChanReq;
+    var B10_Type v_BCCH;
+    var B3_Type v_BCC;
+    var default v_MyDefaultVar := null;
+    timer t_Wait1s := 1.0;
+    
+    //Initialise cell info and configure cell 24
+    f_GERAN_Init(EUTRA_GERAN);
+    
+    f_GERAN_Send_IR_SysInfoToEUTRA(geran_Cell24);
+    f_GERAN_Send_IR_SysInfoToEUTRA(geran_Cell25);
+    f_GERAN_Send_IR_SysInfoToEUTRA(geran_Cell26);
+    f_GERAN_CreateCell(geran_Cell24);
+    v_BCCH := f_GERAN_BCCHFreq_Get(geran_Cell24); // @sic R5s160423 sic@
+    v_BCC := f_GERAN_BCC_Get(geran_Cell24); // @sic R5s160423 sic@
+    
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    f_GERAN_SetCellPowerLevel(geran_Cell24, tsc_GERAN_SuitableNeighbourCell);
+    f_GERAN_TestBody_Set(true);
+        
+    //@siclog "Step 5b1" siclog@
+    f_GERAN_InterRAT_InitialiseAuthParams(); // @sic R5s160065 sic@
+    f_GERAN_SetCellPowerLevel(geran_Cell24, tsc_GERAN_ServingCell);
+    f_GERAN_CreateTCH (geran_Cell24); // @sic R5s160391 sic@
+    f_GERAN_SetChPwrLevel(geran_Cell24, tsc_TchCh, tsc_GERAN_ServingCell);
+    
+    //@siclog "Step 5b3" siclog@
+    G_L2.receive(car_G_L2_ACCESS_IND(geran_Cell24,
+                                     tsc_PhyCh0,
+                                     tsc_RACH,
+                                     ?,
+                                     ?,
+                                     cr_G_ChannelReq ('101?????'B))) // type emergency call
+      -> value v_ChanReq;
+    v_RFN := v_ChanReq.access.rfn;
+    v_RR_RA := bit2int(v_ChanReq.access.burst.chReq.estCauRandomRef);
+    f_GERAN_PreliminaryPass(__FILE__, __LINE__, "Step 5b3");
+    
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);     // @sic R5-171453 sic@
+
+    //@siclog "Step 5b4" siclog@
+    G_L2.send(cas_G_L2_UNITDATA_REQ(geran_Cell24,
+                                    tsc_PhyCh0,
+                                    tsc_AGCH,
+                                    15,
+                                    cs_G_RFN_Omit,
+                                    cs_ImmAss(cs_ImmediateAssignment(v_BCCH, v_BCC, v_RR_RA, v_RFN, substr(oct2bit(f_GERAN_TA_Get(geran_Cell24)), 1, 6)))));
+    
+    //@siclog "Step 5b5" siclog@
+    G_L2.receive(car_G_L2_Estab_IND(geran_Cell24, ?, ?, ?, cr_G_CMServiceRequestEmergency(?))) -> value v_ServReq;
+    f_GERAN_PreliminaryPass(__FILE__, __LINE__, "CM Service Request Received");
+    v_ChannelType := v_ServReq.sabm.g_LogicChType;
+    v_SubChannel := v_ServReq.sabm.subChannel;
+    
+    //@siclog "Step 5b5A" siclog@
+    G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, tsc_PhyCh0, ?, ?, ?, cr_G_ClassmarkChangeAny));
+    
+    //@siclog "Step 5b5B" siclog@
+    alt { // if UTRAN Classmark Change arrives first
+      [pc_UTRA] G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, tsc_PhyCh0, ?, ?, ?, cr_G_UtranClassmarkChange))
+        {
+          t_Wait1s.start;
+          alt { // Wait a while to see if a GPRS Suspension Req is also sent
+            [] G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, tsc_PhyCh0, ?, ?, ?, cr_GPRS_SuspensionReq(?, cr_RAI, ?)))
+              {
+                t_Wait1s.stop;
+              }
+            [] t_Wait1s.timeout {}
+          }
+        }
+      [] G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, tsc_PhyCh0, ?, ?, ?, cr_GPRS_SuspensionReq(?, cr_RAI, ?)))
+        {
+          if (pc_UTRA) {
+            G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, tsc_PhyCh0, ?, ?, ?, cr_G_UtranClassmarkChange));
+          }
+        }
+    }
+    
+    //@siclog "Step 5b6-5b7" siclog@
+    f_GERAN_MM_Authentication(geran_Cell24, v_ChannelType, v_SubChannel);
+    
+    //@siclog "Step 5b7A-B" siclog@
+    f_GERAN_Ciphering_Mode_Setting (geran_Cell24, tsc_PhyCh0, v_ChannelType, v_SubChannel);
+    
+    G_L2.receive(car_G_L2_DATA_IND(geran_Cell24, ?, ?, ?, ?, ?,  cr_G_EmgSetup)) -> value v_SetUp;
+    v_Ti_R := v_SetUp.l3.msg.esetup.ti;
+    
+    v_TchType :=  f_GERAN_EnterU10_MO_Steps11_19 (geran_Cell24, v_ChannelType, v_SubChannel, v_Ti_R);
+    
+     f_GERAN_CC_Disconnect(geran_Cell24, v_TchType, -, cs_TI_MO);  // @sic R5s160423 sic@
+    f_G_ChannelRelease(geran_Cell24, tsc_TchCh, v_TchType, 15, cs_G_ResumeGPRS); // @sic R5s160423 sic@
+    
+    if (pc_IMS) { // @sic R5-184918 sic@
+      v_MyDefaultVar := activate (a_GERAN_ReceivePDPContext ());
+    }
+    f_GERAN_508CheckCampOnNewGeranCell (geran_Cell24, false); // @sic R5s160423 sic@
+
+    if (p_IMSReg and pc_IMS) { // @sic R5-184918 sic@
+      deactivate(v_MyDefaultVar);
+      f_GERAN_RejectOptionalPDPContext (geran_Cell24);
+    }
+    
+    f_GERAN_TestBody_Set(false);
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);     // Tell EUTRA test is over
+    
+    //Perform postamble
+    f_GERAN_Postamble(geran_Cell24, G1_IDLE, -, -, v_TchType); // @sic R5s160423 sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.1.19
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_13_1_19_GERAN() runs on GERAN_PTC
+  {
+    f_TC_13_1_19_20_GERAN_Common(false);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 13.1.20
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_13_1_20_GERAN() runs on GERAN_PTC
+  {
+    f_TC_13_1_19_20_GERAN_Common(true);
+  }
+
+}

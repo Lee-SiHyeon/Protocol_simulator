@@ -1,0 +1,485 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module WLAN_CommonProcedures {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from CommonIratDefs all;
+  import from IP_PTC_CtrlMsgs all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+  import from WLAN_ASP_TypeDefs all;
+  import from WLAN_CellInfo all;
+  import from WLAN_CommonDefs all;
+  import from WLAN_Component all;
+  import from WLAN_Parameters all;
+  import from WLAN_Templates all;
+
+  const float tsc_WLANWatchDogDef := 60.0;  /* @status    APPROVED (IMS) */
+
+  type record of PDN_Index_Type  PDN_Index_List_Type;  /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      Generic function for WLAN Cell Configuration
+   * @param     p_CellId
+   * @param     p_SYSTEM_CTRL_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_SS_CommonCellConfig(WLAN_CellId_Type p_CellId,
+                                      template (value) WLAN_AP_SYSTEM_CTRL_REQ p_SYSTEM_CTRL_REQ) runs on WLAN_PTC
+  {
+    SYS.send(p_SYSTEM_CTRL_REQ);
+    if (valueof(p_SYSTEM_CTRL_REQ.Common.ControlInfo.CnfFlag) == true) {
+      SYS.receive(car_WLAN_SYSTEM_CTRL_CNF(p_CellId, cr_WLAN_CellCnf));
+    }
+  }
+
+  /*
+   * @desc      Generic function for EPDG Configuration
+   * @param     p_SYSTEM_CTRL_REQ
+   * @status    APPROVED (IMS)
+   */
+  function f_EPDG_SS_CommonConfig(template (value) WLAN_ePDG_SYSTEM_CTRL_REQ p_SYSTEM_CTRL_REQ) runs on WLAN_PTC
+  {
+    SYS_EPDG.send(p_SYSTEM_CTRL_REQ);
+    if (valueof(p_SYSTEM_CTRL_REQ.Common.ControlInfo.CnfFlag) == true) {
+      SYS_EPDG.receive(car_EPDG_SYSTEM_CTRL_CNF(p_SYSTEM_CTRL_REQ.Common.RoutingInfo));
+    }
+  }
+
+  /*
+   * @desc      Generic function for getting PDN Configuration Information for EPDG configuration
+   * @param     p_PDN_Id_List
+   * @return    template (value) WLAN_ePDG_PDN_ConfigInfoList_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_WLAN_PDN_IPAddressInfoList(PDN_Index_List_Type p_PDN_Id_List) return template (value) WLAN_ePDG_PDN_ConfigInfoList_Type
+  {
+    var template (value) WLAN_ePDG_PDN_ConfigInfoList_Type v_PDN_List;
+    var template (value) IPsec_ePDG_Cntrl_Type v_IpSec_SA := cs_IPSec_SA(px_ePDG_Ipsec_IntegrityAlgorithm, px_ePDG_Ipsec_CipheringAlgorithm);
+    var PDN_Index_Type v_PDN_Index;
+    var PDN_AddressInfo_Type v_PDN_AddressInfo;
+    var template (value) WLAN_PDN_AddressInfo_Type v_WLAN_PDN_AddressInfo;
+    var integer i;
+    
+    for (i := 0; i < lengthof(p_PDN_Id_List); i := i+1) {
+      
+      v_PDN_Index := p_PDN_Id_List[i];
+      v_PDN_AddressInfo := f_PDN_AddressInfo_Get(v_PDN_Index);
+      
+      select(v_PDN_Index) {
+        case (ePDG_IMS1,       // Only IMS PDN over WLAN
+              ePDG_IMS2) {     // Two PDNs Emergeny PDN is established no other PDN is active
+          v_WLAN_PDN_AddressInfo := cs_WLAN_PDN_IMS_AddressInfo(v_PDN_AddressInfo.UE_IPAddressIPv4,
+                                                                v_PDN_AddressInfo.UE_IPAddressIPv6,
+                                                                v_PDN_AddressInfo.PCSCF_IPAddressIPv4,
+                                                                v_PDN_AddressInfo.PCSCF_IPAddressIPv6);
+          
+        }
+        case (ePDG_XCAP,
+              ePDG_Internet) { //Only Internet PDN over WLAN for offloading scenarios
+          v_WLAN_PDN_AddressInfo := cs_WLAN_PDN_nonIMS_AddressInfo(v_PDN_AddressInfo.UE_IPAddressIPv4,
+                                                                   v_PDN_AddressInfo.UE_IPAddressIPv6,
+                                                                   v_PDN_AddressInfo.DNS_ServerAddressIPv4,
+                                                                   v_PDN_AddressInfo.DNS_ServerAddressIPv6);
+        }
+      }
+      v_PDN_List[i] := cs_WLAN_ePDG_PDN_ConfigInfo(v_PDN_Index, v_WLAN_PDN_AddressInfo, v_IpSec_SA);
+    }
+    return v_PDN_List;
+  }
+
+  /*
+   * @desc      Generic function for getting PDN Configuration the offloaded PDN
+   * @return    PDN_Index_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_WLAN_CheckOffloadedPDN() return PDN_Index_Type
+  {
+    var PDN_Index_Type v_PDN_Id := ePDG_IMS1;
+    
+    if (tsc_WLAN_Offload_IMSPDN1 or tsc_WLAN_Offload_IMSPDN2){
+      v_PDN_Id := ePDG_IMS1; //IMS PDN offloaded
+    }
+    else{
+      v_PDN_Id := ePDG_Internet; //Internet PDN offlaoded
+    }
+    return v_PDN_Id;
+  }
+
+  /*
+   * @desc      Configures WLAN Cell
+   * @param     p_CellId
+   * @param     p_PDN_Id_List       (default value: {ePDG_Internet})
+   * @param     p_ExplicitDnsHandling (default value: false)
+   * @param     p_IMSoWLAN          (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_CellConfig_Def(WLAN_CellId_Type p_CellId,
+                                 PDN_Index_List_Type p_PDN_Id_List := {ePDG_Internet},
+                                 boolean p_ExplicitDnsHandling := false,
+                                 boolean p_IMSoWLAN := false) runs on WLAN_PTC
+  {
+    var WLAN_AddressInfo_Type v_WLAN_AddressInfo := f_WLAN_AddressInfo_Get();
+    var PDN_Index_List_Type v_PDN_Id_List := p_PDN_Id_List;
+    var template (value) WLAN_AP_AddressInfo_Type v_WLAN_AP_AddressInfo := cs_WLAN_AP_AddressInfo(v_WLAN_AddressInfo.UE_IPAddressIPv4,
+                                                                                                  v_WLAN_AddressInfo.UE_IPAddressIPv6,
+                                                                                                  v_WLAN_AddressInfo.DNS_ServerAddressIPv4,
+                                                                                                  v_WLAN_AddressInfo.DNS_ServerAddressIPv6);
+    
+    var WLAN_AP_Parameters_Type v_AP_Parameters := f_WLAN_CellInfo_GetAP_Parameters(p_CellId);
+    var WLAN_InitialCellPower_Type v_CellPower := f_WLAN_CellInfo_GetCellPower(p_CellId);
+    
+    f_IP_Handling_StartWLAN(IP, v_WLAN_AddressInfo, cs_DrbInfo_WLAN(p_CellId), p_ExplicitDnsHandling);
+    
+    f_WLAN_SS_CommonCellConfig(p_CellId, cas_WLAN_CellConfig_REQ(p_CellId, v_WLAN_AP_AddressInfo, v_AP_Parameters, v_CellPower));
+    
+    if (not p_IMSoWLAN) { // offloaded PDN has to be handled dynamically
+      v_PDN_Id_List := {fl_WLAN_CheckOffloadedPDN()}; // Only one PDN is offloaded
+    }
+    f_EPDG_SS_CommonConfig(cas_EPDG_Config_REQ(v_WLAN_AddressInfo.EPDG_ServerAddressIPv4,v_WLAN_AddressInfo.EPDG_ServerAddressIPv6, fl_WLAN_PDN_IPAddressInfoList(v_PDN_Id_List)));
+  }
+
+  /*
+   * @desc      Function that will release a EPDG Tunnel establishment
+   * @param     p_PdnToBeStopped    (default value: ePDG_Internet)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_ePDG_PDN_Release(template (omit) PDN_Index_Type p_PdnToBeStopped := ePDG_Internet) runs on WLAN_PTC
+  {
+    var PDN_Index_Type v_PdnToBeStopped;
+
+    if (isvalue(p_PdnToBeStopped)) {
+      v_PdnToBeStopped := valueof(p_PdnToBeStopped);
+      f_IP_Handling_StopPDN(IP, cs_IP_StopPDN(v_PdnToBeStopped));
+      f_EPDG_SS_CommonConfig(cas_EPDG_Release_REQ(v_PdnToBeStopped));
+    }
+  }
+
+  /*
+   * @desc      Function that will disconnect a ePDG Tunnel Ue initated.
+   * @param     p_PdnToBeStopped    (default value: ePDG_IMS1)
+   * @status    APPROVED (IMS)
+   */
+   function f_WLAN_IMS_ePDG_Tunnel_Disconnet_UE_Initated(PDN_Index_Type p_PdnToBeStopped := ePDG_IMS1) runs on WLAN_PTC
+  {
+    var boolean v_IMSoWLAN := true;
+    var boolean v_OnlyEPDG := true;
+    var WLAN_CellId_Type v_CellId := wlan_Cell27;
+    timer t_Watchdog := tsc_WLANWatchDogDef;
+    t_Watchdog.start;
+    //IpSec Tunnel release
+    f_WLAN_IPsecTunnel_WaitForIndication(p_PdnToBeStopped, t_Watchdog, cr_WLAN_IPsecTunnelDiscInd);
+    f_WLAN_ReleaseCells( -, v_CellId, -, v_OnlyEPDG, v_IMSoWLAN);
+    t_Watchdog.stop;
+  }
+
+  /*
+   * @desc      Function that will release one or/all configired WLAN Cells
+   *            if p_CellId provides an individual Cell ID the Cell with Cell ID is released;
+   *            if Cell non specific ID is used all configured Cells will be released
+   * @param     p_PdnToBeStopped    (default value: omit)
+   * @param     p_CellId            (default value: wlan_Cell_NonSpecific)
+   * @param     p_TimingInfo        (default value: cs_WLAN_TimingInfoNow)
+   * @param     p_ReleaseEPDGOnly   (default value: false)
+   * @param     p_IMSoWLAN          (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_ReleaseCells(template (omit) PDN_Index_Type p_PdnToBeStopped := omit,
+                               WLAN_CellId_Type p_CellId := wlan_Cell_NonSpecific,
+                               template (value) WLAN_TimingInfo_Type p_TimingInfo := cs_WLAN_TimingInfoNow,
+                               boolean p_ReleaseEPDGOnly := false,
+                               boolean p_IMSoWLAN := false) runs on WLAN_PTC //@sic R5-170924 sic@
+  { /* p_CellId := wlan_Cell_NonSpecific => all cells shall be released */
+    var template (omit) PDN_Index_Type v_PdnToBeStopped := p_PdnToBeStopped;
+   
+    if (not p_IMSoWLAN){
+      v_PdnToBeStopped := fl_WLAN_CheckOffloadedPDN(); // Only one PDN is offloaded
+    }
+    f_WLAN_ePDG_PDN_Release(v_PdnToBeStopped);
+
+    if (not p_ReleaseEPDGOnly) { //@sic R5-170924 sic@p_PdnToBeStopped
+      f_IP_Handling_StopWLAN(IP);
+      f_WLAN_SS_CommonCellConfig(p_CellId, cas_WLAN_CellRelease_REQ(p_CellId, p_TimingInfo));
+    }
+  }
+
+  /*
+   * @desc      to configure power of several Cells in one go
+   * @param     p_CellPowerList
+   * @param     p_TimingInfo        (default value: cs_WLAN_TimingInfoNow)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_CellAttenuationList(template (value) WLAN_CellPowerList_Type p_CellPowerList,
+                                      template (value) WLAN_TimingInfo_Type p_TimingInfo := cs_WLAN_TimingInfoNow) runs on WLAN_PTC
+  {
+    var integer i;
+    var WLAN_CellPower_Type v_CellPower;
+    var WLAN_CellAttenuationList_Type v_CellAttenuationList;
+    
+    for (i:=0; i<lengthof(p_CellPowerList); i:=i+1) {
+      v_CellPower := valueof(p_CellPowerList[i]);   // valueof cannot be avoided here
+      v_CellAttenuationList[i].CellId := v_CellPower.CellId;
+      v_CellAttenuationList[i].Attenuation := fl_WLAN_ChangeCellAttenuation(v_CellPower.CellId, v_CellPower.BeaconRSSI);
+    }
+    
+    SYS.send(cas_WLAN_CellAtenuationList_REQ(v_CellAttenuationList, p_TimingInfo));
+    SYS.receive(car_WLAN_SYSTEM_CTRL_CNF(?, cr_WLAN_CellAttenuationCnf)); //@sic R5s170448 sic@
+  }
+
+  /*
+   * @desc   calculate the value in BeconRSSI of given dbm value
+   *
+   * @param     p_DbmValue  (dbm)
+   * @return    integer     RSSIBeacon (0..255)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_ConvertdBm2BeaconRSSI(integer p_DbmValue) return integer
+  {
+    return (p_DbmValue + 128);
+  }
+
+  /*
+   * @desc      calculate new attenuation for a Cell based on the previous attenuation and the given absolute Cell power;
+   *            the attenuation is written back to the global TTCN-3 WLAN_CellInfo but no configuration is performed at SS
+   * @param     p_CellId
+   * @param     p_NewBeaconRSSI
+   * @return    WLAN_Attenuation_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_WLAN_ChangeCellAttenuation(WLAN_CellId_Type p_CellId,
+                                         WLAN_BeaconRSSI_Type p_NewBeaconRSSI) runs on WLAN_PTC return WLAN_Attenuation_Type
+  {
+    var WLAN_InitialCellPower_Type v_CurrentBeaconRSSI := f_WLAN_CellInfo_GetCellPower(p_CellId);
+    var WLAN_BeaconRSSI_Type v_CurrentRefBeaconRSSI := v_CurrentBeaconRSSI.BeaconRSSI;
+    var WLAN_Attenuation_Type v_Attenuation;
+    var integer v_AttenuationValue;
+    
+    if (p_NewBeaconRSSI == 0) {
+      v_Attenuation.Off := true;
+    }
+    else {
+      v_AttenuationValue := v_CurrentRefBeaconRSSI - p_NewBeaconRSSI;  // v_CurrentRefPowerLevel and p_NewPowerLevel both are negative values
+      
+      if (v_AttenuationValue < 0) {  // i.e. |p_NewBeaconRSSI| < |v_CurrentRefBeaconRSSI|
+        FatalError(__FILE__, __LINE__, "Initial reference power has invalid value");
+      } else {
+        v_Attenuation.Value := v_AttenuationValue;
+      }
+    }
+    
+    v_CurrentBeaconRSSI.Attenuation := v_Attenuation;
+    //Conversion from RSSI to dbm is needed to apply attenuation
+    f_WLAN_CellInfo_SetCellPower(p_CellId, v_CurrentRefBeaconRSSI);
+    
+    return v_Attenuation;
+  }
+
+  /*
+   * @desc      Sets the Cell power attenuation and stores the value in the WLAN_CellInfo
+   * @param     p_CellId
+   * @param     p_NewPowerLevel     absolute value as specified in the test prose
+   * @param     p_TimingInfo        (default value: cs_WLAN_TimingInfoNow)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_SetCellPower(WLAN_CellId_Type p_CellId,
+                               WLAN_BeaconRSSI_Type p_NewPowerLevel,
+                               template (value) WLAN_TimingInfo_Type p_TimingInfo := cs_WLAN_TimingInfoNow) runs on WLAN_PTC
+  {
+    var template (value) WLAN_CellPowerList_Type v_CellPowerList := { cs_WLAN_PowerCell(p_CellId, p_NewPowerLevel) };
+    f_WLAN_CellAttenuationList(v_CellPowerList, p_TimingInfo);
+  }
+
+  /*
+   * @desc      Turn the AP "on" - set the default Beacon RSSI defined in 36.508 cl.4.4.8
+   *            To be used at the start of the test body in those test cases that don't modify the RSSI
+   * @param     p_CellId
+   * @param     p_IMSoWLAN          (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_TurnCellOn(WLAN_CellId_Type p_CellId,
+                             boolean p_IMSoWLAN := false) runs on WLAN_PTC
+  {
+    var WLAN_BeaconRSSI_Type v_PowerLevel := f_WLAN_ConvertdBm2BeaconRSSI (-50); // @sic R5s170904 sic@
+    if(p_IMSoWLAN){
+      v_PowerLevel:= px_WLAN_BeaconRSSI; // @sic R5-174499  sic@
+    }
+    f_WLAN_SetCellPower(p_CellId, v_PowerLevel);
+  }
+
+  /*
+   * @desc      To wait the WLAN AP indication from the SS
+   * @param     p_Watchdog
+   * @param     p_CellId
+   * @param     p_SystemIndication
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_AP_WaitForIndication(timer p_Watchdog,
+                                       WLAN_CellId_Type p_CellId,
+                                       template (present) WLAN_AP_SystemIndication_Type p_SystemIndication) runs on WLAN_PTC
+  {
+    alt {
+      [] SYS_CMDIND.receive(car_WLAN_SYSTEM_IND(p_CellId, p_SystemIndication)) {
+      }
+      [] SYS_CMDIND.receive(car_WLAN_SYSTEM_IND(p_CellId, cr_WLAN_ErrorInd)) {
+        f_WLAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "error while waiting for indication from WLAN AP");
+      }
+      [] p_Watchdog.timeout {
+        f_WLAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout while waiting for indication from WLAN AP");
+      }
+    }
+  }
+
+  /*
+   * @desc      Wait for IpSecTunnel indications
+   * @param     p_PdnId
+   * @param     p_Watchdog
+   * @param     p_SystemIndication
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPsecTunnel_WaitForIndication(PDN_Index_Type  p_PdnId,
+                                                timer p_Watchdog,
+                                                template (present) WLAN_ePDG_SystemIndication_Type p_SystemIndication) runs on WLAN_PTC
+  {
+    alt {
+      [] SYS_EPDG_CMDIND.receive(car_EPDG_SYSTEM_IND(p_PdnId, p_SystemIndication)) {
+      }
+      [] p_Watchdog.timeout {
+        f_WLAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout while waiting for indication from IPsec tunnel");
+      }
+    }
+  }
+
+  /*
+   * @desc      Wait for EAP AKA cmpl indication
+   * @param     p_PdnId
+   * @param     p_Watchdog
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_IPsecTunnel_WaitForEAP_AKA_Cmpl(PDN_Index_Type  p_PdnId,
+                                                  timer p_Watchdog) runs on WLAN_PTC
+  {
+    var WLAN_ePDG_SYSTEM_IND v_EAP_AKA_Cmpl;
+    
+    alt {
+      [] SYS_EPDG_CMDIND.receive(car_EPDG_SYSTEM_IND(p_PdnId, cr_WLAN_IPsecTunnelEstabInd_EAP_AKA_Cmpl(-, ?))) -> value v_EAP_AKA_Cmpl
+        {
+          f_WLAN_CellInfo_SetXRES_Length(v_EAP_AKA_Cmpl.Indication.IPsecTunnelEstabInd.EAP_AKA_Cmpl.XRES_Length);
+        }
+      [] SYS_EPDG_CMDIND.receive(car_EPDG_SYSTEM_IND(p_PdnId, cr_WLAN_IPsecTunnelEstabInd_EAP_AKA_Cmpl(-, omit)))
+        {
+          if (tsc_WLAN_Offload_IMSPDN1 or tsc_WLAN_Offload_IMSPDN2) {
+            f_WLAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "IKE AKA Cmpl must contain XRES Length for IMS PDN");
+          }
+        }
+      [] p_Watchdog.timeout {
+        f_WLAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "timeout while waiting for indication from IPsec tunnel");
+      }
+    }
+  }
+
+  /*
+   * @desc      step 2 of the generic procedure for WLAN AP where the UE has been offload as per 36.508 clause 4.5A.23.2:
+   *            UE associates with the WLAN AP and obtains the local IP address
+   * @param     p_Watchdog
+   * @param     p_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_EstablishIPsecTunnel_Step2(timer p_Watchdog,
+                                             WLAN_CellId_Type p_CellId) runs on WLAN_PTC
+  {
+    SYS_CMDIND.send(cas_WLAN_SYSTEM_CMD(p_CellId, cs_WLAN_AP_AssociateCmd));
+    
+    f_WLAN_AP_WaitForIndication(p_Watchdog, p_CellId, cr_WLAN_AP_AssociationCmplInd);
+    f_WLAN_PreliminaryPass(__FILE__, __LINE__, "WLAN AP successfully associated");
+  }
+
+  /*
+   * @desc      step 4 of the generic procedure for WLAN AP where the UE has been offload as per 36.508 clause 4.5A.23.2:
+   *            The UE establishes IPsec tunnel using the IKEv2 protocol as defined in 3GPP TS 33.402 [55] clause 8.2.2, Figure 8.2.2-1
+   * @param     p_PdnId
+   * @param     p_Watchdog
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_EstablishIPsecTunnel_Step4(PDN_Index_Type p_PdnId,
+                                             timer p_Watchdog) runs on WLAN_PTC
+  {
+    var template charstring v_AccessPointName := *;
+
+    if(p_PdnId == ePDG_IMS2){ // ePGDG_IMS2 to be use for second ePDG Tunnel (XCAP, Internet) @sic R5-174498 sic@
+      v_AccessPointName := ?;
+    }
+    //Step 3. UE initiates Authentication and Authorization (EAP-AKA) using CHAP as defined in 33.402[ZZ] clause 6.5.3
+    f_WLAN_IPsecTunnel_WaitForIndication(p_PdnId, p_Watchdog, cr_WLAN_IPsecTunnelEstabInd_IKE_SA_INIT);//@sic R5s170448 sic@
+
+    //Step 4-9. Check:The UE initiates IPsec tunnel establishment procedure using the IKEv2 protocol as defined in  3GPP TS 33.402[ZZ]; Procedure defined in 23.402[YY] clause 8.2.3 steps 4-9
+    f_WLAN_IPsecTunnel_WaitForIndication(p_PdnId, p_Watchdog, cr_WLAN_IPsecTunnelEstabInd_IKE_AUTH_REQ(v_AccessPointName));  //@sic R5s170704 sic@  //@sic R5s221338 sic@
+    f_WLAN_IPsecTunnel_WaitForEAP_AKA_Cmpl(p_PdnId,p_Watchdog); //@sic R5s170448 sic@  //@sic R5s221338 sic@
+
+
+    f_WLAN_IPsecTunnel_WaitForIndication(p_PdnId, p_Watchdog, cr_WLAN_IPsecTunnelEstabInd_Cmpl);//@sic R5s170448 sic@
+    f_WLAN_PreliminaryPass(__FILE__, __LINE__, "IPSec IKEv2 tunnel succesfully established");//@sic R5s170448 sic@
+  }
+
+  /*
+   * @desc      Generic procedure for WLAN AP where the UE has been offload as per 36.508 clause 4.5A.23.2
+   * @param     p_CellId
+   * @param     p_PdnId
+   * @param     p_IMSoWLAN          (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_EstablishIPsecTunnel(WLAN_CellId_Type p_CellId,
+                                       PDN_Index_Type  p_PdnId,
+                                       boolean p_IMSoWLAN := false) runs on WLAN_PTC
+  {
+    timer t_Watchdog := tsc_WLANWatchDogDef;
+
+    //Initiate PDN Handling
+    if (p_IMSoWLAN){ //only for IMS over WLAN
+      f_IP_Handling_StartPDN(IP,p_PdnId,cs_DrbInfo_IPsecTunnel(p_PdnId));
+    }
+    t_Watchdog.start;
+
+    f_WLAN_EstablishIPsecTunnel_Step2(t_Watchdog, p_CellId);     /* @sic R5-169075 (test case 20.1): f_WLAN_EstablishIPsecTunnel_Step2 sic@ */
+    //Step 3. UE initiates a dynamic selection of ePDG using DNS
+
+    f_WLAN_EstablishIPsecTunnel_Step4(p_PdnId, t_Watchdog);               /* @sic R5-169075 (test case 20.1): f_WLAN_EstablishIPsecTunnel_Step4 sic@ */
+    t_Watchdog.stop;
+  }
+
+  /*
+   * @desc      Postamble for WLAN test cases
+   * @param     p_CellId
+   * @param     p_PDN_Index
+   * @param     p_IMSoWLAN          (default value: false)
+   * @status    APPROVED (IMS)
+   */
+  function f_WLAN_Postamble(WLAN_CellId_Type p_CellId,
+                            PDN_Index_Type p_PDN_Index,
+                            boolean p_IMSoWLAN := false) runs on WLAN_PTC
+  {
+    timer t_Watchdog := tsc_WLANWatchDogDef;
+    
+    if (pc_SwitchOnOff) {
+      f_UT_SwitchOffUE (UT, false);
+      t_Watchdog.start;
+      //IpSec Tunnel release acc. 36.523-3 cl. 10.6.3.1
+      f_WLAN_IPsecTunnel_WaitForIndication(p_PDN_Index, t_Watchdog, cr_WLAN_IPsecTunnelDiscInd);
+      //@sic R5s180157 sic@
+      t_Watchdog.stop;
+    } else {
+      f_UT_PowerOffUE (UT);
+    }
+    f_WLAN_ReleaseCells(-, p_CellId, -, -, p_IMSoWLAN); // @sic R5s170904 sic@
+  }
+
+}

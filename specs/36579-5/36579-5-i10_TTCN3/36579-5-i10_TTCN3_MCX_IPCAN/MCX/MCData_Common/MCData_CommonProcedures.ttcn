@@ -1,0 +1,155 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-12-02 20:25:22 +0100 (Mon, 02 Dec 2024) $
+// $Rev: 40016 $
+/******************************************************************************/
+
+module MCData_CommonProcedures {
+
+  import from Base64Encoding all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_SIP_Templates all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from MCDataMessage_TypeDefs all;
+  import from MCData_MCDataMessages all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_CommonProcedures all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIKEY_Messages all;
+  import from MCX_MIME_Functions all;
+  import from MCX_Parameters all;
+  import from MCX_SIP_Common all;
+  import from MCX_SecurityParameters all;
+  import from MCX_XML_mcdata_info all;
+  import from MCX_XML_resource_lists all;
+  import from MIKEY_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Build up message header of SIP MESSAGE to be sent to the UE
+   * @param     p_MCDataService
+   * @param     p_ACCEPT_CONTACT_WITH_MEDIA_FEATURE_TAG (default value: true)
+   * @param     p_PAssertedId       (default value: px_MCX_SIP_PublicUserId_B)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_MessageRequest_MessageHeaderTX(MCX_ServiceType_Type p_MCDataService,    // MCDataSDS or MCDataFD
+                                                   boolean p_ACCEPT_CONTACT_WITH_MEDIA_FEATURE_TAG := true,
+                                                   charstring p_PAssertedId := px_MCX_SIP_PublicUserId_B) runs on IMS_PTC return template (value) MessageHeader
+  {
+    var template (value) MessageHeader v_MessageHeader_Message := f_MCX_MessageRequest_MessageHeaderTX(p_MCDataService, p_ACCEPT_CONTACT_WITH_MEDIA_FEATURE_TAG);
+    var charstring v_MCDataAssertedService := f_MCX_FeatureTag_3gpp_service_ims_icsi_mcs(p_MCDataService);
+
+    v_MessageHeader_Message.pAssertedID := cs_PAssertedId(f_SIP_BuildSipUri_TX(p_PAssertedId));
+    v_MessageHeader_Message.pAssertedService := cs_PAssertedService(v_MCDataAssertedService);
+
+    return v_MessageHeader_Message;
+  }
+
+  /*
+   * @desc      Setup an IPCAN connection for MCData
+   * @param     p_TestProcedure
+   * @param     p_MMI_String        (default value: "")
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_ConnectionSetup(IMS_TestProcedure_Type p_TestProcedure,
+                                    charstring p_MMI_String := "") runs on IMS_PTC
+  {
+    f_MCX_IPCAN_StartSignalling(p_TestProcedure);
+    if (p_MMI_String != "") {
+      f_UT_MCX_UserAction(MMI, p_MMI_String);
+    }
+  }
+
+  /*
+   * @desc      Receive SIP MESSAGE for MCData and send 202 Accepted
+   * @param     p_MCDataService
+   * @param     p_DataKeyIndex
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_McdataInfoExt     (default value: omit)
+   * @param     p_ResourceLists     (default value: omit)
+   * @param     p_MIKEY_Message     (default value: omit)
+   * @param     p_SignallingMessage
+   * @param     p_DataMessage       (default value: omit)
+   * @return    MCData_SignallingAndDataPayload_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_ReceiveMESSAGE_Send202Accepted(MCX_ServiceType_Type p_MCDataService,    // MCDataSDS or MCDataFD
+                                                   MCX_KeyIndex_Type p_DataKeyIndex,        // PCK or GMK
+                                                   template MCData_Info_Type p_McdataInfo := omit,
+                                                   template McdataInfoExt_ElementList_Type p_McdataInfoExt := omit,
+                                                   template ResourceLists_Type p_ResourceLists := omit,
+                                                   template MIKEY_Message p_MIKEY_Message := omit,
+                                                   template (present) MCData_Message p_SignallingMessage,
+                                                   template MCData_Message p_DataMessage := omit) runs on MCX_IMS_PTC return MCData_SignallingAndDataPayload_Type
+  {
+    var MCX_MessageRequestWithXmlBodies_Type v_MessageRequestWithXmlBodies;
+    var MIME_Message v_MIME_Message;
+    var MIKEY_Message v_MIKEY_Message;
+    var MCX_SecurityKey_Type v_PCK;
+
+    v_MessageRequestWithXmlBodies := f_MCX_ReceiveMESSAGE_Send20xResponse_MIME(p_MCDataService, f_MCX_MCServer_PublicServiceId(MCData), c_statusLine202, -, -, -, -, p_McdataInfo, p_McdataInfoExt, -, p_ResourceLists);
+    v_MIME_Message := v_MessageRequestWithXmlBodies.Message.messageBody.mimeMessageBody;
+
+    if (ispresent(p_MIKEY_Message)) {
+      v_MIKEY_Message := f_MCX_MIME_DecodeMatchAndCheckMikeyMessage(v_MIME_Message, p_MIKEY_Message);      /* NOTE: compiler warning cannot be avoided here */
+      v_PCK := f_MCX_MIKEY_Message_ExtractKey(v_MIKEY_Message);
+      f_MCX_IMS_PTC_SecurityParameters_SetKey(PCK, v_PCK);   // needs to be done before MCData payloads can be handled
+    }
+    return f_MIME_DecodeAndMatchMCData(v_MIME_Message, p_DataKeyIndex, p_SignallingMessage, p_DataMessage);
+  }
+
+  /*
+   * @desc      Send SIP MESSAGE for MCData and receive 200 OK
+   * @param     p_MCDataService
+   * @param     p_DataKeyIndex
+   * @param     p_McdataInfo        (default value: omit)
+   * @param     p_SignallingMessage (default value: omit)
+   * @param     p_DataMessage       (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCData_SendMESSAGE_Receive200OK(MCX_ServiceType_Type p_MCDataService,    // MCDataSDS or MCDataFD
+                                             MCX_KeyIndex_Type p_DataKeyIndex,
+                                             template (omit) MCData_Info_Type p_McdataInfo := omit,
+                                             template (omit) MCData_Message p_SignallingMessage := omit,
+                                             template (omit) MCData_Message p_DataMessage := omit) runs on MCX_IMS_PTC
+  {
+    var template (value) MessageHeader v_RequestHeader := f_MCData_MessageRequest_MessageHeaderTX(p_MCDataService);
+    var template (value) MIME_Part_List v_MIME_Part_List := {};
+    var template (value) MessageBody v_MessageBody;
+    var charstring v_EncodedMikeyMessage;
+    var MIME_Part_Body v_MIME_Part_Body;
+
+    v_MIME_Part_List := f_MCX_MIME_PartList_AddTX(MCData, -, v_MIME_Part_List, -, -, -, p_McdataInfo);
+    v_MIME_Part_List := f_MCX_MIME_PartList_AddMCDataMessageTX(v_MIME_Part_List, p_SignallingMessage, CSK);
+    v_MIME_Part_List := f_MCX_MIME_PartList_AddMCDataMessageTX(v_MIME_Part_List, p_DataMessage, p_DataKeyIndex);
+
+    if (isvalue(p_DataMessage) and (p_DataKeyIndex == PCK)) {
+      v_EncodedMikeyMessage := f_Base64Encode(f_MCX_EncodedMikeyMessage(MCData));
+      v_MIME_Part_List := f_MIME_Part_List_AddText(v_MIME_Part_List, tsc_MimeType_Mikey, v_EncodedMikeyMessage);
+    }
+    
+    if (lengthof(v_MIME_Part_List) == 1) {
+      v_RequestHeader.contentType := cs_ContentType(v_MIME_Part_List[0].header.contentType.typeAndSubtype);
+      v_MIME_Part_Body := valueof(v_MIME_Part_List[0].body);
+      select union (v_MIME_Part_Body) {
+        case (xmlBody)      { v_MessageBody := cs_MessageBody_XML(v_MIME_Part_Body.xmlBody); }
+        case (commonText)   { v_MessageBody := cs_MessageBody_CommonText(v_MIME_Part_Body.commonText); }
+        case (commonBinary) { v_MessageBody := cs_MessageBody_CommonBinary(v_MIME_Part_Body.commonBinary); }
+      }
+    } else {
+      v_MessageBody := cs_MessageBody_MIME(cs_MIME_Message(tsc_MCX_MIME_Boundary, v_MIME_Part_List));
+    }
+
+    f_MCX_SendMESSAGE_Receive200OK(-, v_RequestHeader, v_MessageBody);
+  }
+
+}

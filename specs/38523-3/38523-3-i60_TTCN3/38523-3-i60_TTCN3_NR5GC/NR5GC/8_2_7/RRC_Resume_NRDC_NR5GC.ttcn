@@ -1,0 +1,152 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2024-11-25 13:23:03 +0100 (lu., 25 nov. 2024) $
+// $Rev: 39875 $
+/******************************************************************************/
+
+module RRC_Resume_NRDC_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRCSteps_NRDC all;
+  import from NR5GC_RRC_Templates all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_PDCP_Templates all;
+  import from NR_RRC_Templates all;
+  import from SDAP_TypeDefs all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.2.7.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_2_7_2_1_NR5GC() runs on NR5GC_PTC
+  { // RRC Resume / Suspend-Resume / RRC reconfiguration / NR-DC / Resume with SCG
+
+    f_NR5GC_Init_NRDC(NR_1, {nr_Cell1, nr_Cell10});
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell10, -, tsc_NRDC_SCG_Cell);
+
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A);
+    f_NR_SetCellPower(nr_Cell10, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR5GC_RRC_ConnectedState3N_NRDC(nr_Cell1, nr_Cell10, MCG_SCG);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_2_7_2_1_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_8_2_7_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_2_7_2_1_TestBody() runs on NR5GC_PTC
+  {
+    var integer v_SCG_DRB_Id := f_NR_GetDefaultDRB_SCG();
+    var boolean v_IsFR1_SCG := f_NR_CellInfo_GetIsFR1(nr_Cell10);
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+    var template (value) SDAP_Config v_SDAP_ConfigSCG := cs_SDAP_Config(oct2int(valueof(v_GSM_MobilityInfo.SessionId)), false, {5});
+    var template (value) SDAP_Configuration_Type v_SDAP_ConfigurationSCG := f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(v_SDAP_ConfigSCG));
+    var template (value) DRB_ToAddMod v_DRBToAddMod_SCG;
+    var template (value) RadioBearerConfig v_RadioBearerConfig; // @sic R5s221096 sic@
+    var template (value) RadioBearerConfig v_RadioBearerConfig2;
+    var template (value) CellGroupConfig v_CellGroupConfigMCG := f_NR_GetSCGConfigResume(nr_Cell1);
+    var template (omit) octetstring v_EncodedSCG_MCG := bit2oct(encvalue(v_CellGroupConfigMCG));
+    var template (value) CellGroupConfig v_CellGroupConfigSCG;
+    var template (value) NR_RadioBearerList_Type v_SS_ConfigMCG := f_NR5GC_GetRadioBearerList(f_NR5GC_MobileInfo_GetDRBInfoList(), true);
+    var template (value) NR_RadioBearerList_Type v_SS_ConfigSCG;
+    var template (value) RRCResume_v1560_IEs v_RRCResume_v1560Ext;
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList(); // @sic R5s221096 sic@
+    var template (omit) DRB_ToAddModList v_DRB_ToAddModList := omit; // @sic R5s221096 sic@
+    var integer i; // @sic R5s221096 sic@
+    var integer j := 0; // @sic R5s221096 sic@
+
+    //@siclog "Step 1" siclog@
+    //The SS transmits an RRCRelease message with suspendConfig.
+    f_NR_RRC_InactiveDef(nr_Cell1);
+    //Release SCG DRB in SS
+    f_NR_SS_CommonRadioBearerConfig(nr_Cell10, {cs_NR_SS_RadioBearer_Release(cs_NR_RadioBearerId_DRB(v_SCG_DRB_Id))});
+
+    // Prepare SRB+DRBs configurations for step 4
+    // @sic R5s221096 sic@
+    // Configure RadioBearerConfig with condition RESUME
+    for (i:= 0; i < lengthof(v_ExistingDRBs); i :=i+1) { // @sic R5s221096 sic@
+      if(v_ExistingDRBs[i].DC_SCG == false){
+        v_DRB_ToAddModList[j] := cs_NR_DRB_ToAddMod(omit, v_ExistingDRBs[i].DRB_Id, true_, -, omit);
+        j := j+1;
+      }
+    }
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef( {cs_NR_SRB_ToAddMod_ReestablishPDCP(tsc_SRB2)}, v_DRB_ToAddModList);
+
+    // Initialise variablmes for SCG
+    v_DRBToAddMod_SCG := cs_NR_DRB_ToAddMod(omit, v_SCG_DRB_Id, true_, -, omit);
+    v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(omit, {v_DRBToAddMod_SCG}, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get_SCG(), f_NR_AS_IntegrityAlgorithm_Get_SCG()), secondary));
+    v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(nr_Cell10, v_SCG_DRB_Id);
+    v_RRCResume_v1560Ext := f_NRDC_BuildRRCResumeSCG_v1560(v_CellGroupConfigSCG, v_RadioBearerConfig2, -, 0, true_);
+    v_SS_ConfigSCG := { cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                            cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB),
+                                            cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                            v_SDAP_ConfigurationSCG) };
+
+    //@siclog "Step 2" siclog@
+    //The SS waits for 5 sec and transmits a Paging message including a matched identity (correct fullI-RNTI).
+    f_Delay(5.0);
+    f_NR_Paging_Def(nr_Cell1, RRC_INACTIVE);
+
+    //@siclog "Step 3" siclog@
+    //UE transmits an RRCResumeRequest message by setting resumeIdentity to the stored shortI-RNTI value.
+    f_NR_RRC_ResumeRequest_Def(nr_Cell1, tsc_NR_ShortI_RNTI_Value1);
+
+    //@siclog "Step 4" siclog@
+    //The SS transmits an RRCResume message.
+    // Switch on UL grant assignments
+    f_NR_ULGrantConfiguration_Start(nr_Cell1); // @sic R5s221096 sic@
+
+    f_ReconfigureSS_DRBs_NRDC( nr_Cell1, nr_Cell10, -, v_SS_ConfigMCG, v_SS_ConfigSCG, MCG_SCG_SecondaryKeys );
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell10, cds_NR_SystemIndCtrl_RachPreamble(enable));
+    // Reconfigure SS - set DcchDtch on CSS with DCI format 1_0 to send RRCResume
+    f_NR_SS_ReconfigSStoCSS_DCI1_0(nr_Cell1);        //@sic R5s240461 sic@
+
+    SRB.send(cas_NR_SRB1_RrcPdu_REQ(nr_Cell1, -, cs_38508_RRCResume(-, v_EncodedSCG_MCG, v_RadioBearerConfig, -, v_RRCResume_v1560Ext)));
+
+    interleave {
+      //@siclog "Step 5" siclog@
+      //The UE transmits an RRCResumeComplete message.
+      [] SRB.receive(car_NR_SRB1_RrcPdu_IND(nr_Cell1, cr_38508_RRCResumeComplete(-, cr_RRCResumeComplete_v1610(?)))) {}
+      [] SYSIND.receive(car_NR_PRACH_Preamble_IND(nr_Cell10, -, ?)) {}
+    }
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell10, cds_NR_SystemIndCtrl_RachPreamble(disable));
+    // Reconfigure SS - set DcchDtch on USS with DCI format 1_1
+    f_NR_SS_ReconfigSStoUSS_DCI1_1(nr_Cell1);   //@sic R5s240461 sic@
+    // Reconfigure RACH procedure as for initial access.  @sic R5s240440 sic@
+    f_NR_SS_RachProcedureConfig_Def(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+  }
+
+}

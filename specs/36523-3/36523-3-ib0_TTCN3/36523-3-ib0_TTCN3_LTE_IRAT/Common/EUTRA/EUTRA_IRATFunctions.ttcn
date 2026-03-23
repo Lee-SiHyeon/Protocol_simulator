@@ -1,0 +1,405 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+
+module EUTRA_IRATFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_CellInfoInit all;
+  import from EUTRA_CommonDefs all;
+  import from EUTRA_CommonProcedures all;
+  import from EUTRA_Component all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_SecurityFunctions all;
+  import from EUTRA_NR_SecurityFunctions all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from NAS_AuthenticationCommon all;
+  import from NasEmu_CtrlFunctions all;
+  import from Parameters all;
+  import from UTRAN_CapabilityFunctions all;
+
+  /*
+   * @desc      To send authentication parameters to another PTC
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_AuthParams
+   * @param     p_PTMSISig
+   * @param     p_AuthParamsCS      (default value: omit)
+   * @param     p_UEACap            (default value: omit)
+   * @param     p_UIACap            (default value: omit)
+   * @param     p_StartPS           (default value: omit)
+   * @param     p_StartCS           (default value: omit)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_SendAuthCoOrdParameters (IRAT_CO_ORD_PORT p_Port,
+                                            EUTRA_CellId_Type p_CellId,
+                                            Common_AuthenticationParams_Type p_AuthParams,
+                                            B16_Type p_PTMSISig,
+                                            template (omit) Common_AuthenticationParams_Type p_AuthParamsCS := omit, // used in SRVCC tests to pass CS auth params
+                                            template (omit) CoOrd_UEACap_Type p_UEACap := omit,  // @sic R5s130506 sic@
+                                            template (omit) CoOrd_UIACap_Type p_UIACap := omit,  // @sic R5s130680 sic@
+                                            template (omit) B20_Type p_StartPS := omit, // used to pass the start value in HO tests (got from UE Capability)
+                                            template (omit) B20_Type p_StartCS := omit) runs on EUTRA_PTC
+  {
+    var GutiParameters_Type v_Guti_Params := f_EUTRA_CellInfo_GetGuti(p_CellId);
+    
+    p_Port.send (cms_IRAT_AuthInfo(p_AuthParams,
+                                   p_AuthParamsCS,
+                                   cs_IRAT_GUTIStuff (v_Guti_Params.MME_GroupId, v_Guti_Params.MME_Code, v_Guti_Params.M_TMSI, p_PTMSISig),
+                                   -,
+                                   p_UEACap,
+                                   p_UIACap,
+                                   p_StartPS,
+                                   p_StartCS)); //@sic R5-120764 sic@
+  }
+
+  /*
+   * @desc      Function to send the authentication parameters to UTRAN or GERAN in case they are updated in the test case.
+   * @param     p_CellId
+   * @param     p_Port
+   * @param     p_ForIdleMode       (default value: true)
+   * @param     p_SRVCCKeys         (default value: false)
+   * @param     p_StartPS           (default value: omit)
+   * @param     p_StartCS           (default value: omit)
+   * @param     p_CS_PS_ComHO       (default value: false)
+   * @status    APPROVED (IMS_IRAT, LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_SendAuthParameters(EUTRA_CellId_Type p_CellId,
+                                      IRAT_CO_ORD_PORT p_Port,
+                                      boolean p_ForIdleMode := true, // set to false if used in handover test cases
+                                      boolean p_SRVCCKeys  := false, // set to true if used in SRVCC test cases
+                                      template (omit) B20_Type p_StartPS := omit, // used to pass the start value in HO tests (got from UE Capability)
+                                      template (omit) B20_Type p_StartCS := omit, // used to pass the start value in SRVCC tests (got from UE Capability)
+                                      boolean p_CS_PS_ComHO := false) runs on EUTRA_PTC //set to true if used in SRVCC test cases is PS domain is also handed over
+  {
+    var EUTRA_SecurityParams_Type v_SecurityParams;
+    var Common_AuthenticationParams_Type v_CommonAuthParams;
+    var template (omit) Common_AuthenticationParams_Type v_CommonAuthParamsCS := omit;
+    var B256_Type v_CkIk;
+    var B256_Type v_CkIkSRVCC;
+    var B128_Type v_CK;
+    var B128_Type v_CKSRVCC;
+    var B128_Type v_IK;
+    var B128_Type v_IKSRVCC;
+    var O4_Type v_DL_NAS_Count := f_EUTRA_NB_SS_NAS_CountGetDLNext(NASCTRL); // @sic R5s110382 sic@
+    var O4_Type v_UL_NAS_Count := f_EUTRA_NB_SS_NAS_CountGetULNext(NASCTRL); // @sic R5s110382 sic@
+    var template (omit) CoOrd_UEACap_Type v_UEACap := omit;
+    var template (omit) CoOrd_UIACap_Type v_UIACap := omit;
+    var B16_Type v_PTMSISig;
+    
+    //Get latest security params...
+    v_SecurityParams := f_EUTRA_Security_Get();
+    //...and use them to update CK and IK
+    
+    if (p_ForIdleMode or (p_SRVCCKeys and (not p_CS_PS_ComHO))) {//@sic R5s130561 R5s140096 sic@
+      v_CkIk := f_EUTRA_Authentication_S1B(v_SecurityParams.KDF, v_SecurityParams.KASME, v_UL_NAS_Count); //@sic R5s160711 parameter change sic@
+    } else {
+      v_CkIk := f_EUTRA_Authentication_S16(v_SecurityParams.KDF, v_SecurityParams.KASME, v_DL_NAS_Count); //@sic R5s160711 parameter change sic@
+    }
+    
+    v_CK := substr(v_CkIk, 0, 128);
+    v_IK := substr(v_CkIk, 128, 128);
+    
+    v_CommonAuthParams := v_SecurityParams.AuthParams;
+    v_CommonAuthParams.CK := v_CK;
+    v_CommonAuthParams.IK := v_IK;
+    
+    v_PTMSISig := substr (f_EUTRA_Authentication_S17 (v_SecurityParams.KDF, v_SecurityParams.KASME, v_UL_NAS_Count), 240, 16); // @sic R5-140761 R5s160711 parameter change sic@
+    
+    // @sic R5s130506 sic@
+    if (ispresent(v_SecurityParams.NAS_SecurityCap.ueaCap)) {
+      v_UEACap.Uea0 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 0, 1);
+      v_UEACap.Uea1 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 1, 1);
+      v_UEACap.Uea2 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.ueaCap), 2, 1);
+    }
+    // @sic R5s130680 sic@
+    if (ispresent(v_SecurityParams.NAS_SecurityCap.uiaCap)) {
+      v_UIACap.Uia0 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 0, 1);
+      v_UIACap.Uia1 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 1, 1);
+      v_UIACap.Uia2 := substr(oct2bit(v_SecurityParams.NAS_SecurityCap.uiaCap), 2, 1);
+    }
+    //@sic R5-120637 enhancements for SRVCC sic@
+    if (p_SRVCCKeys) {
+      v_CkIkSRVCC := f_EUTRA_Authentication_S1A(v_SecurityParams.KDF, v_SecurityParams.KASME, v_DL_NAS_Count); //@sic R5s130561 R5s160711 parameter change sic@
+      v_CKSRVCC := substr(v_CkIkSRVCC, 0, 128);
+      v_IKSRVCC := substr(v_CkIkSRVCC, 128, 128);
+      v_CommonAuthParamsCS := cs_CommonAuthParams_Init(px_eAuthRAND);
+      v_CommonAuthParamsCS.CK := v_CKSRVCC;
+      v_CommonAuthParamsCS.IK := v_IKSRVCC;
+      v_CommonAuthParamsCS.KeySeq := v_SecurityParams.AuthParams.KeySeq;
+      //derivation of KcGSM from CKsrvcc and IKsrvcc c3 = ((CK1 XOR CK2) XOR (IK1 XOR IK2)) @sic R5s140730 sic@
+      v_CommonAuthParamsCS.KcGSM := (substr( v_CKSRVCC, 0, 64) xor4b substr( v_CKSRVCC, 64, 64)) xor4b (substr( v_IKSRVCC, 0, 64) xor4b substr( v_IKSRVCC, 64, 64));
+      v_CommonAuthParamsCS.Kc128 := substr (fx_KeyDerivationFunction ( tsc_KDF_HMAC_SHA_256, (valueof(v_CommonAuthParamsCS.CK) & valueof(v_CommonAuthParamsCS.IK)), '32'O ), 0, 128);  // @sic R5s150121 sic@
+    }
+    
+    //Now send these over to the other RAT, but DON'T store them
+    f_EUTRA_SendAuthCoOrdParameters (p_Port, p_CellId, v_CommonAuthParams, v_PTMSISig, v_CommonAuthParamsCS, v_UEACap, v_UIACap, p_StartPS, p_StartCS); // @sic R5-120764, R5s130506, R5s130680, R5-140761 sic@
+  }
+
+  /*
+   * @desc      wrapper function using charstring as parameter instead of port
+   * @param     p_CellId
+   * @param     p_OtherRat
+   * @param     p_ForIdleMode       (default value: true)
+   * @param     p_SRVCCKeys         (default value: false)
+   * @param     p_StartPS           (default value: omit)
+   * @param     p_StartCS           (default value: omit)
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_SendAuthParametersToOtherRAT(EUTRA_CellId_Type p_CellId,
+                                                charstring p_OtherRat,
+                                                boolean p_ForIdleMode := true, // set to false if used in handover test cases
+                                                boolean p_SRVCCKeys  := false, // set to true if used in SRVCC test cases
+                                                template (omit) B20_Type p_StartPS := omit, // used to pass the start value in HO tests (got from UE Capability)
+                                                template (omit) B20_Type p_StartCS := omit) runs on EUTRA_PTC // used to pass the start value in SRVCC tests (got from UE Capability)
+  {
+    select (p_OtherRat) {
+      case ("UTRAN") {
+        f_EUTRA_SendAuthParameters(p_CellId, UTRAN, p_ForIdleMode, p_SRVCCKeys, p_StartPS, p_StartCS);
+      }
+      case ("GERAN") {
+        f_EUTRA_SendAuthParameters(p_CellId, GERAN, p_ForIdleMode, p_SRVCCKeys, p_StartPS, p_StartCS);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid other RAT");
+      }
+    }
+  }
+
+  /*
+   * @desc      wrapper function using charstring as parameter instead of port
+   * @param     p_OtherRat
+   * @param     p_Msg
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_SendCoOrdToOtherRAT(charstring p_OtherRat,
+                                      template (value) IRAT_Coordination_MSG p_Msg) runs on EUTRA_PTC
+  {
+    select (p_OtherRat) {
+      case ("UTRAN") {
+        f_IRAT_SendCoOrd(UTRAN, p_Msg);
+      }
+      case ("GERAN") {
+        f_IRAT_SendCoOrd(GERAN, p_Msg);
+      }
+      case else {} // @sic R5s140189 sic@
+    }
+  }
+
+  /*
+   * @desc      to be used in the test case preamble for ALL Inter-RAT tests that start in EUTRA
+   * @param     p_CellId
+   * @param     p_State
+   * @param     p_Port
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_NtwkFeatSupport   (default value: f_GetDefaultValueNetworkFeatureSupport())
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_Preamble_InterRAT (EUTRA_CellId_Type p_CellId,
+                                      IDLEUPDATED_STATE_Type p_State,
+                                      IRAT_CO_ORD_PORT p_Port,
+                                      EUTRA_ATTACH_Type p_ForcedAttach := NORMAL,
+                                      template (omit) EPS_NetworkFeatureSupport p_NtwkFeatSupport := f_GetDefaultValueNetworkFeatureSupport()) runs on EUTRA_PTC // @sic R5-130620, R5-155988 sic@
+  {
+    // Do normal preamble
+    f_EUTRA_Preamble (p_CellId, p_State, p_ForcedAttach, -, p_NtwkFeatSupport);
+    
+    // then get latest security params and send them over
+    f_EUTRA_SendAuthParameters (p_CellId, p_Port);
+  }
+
+  /*
+   * @desc      To be called after EUTRA_Init, before the test case body for every test that doesn't start in EUTRA.
+   *             This will wait until Preamble is finished on the other RAT and it has received the AuthParams
+   *             These are then stored in SecurityParams
+   * @param     p_Port
+   * @param     p_IsRSRVCC          (default value: false)
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_InterRAT_InitialiseAuthParams (IRAT_CO_ORD_PORT p_Port,//@sic R5s150704 new parameter and its branch in code added sic@
+                                                   boolean p_IsRSRVCC := false) runs on EUTRA_PTC
+  {
+    var IRAT_Coordination_MSG v_RxdMsg;
+    var EUTRA_SecurityParams_Type v_SecurityParams := f_EUTRA_Security_Get();
+    
+    p_Port.receive (cmr_IRAT_AuthInfo) -> value v_RxdMsg;
+    //@sic R5s150704 sic@
+    if (p_IsRSRVCC)
+    {
+        v_SecurityParams.AuthParams := v_RxdMsg.Authentication.AuthCS;
+    }else
+    {
+        v_SecurityParams.AuthParams := v_RxdMsg.Authentication.AuthPS;
+    }
+    f_EUTRA_Security_Set (v_SecurityParams);
+    f_EUTRA_MobileInfo_SetCoOrd_OtherRATState (v_RxdMsg.Authentication.OtherRATState); // @sic R5-163054 sic@
+  }
+
+  /*
+   * @desc      return RAT combination for the respective test run depending on px_RATComb_Tested
+   * @return    charstring
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_GetOtherRAT() return charstring
+  {
+    select (px_RATComb_Tested) {
+      case (EUTRA_UTRA) {
+        return "UTRAN";
+      }
+      case (EUTRA_GERAN) {
+        return "GERAN";
+      }
+      case else {
+        return "NONE";
+      }
+    }
+  }
+
+  /*
+   * @desc      Call Preamble_InterRAT for UTRAN or GERAN RAT and possibly wait for the pre-preamble to finish first
+   * @param     p_CellsOnSamePLMN
+   * @param     p_SibCombinationUTRANorGERAN (default value: c10)
+   * @param     p_SibCombinationEUTRAonly (default value: c1)
+   * @param     p_CellSpecialFreq   (default value: LTE_NAS_NormalFreq)
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_NAS_InitIRATorEUTRAonly(EUTRA_NAS_NumOfPLMN_Type p_CellsOnSamePLMN,
+                                           Combination_Type p_SibCombinationUTRANorGERAN := c10, // can be c10 or c10a
+                                           Combination_Type p_SibCombinationEUTRAonly := c1,
+                                           EUTRA_NAS_CellSpecialFreq p_CellSpecialFreq := LTE_NAS_NormalFreq) runs on EUTRA_PTC
+  { /* NOTE: Consistency check of px_RATComb_Tested and pc_UTRA/pc_GERAN will be done at top-level */
+    /* @sic R5-113805, R5-113696, R5-113734 sic@ */
+    var charstring v_OtherRAT := f_EUTRA_GetOtherRAT();
+    var Combination_Type v_Combination;
+
+    if (v_OtherRAT == "NONE") {
+      v_Combination := p_SibCombinationEUTRAonly;
+    } else {
+      v_Combination := p_SibCombinationUTRANorGERAN;
+    }
+    f_EUTRA_NAS_Init(p_CellsOnSamePLMN, v_Combination, p_CellSpecialFreq);
+  }
+
+  /*
+   * @desc      wrapper function using charstring as parameter instead of port
+   * @param     p_OtherRat
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_WaitForTriggerFromOtherRAT(charstring p_OtherRat) runs on EUTRA_PTC
+  {
+    select (p_OtherRat) {
+      case ("UTRAN") {
+        f_IRAT_WaitForCoOrd_Trigger(UTRAN); // wait for trigger from UTRAN side
+      }
+      case ("GERAN") {
+        f_IRAT_WaitForCoOrd_Trigger(GERAN); // wait for trigger from GERAN side
+      }
+        case else {} // @sic R5s140189 sic@
+
+    }
+  }
+
+  /*
+   * @desc      Send Trigger to UTRAN or GERAN RAT and possibly wait for a response
+   * @param     p_WaitForTrigger    (default value: false)
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_SendTriggerToOtherRAT (boolean p_WaitForTrigger := false) runs on EUTRA_PTC
+  { /* @sic R5s110232 sic@ */
+    /* @sic R5-113805, R5-113696, R5-113734 sic@ */
+    /* @sic R5s140072: additional changes sic@ */
+
+    var charstring v_OtherRAT := f_EUTRA_GetOtherRAT();
+    
+    f_EUTRA_SendCoOrdToOtherRAT(v_OtherRAT, cms_IRAT_Trigger);
+    if (p_WaitForTrigger) { // set if need to wait for a trigger back afterwards
+      f_EUTRA_WaitForTriggerFromOtherRAT(v_OtherRAT);
+    }
+  }
+
+  /*
+   * @desc      Call Preamble_InterRAT for UTRAN or GERAN RAT and possibly wait for the pre-preamble to finish first
+   * @param     p_CellId
+   * @param     p_ForcedAttach      (default value: NORMAL)
+   * @param     p_WaitForTrigger    (default value: false)
+   * @param     p_State             (default value: STATE2_IDLEUPDATE)
+   * @param     p_NtwkFeatSupport   (default value: f_GetDefaultValueNetworkFeatureSupport())
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_EUTRA_PreambleOtherRAT (EUTRA_CellId_Type p_CellId,
+                                     EUTRA_ATTACH_Type p_ForcedAttach := NORMAL,
+                                     boolean p_WaitForTrigger := false,
+                                     IDLEUPDATED_STATE_Type p_State := STATE2_IDLEUPDATE,
+                                     template (value) EPS_NetworkFeatureSupport p_NtwkFeatSupport := f_GetDefaultValueNetworkFeatureSupport()) runs on EUTRA_PTC
+  { /* @sic R5-113805, R5-113696, R5-113734 sic@ */
+    var charstring v_OtherRAT := f_EUTRA_GetOtherRAT();
+    
+    select (v_OtherRAT) {
+      case ("UTRAN") {
+        if (p_WaitForTrigger) {
+          f_EUTRA_InterRAT_InitialiseAuthParams(UTRAN); // wait for trigger from UTRAN side @sic R5s160757 sic@
+        }
+        f_EUTRA_Preamble_InterRAT(p_CellId, p_State, UTRAN, p_ForcedAttach, p_NtwkFeatSupport); // @sic R5-171447 sic@
+      }
+      case ("GERAN") {
+        if (p_WaitForTrigger) {
+          f_IRAT_WaitForCoOrd_Trigger(GERAN); // wait for trigger from GERAN side
+        }
+        f_EUTRA_Preamble_InterRAT(p_CellId, p_State, GERAN, p_ForcedAttach, p_NtwkFeatSupport); // @sic R5-171447 sic@
+      }
+      case else {
+        f_EUTRA_Preamble(p_CellId, p_State, p_ForcedAttach, -, p_NtwkFeatSupport); // @sic R5-171447 sic@
+      }
+    }
+  }
+
+  /*
+   * @desc      To get the UE Capability Information and then send the start-CS and start-PS values to UTRAN  @sic R5-120764 sic@
+   * @param     p_CellId
+   * @param     p_StartCS     (default value: false) ... set to true if the start-CS value is also required
+   * @param     p_CS_PS_ComHO       (default value: false)-  set to true if used in SRVCC test cases is PS domain is also handed over
+   * @status    APPROVED (LTE_A_IRAT, LTE_IRAT)
+   */
+  function f_EUTRA_UTRA_Capability(EUTRA_CellId_Type p_CellId,
+                                   boolean p_StartCS := false,
+                                   //@sic R5s140096 sic@
+                                   boolean p_CS_PS_ComHO := false)  runs on EUTRA_PTC
+
+  {
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var SRB_COMMON_IND v_RxdAsp;
+    var B20_Type v_UTRAN_StartPS;
+    var template (omit) B20_Type v_UTRAN_StartCS := omit;
+    
+    SRB.send(cas_SRB1_RrcPdu_REQ(p_CellId,
+                                 cs_TimingInfo_Now,
+                                 cs_508_UeCapabilityEnquiry(v_RRC_TI, cs_UE_CapabilityRequest_EUTRA_UTRA)));
+    
+    SRB.receive(car_SRB1_RrcPdu_IND(p_CellId, cr_508_UeCapabilityInformation(v_RRC_TI, cr_EutraCapInfo_EUTRA_UTRA))) -> value v_RxdAsp; // @sic R5s120138 sic@
+    
+    v_UTRAN_StartPS := f_U_DecodeInterRatHandoverInfo_AndGetStartPSValue (v_RxdAsp.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[1].ueCapabilityRAT_Container);
+    if (p_StartCS) {
+      v_UTRAN_StartCS := f_U_DecodeInterRatHandoverInfo_AndGetStartCSValue (v_RxdAsp.Signalling.Rrc.Dcch.message_.c1.ueCapabilityInformation.criticalExtensions.c1.ueCapabilityInformation_r8.ue_CapabilityRAT_ContainerList[1].ueCapabilityRAT_Container);
+    }
+    // then get latest security params and send them over
+    f_EUTRA_SendAuthParameters(p_CellId, UTRAN, false, p_StartCS, v_UTRAN_StartPS, v_UTRAN_StartCS, p_CS_PS_ComHO); //@sic R5s140096 sic@
+  }
+
+}

@@ -1,0 +1,2087 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2026-02-28 20:53:22 +0100 (Sat, 28 Feb 2026) $
+// $Rev: 43062 $
+/******************************************************************************/
+
+module IMS_Component {
+
+  import from Base64Encoding all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonParameters all;
+  import from IMS_PTC_CoordMsg all;
+  import from IMS_SIP_Templates all;
+  import from IP_ASP_Common all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from NAS_AuthenticationCommon all;
+  import from Parameters all;
+  import from UpperTesterPtcToMtcDefs all;
+
+  type enumerated IMS_PTC_Handling_Type {       /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    testcaseSpecificHandling,
+    defaultHandling
+  };
+
+  type record IMS_PTC_Ctrl_Type {               /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    default             Default,                /* default behaviour being activated on IMS PTC */
+    boolean             TestBody,               /* true:  => fail may be assigend
+                                                 * false: => inconc is assigned instead of fail */
+    boolean             BlockUlDataInDefault,   /* @sic R5s140780 - MCC160 Implementation sic@
+                                                 * true:  => ports IMS_Server and IMS_Client are not handle by default handler
+                                                 *           i.e. any messages coming up at these ports are stored until there are explicit receive statements in the test case
+                                                 * false: => UL data may cause test case fail/inconc */
+    boolean             IgnoreReset,            /* @sic R5s150031: to deal with "Reset" sent from IPCAN to reset IMS in case of the UE being switched on after a switch-off during the test case sic@ */
+    boolean             WaitForPublish          /* @sic R5-155916: PUBLISH during initial registration sic@ */
+  };
+
+  type record IMS_PTC_SecurityInfo_Type {                       /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    IPsec_IntegrityAlgorithm_Type       IntegrityAlgorithm,
+    IPsec_CipheringAlgorithm_Type       CipheringAlgorithm,
+    IMS_ProtectedPorts_Type             ProtectedPorts       optional,
+    IMS_SPIs_Type                       SPIs                 optional,
+    charstring                          Nonce                optional,
+    B32_128_Type                        XRES                 optional,
+    integer                             XRESLength           optional  // @sic R5s120907 sic@
+  };
+
+  type enumerated IMS_UriInfo_UriType_Type { firstId, secondId, thirdId, defaultId, registrationId, emergencyId, dialogLocalId, dialogRemoteId, temporaryId, gruu };   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+                                                                                                                                                                          @sic R5-153760: gruu sic@ */
+
+  type enumerated IMS_ContactUriType_Type {     /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    registration,        /* contact URI as provided by the UE during registration */
+    dialog               /* contact URI as provided by the UE for a dialog; different to the contact URI of the registration e.g. in case of GRUU */
+  };
+
+  type enumerated IMS_PTC_CseqType_Type {       /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    register,           /* CSeq used by the UE in any REGISTER message (registration, re-registration and de-registration */
+    dialogRemote,       /* CSeq to be used in MO requests */
+    dialogLocal         /* CSeq to be used in MT requests */
+  };
+
+  type record IMS_PTC_RegistrationInfo_Type {   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    charstring          Uri optional,           /* SIP URI used for registration (To header of the REGISTER message; can be temporary SIP URI when the UE does not have an ISIM) */
+    charstring          CallId  optional,       /* CallId used for registration (needed to check against CallId of INVITE) */
+    integer             Cseq,
+    SipUrl              ContactUrl optional
+  };
+
+  type record IMS_DialogInfo_Type {                     /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+                                                           @sic R5s140092 change 1.5: RemoteURI, RemoteCseq, LocalURI, LocalCseq stored in this structure sic@
+                                                           @sic R5-174544: SessionId removed sic@ */
+    boolean             MobileOriginated  optional,     /* needed e.g. to get the right route-set for re-INVITE */
+    charstring          RemoteTag         optional,     /* acc. to RFC 3261 when creating a dialog in first request there is a From tag but no To tag;
+                                                           the To tag is chosen by the other end and sent in a response; in all further messages within the dialog the same From and To tags shall be used
+                                                           (=> especially in request messages (e.g. BYE) it may be necessary to use this stored value whereas in responses the values can be used as sent in the request);
+                                                           NOTE: in general outside a dialog (e.g. registration) requests get a new From tag and the corresponding reponses contain a new To tag */
+    SipUrl              RemoteURI         optional,     /* URI of the remote side in a dialog created by INVITE @sic R5s160451: SipUrl instead of charstring sic@ */
+    integer             RemoteCseq        optional,     /* @sic R5s140235: changed to optional sic@ */
+    charstring          LocalTag          optional,
+    SipUrl              LocalURI          optional,     /* URI of the UE in a dialog created by INVITE @sic R5s160451: SipUrl instead of charstring sic@ */
+    integer             LocalCseq,
+    charstring          CallId            optional,
+    SipUrl              ContactUrlUE      optional,     /* Contact Url provided by the UE for this dialog (especially in case GRUU this is different to the (non-GRUU) URI used for registration); @sic R5s150908 sic@ */
+    SipUrl              ContactUrlSS      optional,     /* @sic R5w220111: Session-id for MCX sic@ */
+    charstring          SdpSessionIdTX,                 /* @sic R5-150707 sic@ */
+    integer             SdpSessionVersionTX,            /* current SDP session version for the DL   @sic R5-150707 sic@ */
+    SDP_Message         SdpMessagePrevTX  optional,     /* previous SDP message sent to the UE      @sic R5-225427, R5-225258 sic@ */
+    SDP_Message         SdpMessagePrevRX  optional,     /* previous SDP message sent by the UE      @sic R5-150702 sic@ */
+    integer             RemoteRSeq        optional      /* RemoteRSeq for ongoing transaction initiated by MT INVITE; shall be incremented for every reliable 1XX response (RFC 3262)   @sic R5-181190 sic@ */
+  };
+
+  const integer tsc_IMS_NoOfDialogs := 14;              /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+
+  type record length(tsc_IMS_NoOfDialogs) of IMS_DialogInfo_Type IMS_PTC_DialogInfoList_Type;   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+
+  type record IMS_PTC_DialogList_Type {                 /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    integer                     CurrentIndex,
+    IMS_PTC_DialogInfoList_Type Info
+  };
+
+  type record IMS_PTC_ImsInfo_Type {                    /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    CharStringList_Type         IMPUList,                       /* list of all Public User Ids acc. to ISIM setting (31.121) or as stored in the HSS */
+    IP_AddrInfo_Type            UE_Address      optional,
+    IP_AddrInfo_Type            NW_Address      optional,
+    charstring                  P_CSCF_Address  optional,       /* @sic R5s140934 sic@ */
+    InternetProtocol_Type       TransportProtocol,              /* transport protocol to be used for requests sent in DL
+                                                                 * @sic R5s120530 change 1.7 sic@
+                                                                 * NOTE: in contrast to @sic R5s120530 sic@ and acc. to rejection of @sic R5-130765 sic@ at RAN WG5 Meeting #58 in Malta UDP is used for all requests in DL;
+                                                                 *       nevertheless "TransportProtocol" is kept in case there are other decisions in the future */
+    IPCAN_RAN_Type              RanType         optional,
+    integer                     UE_Release      optional,       /* @sic R5s130739 MCC160 implementation: new field to store the UE's release sic@ */
+    boolean                     SigCompStarted,
+    charstring                  HomeDomainName,
+    charstring                  PrivateUserId,
+    SipUrl                      ContactUrl      optional,       /* contact address as provided in contact header of the REGISTER message;
+                                                                   to be used e.g. for Request-URI of INVITE for MT call */
+    integer                     BranchIndex,                    /* internal index used to generate unique branches */
+    integer                     CallIdCnt,                      /* counter to achieve unique callids e.g. for SMS MESSAGE sent to the UE @sic R5-133705 sic@ */
+    IMS_PTC_RegistrationInfo_Type       Registration,
+    IMS_PTC_DialogList_Type             Dialog,                 /* @sic R5s140092 change 1.5: two sets of dialogs sic@ */
+    IMS_SecurityScheme_Type     SecurityScheme,                 /* IMS security or GIBA acc. to 34.229-2 Table A.6a; depends on PICS setting and may depend on test case */
+    IntegerList_Type            SPI_ValidValueList[2],          /* list of valid SPI values for PDN_1 and PDN_2 (@sic R5-172048 sic@) */
+    boolean                     NetworkSupportsVoiceOverIMS,    /* @sic R5-177127 sic@
+                                                                   imsVoPS network feature tag indicated to the UE in ATTACH ACCEPT => audio feature tag to be checked (if supported) */
+    boolean                     CheckFeatureTagsInRegister,     /* @sic R5-201121, R5-201110 sic@
+                                                                   audio/video tag to be checked at (re-)registration */
+    boolean                     UEwithISIM                      /* @sic R5-203077: px_MCX_SIP_RegistrationWithTemporaryIdentities for MCX sic@ */
+  };
+
+  type record IMS_TestsuiteInfo_Type {
+    IMS_TestSpec_Type           TestSpec,                       /* to distinguish e.g. MCX specific parts in common implementation   @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    NameValueList_Type          ParameterList
+  };
+
+  type record IMS_Global_Type {                                 /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    PDN_Index_Type              PdnIndex,                       /* @sic R5s130651: new variable sic@ */
+    IMS_PTC_Ctrl_Type           Ctrl,
+    IMS_PTC_SecurityInfo_Type   Security,
+    IMS_PTC_ImsInfo_Type        ImsInfo,
+    IMS_TestsuiteInfo_Type      TestsuiteInfo                   /* @sic R5-196983: MCX sic@ */
+  };
+
+  type component IMS_PTC {                                      /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+
+    var IMS_Global_Type         vc_IMS_Global;
+
+    // port to RAT components
+    port IMS_IPCAN_CO_ORD_PORT  IPCAN;
+    port IMS_IPCAN_CO_ORD_PORT  OtherIPCAN;                     /* @sic R5-142919 sic@ */
+
+    // port to other IMS PTC (other PDN)
+    port IMS_IMS_CO_ORD_PORT    OtherPDN;
+
+    // ports connected to IP:
+    port IMS_IP_CTRL_PORT       IMS_CTRL;
+    port IMS_IP_SERVER_PORT     IMS_Server;
+    port IMS_IP_CLIENT_PORT     IMS_Client;
+
+    // ports for MMI (used by IMS CC test suite)
+    port UT_PTC_MTC_PORT        MMI;
+  };
+
+  template (value) IMS_PTC_SecurityInfo_Type cs_IMS_SecurityInfo_Init(template (omit) IMS_SPIs_Type p_SPIs := omit) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    IntegrityAlgorithm := px_IMS_IPSecAlgorithm,
+    CipheringAlgorithm := px_IMS_CiphAlgo_Def,
+    ProtectedPorts := omit,
+    SPIs := p_SPIs,     /* @sic R5s170679: to keep SPI values in case of reset => sub-sequent authorizations will use different SPI values sic@ */
+    Nonce := omit,
+    XRES := omit,
+    XRESLength := omit  // @sic R5s120907 sic@
+  };
+
+  template (value) IMS_PTC_RegistrationInfo_Type cs_IMS_RegistrationInfo_Init :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    Uri := omit,
+    CallId := omit,
+    Cseq := 0,
+    ContactUrl := omit // @sic R5s150908 sic@
+  };
+
+  template (value) IMS_DialogInfo_Type cs_IMS_DialogInfo_Init :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    /* @sic R5-174544: SessionId removed sic@ */
+    MobileOriginated := omit,
+    RemoteTag := omit,
+    RemoteURI := omit,
+    RemoteCseq := omit,                     /* @sic R5s140235: changed to omit sic@ */
+    LocalTag := omit,
+    LocalURI := omit,
+    LocalCseq := 0,
+    CallId := omit,
+    ContactUrlUE := omit,                   /* @sic R5s150908 sic@ */
+    ContactUrlSS := omit,
+    SdpSessionIdTX := "1111111111",         /* @sic R5-150707: new variable replacing tsc_SDP_SessionId sic@ */
+    SdpSessionVersionTX := 1111111110,      /* @sic R5-150702: new variable; intialised with 1111111110 as being incremented firstly (see f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX) sic@ */
+    SdpMessagePrevTX := omit,
+    SdpMessagePrevRX := omit,
+    RemoteRSeq := omit
+  };
+
+  /*
+   * @desc      initialise dialog status information
+   * @return    template (value) IMS_PTC_DialogList_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_DialogList_Init() return template (value) IMS_PTC_DialogList_Type
+  {
+    var template (value) IMS_PTC_DialogList_Type v_DialogList;
+    var integer i;
+    v_DialogList.CurrentIndex := 0;
+    for (i:=0; i<tsc_IMS_NoOfDialogs; i:=i+1) {
+      v_DialogList.Info[i] := cs_IMS_DialogInfo_Init;
+    }
+    return v_DialogList;
+  }
+
+  template (value) IMS_PTC_ImsInfo_Type cs_IMS_ImsInfo_Init(template (omit) IPCAN_RAN_Type p_RanType,
+                                                            CharStringList_Type p_IMPUList,
+                                                            template (omit) integer p_UE_Release,
+                                                            charstring p_HomeDomainName,
+                                                            charstring p_PrivateUserId,
+                                                            IMS_SecurityScheme_Type p_SecurityScheme,
+                                                            IntegerList_Type p_SPI_ValidValueList_PDN1,
+                                                            IntegerList_Type p_SPI_ValidValueList_PDN2,
+                                                            boolean p_UEwithISIM,
+                                                            boolean p_CheckFeatureTagsInRegister := true,
+                                                            integer p_BranchIndex := 0) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    /* @sic R5s140802: new parameter p_BranchIndex sic@ */
+    /* @sic R5-172048: p_SPI_ValidValueList_PDN1, p_SPI_ValidValueList_PDN2 sic@ */
+    /* @sic R5s200997: p_CheckFeatureTagsInRegister sic@ */
+    IMPUList := p_IMPUList,
+    UE_Address := omit,
+    NW_Address := omit,
+    P_CSCF_Address := omit,
+    TransportProtocol := udp,
+    RanType := p_RanType,
+    UE_Release := p_UE_Release,
+    SigCompStarted := false,
+    HomeDomainName := p_HomeDomainName,
+    PrivateUserId := p_PrivateUserId,
+    ContactUrl := omit,
+    BranchIndex := p_BranchIndex,
+    CallIdCnt := 0,
+    Registration := cs_IMS_RegistrationInfo_Init,
+    Dialog := fl_IMS_PTC_DialogList_Init(),
+    SecurityScheme := p_SecurityScheme,
+    SPI_ValidValueList := {p_SPI_ValidValueList_PDN1, p_SPI_ValidValueList_PDN2},
+    NetworkSupportsVoiceOverIMS := true,
+    CheckFeatureTagsInRegister := p_CheckFeatureTagsInRegister,
+    UEwithISIM := p_UEwithISIM
+  };
+
+  template (value) IMS_ProtectedPorts_Type cs_IMS_ProtectedPorts(PortNumber_Type p_Port_us,
+                                                                 PortNumber_Type p_Port_uc,
+                                                                 PortNumber_Type p_Port_ps,
+                                                                 PortNumber_Type p_Port_pc) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    Port_us := p_Port_us,
+    Port_uc := p_Port_uc,
+    Port_ps := p_Port_ps,
+    Port_pc := p_Port_pc
+  };
+
+  template (value) IMS_SPIs_Type cs_IMS_SPIs_Init(IPsec_SPI_Type p_SPI_us,
+                                                  IPsec_SPI_Type p_SPI_uc) :=
+  { /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+    SPI_us := p_SPI_us,
+    SPI_uc := p_SPI_uc,
+    SPI_ps := omit,
+    SPI_pc := omit
+  };
+
+  /*
+   * @desc      get (next) SPI value
+   * @param     p_Offset
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_SPI_GetValidValue(integer p_Offset) runs on IMS_PTC return integer
+  {
+    var integer v_Index := f_PDN_PdnIndex2ImsIndex(vc_IMS_Global.PdnIndex);    // @sic R5s201177: f_PDN_PdnIndex2ImsIndex instead of f_PDN_PdnIndex2Integer sic@
+    var IntegerList_Type v_ValidValueList := vc_IMS_Global.ImsInfo.SPI_ValidValueList[v_Index];
+    var integer v_ValidValueListLength := lengthof(v_ValidValueList);
+    var integer v_SPI;
+
+    if (v_ValidValueListLength > 0) {
+      if (v_ValidValueListLength <= p_Offset) {
+        FatalError(__FILE__, __LINE__, "Not enough SPI values");
+      }
+      v_SPI := v_ValidValueList[p_Offset];
+    } else {
+      v_SPI := 256 + (v_Index * 1024) + p_Offset; /* @sic R5s130651: v_Index used to get different SPIs for different PDNs sic@ */
+    }
+    if (v_SPI < 256) {  /* According to RFC 2406, SPI values from 0 to 255 are reserved */
+      FatalError(__FILE__, __LINE__, "Invalid SPI value");
+    }
+    return v_SPI;
+  }
+
+  /*
+   * @desc      search for unique SPIs
+   *            Acc. to RFCs (e.g. RFC2406, RFC4302) the SPIs have local significance and source and destination address shall be taken into account to find the corresponding SA;
+   *            as typically one end of the secure connection tells the other end which SPI it is using for its SAD, both ends may even use the same SPIs;
+   *            nevertheless 33.203 cl. 7.1 specifies SPIs at the UE and at the P-CSCF to be different from each other
+   *            => in this function we will ensure that in the 4-tuple of SPIs needed for IMS in a given PDN all values are distinct.
+   *            In addition e.g. in case of re-authentication the network's SPIs shall be different than the previous ones.
+   * @param     p_NewSPI_us
+   * @param     p_NewSPI_uc
+   * @param     p_PrevSPI_ps        (default value: omit)
+   * @param     p_PrevSPI_pc        (default value: omit)
+   * @return    IMS_SPIs_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_SPIs_Init(integer p_NewSPI_us,
+                        integer p_NewSPI_uc,
+                        template (omit) integer p_PrevSPI_ps := omit,
+                        template (omit) integer p_PrevSPI_pc := omit) runs on IMS_PTC return IMS_SPIs_Type
+  { /* @sic R5s130266 change 1.3, 4, 5 - MCC160 Implementation: taking into account the previous SPIs of the network side sic@ */
+    /* p_PrevSPI_ps, p_PrevSPI_pc are omit at initial registration */
+
+    var IMS_SPIs_Type v_SPIs := valueof(cs_IMS_SPIs_Init(p_NewSPI_us, p_NewSPI_uc));
+    var integer v_Offset := 0;
+    var integer v_SPI;
+
+    if (p_NewSPI_uc == p_NewSPI_us) {
+      FatalError(__FILE__, __LINE__, "SPIs of UE side have the same values");
+    }
+
+    while (not isvalue(v_SPIs.SPI_ps) or not isvalue(v_SPIs.SPI_pc)) {
+      v_SPI := fl_SPI_GetValidValue(v_Offset); // @sic R5-172048, R5s170450 sic@
+      if ((v_SPI != p_NewSPI_uc) and (v_SPI != p_NewSPI_us) and                // new value shall be neither equal to the UE's values ...
+          not match(v_SPI, p_PrevSPI_pc) and not match(v_SPI, p_PrevSPI_ps)) { // ... nor to the network's previous values
+        if (not isvalue(v_SPIs.SPI_ps)) {
+          v_SPIs.SPI_ps := v_SPI;
+        } else {
+          v_SPIs.SPI_pc := v_SPI;
+        }
+      }
+      v_Offset := v_Offset + 1;
+    }
+    return v_SPIs;
+  }
+
+  /*
+   * @desc      initialise or re-initialise security at the IMS PTC
+   * @param     p_AuthenticationParams (default value: omit)
+   * @param     p_Port_us
+   * @param     p_Port_uc
+   * @param     p_SPI_us
+   * @param     p_SPI_uc
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_Init(template (omit) Common_AuthenticationParams_Type p_AuthenticationParams := omit,
+                                   PortNumber_Type p_Port_us,
+                                   PortNumber_Type p_Port_uc,
+                                   IPsec_SPI_Type p_SPI_us,
+                                   IPsec_SPI_Type p_SPI_uc) runs on IMS_PTC
+  { /* @sic R5s130266 change 1.3, 4, 5 - MCC160 Implementation: taking into account SPIs for re-authentication sic@ */
+    
+    var Common_AuthenticationParams_Type v_AuthenticationParams;
+    var template (omit) IPsec_SPI_Type v_PrevSPI_ps := omit;
+    var template (omit) IPsec_SPI_Type v_PrevSPI_pc := omit;
+    var PortNumber_Type v_Port_pc := tsc_IMS_Port_pc;
+
+    if (isvalue(p_AuthenticationParams)) {
+      v_AuthenticationParams := valueof(p_AuthenticationParams);
+      vc_IMS_Global.Security.Nonce := f_Base64Encode(v_AuthenticationParams.RandValue & v_AuthenticationParams.AUTN);
+      vc_IMS_Global.Security.XRES := v_AuthenticationParams.XRES;
+    }
+    if (isvalue(vc_IMS_Global.Security.SPIs)) { // => re-authentication
+      v_PrevSPI_ps := vc_IMS_Global.Security.SPIs.SPI_ps;
+      v_PrevSPI_pc := vc_IMS_Global.Security.SPIs.SPI_pc;
+    }
+    vc_IMS_Global.Security.SPIs := fl_SPIs_Init(p_SPI_us, p_SPI_uc, v_PrevSPI_ps, v_PrevSPI_pc);
+    
+    if (isvalue(vc_IMS_Global.Security.ProtectedPorts)) { // => re-authentication
+      if (vc_IMS_Global.Security.ProtectedPorts.Port_pc == tsc_IMS_Port_pc) {
+        v_Port_pc := tsc_IMS_Port_pc_2; // new client port
+      }
+    }
+    vc_IMS_Global.Security.ProtectedPorts := valueof(cs_IMS_ProtectedPorts(p_Port_us, p_Port_uc, tsc_IMS_Port_ps, v_Port_pc));
+  }
+
+  /*
+   * @desc      return true when IMS security is started on protected ports
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_IPsecIsStarted() runs on IMS_PTC return boolean
+  {
+    return isvalue(vc_IMS_Global.Security.ProtectedPorts);
+  }
+
+  /*
+   * @desc      return hash algorithm stored at the IMS PTC
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetHashAlgorithm() runs on IMS_PTC return charstring
+  {
+    var charstring v_Algorithm;
+    select (vc_IMS_Global.ImsInfo.SecurityScheme) {
+      case (IMS_Security) {
+        v_Algorithm := tsc_AKAv1_MD5;
+      }
+      case else {
+        v_Algorithm := "";   // dummy
+      }
+    }
+    return v_Algorithm;
+  }
+
+  /*
+   * @desc      return integrity algorithm stored at the IMS PTC
+   * @return    IPsec_IntegrityAlgorithm_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetIntegrityAlgorithm() runs on IMS_PTC return IPsec_IntegrityAlgorithm_Type
+  {
+    return vc_IMS_Global.Security.IntegrityAlgorithm;
+  }
+
+  /*
+   * @desc      return ciphering algorithm stored at the IMS PTC
+   * @return    IPsec_CipheringAlgorithm_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetCipheringAlgorithm() runs on IMS_PTC return IPsec_CipheringAlgorithm_Type
+  {
+    return vc_IMS_Global.Security.CipheringAlgorithm;
+  }
+
+  /*
+   * @desc      return NONCE stored at the IMS PTC
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetNonce() runs on IMS_PTC return charstring
+  {
+    return vc_IMS_Global.Security.Nonce;
+  }
+
+  /*
+   * @desc      return XRES stored at the IMS PTC
+   * @return    B32_128_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetXRES() runs on IMS_PTC return B32_128_Type
+  {
+    return vc_IMS_Global.Security.XRES;
+  }
+
+  /*
+   * @desc      return length of XRES as stored at the IMS PTC
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetXRESLength() runs on IMS_PTC return integer // @sic R5s120907 sic@
+  {
+    if (not ispresent(vc_IMS_Global.Security.XRESLength)) {
+      FatalError(__FILE__, __LINE__, "unknown XRES length");
+    }
+    return vc_IMS_Global.Security.XRESLength;
+  }
+
+  /*
+   * @desc      set info retrieved from IPCAN
+   * @param     p_IpcanInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_SetIpcanInfo(IPCAN_INFO_Type p_IpcanInfo) runs on IMS_PTC
+  { /* @sic R5s120907 R5s130133 additional changes sic@ */
+    if (ispresent(p_IpcanInfo.AuthResLength)) { vc_IMS_Global.Security.XRESLength := p_IpcanInfo.AuthResLength; }    /* @sic R5w160208 - FBBA: ispresent sic@ */
+    if (ispresent(p_IpcanInfo.UE_Release))    { vc_IMS_Global.ImsInfo.UE_Release := p_IpcanInfo.UE_Release; }        /* @sic R5s130739 MCC160 implementation sic@ @sic R5w160208 - FBBA: ispresent sic@ */
+    if (ispresent(p_IpcanInfo.RanType))       { vc_IMS_Global.ImsInfo.RanType := p_IpcanInfo.RanType; }              /* @sic R5w160208 - FBBA: ispresent sic@ */
+
+    vc_IMS_Global.ImsInfo.NetworkSupportsVoiceOverIMS := p_IpcanInfo.NetworkSupportsVoiceOverIMS;                    /* @sic R5-177127 sic@ */
+  }
+
+  /*
+   * @desc      set RAN type
+   * @param     p_RanType
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_SetRanType(IPCAN_RAN_Type p_RanType) runs on IMS_PTC
+  {
+    vc_IMS_Global.ImsInfo.RanType := p_RanType;
+  }
+
+  /*
+   * @desc      reset RAN type to omit
+   * @status    APPROVED (ENDC, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ResetRanType() runs on IMS_PTC
+  {
+    vc_IMS_Global.ImsInfo.RanType := omit;
+  }
+
+  /*
+   * @desc      get RAN type
+   * @return    template (omit) IPCAN_RAN_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_GetRanType() runs on IMS_PTC return template (omit) IPCAN_RAN_Type
+  {
+    return vc_IMS_Global.ImsInfo.RanType;
+  }
+
+  /*
+   * @desc      return true if IPCAN matches the given RanType
+   * @param     p_RanType
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_CheckRanType(IPCAN_RAN_Type p_RanType) runs on IMS_PTC return boolean
+  {
+    var template (omit) IPCAN_RAN_Type v_RanType := f_IMS_PTC_GetRanType();
+    if (isvalue(v_RanType)) {
+      return (p_RanType == valueof(v_RanType));
+    }
+    return false;
+  }
+
+  /*
+   * @desc      return true if IPCAN is NR5GC
+   * @return    boolean
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_RanTypeIsNR5GC() runs on IMS_PTC return boolean
+  {
+    return fl_IMS_PTC_CheckRanType(NR);
+  }
+
+  /*
+   * @desc      return true if IPCAN is WLAN
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_RanTypeIsWLAN() runs on IMS_PTC return boolean
+  {
+    return fl_IMS_PTC_CheckRanType(WLAN);
+  }
+
+  /*
+   * @desc      get UE release
+   * @return    template (omit) integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_GetUE_Release() runs on IMS_PTC return template (omit) integer
+  {
+    return vc_IMS_Global.ImsInfo.UE_Release;
+  }
+
+  /*
+   * @desc      return true when UE release is >= given release
+   * @param     p_Release
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_UE_ReleaseGreaterOrEqual(integer p_Release) runs on IMS_PTC return boolean
+  {
+    var template (omit) integer v_UERelease := f_IMS_PTC_GetUE_Release();
+    var boolean v_Result := false;
+
+    if (isvalue(v_UERelease)) {
+      v_Result := (valueof(v_UERelease) >= p_Release);
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      return true when the UE shall come up with audio feature tag
+   * @param     p_AudioFeatureTagIsSupported (default value: pc_IMS_Audio_FeatureTag)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_AudioFeatureTagIsRequired(boolean p_AudioFeatureTagIsSupported := pc_IMS_Audio_FeatureTag) runs on IMS_PTC return boolean
+  {
+    return p_AudioFeatureTagIsSupported and vc_IMS_Global.ImsInfo.NetworkSupportsVoiceOverIMS;
+  }
+
+  /*
+   * @desc      set "CheckFeatureTagsInRegister" flag
+   * @param     p_CheckFeatureTagsInRegister
+   * @status    APPROVED (ENDC, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_CheckFeatureTagsInRegister_Set(boolean p_CheckFeatureTagsInRegister) runs on IMS_PTC
+  {
+    vc_IMS_Global.ImsInfo.CheckFeatureTagsInRegister := p_CheckFeatureTagsInRegister;
+  }
+
+  /*
+   * @desc      get whether or not audio/video tags shall be checked
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_CheckFeatureTagsInRegister_Get() runs on IMS_PTC return boolean
+  {
+    return vc_IMS_Global.ImsInfo.CheckFeatureTagsInRegister;
+  }
+
+  /*
+   * @desc      get SPIs stored at IMS PTC
+   * @return    IMS_SPIs_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetSPIs() runs on IMS_PTC return IMS_SPIs_Type
+  {
+    return vc_IMS_Global.Security.SPIs;
+  }
+
+  /*
+   * @desc      return security information as stored at the IMS PTC
+   * @return    IMS_ProtectedPorts_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Security_GetProtectedPorts() runs on IMS_PTC return IMS_ProtectedPorts_Type
+  {
+    return vc_IMS_Global.Security.ProtectedPorts;
+  }
+
+  /*
+   * @desc      Build SecurityMechanism list template from the stored security configuration to be used for sending
+   * @return    template (value) SecurityMechanism_List
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_BuildSecurityServerParam() runs on IMS_PTC return template (value) SecurityMechanism_List
+  {
+    var IMS_PTC_SecurityInfo_Type v_Security := vc_IMS_Global.Security;
+
+    return f_SIP_BuildSecurityServerParam(v_Security.IntegrityAlgorithm,
+                                          v_Security.CipheringAlgorithm,
+                                          int2str(v_Security.SPIs.SPI_pc),
+                                          int2str(v_Security.SPIs.SPI_ps),
+                                          int2str(v_Security.ProtectedPorts.Port_pc),
+                                          int2str(v_Security.ProtectedPorts.Port_ps));
+  }
+
+  /*
+   * @desc      Build SecurityVerify header template from the stored security configuration to be used for receiving
+   * @return    template (present) SecurityVerify
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_BuildSecurityVerifyHeader() runs on IMS_PTC return template (present) SecurityVerify
+  {
+    var IMS_PTC_SecurityInfo_Type v_Security := vc_IMS_Global.Security;
+
+    return f_SIP_BuildSecurityVerifyHeader(v_Security.IntegrityAlgorithm,
+                                           v_Security.CipheringAlgorithm,
+                                           int2str(v_Security.SPIs.SPI_pc),
+                                           int2str(v_Security.SPIs.SPI_ps),
+                                           int2str(v_Security.ProtectedPorts.Port_pc),
+                                           int2str(v_Security.ProtectedPorts.Port_ps));
+  }
+
+  /*
+   * @desc      return true when IMS_Security
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_SecurityScheme_IsImsSecurity() runs on IMS_PTC return boolean
+  {
+    return (vc_IMS_Global.ImsInfo.SecurityScheme == IMS_Security);
+  }
+
+  /*
+   * @desc      return true when GIBA
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_SecurityScheme_IsGiba() runs on IMS_PTC return boolean
+  {
+    return (vc_IMS_Global.ImsInfo.SecurityScheme == GIBA);
+  }
+
+  /*
+   * @desc      initialise IMS PTC
+   * @param     p_UE_Address
+   * @param     p_NW_Address
+   * @param     p_RegisterReq       (default value: omit)
+   * @param     p_SigCompStarted    (default value: false)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_Init(IP_AddrInfo_Type p_UE_Address,
+                                  IP_AddrInfo_Type p_NW_Address,
+                                  template (omit) REGISTER_Request p_RegisterReq := omit,
+                                  boolean p_SigCompStarted := false) runs on IMS_PTC
+  { /* @sic R5s130756 change 14, 15 sic@ */
+    var REGISTER_Request v_RegisterReq;
+    var InternetProtocol_Type v_TransportProtocol := udp;    /* @sic acc. to discussions regarding rejection of R5-130765 at RAN WG5 Meeting #58 in Malta per default UDP is used for all requests in DL sic@ */
+    var charstring v_Testcasename := testcasename();
+
+    if (match(testcasename(), pattern "TC_8_[0-9]#(1,2)") or match(v_Testcasename, pattern "TC_6_[0-9]#(1,2)_NR5GC")) { /* @sic R5-131292 - TCP as normative DL transport protocol in IMS Registration test sic@
+                                                                                                                           @sic R5s130897 - distinguish IMS from LTE test cases sic@
+                                                                                                                           @sic R5s210268 - NR5GC sic@ */
+      v_TransportProtocol := tcp;
+    }
+
+    vc_IMS_Global.Ctrl.IgnoreReset := false;                 /* @sic R5s150031: f_IMS_PTC_ImsInfo_Init is called e.g. after the UE has send the initial REGISTER => from now on we need to care about any reset sic@ */
+    vc_IMS_Global.Ctrl.WaitForPublish := false;              /* @sic R5-155916: PUBLISH during initial registration sic@ */
+
+    vc_IMS_Global.ImsInfo.UE_Address           := p_UE_Address;
+    vc_IMS_Global.ImsInfo.NW_Address           := p_NW_Address;
+    vc_IMS_Global.ImsInfo.TransportProtocol    := v_TransportProtocol;
+    vc_IMS_Global.ImsInfo.SigCompStarted       := p_SigCompStarted;
+
+    if (ispresent(p_RegisterReq)) {
+      v_RegisterReq := valueof(p_RegisterReq);
+      vc_IMS_Global.ImsInfo.Registration.ContactUrl := f_MessageHeader_GetContactSipUrl(v_RegisterReq.msgHeader);
+      vc_IMS_Global.ImsInfo.Registration.Uri     := f_SIP_SipUrl_GetPublicUserIdentity(f_Addr_Union_GetSipUrl(v_RegisterReq.msgHeader.toField.addressField));
+      vc_IMS_Global.ImsInfo.Registration.CallId  := v_RegisterReq.msgHeader.callId.callid;
+      vc_IMS_Global.ImsInfo.Registration.Cseq    := v_RegisterReq.msgHeader.cSeq.seqNumber;
+    }
+  }
+
+  /*
+   * @desc      Get dialog index value related to given enumerated
+   * @param     p_Index
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_ImsInfo_GetDialogIndexValue(template (omit) IMS_PTC_DialogIndex_Type p_Index) runs on IMS_PTC return integer
+  {
+    var integer i;
+
+    if (isvalue(p_Index)) {
+      select (valueof(p_Index)) {
+        case (firstDialog)        { i := 0; }
+        case (secondDialog)       { i := 1; }
+        case (thirdDialog,
+              referDialog)        { i := 2; }
+        case (confEventDialog)    { i := 3; }    /* @sic R5-153986 sic@ */
+        case (regEventDialog)     { i := 4; }    /* @sic R5-153756 sic@ */
+        case (msgSummaryDialog)   { i := 5; }    /* @sic R5-153756, R5s150854 sic@ */
+        case (presenceDialog1)    { i := 6; }    /* @sic R5s190727 change 3.1 sic@ */
+        case (presenceDialog2)    { i := 7; }    /* @sic R5-206463 sic@ */
+        case (xcapDiffDialogCMS)  { i := 8; }    /* @sic R5s190727 change 3.1 sic@ @sic R5s200743 sic@ */
+        case (xcapDiffDialogGMS1) { i := 9; }    /* @sic R5s200743 sic@ */
+        case (xcapDiffDialogGMS2) { i := 10; }   /* @sic R5-206449 sic@ */
+        case (xcapDiffDialogGMS3) { i := 11; }   /* @sic R5-212291 sic@ */
+        case (xcapDiffDialogGMS4) { i := 12; }   /* @sic R5-212291 sic@ */
+        case (pocSettingsDialog)  { i := 13; }   /* @sic R5s200743 sic@ */
+        case else { FatalError(__FILE__, __LINE__, "invalid dialog"); }
+      }
+    } else {
+      i := vc_IMS_Global.ImsInfo.Dialog.CurrentIndex;
+    }
+    return i;
+  }
+
+  /*
+   * @desc      Get dialog status information for the currenct dialog
+   * @param     p_DialogIndex
+   * @return    IMS_DialogInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_ImsInfo_GetDialog(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex) runs on IMS_PTC return IMS_DialogInfo_Type
+  {
+    var integer i := fl_IMS_PTC_ImsInfo_GetDialogIndexValue(p_DialogIndex);
+    return vc_IMS_Global.ImsInfo.Dialog.Info[i];
+  }
+
+  /*
+   * @desc      Set dialog status information for the currenct dialog
+   * @param     p_DialogIndex
+   * @param     p_DialogInfo
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_ImsInfo_SetDialog(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex,
+                                        IMS_DialogInfo_Type p_DialogInfo) runs on IMS_PTC
+  {
+    var integer i := fl_IMS_PTC_ImsInfo_GetDialogIndexValue(p_DialogIndex);
+    vc_IMS_Global.ImsInfo.Dialog.Info[i] := p_DialogInfo;
+  }
+
+  /*
+   * @desc      return IP address which is used by the UE for IMS signalling (IPv4 or IPv6)
+   * @return    IP_AddrInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_UE_Address_Get() runs on IMS_PTC return IP_AddrInfo_Type
+  {
+    return vc_IMS_Global.ImsInfo.UE_Address;
+  }
+
+  /*
+   * @desc      return network address stored at the IMS PTC
+   * @return    IP_AddrInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_NW_Address_Get() runs on IMS_PTC return IP_AddrInfo_Type
+  {
+    return vc_IMS_Global.ImsInfo.NW_Address;
+  }
+
+  /*
+   * @desc      return IP type for network address stored at the IMS PTC
+   * @return    charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_NW_Address_GetTypeStr() runs on IMS_PTC return charstring
+  {
+    return f_IP_AddrInfo_TypeStr(vc_IMS_Global.ImsInfo.NW_Address);
+  }
+
+  /*
+   * @desc      return network address stored at the IMS PTC as charstring
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_NW_Address_GetAddrStr() runs on IMS_PTC return charstring
+  {
+    if (not isvalue(vc_IMS_Global.ImsInfo.NW_Address)) {
+      FatalError(__FILE__, __LINE__, "NW address not initialiased yet");
+    }
+    return f_IP_AddrInfo_AddrStr(vc_IMS_Global.ImsInfo.NW_Address);
+  }
+
+  /*
+   * @desc      return address of the simulated remote UE as charstring
+   * @return    charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_RemoteAddress_GetAddrStr() runs on IMS_PTC return charstring
+  { /* @sic R5s130681 additional change sic@ */
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(vc_IMS_Global.PdnIndex);
+    var IP_AddrInfo_Type v_UE_Address := f_IMS_PTC_UE_Address_Get();
+    var charstring v_RemoteAddress;
+  
+    if (ischosen(v_UE_Address.V4)) {
+      v_RemoteAddress := v_PDN_AddressInfo.Remote_IPAddressIPv4;
+    } else {
+      v_RemoteAddress := v_PDN_AddressInfo.Remote_IPAddressIPv6;
+    }
+    return v_RemoteAddress;
+  }
+
+  /*
+   * @desc      return P-CSCF address (FQDN) stored at the IMS PTC
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Pcscf_Get() runs on IMS_PTC return charstring
+  { /* @sic R5-144747 removal of px_IMS_Pcscf and px_IMS_Pcscf_Emg sic@ */
+    /* @sic R5s140934: P_CSCF_Address sic@ */
+    var charstring v_P_CSCF_Address;
+
+    if (ispresent(vc_IMS_Global.ImsInfo.P_CSCF_Address)) {
+      v_P_CSCF_Address := vc_IMS_Global.ImsInfo.P_CSCF_Address;
+    } else {
+      v_P_CSCF_Address := f_IMS_PTC_NW_Address_GetAddrStr();
+    }
+    return v_P_CSCF_Address;
+  }
+
+  /*
+   * @desc      Check P-CSCF address;
+   *            NOTE: the P-CSCF address is the same address as the NW_Address but in case of IPv6 it may be a different notation
+   *                  typically the UE may use the canonical format acc. to RFC 5952
+   * @param     p_P_CSCF_Address
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Pcscf_CheckAndSet(charstring p_P_CSCF_Address) runs on IMS_PTC return boolean
+  {
+    var charstring v_P_CSCF_Address := f_IMS_PTC_Pcscf_Get();
+
+    if (v_P_CSCF_Address != p_P_CSCF_Address) {
+      if (f_IPAddresses_Compare(v_P_CSCF_Address, p_P_CSCF_Address)) {
+        vc_IMS_Global.ImsInfo.P_CSCF_Address := p_P_CSCF_Address;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /*
+   * @desc      check validity of the host/port information used by the UE
+   * @param     p_HostPort
+   * @param     p_Port              (default value: *)
+   * @param     p_AllowFQDN         (default value: true)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_CheckHostPortForIPAddrOrFQDN(HostPort p_HostPort,
+                                                  template integer p_Port := *,
+                                                  boolean p_AllowFQDN := true) runs on IMS_PTC return boolean
+  { /* p_AllowFQDN  ..  shall be set to false e.g. for condition A6 of A.2.1 */
+    if (p_AllowFQDN and match(p_HostPort, cr_HostPort(f_IMS_PTC_ImsInfo_GetHomeDomainName(), p_Port))) {  // => FQDN
+      return true;
+    }
+    return (match(p_HostPort.portField, p_Port) and                                       // check port
+            f_IMS_IpAddrMatch(f_IMS_PTC_UE_Address_Get(), p_HostPort.host));              // check IP address taking into account that formats may be different
+  }
+
+  /*
+   * @desc      Check SipUrl (e.g. in Contact header) to be "SIP URI with IP address or FQDN and protected server port of UE or GRUU as returned by the SS in registration"
+   * @param     p_SipUrl
+   * @param     p_Port              (default value: *)
+   * @param     p_GRUUsInSIP
+   * @param     p_AllowFQDN         (default value: true)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_CheckSipUrlForIPAddrOrFQDNOrGRUU(SipUrl p_SipUrl,
+                                                      template integer p_Port := *,
+                                                      boolean p_GRUUsInSIP,
+                                                      boolean p_AllowFQDN := true) runs on IMS_PTC return boolean
+  { /* @sic R5s130195 BASELINE MOVING 2013: change of SipUrl sic@ */
+    /* @sic R5-153760: p_GRUUsInSIP := pc_IMS_GRUUsInSIP; R5s150908: p_GRUUsInSIP handed over from f_IMS_MessageHeader_CheckContactAddr sic@ */
+    
+    var template (present) SipUrl v_ExpectedSipUrl;
+    var HostPort v_HostPort;
+    
+    if (not ischosen(p_SipUrl.components.sip)) {
+      return false;
+    }
+    v_HostPort := p_SipUrl.components.sip.hostPort;
+
+    if (p_GRUUsInSIP) {  // @sic R5-153760 sic@
+      v_ExpectedSipUrl := f_SIP_BuildSipUri_RX(f_IMS_PTC_ImsInfo_GetUriString(gruu), cr_UriParameters_gruu);    /* when "obtaining and using GRUUs in SIP" the UE shall use the public GRUU in the Contact header
+                                                                                                                   => SIP URI as used during registration + "gr" uri-parameter
+                                                                                                                   @sic R5s150721, R5-153760 sic@ */
+      return match(p_SipUrl, v_ExpectedSipUrl);
+    } else { // No GRUU
+      return f_IMS_PTC_CheckHostPortForIPAddrOrFQDN(v_HostPort, p_Port, p_AllowFQDN);
+    }
+  }
+
+  /*
+   * @desc      return true when SigComp is started
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_SigCompStarted() runs on IMS_PTC return boolean
+  {
+    return vc_IMS_Global.ImsInfo.SigCompStarted;
+  }
+
+  /*
+   * @desc      return sig comp parameters or omit when sig comp is not started
+   * @return    template (omit) GenericParam
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetSigCompParam() runs on IMS_PTC return template (omit) GenericParam
+  {
+    if (vc_IMS_Global.ImsInfo.SigCompStarted) {
+      return cs_SigCompParam;
+    } else {
+      return omit;
+    }
+  }
+
+  /*
+   * @desc      function returning IMPU; FatalError is raised in case of invalid index
+   * @param     p_Index
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_ImsInfo_GetIMPU(integer p_Index) runs on IMS_PTC return charstring
+  { /* @sic R5-160290 FBBA registration: new function to avoid runtime error sic@ */
+    if (p_Index > lengthof(vc_IMS_Global.ImsInfo.IMPUList)) {
+      FatalError(__FILE__, __LINE__, "not that many IMPUs configured");
+    }
+    return vc_IMS_Global.ImsInfo.IMPUList[p_Index];
+  }
+
+  /*
+   * @desc      return specific public user id e.g. as used for registration
+   * @param     p_IdType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetUriString(IMS_UriInfo_UriType_Type p_IdType,
+                                          template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return charstring
+  {
+    var template (omit) SipUrl v_SipUrl;
+
+    select (p_IdType) {
+      case (firstId, defaultId, emergencyId) {
+        return fl_IMS_PTC_ImsInfo_GetIMPU(0);
+      }
+      case (secondId) {
+        return fl_IMS_PTC_ImsInfo_GetIMPU(1);
+      }
+      case (thirdId) {
+        return fl_IMS_PTC_ImsInfo_GetIMPU(2);
+      }
+      case (registrationId, gruu) {     /* @sic R5-153760: support of gruu; same URI as used by the UE in the To header of the REGISTER message sic@ */
+        if (ispresent(vc_IMS_Global.ImsInfo.Registration.Uri)) {
+          return vc_IMS_Global.ImsInfo.Registration.Uri;
+        }
+      }
+      case (dialogLocalId, dialogRemoteId) {
+        v_SipUrl := f_IMS_PTC_ImsInfo_DialogGetSipUri(p_IdType, p_DialogIndex); /* @sic R5s160451: f_IMS_PTC_ImsInfo_DialogGetSipUri sic@ */
+        if (isvalue(v_SipUrl)) {
+          return f_SIP_SipUrl2Str(valueof(v_SipUrl));
+        }
+      }
+      case (temporaryId) {
+        return f_IMS_TemporaryPublicUserIdentity(px_IMSI_Def);
+      }
+    }
+    FatalError(__FILE__, __LINE__, "Invalid URI or URI not initialised");
+    return "";
+  }
+
+  /*
+   * @desc      return SipUrl to be used in DL
+   * @param     p_IdType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (value) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetSipUriTX(IMS_UriInfo_UriType_Type p_IdType,
+                                         template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (value) SipUrl
+  { /* @sic R5s150382 change 1: p_DialogIndex sic@ */
+    /* @sic R5s160451: p_Port removed as never being used sic@ */
+    var template (omit) SipUrl v_DialogSipUrl := f_IMS_PTC_ImsInfo_DialogGetSipUri(p_IdType, p_DialogIndex);  /* @sic R5s160451: SipUrl as in From/To header of message creating the dialog sic@ */
+    var template (value) SipUrl v_SipUrl;
+
+    if (isvalue(v_DialogSipUrl)) {        /* URI is related to the given dialog */
+      v_SipUrl := valueof(v_DialogSipUrl);
+    } else {
+      v_SipUrl := f_SIP_BuildSipUri_TX(f_IMS_PTC_ImsInfo_GetUriString(p_IdType, p_DialogIndex));
+    }
+    return v_SipUrl;
+  }
+
+  /*
+   * @desc      return SipUrl to be used in UL
+   * @param     p_IdType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (present) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetSipUriRX(IMS_UriInfo_UriType_Type p_IdType,
+                                         template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (present) SipUrl
+  { /* @sic R5s150382 change 1: p_DialogIndex sic@ */
+    var template (omit) SipUrl v_DialogSipUrl := f_IMS_PTC_ImsInfo_DialogGetSipUri(p_IdType, p_DialogIndex);  /* @sic R5s160451: SipUrl as in From/To header of message creating the dialog sic@ */
+    var template (present) SipUrl v_SipUrl;
+
+    if (isvalue(v_DialogSipUrl)) {
+      v_SipUrl := valueof(v_DialogSipUrl);
+    } else {
+      v_SipUrl := f_SIP_BuildSipUri_RX(f_IMS_PTC_ImsInfo_GetUriString(p_IdType, p_DialogIndex));
+    }
+    return v_SipUrl;
+  }
+
+  /*
+   * @desc      return all PublicUserIds for which the UE is registered or shall be registered
+   * @return    CharStringList_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetAllIMPUs() runs on IMS_PTC return CharStringList_Type
+  {
+    return vc_IMS_Global.ImsInfo.IMPUList;
+  }
+
+  /*
+   * @desc      return SipUrl as used for subscription (ref event package)
+   * @return    template (present) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetSipUriSubscriptionRX() runs on IMS_PTC return template (present) SipUrl
+  {
+    var charstring v_PublicUserIdDefault := f_IMS_PTC_ImsInfo_GetUriString(defaultId);
+    var charstring v_PublicUserIdRegistration := f_IMS_PTC_ImsInfo_GetUriString(registrationId);
+    var template (present) SipUrl v_SipUrl;
+
+    if (f_IMS_PTC_ImsInfo_GetUEwithISIM() and (v_PublicUserIdDefault != v_PublicUserIdRegistration)) {             /* @sic R5-203077: f_IMS_PTC_ImsInfo_GetUEwithISIM instead of px_UEwithISIM sic@ */
+      v_SipUrl := (f_SIP_BuildSipUri_RX(v_PublicUserIdDefault), f_SIP_BuildSipUri_RX(v_PublicUserIdRegistration));
+    } else {
+      v_SipUrl := f_SIP_BuildSipUri_RX(v_PublicUserIdDefault);
+    }
+    return v_SipUrl;
+  }
+
+  /*
+   * @desc      return SipUrl with "any IMPU within the set of IMPUs on ISIM"
+   * @return    template (present) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetSipUriAnyRX() runs on IMS_PTC return template (present) SipUrl
+  {
+    var CharStringList_Type v_IMPUList := f_IMS_PTC_ImsInfo_GetAllIMPUs();
+    var template (present) SipUrlList_Type v_SipUrlList;
+    var integer i;
+
+    for (i := 0; i < lengthof(v_IMPUList); i := i + 1) {
+      v_SipUrlList[i] := f_SIP_BuildSipUri_RX(v_IMPUList[i]);
+    }
+    return (all from v_SipUrlList);
+  }
+
+  /*
+   * @desc      Initialise structure of type IMS_DialogInfo_Type
+   * @param     p_DialogInfo
+   * @param     p_CseqType
+   * @param     p_MessageHeader_InviteOrReferOrSubscribe
+   * @return    IMS_DialogInfo_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_DialogInfo_Init(IMS_DialogInfo_Type p_DialogInfo,
+                                 IMS_PTC_CseqType_Type p_CseqType,
+                                 MessageHeader p_MessageHeader_InviteOrReferOrSubscribe) return IMS_DialogInfo_Type
+  { /* @sic R5-174544: SessionId removed sic@ */
+    var SipUrl v_FromURI := f_Addr_Union_GetSipUrl(p_MessageHeader_InviteOrReferOrSubscribe.fromField.addressField);  /* @sic R5s160451: SipUrl instead of charstring sic@ */
+    var SipUrl v_ToURI   := f_Addr_Union_GetSipUrl(p_MessageHeader_InviteOrReferOrSubscribe.toField.addressField);    /* @sic R5s160451: SipUrl instead of charstring sic@ */
+    var charstring v_FromTag := f_MessageHeader_GetFromTag(p_MessageHeader_InviteOrReferOrSubscribe);
+    var integer v_CseqValue := p_MessageHeader_InviteOrReferOrSubscribe.cSeq.seqNumber;
+    var IMS_DialogInfo_Type v_Dialog := p_DialogInfo;
+    
+    select (p_CseqType) {
+      case (dialogLocal) {                 /* MT establishment of the dialog */
+        v_Dialog.LocalURI  := v_FromURI;   /* @sic R5s140121 change 2.2: needs to be v_FromURI instead of v_ToURI sic@ */
+        v_Dialog.RemoteURI := v_ToURI;     /* @sic R5s140121 change 2.2: needs to be v_ToURI instead of v_FromURI sic@ */
+        v_Dialog.MobileOriginated := false;
+        v_Dialog.LocalTag := v_FromTag;
+        v_Dialog.RemoteTag := omit;        /* @sic R5s130497 change 1 - MCC160 implementation sic@ */
+        v_Dialog.LocalCseq := v_CseqValue;
+      }
+      case (dialogRemote) {                /* MO establishment of the dialog */
+        v_Dialog.LocalURI  := v_ToURI;     /* @sic R5s140121 change 2.2: needs to be v_ToURI instead of v_FromURI sic@ */
+        v_Dialog.RemoteURI := v_FromURI;   /* @sic R5s140121 change 2.2: needs to be v_FromURI instead of v_ToURI sic@ */
+        v_Dialog.MobileOriginated := true;
+        v_Dialog.LocalTag := omit;         /* @sic R5s130497 change 1 - MCC160 implementation sic@ */
+        v_Dialog.RemoteTag := v_FromTag;
+        v_Dialog.RemoteCseq := v_CseqValue;
+        v_Dialog.ContactUrlUE := f_MessageHeader_GetContactSipUrl(p_MessageHeader_InviteOrReferOrSubscribe);
+      }
+      case else {
+        FatalError (__FILE__, __LINE__, "");
+      }
+    }
+
+    v_Dialog.CallId := p_MessageHeader_InviteOrReferOrSubscribe.callId.callid;
+    return v_Dialog;
+  }
+
+  /*
+   * @desc      Initialise global variables for SIP dialog
+   * @param     p_CseqType
+   * @param     p_MessageHeader_InviteOrReferOrSubscribe
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogInit(IMS_PTC_CseqType_Type p_CseqType,
+                                        MessageHeader p_MessageHeader_InviteOrReferOrSubscribe,
+                                        template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  { /* @sic R5s140017 MCC160 implementation: ToTag replaced by RemoteTag and LocalTag; additional state variables: CallId, SessionId sic@ */
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+
+    v_Dialog := f_IMS_DialogInfo_Init(v_Dialog, p_CseqType, p_MessageHeader_InviteOrReferOrSubscribe);
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      check whether given dialog is started
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    boolean
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogIsStarted(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return boolean
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return ispresent(v_Dialog.CallId);
+  }
+
+  /*
+   * @desc      release a SIP dialog
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogRelease(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, valueof(cs_IMS_DialogInfo_Init));
+  }
+
+  /*
+   * @desc      returns true if a dialog is released already
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    boolean
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogIsReleased(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return boolean
+  {
+    var template (omit) charstring v_LocalTag := f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex);
+    var template (omit) charstring v_RemoteTag := f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_DialogIndex);
+    return (not isvalue(v_LocalTag) and not isvalue(v_RemoteTag));
+  }
+
+  /*
+   * @desc      returns true if a dialog is (fully) established
+   *            according to RFC 3261 clause 12.1 2xx and 101-199 responses with a To tag establish a dialog
+   *            => this is the case when remote and local tag are set (independent of whether the dialog is MO or MT)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogIsEstablished(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return boolean
+  {
+    var template (omit) charstring v_LocalTag := f_IMS_PTC_ImsInfo_DialogGetLocalTag(p_DialogIndex);
+    var template (omit) charstring v_RemoteTag := f_IMS_PTC_ImsInfo_DialogGetRemoteTag(p_DialogIndex);
+    return (isvalue(v_LocalTag) and isvalue(v_RemoteTag));
+  }
+
+  /*
+   * @desc      set active dialog, i.e. dialog of which global procedures take dialog state info
+   * @param     p_Index
+   * @status    APPROVED (IMS, LTE_A_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_ActivateDialog(IMS_PTC_DialogIndex_Type p_Index) runs on IMS_PTC
+  { /* @sic R5s140092 change 1.5: new function sic@ */
+    vc_IMS_Global.ImsInfo.Dialog.CurrentIndex := fl_IMS_PTC_ImsInfo_GetDialogIndexValue(p_Index);
+  }
+
+  /*
+   * @desc      function to set local tag acc. to response for INVITE (MO call setup)
+   * @param     p_Tag
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetLocalTag(charstring p_Tag,
+                                               template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    v_Dialog.LocalTag := p_Tag;
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      function to set remote tag acc. to response for INVITE (MT call setup)
+   * @param     p_Tag
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, MCX, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetRemoteTag(charstring p_Tag,
+                                                template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    v_Dialog.RemoteTag := p_Tag;
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      function to be used to get local tag for sending any request to a UE within a dialog (e.g. PRACK, BYE etc.)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetLocalTag(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) charstring
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.LocalTag;
+  }
+
+  /*
+   * @desc      Get SipUrl related to the dialog
+   * @param     p_IdType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetSipUri(IMS_UriInfo_UriType_Type p_IdType,
+                                             template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) SipUrl
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    var template (omit) SipUrl v_SipUrl := omit;
+
+    select (p_IdType) {
+      case (dialogLocalId) {
+        v_SipUrl := v_Dialog.LocalURI;
+      }
+      case (dialogRemoteId) {
+        v_SipUrl := v_Dialog.RemoteURI;
+      }
+    }
+    return v_SipUrl;
+  }
+
+  /*
+   * @desc      function to be used to get remote tag for sending any request to a UE within a dialog (e.g. PRACK, BYE etc.)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetRemoteTag(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) charstring
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.RemoteTag;
+  }
+
+  /*
+   * @desc      function to get call id of the current dialog
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (value) CallId
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetCallId(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (value) CallId
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return cs_CallId(v_Dialog.CallId);
+  }
+
+  /*
+   * @desc      get previous SDP message (sent by the UE)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) SDP_Message
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetPrevSdpMessageRX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) SDP_Message
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.SdpMessagePrevRX;
+  }
+
+  /*
+   * @desc      store SDP message (sent to the UE)
+   * @param     p_SDP_Message
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageTX(template (omit) SDP_Message p_SDP_Message,
+                                                       template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    if (isvalue(p_SDP_Message)) {
+      v_Dialog.SdpMessagePrevTX := valueof(p_SDP_Message);
+    } else {
+      v_Dialog.SdpMessagePrevTX := omit;
+    }
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      store SDP message (sent by the UE)
+   * @param     p_SDP_Message
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetPrevSdpMessageRX(template (omit) SDP_Message p_SDP_Message,
+                                                       template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    if (isvalue(p_SDP_Message)) {  /* @sic R5s150666, R5-153525 sic@ */
+      v_Dialog.SdpMessagePrevRX := valueof(p_SDP_Message);
+    } else {
+      v_Dialog.SdpMessagePrevRX := omit;
+    }
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      get latest RSeq value sent by the UE for an ongoing MT INVITE transaction
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetRemoteRSeq(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) integer
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.RemoteRSeq;
+  }
+
+  /*
+   * @desc      set latest RSeq value sent by the UE for an ongoing MT INVITE transaction
+   * @param     p_RSeq
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetRemoteRSeq(template (omit) integer p_RSeq,
+                                                 template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    if (isvalue(p_RSeq)) {
+      v_Dialog.RemoteRSeq := valueof(p_RSeq);
+    } else {
+      v_Dialog.RemoteRSeq := omit;
+    }
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      set SDP session version to be used in DL
+   * @param     p_SessVersion
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetSessVersionTX(integer p_SessVersion,
+                                                    template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  { /* @sic R5-150707: new function to allow to set session version needs to specific values by a test case sic@ */
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    v_Dialog.SdpSessionVersionTX := p_SessVersion;
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      get SDP session version to be used in DL
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    integer
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetSessVersionTX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return integer
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.SdpSessionVersionTX;
+  }
+
+  /*
+   * @desc      get next session version for DL
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogIncrAndGetSessVersionTX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return charstring
+  { /* @sic R5-150707: replaces f_IMS_PTC_SDP_SessVersionIndex_GetNext and f_IMS_SDP_SessVersion_GetNext sic@
+       NOTE: when session version needs to be set to specific values by a test case we cannot use an index anymore to increment the value */
+
+    var integer v_SdpSessionVersionTX := f_IMS_PTC_ImsInfo_DialogGetSessVersionTX(p_DialogIndex) + 1;
+    f_IMS_PTC_ImsInfo_DialogSetSessVersionTX(v_SdpSessionVersionTX, p_DialogIndex);
+
+    return int2str(v_SdpSessionVersionTX);
+  }
+
+  /*
+   * @desc      set SDP session id to be used in DL
+   * @param     p_SessId
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (IMS, LTE_A_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogSetSessIdTX(charstring p_SessId,
+                                               template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  { /* @sic R5-150707: new function sic@ */
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    v_Dialog.SdpSessionIdTX := p_SessId;
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      set SDP session id to be used in DL
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogGetSessIdTX(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return charstring
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    return v_Dialog.SdpSessionIdTX;
+  }
+
+  /*
+   * @desc      returns true when the current dialog is MO
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    boolean
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_DialogIsMO(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return boolean
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    if (not ispresent(v_Dialog.MobileOriginated)) {
+      FatalError(__FILE__, __LINE__, "no dialog established");
+    }
+    return v_Dialog.MobileOriginated;
+  }
+
+  /*
+   * @desc      return UE's contact address as provided in contact header of the REGISTER message or as provided in the INVITE (MO call) or and appropriate response (MT call)
+   * @param     p_ContactUriType    (default value: registration)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetContactUrlUE(IMS_ContactUriType_Type p_ContactUriType := registration,
+                                             template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return SipUrl
+  { /* @sic R5s150908: contact URI for dialogs sic@ */
+    var IMS_DialogInfo_Type v_Dialog;
+    var template (omit) SipUrl v_ContactUri := omit;
+
+    select (p_ContactUriType) {
+      case (registration) {
+        v_ContactUri := vc_IMS_Global.ImsInfo.Registration.ContactUrl;
+      }
+      case (dialog) {
+        v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+        v_ContactUri := v_Dialog.ContactUrlUE;
+      }
+    }
+    if (not isvalue(v_ContactUri)) {
+      FatalError(__FILE__, __LINE__, "no valid contact uri stored at IMS PTC");
+    }
+    return valueof(v_ContactUri);
+  }
+
+  /*
+   * @desc      wrapper function setting URI parameters to any-or-omit
+   * @param     p_ContactUriType    (default value: registration)
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (present) SipUrl
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetContactUrlUE_RX(IMS_ContactUriType_Type p_ContactUriType := registration,
+                                                template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (present) SipUrl
+  {
+    var template (present) SipUrl v_ContactUri := f_IMS_PTC_ImsInfo_GetContactUrlUE(p_ContactUriType, p_DialogIndex);
+
+    v_ContactUri.urlParameters := *;
+    return v_ContactUri;
+  }
+
+  /*
+   * @desc      set the UE's contact address for registration or a given dialog
+   * @param     p_ContactUrl
+   * @param     p_ContactUriType    (default value: registration)
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_SetContactUrlUE(SipUrl p_ContactUrl,
+                                             IMS_ContactUriType_Type p_ContactUriType := registration,
+                                             template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  { /* @sic R5s150908: contact URI for dialogs sic@ */
+    var IMS_DialogInfo_Type v_Dialog;
+
+    select (p_ContactUriType) {
+      case (registration) {                  /* shall be used when subsequent REGISTER has been received during registration */
+        vc_IMS_Global.ImsInfo.Registration.ContactUrl := p_ContactUrl;
+      }
+      case (dialog) {                       /* to set contact URI for given dialog @sic R5s150908 sic@ */
+        v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+        v_Dialog.ContactUrlUE := p_ContactUrl;
+        fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+      }
+    }
+  }
+
+  /*
+   * @desc      return CallId that has been used for registration
+   * @return    template (omit) charstring
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_GetCallIdRegistration() runs on IMS_PTC return template (omit) charstring
+  {
+    return vc_IMS_Global.ImsInfo.Registration.CallId;
+  }
+
+  /*
+   * @desc      return true, if the UE registered in the PDN the PTC is associated with
+   *            (e.g. to check for emergency call without registration)
+   * @return    boolean
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_ImsInfo_IsRegistered() runs on IMS_PTC return boolean
+  {
+    return isvalue(vc_IMS_Global.ImsInfo.Registration.CallId);
+  }
+
+  /*
+   * @desc      generate a call id derived from the NW's IP address (see examples in RFC 3261)
+   * @param     p_Method
+   * @return    charstring
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_PTC_GenerateCallId(charstring p_Method)  runs on IMS_PTC return charstring
+  { /* p_Method  ..  e.g. "INVITE" */
+    var integer v_CallIdCnt := vc_IMS_Global.ImsInfo.CallIdCnt;
+
+    vc_IMS_Global.ImsInfo.CallIdCnt := v_CallIdCnt + 1;
+    return p_Method & "-" & int2str(v_CallIdCnt) & "-7dec-11d0-a765-00a0c91e6bf6@" & f_IMS_PTC_NW_Address_GetAddrStr();  /* @sic R5-133705: CallIdCnt to achieve unique callids sic@ */
+  }
+
+  /*
+   * @desc      return transport protocol (UDP/TCP) to be used for requests in DL
+   * @return    InternetProtocol_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetTransportProtocol() runs on IMS_PTC return InternetProtocol_Type
+  {
+    return vc_IMS_Global.ImsInfo.TransportProtocol;
+  }
+
+  /*
+   * @desc      get CSeq for respective message
+   * @param     p_CseqType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    template (omit) integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_CseqGet(IMS_PTC_CseqType_Type p_CseqType,
+                                     template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return template (omit) integer
+  { /* @sic R5s140235: return value changed to "template (omit)" sic@ */
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    var template (omit) integer v_CseqValue;
+
+    select (p_CseqType) {
+      case (register)     { v_CseqValue := vc_IMS_Global.ImsInfo.Registration.Cseq; }
+      case (dialogRemote) { v_CseqValue := v_Dialog.RemoteCseq; }
+      case (dialogLocal)  { v_CseqValue := v_Dialog.LocalCseq; }
+      case else { FatalError (__FILE__, __LINE__, ""); }
+    }
+    return v_CseqValue;
+  }
+
+  /*
+   * @desc      get CSeq for respective message
+   * @param     p_CseqType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_CseqGetValue(IMS_PTC_CseqType_Type p_CseqType,
+                                          template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return integer
+  { /* @sic R5s140235: new function sic@ */
+    var template (omit) integer v_Cseq := f_IMS_PTC_ImsInfo_CseqGet(p_CseqType, p_DialogIndex);
+
+    if (not isvalue(v_Cseq)) {
+      FatalError(__FILE__, __LINE__, "no valid Cseq yet");
+    }
+    return valueof(v_Cseq);
+  }
+
+  /*
+   * @desc      set CSeq for respective message
+   * @param     p_CseqType
+   * @param     p_CseqValue
+   * @param     p_DialogIndex       (default value: omit)
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_CseqSet(IMS_PTC_CseqType_Type p_CseqType,
+                                     integer p_CseqValue,
+                                     template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC
+  {
+    var IMS_DialogInfo_Type v_Dialog := fl_IMS_PTC_ImsInfo_GetDialog(p_DialogIndex);
+    select (p_CseqType) {
+      case (register)     { vc_IMS_Global.ImsInfo.Registration.Cseq := p_CseqValue; }
+      case (dialogRemote) { v_Dialog.RemoteCseq := p_CseqValue; }
+      case (dialogLocal)  { v_Dialog.LocalCseq := p_CseqValue; }
+      case else { FatalError (__FILE__, __LINE__, ""); }
+    }
+    fl_IMS_PTC_ImsInfo_SetDialog(p_DialogIndex, v_Dialog);
+  }
+
+  /*
+   * @desc      increment CSeq for respective message
+   * @param     p_CseqType
+   * @param     p_DialogIndex       (default value: omit)
+   * @return    integer
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_CseqIncr(IMS_PTC_CseqType_Type p_CseqType,
+                                      template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit) runs on IMS_PTC return integer
+  { /* @sic R5s140235: Cseq may be omit sic@ */
+    var integer v_CseqValue := f_IMS_PTC_ImsInfo_CseqGetValue(p_CseqType, p_DialogIndex) + 1;
+    f_IMS_PTC_ImsInfo_CseqSet(p_CseqType, v_CseqValue, p_DialogIndex);
+    return v_CseqValue;
+  }
+
+  /*
+   * @desc      return appropriate branch value
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetNextBranch() runs on IMS_PTC return charstring
+  { /* @sic R5s130561 change 4: addtional branch values sic@ */
+    /* @sic R5s160540 change 2: more branch values sic@ */
+    /* @sic R5s190963: more branch values sic@ */
+    const CharStringList_Type tsc_TagList1 := { "1234567890", "2345678901", "3456789012", "4567890123", "5678901234", "6789012345", "7890123456", "8901234567", "9012345678", "0123456789",
+                                                "0987654321", "9876543210", "8765432109", "7654321098", "6543210987", "5432109876", "4321098765", "3210987654", "2109876543", "1098765432",
+                                                "0987654320", "9876543200", "8765432009", "7654320098", "6543200987", "5432009876", "4320098765", "3200987654", "2009876543", "0098765432",
+                                                "0987654300", "9876543000", "8765430009", "7654300098", "6543000987", "5430009876", "4300098765", "3000987654", "0009876543", "0098765430",
+                                                "0987654000", "9876540000", "8765400009", "7654000098", "6540000987", "5400009876", "4000098765", "0000987654", "0009876540", "0098765400",
+                                                "0987650000", "9876500000", "8765000009", "7650000098", "6500000987", "5000009876", "0000098765", "0000987650", "0009876500", "0098765000",
+                                                "0987600000", "9876000000", "8760000009", "7600000098", "6000000987", "0000009876", "0000098760", "0000987600", "0009876000", "0098760000" };
+    const CharStringList_Type tsc_TagList2 := { "123456789a", "23456789a1", "3456789a12", "456789a123", "56789a1234", "6789a12345", "789a123456", "89a1234567", "9a12345678", "a123456789",
+                                                "a987654321", "987654321a", "87654321a9", "7654321a98", "654321a987", "54321a9876", "4321a98765", "321a987654", "21a9876543", "1a98765432",
+                                                "a98765432a", "98765432aa", "8765432aa9", "765432aa98", "65432aa987", "5432aa9876", "432aa98765", "32aa987654", "2aa9876543", "aa98765432",
+                                                "a9876543aa", "9876543aaa", "876543aaa9", "76543aaa98", "6543aaa987", "543aaa9876", "43aaa98765", "3aaa987654", "aaa9876543", "aa9876543a",
+                                                "a987654aaa", "987654aaaa", "87654aaaa9", "7654aaaa98", "654aaaa987", "54aaaa9876", "4aaaa98765", "aaaa987654", "aaa987654a", "aa987654aa",
+                                                "a98765aaaa", "98765aaaaa", "8765aaaaa9", "765aaaaa98", "65aaaaa987", "5aaaaa9876", "aaaaa98765", "aaaa98765a", "aaa98765aa", "aa98765aaa",
+                                                "a9876aaaaa", "9876aaaaaa", "876aaaaaa9", "76aaaaaa98", "6aaaaaa987", "aaaaaa9876", "aaaaa9876a", "aaaa9876aa", "aaa9876aaa", "aa9876aaaa" };
+    var CharStringList_Type v_TagList;
+    var charstring v_Branch;
+
+    if (vc_IMS_Global.PdnIndex == PDN_1) {    /* @sic R5s170137: different branches for different PDNs sic@ */
+      v_TagList := tsc_TagList1;
+    } else {
+      v_TagList := tsc_TagList2;
+    }
+
+    if (vc_IMS_Global.ImsInfo.BranchIndex >= lengthof(v_TagList)) {
+      FatalError (__FILE__, __LINE__, "not enough branches");
+    }
+
+    v_Branch := c_branchCookie & v_TagList[vc_IMS_Global.ImsInfo.BranchIndex];
+    vc_IMS_Global.ImsInfo.BranchIndex := vc_IMS_Global.ImsInfo.BranchIndex + 1;
+    return v_Branch;
+  }
+
+  /*
+   * @desc      provide latest HomeDomainName
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetHomeDomainName() runs on IMS_PTC return charstring
+  {
+    return vc_IMS_Global.ImsInfo.HomeDomainName;
+  }
+
+  /*
+   * @desc      provide latest HomeDomainName
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetPrivateUserId() runs on IMS_PTC return charstring
+  {
+    return vc_IMS_Global.ImsInfo.PrivateUserId;
+  }
+
+  /*
+   * @desc      get whether or not the UE has an ISIM
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ImsInfo_GetUEwithISIM() runs on IMS_PTC return boolean
+  {
+    return vc_IMS_Global.ImsInfo.UEwithISIM;
+  }
+
+  /*
+   * @desc      reset ImsInfo, Security and 'IgnoreReset' flag as it is before initial registration
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Reset() runs on IMS_PTC
+  { /* @sic R5s150031: new common function sic@ */
+    vc_IMS_Global.ImsInfo := valueof(cs_IMS_ImsInfo_Init(vc_IMS_Global.ImsInfo.RanType,
+                                                         vc_IMS_Global.ImsInfo.IMPUList,
+                                                         vc_IMS_Global.ImsInfo.UE_Release,
+                                                         vc_IMS_Global.ImsInfo.HomeDomainName,
+                                                         vc_IMS_Global.ImsInfo.PrivateUserId,
+                                                         vc_IMS_Global.ImsInfo.SecurityScheme,
+                                                         vc_IMS_Global.ImsInfo.SPI_ValidValueList[0],       /* @sic R5-172048 sic@ */
+                                                         vc_IMS_Global.ImsInfo.SPI_ValidValueList[1],       /* @sic R5-172048 sic@ */
+                                                         vc_IMS_Global.ImsInfo.UEwithISIM,                  /* @sic R5-203077: px_MCX_SIP_RegistrationWithTemporaryIdentities for MCX sic@ */
+                                                         vc_IMS_Global.ImsInfo.CheckFeatureTagsInRegister,  /* @sic R5s200997 sic@ */
+                                                         vc_IMS_Global.ImsInfo.BranchIndex));               /* @sic R5s140802 sic@ */
+    vc_IMS_Global.Security := valueof(cs_IMS_SecurityInfo_Init(vc_IMS_Global.Security.SPIs));
+    vc_IMS_Global.Ctrl.IgnoreReset := true;
+  }
+
+  /*
+   * @desc      Initialise test suite specific information
+   * @param     p_TestSpec
+   * @param     p_ParameterList
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_TestsuiteInfo_Init(IMS_TestSpec_Type p_TestSpec,
+                                        NameValueList_Type p_ParameterList) runs on IMS_PTC
+  {
+    vc_IMS_Global.TestsuiteInfo.TestSpec := p_TestSpec;
+    vc_IMS_Global.TestsuiteInfo.ParameterList := p_ParameterList;
+  }
+
+  /*
+   * @desc      return true when SIP digest
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_TestsuiteInfo_IsMCX() runs on IMS_PTC return boolean
+  {
+    return (vc_IMS_Global.TestsuiteInfo.TestSpec == TS_37579);
+  }
+
+  /*
+   * @desc      return test suite specific parameter
+   * @param     p_Name
+   * @return    charstring
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_TestsuiteInfo_GetParameter(charstring p_Name) runs on IMS_PTC return charstring
+  {
+    var template (omit) charstring v_Value := f_NameValueList_Get(vc_IMS_Global.TestsuiteInfo.ParameterList, p_Name);
+    if (not isvalue(v_Value)) {
+      FatalError(__FILE__, __LINE__, "unknown parameter " & p_Name);
+    }
+    return valueof(v_Value);
+  }
+
+  /*
+   * @desc      to deal with entry and exit of the test body
+   * @param     p_TestBodyFlag
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_R12, MCX)
+   */
+  function f_IMS_TestBody_Set(boolean p_TestBodyFlag) runs on IMS_PTC
+  {
+    vc_IMS_Global.Ctrl.TestBody := p_TestBodyFlag;
+  }
+
+  /*
+   * @desc      check whether test body is active
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_TestBody_Check() runs on IMS_PTC return boolean
+  {
+    return vc_IMS_Global.Ctrl.TestBody;
+  }
+
+  /*
+   * @desc      to block UL data from default handling
+   * @param     p_BlockUlDataInDefault
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_BlockUlDataInDefault_Set(boolean p_BlockUlDataInDefault) runs on IMS_PTC
+  {
+    vc_IMS_Global.Ctrl.BlockUlDataInDefault := p_BlockUlDataInDefault;
+  }
+
+  /*
+   * @desc      enable/disable handling of PUBLISH
+   * @param     p_WaitForPublish
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_WaitForPublish_Set(boolean p_WaitForPublish) runs on IMS_PTC
+  {
+    vc_IMS_Global.Ctrl.WaitForPublish := p_WaitForPublish;
+  }
+
+  /*
+   * @desc      return whether or not waiting for PUBLISH is ongoing
+   * @return    boolean
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_WaitForPublish_Get() runs on IMS_PTC return boolean
+  {
+    return vc_IMS_Global.Ctrl.WaitForPublish;
+  }
+
+  /*
+   * @desc      set correct verdict: FAIL is assigned only when being in the test body
+   * @param     p_FileName
+   * @param     p_LineNo
+   * @param     p_Msg
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_SetVerdictFailOrInconc(charstring p_FileName,
+                                        LineNo_Type p_LineNo,
+                                        charstring p_Msg) runs on IMS_PTC
+  {
+    if (fl_IMS_TestBody_Check()) {
+      f_SetVerdict(fail, p_FileName, p_LineNo, p_Msg);
+    } else {
+      f_SetVerdict(inconc, p_FileName, p_LineNo, p_Msg);
+    }
+    self.kill; // => test case will terminate immediately
+  }
+
+  template (present) IMS_CONFIG_CNF cr_IMS_CONFIG_CNF_Any := ?;   /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS) */
+
+  /*
+   * @desc      Default behaviour for test cases when the IMS behaviour is matter of the test purpose
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_PTC_DefaultBehaviour_TestcaseSpecificImsHandling() runs on IMS_PTC
+  {
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_Coordination_MSG;
+    var boolean v_IgnoreReset := vc_IMS_Global.Ctrl.IgnoreReset;
+
+    [v_IgnoreReset] IPCAN.receive(cmr_IPCAN_IMS_Reset) -> value v_IMS_IPCAN_Coordination_MSG {
+      if ((v_IMS_IPCAN_Coordination_MSG.IPCAN_IMS_Control.Reset == WithCNF))  {  // @sic R5s230197 sic@
+        f_IMS_IPCAN_SendCoOrdMsg(IPCAN);
+      }
+      repeat;
+    }
+    [v_IgnoreReset] OtherIPCAN.receive(cmr_IPCAN_IMS_Reset) -> value v_IMS_IPCAN_Coordination_MSG { // @sic R5s201235 sic@
+      if ((v_IMS_IPCAN_Coordination_MSG.IPCAN_IMS_Control.Reset == WithCNF))  {  // @sic R5s230197 sic@
+        f_IMS_IPCAN_SendCoOrdMsg(OtherIPCAN);
+      }
+      repeat;
+    }
+    [] IMS_CTRL.receive(cr_IMS_CONFIG_CNF_Any) {
+      all timer.stop;
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected receive event at the IMS_CTRL port");
+    }
+    [not vc_IMS_Global.Ctrl.BlockUlDataInDefault] IMS_Server.receive(cr_IMS_DATA_REQ_Any) {  /* @sic R5s140780 - MCC160 Implementation sic@ */
+      all timer.stop;
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected receive event at the IMS_Server port");
+    }
+    [not vc_IMS_Global.Ctrl.BlockUlDataInDefault] IMS_Client.receive(cr_IMS_DATA_RSP_Any) {  /* @sic R5s140780 - MCC160 Implementation sic@ */
+      all timer.stop;
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected receive event at the IMS_Client port");
+    }
+    [] any timer.timeout {
+      all timer.stop;
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected timeout");
+    }
+  }
+
+  /*
+   * @desc      Default behaviour for default IMS handling
+   *            when IMS PTC shall only deal with IMS messages as for the initial registration
+   *            but IMS behavour is not matter of the test purpose
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_PTC_DefaultBehaviour_DefaultImsHandling() runs on IMS_PTC
+  { // @sic R5s230197 sic@ re-written to allow coordination ports to be handled in the default handler
+    [] IMS_CTRL.receive(cr_IMS_CONFIG_CNF_Any) {
+      f_ErrorLog(__FILE__, __LINE__, "unexpected message (skipped)");
+      repeat;
+    }
+    [] IMS_Server.receive(cr_IMS_DATA_REQ_Any) {
+      f_ErrorLog(__FILE__, __LINE__, "unexpected message (skipped)");
+      repeat;
+    }
+    [] IMS_Client.receive(cr_IMS_DATA_RSP_Any) {
+      f_ErrorLog(__FILE__, __LINE__, "unexpected message (skipped)");
+      repeat;
+    }
+    [] any timer.timeout {
+      f_ErrorLog(__FILE__, __LINE__, "unexpected timeout");
+      repeat;
+    }
+  }
+
+  /*
+   * @desc      default handler to be activated on top of regular default handler to deal with repetitions of SIP requests (especially REGISTER request)
+   * @param     p_IMS_DATA_REQ
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  altstep a_IMS_RetransmissionHandler(IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC
+  {
+    var template (present) IMS_RoutingInfo_Type v_RoutingInfo := p_IMS_DATA_REQ.RoutingInfo;
+    var template (present) IMS_Request_Type v_IMS_Request := p_IMS_DATA_REQ.Request;   /* repeated message has to be exactly the same (especially cseq) */
+
+    [] IMS_Server.receive(cr_IMS_DATA_REQ_Any(v_RoutingInfo, v_IMS_Request)) { repeat; }
+  }
+
+  /*
+   * @desc      to activate the standard default behaviour or default behaviour for test case specific IMS handling
+   * @param     p_Handling
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_ActivateDefault(IMS_PTC_Handling_Type p_Handling) runs on IMS_PTC
+  {
+    deactivate(vc_IMS_Global.Ctrl.Default);
+    
+    select (p_Handling) {
+      case (testcaseSpecificHandling) {
+        vc_IMS_Global.Ctrl.Default := activate(a_IMS_PTC_DefaultBehaviour_TestcaseSpecificImsHandling());
+      }
+      case (defaultHandling) {
+        vc_IMS_Global.Ctrl.Default := activate(a_IMS_PTC_DefaultBehaviour_DefaultImsHandling());
+      }
+      case else {
+        FatalError (__FILE__, __LINE__, "unknown default behaviour");
+      }
+    }
+  }
+
+  /*
+   * @desc      Initialise list of SPI values according to given comma-separated list
+   * @param     p_CommaSeparatedValues
+   * @return    IntegerList_Type
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_IMS_PTC_SPI_ValidValueList_Init(charstring p_CommaSeparatedValues) return IntegerList_Type
+  {
+    var Char1List_Type v_Separator := {","};
+    var CharStringList_Type v_CharStringList := f_StringSplit(p_CommaSeparatedValues, v_Separator);
+    var IntegerList_Type v_ValueList := {};
+    var integer i;
+
+    for (i := 0; i < lengthof(v_CharStringList); i := i + 1) {
+      v_ValueList[i] := str2int(v_CharStringList[i]);
+    }
+    return v_ValueList;
+  }
+
+  /*
+   * @desc      initialisiation of IMS PTC
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @param     p_Handling          (default value: testcaseSpecificHandling)
+   * @param     p_SecurityScheme    (default value: omit)
+   * @param     p_RanType           (default value: omit)
+   * @param     p_TestSpec          (default value: TS_34229)
+   * @param     p_TestsuiteParameterList  (default value: {})
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Init(PDN_Index_Type p_PdnIndex := PDN_1,
+                          IMS_PTC_Handling_Type p_Handling := testcaseSpecificHandling,
+                          template (omit) IMS_SecurityScheme_Type p_SecurityScheme := omit,
+                          template (omit) IPCAN_RAN_Type p_RanType := omit,
+                          IMS_TestSpec_Type p_TestSpec := TS_34229,
+                          NameValueList_Type p_TestsuiteParameterList := {})  runs on IMS_PTC
+  { /* @sic R5s130651: new parameter p_PdnIndex sic@ */
+    /* @sic R5s130756 additional changes: new parameter p_SecurityScheme sic@ */
+    /* @sic R5s130756: new parameter p_Pcscf sic@ */
+    /* @sic R5-144747: removal of px_IMS_Pcscf and px_IMS_Pcscf_Emg => p_Pcscf removed sic@ */
+    /* @sic R5s190727 change 4.2: p_DigestPasswordForSIP, p_TestSpec; p_UE_Release removed sic@ */
+    /* @sic R5-196983: p_TestSpec - support of MCX sic@ */
+    /* @sic R5-196983: p_TestsuiteParameterList - support of MCX: to avoid the need of importing MCX specific PICS/PIXITs sic@ */
+    /* @sic R5s201657: Removal of FBBA sic@ */
+    var charstring v_HomeDomainName;
+    var charstring v_PrivateUserId;
+    var CharStringList_Type v_IMPUList;
+    var IMS_SecurityScheme_Type v_SecurityScheme;
+    var boolean v_IsMCX;
+    var IntegerList_Type v_SPI_ValidValueList_PDN1 := fl_IMS_PTC_SPI_ValidValueList_Init(px_IMS_SPI_ValidValueList_PDN1);  /* @sic R5-172048 sic@ */
+    var IntegerList_Type v_SPI_ValidValueList_PDN2 := fl_IMS_PTC_SPI_ValidValueList_Init(px_IMS_SPI_ValidValueList_PDN2);  /* @sic R5-172048 sic@ */
+    var template (omit) integer v_UE_Release := omit;
+    var boolean v_UEwithISIM := px_UEwithISIM;
+    
+    f_IMS_PTC_TestsuiteInfo_Init(p_TestSpec, p_TestsuiteParameterList);
+    v_IsMCX := f_IMS_PTC_TestsuiteInfo_IsMCX();
+
+    if (v_IsMCX) {   /* @sic R5-196983 sic@ */
+      v_UEwithISIM := not match(f_IMS_PTC_TestsuiteInfo_GetParameter("MCX_SIP_RegistrationWithTemporaryIdentities"), "true");
+      if (v_UEwithISIM) {
+        v_HomeDomainName := f_IMS_PTC_TestsuiteInfo_GetParameter("MCX_SIP_HomeDomain_A");
+        v_PrivateUserId  := f_IMS_PTC_TestsuiteInfo_GetParameter("MCX_SIP_PrivateUserId_A");
+      } else {
+        v_HomeDomainName := f_DomainName_IMS_DerivedFromIMSI(px_IMSI_Def);
+        v_PrivateUserId := f_IMS_PrivateUserIdentityDerivedFromIMSI(px_IMSI_Def);
+      }
+    }
+    else if (px_UEwithISIM) {  /* @sic R5-133628: check of temporary user id sic@ */
+      v_HomeDomainName := px_IMS_HomeDomainName;
+      v_PrivateUserId := px_IMS_Private_UserId;
+    }
+    else {
+      v_HomeDomainName := f_DomainName_IMS_DerivedFromIMSI(px_IMSI_Def);
+      v_PrivateUserId := f_IMS_PrivateUserIdentityDerivedFromIMSI(px_IMSI_Def);
+    }
+    if (ispresent(p_SecurityScheme)) {
+      v_SecurityScheme := valueof(p_SecurityScheme);
+    } else if (pc_IMS_GIBA_Sec and not pc_IMS_Sec) {
+      v_SecurityScheme := GIBA;
+    } else if (pc_IMS_Sec) {
+      v_SecurityScheme := IMS_Security;
+    } else {
+      FatalError(__FILE__, __LINE__, "Invalid security setting (neither pc_IMS_GIBA_Sec nor pc_IMS_Sec is set)");
+    }
+
+    if (v_IsMCX) {   /* @sic R5-196983 sic@ */
+      v_IMPUList := { f_IMS_PTC_TestsuiteInfo_GetParameter("MCX_SIP_PublicUserId_A_1") };
+    } else {
+      v_IMPUList := {px_IMS_PublicUserIdentity1, px_IMS_PublicUserIdentity2, px_IMS_PublicUserIdentity3};
+    }
+
+    vc_IMS_Global.PdnIndex := p_PdnIndex;
+    vc_IMS_Global.Ctrl.TestBody := false;
+    vc_IMS_Global.Ctrl.BlockUlDataInDefault := false;       /* @sic R5s140780 - MCC160 Implementation sic@ */
+    vc_IMS_Global.Ctrl.IgnoreReset := true;                 /* @sic R5s150031: IMS is already reset after initialisation sic@ */
+    vc_IMS_Global.Ctrl.Default := null;
+    vc_IMS_Global.Security := valueof(cs_IMS_SecurityInfo_Init);
+    vc_IMS_Global.ImsInfo  := valueof(cs_IMS_ImsInfo_Init(p_RanType, v_IMPUList, v_UE_Release, v_HomeDomainName, v_PrivateUserId, v_SecurityScheme, v_SPI_ValidValueList_PDN1, v_SPI_ValidValueList_PDN2, v_UEwithISIM));
+
+    f_IMS_PTC_ActivateDefault(p_Handling);
+  }
+
+  /*
+   * @desc      create IMS component
+   * @param     p_PtcName           (default value: "IMS1")
+   * @return    IMS_PTC
+   * @status    APPROVED (ENDC, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_IMS_PTC_Create(charstring p_PtcName := "IMS1") return IMS_PTC
+  {
+    var IMS_PTC v_IMS_PTC := IMS_PTC.create(p_PtcName) alive;    // @sic R5s210270 sic@
+    return v_IMS_PTC;
+  }
+
+}

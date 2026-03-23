@@ -1,0 +1,1462 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-03-04 15:55:41 +0100 (Wed, 04 Mar 2026) $
+// $Rev: 43201 $
+/******************************************************************************/
+
+module IMS_Procedures_CallControl4G5G {
+
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_ASP_Templates all;
+  import from IMS_ASP_TypeDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_CommonFunctions all;
+  import from IMS_CommonParameters all;
+  import from IMS_CommonTemplates all;
+  import from IMS_Component all;
+  import from IMS_MessageBody_Templates all;
+  import from IMS_Procedures_CallControlCommon all;
+  import from IMS_Procedures_Common all;
+  import from IMS_SDP_Messages all;
+  import from IMS_SIP_Templates all;
+  import from IMS_XML_PIDF_Templates all;
+  import from IP_ASP_TypeDefs all;
+  import from LibSip_Common all;
+  import from LibSip_MessageBodyTypes all;
+  import from LibSip_SDPTypes all;
+  import from LibSip_SIPTypesAndValues all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  type enumerated INVITE_A_2_1_Context_Type { /* NOTE: some of the conditions for A.2.1 describe the context in which the INVITE is used (=> these conditions are mutual exclusive)
+                                               *       whereas other conditions are "add-on"
+                                               * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT) */
+    A_2_1_A4,   /* INVITE creating a dialog */
+    A_2_1_A5,   /* re-INVITE within a dialog */
+    A_2_1_A6,   /* INVITE for creating an emergency session in case of no registration */
+    A_2_1_A7,    /* INVITE for creating an emergency session within an emergency registration */
+    A_2_1_A19   /* INVITE for creating an emergency session within an emergency registration using GIBA */
+  };
+
+  type record IMS_PrackOrUpdateWithSdp_Type { /* @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT) */
+    IMS_RoutingInfo_Type        RoutingInfo,
+    MessageHeader               MessageHeader,
+    SDP_Message                 SdpOffer  optional
+  };
+
+  template (value) IMS_PrackOrUpdateWithSdp_Type cs_IMS_PrackOrUpdateWithSdp(IMS_DATA_REQ p_IMS_DATA_REQ,
+                                                                             template (omit) SDP_Message p_SdpOffer) :=
+  { /* @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT) */
+    RoutingInfo := p_IMS_DATA_REQ.RoutingInfo,
+    MessageHeader := p_IMS_DATA_REQ.Request.Prack.msgHeader,
+    SdpOffer := p_SdpOffer
+  }
+
+  /*
+   * @desc      returns list of option-tags to be included in the Supported header of an INVITE
+   * @param     p_PreconditionSupported (default value: true)
+   * @return    OptionTag_List
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_Invite_OptionTagsSupported(boolean p_PreconditionSupported := true) return OptionTag_List
+  { /* @sic R5-214531: f_IMS_AdditionalOptionTagsForSupported changed to f_IMS_Invite_OptionTagsSupported sic@ */
+    var OptionTag_List v_AdditionalOptionTagsForSupported := tsc_OptionTagList_100rel;    /* @sic R5-214531 sic@ */
+    if (p_PreconditionSupported) {
+      v_AdditionalOptionTagsForSupported := v_AdditionalOptionTagsForSupported & tsc_OptionTagList_precondition;
+    }
+    return v_AdditionalOptionTagsForSupported;
+  }
+
+  /*
+   * @desc      Check that forbidden option tag is not contained in option tag list
+   * @param     p_OptionTags
+   * @param     p_ForbiddenOptionTag
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_CheckForbiddenOptionTags(OptionTag_List p_OptionTags,
+                                          template (present) OptionTag p_ForbiddenOptionTag) runs on IMS_PTC
+  {
+    if (match(p_OptionTags, superset(p_ForbiddenOptionTag))) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "unexpected option tag");
+    }
+  }
+
+  /*
+   * @desc      Check that if p_PreconditionsForbidden then there is no option tag "precodition" in Supported header field and that there are precondition attributes in the SDP message
+   * @param     p_PreconditionsForbidden
+   * @param     p_MessageHeader
+   * @param     p_SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_R12, NR5GC)
+   */
+  function f_IMS_CheckNoPreconditions(boolean p_PreconditionsForbidden,
+                                      MessageHeader p_MessageHeader,
+                                      SDP_Message p_SDP_Message) runs on IMS_PTC
+  {
+    if (p_PreconditionsForbidden) {
+      f_IMS_SDP_CheckNoPreconditionAttributes(p_SDP_Message);
+      if (isvalue(p_MessageHeader.supported.optionsTags)) {     // @sic R5s220787 sic@
+        f_IMS_CheckForbiddenOptionTags(p_MessageHeader.supported.optionsTags, c_tagPrecond);
+      }
+    }
+  }
+
+  /*
+   * @desc      check whether the precondition option tag is contained in the Require or Supported header
+   * @param     p_MessageHeader
+   * @param     p_PreconditionIndication
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MessageHeader_CheckPreconditionIndicationForOffer(MessageHeader p_MessageHeader,
+                                                                   IMS_PreconditionIndication_Type p_PreconditionIndication) runs on IMS_PTC
+  {
+    select (p_PreconditionIndication) {
+      case (PreconditionRequired) {
+        if (not f_MessageHeader_CheckRequire(p_MessageHeader, c_tagPrecond)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no indication of 'precondition' in Require header");
+        }
+      }
+      case (PreconditionSupported) {
+        if (not f_MessageHeader_CheckSupported(p_MessageHeader, c_tagPrecond)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "no indication of 'precondition' in Supported header");
+        }
+      }
+    }
+  }
+
+  /*
+   * @desc      180 Ringing for INVITE (see TS 34.229, A.2.6)
+   * @param     p_InviteRequest
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_AditionalContactParams (default value: omit)
+   * @param     p_OptionTagsForRequired  (default value: tsc_OptionTagList_Empty)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_SrvccAlertingSupported   (default value: pc_IMS_SRVCCAlert)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_InviteResponse_180_MessageHeaderTX(INVITE_Request p_InviteRequest,
+                                                    charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                    template (omit) SemicolonParam_List p_AditionalContactParams := omit,
+                                                    OptionTag_List p_OptionTagsForRequired := tsc_OptionTagList_Empty,
+                                                    IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                    template (omit) ContentType p_ContentType := omit,
+                                                    boolean p_SrvccAlertingSupported := pc_IMS_SRVCCAlert) runs on IMS_PTC return template (value) MessageHeader
+  { // p_PrackRequested  ..  condition A3; needs to be true when the 180 response shall be acknowleged with a PRACK i.e. is "sent reliably" acc. to A.2.6 A3
+    // p_SrvccAlertingSupported  .. if voice call => condition A6; needs to be set to false for non-voice calls
+    /* @sic R5s130333 change 2: new parameter p_PrackRequested sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s140370 change 6: new parameter p_SrvccAlertingSupported sic@ */
+    /* @sic R5s150692 change 11: parameter p_CallType sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s170904, R5-177068: p_ContentType sic@ */
+    /* @sic R5s180179: p_OptionTagsForRequired instead of p_PrackRequested sic@ */
+    var MessageHeader v_MessageHeader_Invite := p_InviteRequest.msgHeader;
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(v_MessageHeader_Invite);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@ */
+    var template (value) RouteBody_List v_RouteBodyList := f_IMS_RouteSet_MO_Call_TX(p_CallType); /* @sic R5s150692 change 11 sic@ */
+    var template (value) SemicolonParam_List v_FeatureParams := {};
+    var template (value) SemicolonParam_List v_ContactParams := f_SemicolonParam_List_Add_TX(p_AditionalContactParams, cs_GenericParam("audio"));   /* @sic R5-165943, R5-170564, R5s170216 change 1 (R5-173021) sic@ */
+
+    v_MessageHeader_Response.contentType     := p_ContentType; // @sic R5s170904, R5-177068 sic@
+    v_MessageHeader_Response.recordRoute     := cs_RecordRoute(v_RouteBodyList);
+    v_MessageHeader_Response.contact         := cs_Contact(f_SIP_BuildSipUri_TX(p_ContactUri), v_ContactParams); /* @sic R5s130109, R5s170216 change 1 sic@ */
+
+    if (lengthof(p_OptionTagsForRequired) > 0) {                                             /* @sic R5s180179 sic@ */
+      v_MessageHeader_Response.require       := cs_Require(p_OptionTagsForRequired);
+      if (f_MessageHeader_CheckRequire(valueof(v_MessageHeader_Response), c_tag100rel)) {    /* -> reliable provisional responses acc. RFC 3262; condition A3 @sic R5s130333 change 2 sic@ */
+        v_MessageHeader_Response.rSeq        := cs_RSeq(tsc_IMS_RSeqNumFor183 + 1);
+      }
+    }
+
+    if (f_IMS_CallIsEmergency(p_CallType)) { // Condition A4 @sic R5s150692 change 11 sic@
+      v_MessageHeader_Response.pAssertedID := cs_PAssertedId(f_SIP_BuildSipUri_lr_TX(tsc_IMS_Emergency_TelUri));
+    }
+    if (p_SrvccAlertingSupported) {
+      v_FeatureParams := f_SemicolonParam_List_Add_TX(v_FeatureParams, cs_GenericParam(tsc_IMS_FeatureCap_SrvccAlerting)); // @sic R5-145796 sic@
+    }
+    v_MessageHeader_Response.featureCaps   := cs_FeatureCaps(v_FeatureParams);  /* @sic R5s170216 change 1: "audio" removed from FeatureCaps sic@ */
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      183 Session Progress for INVITE (see TS 34.229, A.2.3)
+   * @param     p_InviteRequest
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_AditionalContactParams (default value: omit)
+   * @param     p_OptionTagsForRequire (default value: tsc_OptionTagList_100rel_precondition)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_A6                (default value: pc_IMS_Video_FeatureTag)
+   * @param     p_ContentType       (default value: cs_ContentTypeSDP)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_InviteResponse_183_MessageHeaderTX(INVITE_Request p_InviteRequest,
+                                                    charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                    template (omit) SemicolonParam_List p_AditionalContactParams := omit,
+                                                    OptionTag_List p_OptionTagsForRequire := tsc_OptionTagList_100rel_precondition,
+                                                    IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                    boolean p_A6 := pc_IMS_Video_FeatureTag,
+                                                    template (omit) ContentType p_ContentType := cs_ContentTypeSDP) runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s150180: tsc_IMS_VideoFeature replaced by pc_IMS_Video_FeatureTag sic@ */
+    /* @sic R5s150692 change 7: parameter p_CallType sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s190882: p_OptionTagsForRequire := tsc_OptionTagList_100rel_precondition instead of p_AdditionalOptionTagsForRequire := tsc_OptionTagList_Empty; p_Earlymedia removed; p_ContentType added  sic@ */
+
+    var MessageHeader v_MessageHeader_Invite := p_InviteRequest.msgHeader;
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(v_MessageHeader_Invite);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@ */
+    var template (omit) SemicolonParam_List v_ContactParams := p_AditionalContactParams;
+    var template (value) RouteBody_List v_RouteBodyList;
+    var boolean v_A15 := f_IMS_SipRequest_MessageHeaderIsReINVITE(p_InviteRequest.msgHeader);   /* 183 sent for re-INVITE within an established dialog @sic R5s220766/R5s220772 sic@ */
+
+    if (not v_A15) {                                                    /* @sic R5-223453: condition A15 sic@ */
+      v_RouteBodyList := f_IMS_RouteSet_MO_Call_TX(p_CallType);         /* @sic R5s150692 change 17 sic@ */
+      v_MessageHeader_Response.recordRoute   := cs_RecordRoute(v_RouteBodyList);
+    } // else: RecordRoute remains omit in response for re-INVITE
+
+    v_MessageHeader_Response.contentType     := p_ContentType;
+
+    if (lengthof(p_OptionTagsForRequire) > 0) {                                              /* @sic R5s190882 sic@ */
+      v_MessageHeader_Response.require       := cs_Require(p_OptionTagsForRequire);          // @sic R5s130333 change 3 sic@  @sic R5s190882 sic@
+      if (f_MessageHeader_CheckRequire(valueof(v_MessageHeader_Response), c_tag100rel)) {    /* -> reliable provisional responses acc. RFC 3262; condition A3 @sic R5s190882 sic@ */
+        v_MessageHeader_Response.rSeq        := cs_RSeq(tsc_IMS_RSeqNumFor183);
+      }
+    }
+
+    if (f_IMS_CallIsEmergency(p_CallType)) {   // Condition A5 @sic R5s150692 change 7 sic@ @sic R5s250088: use of f_IMS_CallIsEmergency sic@
+      v_MessageHeader_Response.pAssertedID   := cs_PAssertedId(f_SIP_BuildSipUri_lr_TX(tsc_IMS_Emergency_TelUri));
+    }
+    if (pc_BSRVCC) {  // @sic R5s140962 sic@
+      v_MessageHeader_Response.featureCaps   := cs_FeatureCaps({ cs_GenericParam(tsc_IMS_FeatureCap_SrvccPreAlerting)});  // @sic R5-145796 sic@
+    }
+    if (p_A6) { // @sic R5s130109 sic@
+      v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("video"));
+    }
+    v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("audio"));                           // @sic R5-165943 sic@
+    if (pc_MTSI_rtt) {                                                                                                    // @sic R5-255082: condition A17 sic@
+      v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("text"));
+    }
+    v_MessageHeader_Response.contact         := cs_Contact(f_SIP_BuildSipUri_TX(p_ContactUri), v_ContactParams);
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      200 OK for other requests than REGISTER or SUBSCRIBE (see TS 34.229, A.3.1)
+   * @param     p_MessageHeader_Request
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_PreconditionsRequired   (default value: false)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_ContactParams     (default value: omit)
+   * @return    template (value) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_OtherResponse_200_MessageHeaderTX(MessageHeader p_MessageHeader_Request,
+                                                   template (omit) ContentType p_ContentType := omit,
+                                                   charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                   boolean p_PreconditionsRequired := false,
+                                                   IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                   template (omit) SemicolonParam_List p_ContactParams := omit)
+    runs on IMS_PTC return template (value) MessageHeader
+  { /* @sic R5-130683: common handling for INVITE and UPDATE sic@ */
+    /* p_EmergencyTelURI .. shall be set e.g. to tsc_IMS_Emergency_TelUri for condition A6 in A.3.1 */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s150237: parameter p_AdditionalOptionTagsForRequire sic@ */
+    /* @sic R5s150692 change 17: parameter p_CallType  sic@ */
+    /* @sic R5s150851: no consistency check for p_CallType and p_EmergencyTelURI sic@ */
+    /* @sic R5-160794: p_AdditionalOptionTagsForRequire replaced by p_PreconditionIndication sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s210615: p_PreconditionsRequired (boolean) instead of p_PreconditionIndication (IMS_PreconditionIndication_Type) sic@ */
+    /* @sic R5s250088: p_EmergencyTelURI removed sic@ */
+    /* @sic R5-254984 (new IMS datachannel test cases): p_ContactParams sic@ */
+    var template (value) MessageHeader v_MessageHeader_Response := f_IMS_BaseResponse_MessageHeaderTX(p_MessageHeader_Request);  /* @sic R5s190882: f_IMS_BaseResponse_MessageHeaderTX sic@ */
+    var charstring v_Method := p_MessageHeader_Request.cSeq.method;
+    var boolean v_A1A3 := false;
+    var boolean v_A18 := pc_IMS_Video_FeatureTag;
+    var boolean v_A19 := false;
+    var boolean v_A23 := false;
+    var template (value) RouteBody_List v_RouteBodyList;
+    var template (omit) Require v_Require := omit;
+    var template (omit) SemicolonParam_List v_ContactParams := p_ContactParams;
+
+    if (p_PreconditionsRequired and ispresent(p_ContentType)) {    /* @sic R5-160794 sic@ NOTE: responses use Require header even for session modifications */
+      v_Require := cs_Require(tsc_OptionTagList_precondition);
+    }
+    
+    select (v_Method) {
+      case ("INVITE") {
+        v_A1A3 := true;
+        v_A19 := true;
+        v_A23 := f_IMS_SipRequest_MessageHeaderIsReINVITE(p_MessageHeader_Request);                 /* Response sent for re-INVITE within an established dialog @sic R5s220766/R5s220772 sic@ */
+      }
+      case ("UPDATE") {
+        v_A1A3 := true;
+      }
+    }
+    v_MessageHeader_Response.require         := v_Require;                                          /* @sic R5-160794 sic@ */
+    v_MessageHeader_Response.contentType     := p_ContentType;
+
+    if (v_A1A3) {
+      if (not v_A23) {                                                                              /* @sic R5-223454: condition A23 sic@ */
+        v_RouteBodyList := f_IMS_RouteSet_MO_Call_TX(p_CallType);                                   /* @sic R5s150692 change 17 sic@ */
+        v_MessageHeader_Response.recordRoute := cs_RecordRoute(v_RouteBodyList);
+      } // else: RecordRoute remains omit in response for re-INVITE
+
+      v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("audio"));                     /* @sic R5-165943 sic@ */
+      if (v_A18 and v_A19) {
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("video"));                   /* @sic R5-191117 sic@ */
+      }
+      if (pc_MTSI_rtt and v_A19) {                                                                                    /* @sic R5-255082: condition A25 sic@ */
+        v_ContactParams := f_SemicolonParam_List_Add_TX(v_ContactParams, cs_GenericParam("text"));
+      }
+      v_MessageHeader_Response.contact       := cs_Contact(f_SIP_BuildSipUri_TX(p_ContactUri), v_ContactParams);
+    }
+    if (f_IMS_CallIsEmergency(p_CallType)) {    /* @sic R5-252220, R5-253196: P-Asserted_id independent from v_A1A3 i.e. also for 200 OK for PRACK in case of non-UE detectable emergency call sic@ */
+      v_MessageHeader_Response.pAssertedID   := cs_PAssertedId(f_SIP_BuildSipUri_lr_TX(tsc_IMS_Emergency_TelUri));    /* @sic R5s250088, R5-250344: P-Asserted-Identity in 200 OK for INVITE/UPDATE of any emergency call establishment sic@ */
+    }
+
+    return v_MessageHeader_Response;
+  }
+
+  /*
+   * @desc      INVITE acc. to condition A4 - INVITE creating a dialog  (see TS 34.229, A.2.1)
+   * @param     p_ExpectedCalleeUri
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_100rel)
+   * @param     p_Context           (default value: A_2_1_A4)
+   * @param     p_A3                (default value: pc_MultimediaTelephonyService)
+   * @param     p_A8                (default value: false)
+   * @param     p_A11               (default value: false)
+   * @param     p_SessionTimerSupported  (default value: pc_IMS_Session_Timer)
+   * @return    template (present) MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_InviteRequest_MessageHeaderRX(template (present) SipUrl p_ExpectedCalleeUri,
+                                               OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_100rel,
+                                               INVITE_A_2_1_Context_Type p_Context := A_2_1_A4,
+                                               boolean p_A3 := pc_MultimediaTelephonyService,    /* @sic R5s130510 additional change 1: tsc_IMS_MTSI replaced by pc_MultimediaTelephonyService sic@ */
+                                               boolean p_A8 := false,
+                                               boolean p_A11 := false,
+                                               boolean p_SessionTimerSupported := pc_IMS_Session_Timer)
+    runs on IMS_PTC return template (present) MessageHeader
+  { /* p_A3:          MTSI
+       p_A8:          UE uses Geolocation header to provide its geographical location for emergency session setup, has obtained its location and is setting up an emergency session
+       p_A9:          UE supports Session-ID   @sic R5s150086: pc_IMS_SessionIdSupported per default sic@
+       p_A11:         INVITE for creating a video stream
+       NOTE1: If SigComp shall be applied the param "comp=sigcomp" is optional for Via, Route and Contact
+       NOTE2: condition A5 (re-INVITE within a dialog) is not considered yet and will have impact e.g. on checking of the From/To headers */
+    /* @sic R5-133629: 100rel option tag shall always be included in INVITE; further option tags may be added => p_Supported replaced by p_AdditionalOptionTagsForSupported; Cleanup of functions for MO Call Setup sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s140017 MCC160 implementation: checks for A_2_1_A5 sic@ */
+    /* @sic R5-140799: additional parameter p_MessageHeader to deal with Reason header sic@ */
+    /* @sic R5s150846: p_A8 := false per default sic@ */
+    /* @sic R5-160505: p_A17 := false per default sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s170xxx: p_A17 replaced by v_A17 sic@ */
+    /* @sic R5s190882: p_MessageHeader removed sic@ */
+    /* @sic R5-214531: p_AdditionalOptionTagsForSupported := tsc_OptionTagList_Empty -> p_OptionTagsForSupported := tsc_OptionTagList_100rel sic@ */
+    /* @sic R5-223475, R5-192321: p_SessionTimerSupported sic@ */
+
+    var boolean v_IsGiba := f_IMS_PTC_SecurityScheme_IsGiba();  // => A1/A2
+    var template (present) MessageHeader v_MessageHeader_Invite := cr_MessageHeader_Dummy;
+    var template (present) RouteBody_List v_RouteBodyList;
+    var IMS_ProtectedPorts_Type v_Protected;
+    var template integer v_Port_us_Contact := *;
+    var template integer v_Port_ps_Route := *;
+    var template DisplayName v_DisplayName := *;
+    var template (present) SipUrl v_SipUrlFrom := ?;    /* per default any SIP URI is accepted in the From header in the first place;
+                                                           further checks may be applied in f_IMS_A_2_1_Invite_CommonChecks (depending on the conditions acc. to A.2.1 */
+    var template (present) charstring v_Pcscf;
+    var charstring v_MediaType := c_sdpApplication;
+    var template (present) CallId v_CallId;
+    var template (present) integer v_CSeqValue := ?;
+    var template (present) From v_From;
+    var template (present) To v_To;
+    var template AcceptBody_List v_AcceptBodyList := {};
+    var OptionTag_List v_OptionTag_List := p_OptionTagsForSupported;
+    var boolean v_GRUUsInSIP := pc_IMS_GRUUsInSIP;
+    var boolean v_A4 := (p_Context == A_2_1_A4);    // INVITE creating a dialog    @sic R5-166280 sic@
+    var boolean v_A5 := (p_Context == A_2_1_A5);    // re-INVITE within a dialog   @sic R5-166280 sic@
+    var boolean v_A6 := (p_Context == A_2_1_A6);    // emergency session in case of no registration          @sic R5-166280 sic@
+    var boolean v_A19 := (p_Context == A_2_1_A19);  // emergency session in case of no registration (GIBA)   @sic R5-174545 sic@
+    
+    if (pc_IMS_CS_PS_SRVCCMidCall or pc_IMS_CS_PS_SRVCCAlert) { // @sic R5-145746 sic@
+      v_OptionTag_List := v_OptionTag_List & tsc_OptionTagList_norefersub;
+    }
+    if (v_A4 and p_SessionTimerSupported) {         /* @sic R5-192321: A26 (UE supports Session Timer) and session timer is needed (R5-223475) sic@
+                                                       NOTE: A4, A6, A7 and A19 are mutual exclusive; use of A20, A21 (eCall) is unclear */
+      v_OptionTag_List := v_OptionTag_List & tsc_OptionTagList_timer;  /* @sic R5-173024: support of session timer acc. RFC 4028  sic@
+                                                                          @sic R5-180230: end of grace period sic@ */
+    }
+    
+    if (v_A6 or v_A19) {  // INVITE for creating an emergency session in case of no registration
+      // Route, Contact: ports to be used
+      v_Port_us_Contact := ?;
+      v_Port_ps_Route := tsc_IMS_PortNumber_5060;
+      if (not v_A19) {                                    /* @sic R5-191118 sic@ */
+        // From: Display
+        v_DisplayName := cr_DisplayName("Anonymous");     /* @sic R5s140005, R5-140901, R5w140111 sic@ */
+      }
+      v_GRUUsInSIP := false;     /* @sic R5s160366: no GRUU in case of no registration sic@ */
+    }
+    else {
+      // Route, Contact: ports to be used
+      if (not v_IsGiba or (p_Context == A_2_1_A7)) {
+        v_Protected := f_IMS_PTC_Security_GetProtectedPorts();
+        v_Port_us_Contact := v_Protected.Port_us;
+        v_Port_ps_Route := v_Protected.Port_ps;
+      } else {  /* @sic R5s160366: GIBA sic@ */
+        v_Port_us_Contact := ?;
+        v_Port_ps_Route := tsc_IMS_PortNumber_5060 ifpresent;
+      }
+    }
+
+    if (v_A5)  {                  /* re-invite @sic R5s140017 MCC160 implementation sic@ */
+      v_RouteBodyList := f_IMS_Request_RouteSet_RouteBodyList_RX();
+      v_CallId := f_IMS_PTC_ImsInfo_DialogGetCallId();
+      v_From := f_IMS_RequestInDialog_FromHeaderRX();
+      v_To := f_IMS_RequestInDialog_ToHeaderRX();
+      v_CSeqValue := f_IMS_RequestInDialog_CSeqValueRX();     /* @sic R5s140235, R5s140385 change 3 MCC160 implementation sic@ */
+    }
+    else {                                       /* normal case: no re-invite */
+      // route body acc. to conditions in A.2.1
+      v_Pcscf := ?;                              /* @sic R5s140934 change 6: P-CSCF address is checked later on (f_IMS_A_2_1_Invite_CommonChecks -> f_IMS_MessageHeader_Request_CheckRoute) sic@ */
+      v_RouteBodyList[0] := cr_RouteBody(*, cr_SipUri_HostPort_lr(v_Pcscf, v_Port_ps_Route));  /* @sic R5s140873: v_Pcscf;  R5s140934 change 6 sic@
+                                                                                                  @sic R5-155174: "loose routing" parameter mandatory for any kind of call (i.e. emergency call too, in contrast to R5s150817) sic@ */
+      if (not match(p_Context, (A_2_1_A6, A_2_1_A7, A_2_1_A19))) {  // => no emergency call
+        v_RouteBodyList[1] := cr_RouteBody(*, cr_SipUri_HostPort_lr(tsc_IMS_Scscf));
+      }
+      v_CallId := cr_CallId(?);
+      v_From := cr_From(v_DisplayName, v_SipUrlFrom);
+      v_To := cr_ToDef(p_ExpectedCalleeUri);
+    }
+    
+    if (p_A8) {
+      v_MessageHeader_Invite.geolocation := cr_GeolocationAny;
+      v_MessageHeader_Invite.geolocationRouting := cr_GeolocationRoutingSupported; // @sic R5-134798 sic@
+      v_MediaType := tsc_MimeType_MultipartMixed;
+    } else { // @sic R5s220485, R5-223306 sic@
+      v_MessageHeader_Invite.geolocation := omit;
+      v_MessageHeader_Invite.geolocationRouting := omit;
+    }
+    
+    v_MessageHeader_Invite.via             := f_IMS_SipRequest_ViaRX();                               /* additional checks in f_IMS_A_2_1_Invite_CommonChecks: check of FQDN or IP address
+                                                                                                         @sic R5-133358: rport is optional for tcp sic@ */
+    v_MessageHeader_Invite.route           := cr_Route(v_RouteBodyList);
+    v_MessageHeader_Invite.fromField       := v_From;                                                 /* additional checks in f_IMS_A_2_1_Invite_CommonChecks: check of FQDN or IP address, check against P-Preferred-Identity header */
+    v_MessageHeader_Invite.toField         := v_To;                                                   /* additional checks in f_IMS_A_2_1_Invite_CommonChecks: check of tag */
+    v_MessageHeader_Invite.callId          := v_CallId;                                               /* additional checks in f_IMS_A_2_1_Invite_CommonChecks: value acc. to A4 or A5 */
+    v_MessageHeader_Invite.cSeq            := cr_CseqDef(v_CSeqValue, "INVITE");                      /* additional checks in f_IMS_A_2_1_Invite_CommonChecks: A5 */
+    v_MessageHeader_Invite.supported       := cr_Supported(v_OptionTag_List);
+    v_MessageHeader_Invite.contact         := cr_Contact(f_Contact_SipUri_HostPortRX(?, v_Port_us_Contact, v_GRUUsInSIP));  /* additional checks in f_IMS_A_2_1_Invite_CommonChecks:
+                                                                                                                               check of FQDN or IP address, check of feature-param for A3, A6, A10, A12
+                                                                                                                               @sic R5s150721, R5-153760: cr_SipUri_HostPort replaced by f_Contact_SipUri_HostPortRX sic@
+                                                                                                                               @sic R5s160366: v_GRUUsInSIP sic@ */
+    v_MessageHeader_Invite.contentType     := cr_ContentType(v_MediaType);
+    v_MessageHeader_Invite.maxForwards     := cr_MaxForwardsDef;
+    
+    // additional headers for specific conditions:
+    if (v_IsGiba or v_A6 or v_A19) {
+      v_MessageHeader_Invite.securityVerify  := omit;
+      if (v_A6 or v_A19) {
+        v_MessageHeader_Invite.require       := omit;
+        v_MessageHeader_Invite.proxyRequire  := omit;
+      }
+    } else {   // -> A1 or A7
+      v_MessageHeader_Invite.securityVerify  := f_IMS_PTC_BuildSecurityVerifyHeader();
+      if (not v_A5) {  /* @sic R5s140017 change 9.3 sic@ */
+        v_MessageHeader_Invite.require       := cr_RequireSecAgree;
+        v_MessageHeader_Invite.proxyRequire  := cr_ProxyRequireSecAgree;
+      }
+    }
+
+    if (not v_IsGiba) {
+      v_MessageHeader_Invite.pAccessNetworkInfo := cr_PAccessNetworkInfo(f_IMS_PTC_GetRanType());
+    }
+
+    if (v_A4) {  /* @sic R5s140017 change 9.3 sic@ */
+      v_AcceptBodyList := {cr_AcceptBody(c_sdpApplication), cr_AcceptBody(c_ims3gppApplication)};
+    }
+    if (pc_IMS_CS_PS_SRVCCMidCall) { // @sic R5-145746 sic@
+      v_AcceptBodyList[lengthof(v_AcceptBodyList)] := cr_AcceptBody("application/vnd.3gpp.mid-call+xml"); // add another element in the array
+    }
+    if (pc_IMS_CS_PS_SRVCCAlert) { // @sic R5-145746 sic@
+      v_AcceptBodyList[lengthof(v_AcceptBodyList)] := cr_AcceptBody("application/vnd.3gpp.state-and-event-info+xml"); // add another element in the array
+      v_MessageHeader_Invite.recvInfo := cr_RecvInfo_Def(tsc_IMS_InfoPackageType_3gpp);  // @sic R5-145746, R5s150704,  sic@
+    }
+    if (lengthof(v_AcceptBodyList) > 0) {
+      if (v_A5) { // @sic R5s150971 header optional if A5 sic@
+        v_MessageHeader_Invite.accept := cr_Accept(superset(all from v_AcceptBodyList)) ifpresent;
+      } else {
+        v_MessageHeader_Invite.accept := cr_Accept(superset(all from v_AcceptBodyList));
+      }
+    }
+    
+    if (p_Context == A_2_1_A7) {
+      v_MessageHeader_Invite.pPreferredID := cr_PPreferredID(?);    // Checked in f_IMS_A_2_1_Invite_CommonChecks
+    }
+    if (p_A3 and v_A4) {                          /* @sic R5s140263 change 5, modified by R5-142949 (-> A4 only) sic@ */
+      v_MessageHeader_Invite.pPreferredService := cr_PPreferredService(tsc_IMS_FeatureParamValue_3gpp_icsi_ref);   /* @sic R5s140565 change 2 sic@ */
+    }
+    if ((p_A3 and v_A4) or p_A11) {               /* @sic R5-142949 sic@ */
+      v_MessageHeader_Invite.acceptContact   := cr_AcceptContact;    // Checked in f_IMS_A_2_1_Invite_CommonChecks (depending on conditions)
+    }
+
+    if (pc_EarlyMedia and not v_A5) {                                             /* @sic R5-162934: condition A16 for A.2.1  sic@
+                                                                                     @sic R5-166280: "not A5" sic@ */
+      
+      v_MessageHeader_Invite.pEarlyMedia := cr_PEarlyMedia({"supported"});
+    }
+    return v_MessageHeader_Invite;
+  }
+
+  /*
+   * @desc      Additional checks of the INVITE acc. to A.2.1
+   * @param     p_IMS_INVITE_REQ
+   * @param     p_Context           (default value: A_2_1_A4)
+   * @param     p_A3                (default value: false)
+   * @param     p_A11               (default value: false)
+   * @param     p_OriginatingIdentificationRestriction (default value: false)
+   * @param     p_SrvccAlertingSupported (default value: pc_IMS_SRVCCAlert)
+   * @param     p_A18               (default value: pc_BSRVCC)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_A_2_1_Invite_CommonChecks(IMS_DATA_REQ p_IMS_INVITE_REQ,
+                                           INVITE_A_2_1_Context_Type p_Context := A_2_1_A4,
+                                           boolean p_A3 := false,
+                                           boolean p_A11 := false,
+                                           boolean p_OriginatingIdentificationRestriction := false,
+                                           boolean p_SrvccAlertingSupported := pc_IMS_SRVCCAlert,
+                                           boolean p_A18 := pc_BSRVCC) runs on IMS_PTC
+  { // p_A12  .. shall be pc_IMS_SRVCCAlert for voice call; needs to be set to false for non-voice calls
+    /* @sic R5-133276, R5-133301 Cleanup of functions for MO Call Setup sic@ */
+    /* @sic R5s140370 change 7: pc_IMS_SRVCCAlert default value for p_A12, p_A12 renamed to p_SrvccAlertingSupported sic@ */
+    /* @sic R5s150180: tsc_IMS_VideoFeature replaced by pc_IMS_Video_FeatureTag sic@ */
+    /* @sic R5-160975: p_OriginatingIdentificationRestriction sic@ */
+    /* @sic R5-160505: p_A17 := false per default sic@ */
+    /* @sic R5-171486: p_A18 := pc_BSRVCC sic@ */
+    /* @sic R5s201657: p_A17 removed sic@ */
+    /* @sic R5s220485: p_A8 removed sic@ */
+    /* @sic R5s250011: p_SrvccAlertingSupported and p_OriginatingIdentificationRestriction swapped sic@ */
+    var MessageHeader v_MessageHeader := p_IMS_INVITE_REQ.Request.Invite.msgHeader;
+    var SemicolonParam_List v_ContactParams := {};
+    var SemicolonParam_List v_AcceptContactParams := {};
+    var InternetProtocol_Type v_Protocol := p_IMS_INVITE_REQ.RoutingInfo.Protocol;
+    var SipUrl v_SipUrlFrom := f_Addr_Union_GetSipUrl(v_MessageHeader.fromField.addressField);
+    var SipUrl v_SipUrlPreferred;
+    var template SipUrl v_ExpectedEmergencyUrl := f_IMS_PTC_ImsInfo_GetSipUriRX(emergencyId);   /* @sic R5s220953 Further changes by MCC160: port number ('*') removed sic@ */
+    var PPreferredIDValue_List v_PreferredIDValueList;
+    var CharStringList_Type v_PreferredPublicUserIdList;
+    var boolean v_EmergencyCallWithoutRegistration := (p_Context == A_2_1_A6);
+    var boolean v_AllowFQDN := not v_EmergencyCallWithoutRegistration;  // for A6 there is no FQDN for the UE
+    var boolean v_CheckRport := v_EmergencyCallWithoutRegistration;
+    var boolean v_A10 := pc_IMS_Video_FeatureTag;
+    var boolean v_A12 := p_SrvccAlertingSupported and (p_Context != A_2_1_A5);  /* @sic R5s140370 change 7 sic@ */
+    var integer i;
+    var template (present) GenValue v_SipInstanceValue;
+    var template integer v_Port_us_Via := *;
+
+    if ((v_EmergencyCallWithoutRegistration and (v_Protocol==udp))) {  /* @sic R5-172412 sic@ */
+      v_Port_us_Via := tsc_IMS_PortNumber_5060;
+    }
+
+    if (ispresent(v_MessageHeader.contact.contactBody.contactAddresses[0].contactParams)) {
+      v_ContactParams := v_MessageHeader.contact.contactBody.contactAddresses[0].contactParams;
+    }
+    if (ispresent(v_MessageHeader.acceptContact.acValues[0].acRcParams)) {
+      v_AcceptContactParams := v_MessageHeader.acceptContact.acValues[0].acRcParams;
+    }
+
+    // ****  Common checks ****
+    f_IMS_MessageHeader_Request_CheckVia(v_MessageHeader, v_Protocol, v_AllowFQDN, v_CheckRport, v_Port_us_Via);   /* check whether via contains "SIP URI with IP address or FQDN" (see @sic R5s120727 sic@)
+                                                                                                                      @sic R5-172412: v_Port_us_Via sic@ */
+    f_IMS_MessageHeader_CheckContactAddr(v_MessageHeader, v_EmergencyCallWithoutRegistration);      /* check whether contact contains "SIP URI with IP address or FQDN" (see @sic R5s120727 sic@)
+                                                                                                       @sic R5s160366: v_EmergencyCallWithoutRegistration sic@ */
+    if (p_Context != A_2_1_A5) {
+      f_IMS_MessageHeader_CheckTo(v_MessageHeader, noToTag);                                        /* check that there is no To tag */
+      f_IMS_MessageHeader_Request_CheckRoute(v_MessageHeader);                                      /* @sic R5s140934 change 7 sic@ */
+    }
+
+    // ****  Check URIs in From header, P-Preferred-Identity header and further headers ****
+    select (p_Context) {
+      case (A_2_1_A4) {
+        // Check Call-Id
+        if (match(v_MessageHeader.callId.callid, f_IMS_PTC_ImsInfo_GetCallIdRegistration())) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A4: invalid 'CallId' in INVITE (has to be different than in previous REGISTER)");
+        }
+        // Additional checks regarding SIP URI in the From header @sic R5-130750 change 3 sic@
+        if (not p_OriginatingIdentificationRestriction) { /* @sic R5-160975, R5s160687: p_OriginatingIdentificationRestriction sic@ */
+          if (not f_IMS_PublicUserId_Match(f_IMS_PTC_ImsInfo_GetAllIMPUs(), v_SipUrlFrom)) {
+            f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "invalid 'From'");
+          }
+          if (ispresent(v_MessageHeader.pPreferredID.pPreferredIDValueList)) {
+            v_PreferredIDValueList := v_MessageHeader.pPreferredID.pPreferredIDValueList;
+            for (i:=0; i < lengthof(v_PreferredIDValueList); i := i+1) {
+              v_PreferredPublicUserIdList[i] := f_SIP_SipUrl_GetPublicUserIdentity(f_Addr_Union_GetSipUrl(v_PreferredIDValueList[i]));
+            }
+            if (not f_IMS_PublicUserId_Match(v_PreferredPublicUserIdList, v_SipUrlFrom)) {
+              f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A4: invalid 'From': does not match with P-Preferred-Identity");
+            }
+          }
+        }
+      }
+      case (A_2_1_A5) {
+        /* @sic R5s140017 MCC160 implementation: no further checks for A5 are needed in this function anymore sic@ */
+      }
+      case (A_2_1_A6) {
+        v_SipInstanceValue := cr_GenValueQuoted(f_SIP_InstanceIdWithAngleBrackets()); /* @sic R5s130756 change 11; R5w140111: GenValue; R5s141212  sic@ */
+        if (not match(v_ContactParams, cr_SemicolonParam_List_OneSpecificParam("+sip.instance", v_SipInstanceValue))) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "IMEI code of the UE, coded as specified in draft-montemurro-gsma-imei-urn, not matching");
+        }
+      }
+      case (A_2_1_A7) {
+        if (not match(v_SipUrlFrom, v_ExpectedEmergencyUrl)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A7: invalid 'From'");
+        }
+        v_SipUrlPreferred := f_Addr_Union_GetSipUrl(v_MessageHeader.pPreferredID.pPreferredIDValueList[0]);
+        if (not match(v_SipUrlPreferred, v_ExpectedEmergencyUrl)) {
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A7: invalid 'P-Preferred-Identity'");
+        }
+      }
+      case (A_2_1_A19)  { // @sic R5-174545, Change 2 R5s180463 sic@
+        // Via, Route and Contact header are checked in function f_IMS_InviteRequest_MessageHeaderRX
+        if (not match(v_SipUrlFrom, v_ExpectedEmergencyUrl)) {          // @sic R5-191118 sic@
+          f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A19: invalid 'From'");
+        }
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "unknown context");
+      }
+    }
+
+    // ****  Check further Contact feature-param acc. to further conditions of A.2.1:  ****
+    //
+    if (p_A3) {                                 // A.1.2 condition A3: MTSI  @sic R5-211418: v_A29  R5-247606: A29 removed sic@
+      if (not match(v_ContactParams, cr_FeatureParamList_3gpp_icsi_ref)) {            // @sic R5s130738: string needs to be quoted; R5-142247 sic@
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A3: Missing feature-param in Contact header");
+      }
+    }
+    if (p_A3 and (p_Context == A_2_1_A4)) {     // @sic R5-142949 sic@
+      if (not match(v_AcceptContactParams, cr_FeatureParamList_3gpp_icsi_ref)) {    // @sic R5s130738: string needs to be quoted; R5-142247 sic@
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A3: Missing feature-param in AcceptContact header");
+      }
+    }
+    if (v_A10) {                                /* A.1.2 condition A10: UE supports video feature tag   @sic R5-211418: v_A31  R5-247606: A31 removed sic@
+                                                   @sic R5-176371: "v_A10" for ContactParams, "v_A10 and p_A11" for AcceptContactParams sic@ */
+      if (not match(v_ContactParams, cr_VideoInContactParams)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A10: Missing feature-param in Contact header");
+      }
+      if (p_A11 and not match(v_AcceptContactParams, cr_VideoInContactParams)) {  /* @sic R5-176371 sic@ */
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A10, A11: Missing feature-param in Accept-Contact header");
+      }
+    }
+    if (f_IMS_PTC_AudioFeatureTagIsRequired() and not match(v_ContactParams, cr_AudioInContactParams)) {    /* check 'feature-param'  @sic R5-165943, R5-170564 sic@ @sic R5-173021 sic@  @sic R5-177127 sic@
+                                                                                                               @sic R5-211418: v_A30  R5-247606: A30 removed sic@ */
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "missing audio feature-param in Contact header");
+    }
+    if (v_A12) {                                                // A.1.2 condition A12: INVITE for creating a voice or video call and UE supports g.3gpp.srvcc-alerting media feature tag
+      if (not match(v_ContactParams, cr_SemicolonParam_List_OneSpecificParamNoValue(tsc_IMS_FeatureCap_SrvccAlerting))) { /* @sic R5s140370 change 7: tsc_IMS_FeatureCap_SrvccAlerting sic@ */
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A12: Missing feature-param");
+      }
+    }
+    if (p_A18 and (p_Context != A_2_1_A5)) {                    // A.1.2 condition A18: UE indicates g.3gpp.ps2cs-srvcc-orig-pre-alerting media feature tag in INVITE request @sic R5-171486 sic@ @sic R5-182793 sic@
+      if (not match(v_ContactParams, cr_SemicolonParam_List_OneSpecificParamNoValue(tsc_IMS_FeatureCap_SrvccPreAlerting))) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "A.2.1 condition A18: Missing feature-param");
+      }
+    }
+    if (pc_MTSI_rtt) {                                          // @sic R5-255082: condition A33 sic@
+      if (not match(v_ContactParams, cr_TextInContactParams)) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "'text' missing in Contact parameters");
+      }
+    }
+  }
+
+  /*
+   * @desc      Check PIDF
+   * @param     p_XmlBody
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_DecodeAndCheckGeolocation(charstring p_XmlBody) runs on IMS_PTC
+  {
+    var PIDF_Presence_Type v_Presence := f_PIDF_Decode(p_XmlBody);
+    var template (omit) Geolocation_Type v_Geolocation;
+
+    /* @sic R5s230385: match against cr_PIDF_Presence_Any removed as Presence.elem_list needs to be ? for R5-231989 and then all elements of Presence are ?, so that cr_PIDF_Presence_Any woould match every Presence sic@ */
+
+    // Check PDIF-LO see RFC 4119 cl. 2.2
+    // extends the 'status' element of PIDF with a complex element called 'geopriv'
+    // There are two major subelements that are encapsulated within geopriv: one for location information, and one for usage rules
+    // Get the first <geopriv> element which is found in a element according to RFC 4119 or in a <device> or <person> element according to RFC 4479 and RFC 5491
+    v_Geolocation := f_PIDF_GetFirstGeopriv(v_Presence);        /* @sic R5-231989 sic@ */
+    if (not isvalue(v_Geolocation)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "No <geopriv> element found in PIDF document");
+    }
+  }
+
+  /*
+   * @desc      Check Geolocation header (if any)
+   * @param     p_MessageBody
+   * @param     p_SDP_MessageTemplate
+   * @param     p_Geolocation       (default value: omit)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MessageBody_CheckSdpMessageAndGeolocation(MessageBody p_MessageBody,
+                                                           template (present) SDP_Message p_SDP_MessageTemplate,
+                                                           template (omit) Geolocation p_Geolocation := omit) runs on IMS_PTC return SDP_Message
+  { /* @sic R5w140112: new parameter p_SDP_MessageTemplate sic@ */
+    /* @sic R5w180006 sic@ - MIME type defs update */
+    /* @sic R5s230256: p_Geolocation instead of p_GeolocationInfoAvailable sic@ */
+    var MIME_Part v_MIME_PartSDP;
+    var MIME_Part v_MIME_PartPIDF;
+    var charstring v_AddrSpec;
+    var SdpBody v_SdpBody;
+
+    if (isvalue(p_Geolocation)) {         // if and only if there is a Geolocation header field then there is a PIDF MIME body part
+      if (not ispresent(p_MessageBody.mimeMessageBody.mimePartList) and
+          lengthof(p_MessageBody.mimeMessageBody.mimePartList) != 2) {
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Invalid Invite body");
+      }
+      v_MIME_PartSDP := f_IMS_MIME_MessageBody_GetBody(p_MessageBody.mimeMessageBody, c_sdpApplication);
+      v_SdpBody := v_MIME_PartSDP.body.sdpMessageBody;
+
+      v_MIME_PartPIDF := f_IMS_MIME_MessageBody_GetBody(p_MessageBody.mimeMessageBody, tsc_MimeType_Pidf);
+      v_AddrSpec := f_MIME_ContentId_GetAddrSpec(v_MIME_PartPIDF.header.contentId);     /* @sic R5s230480: f_MIME_ContentId_GetAddrSpec sic@ */
+      if (not match(valueof(p_Geolocation.addrSpec), cr_SipUrl_Cid(v_AddrSpec))) {      /* @sic R5s230256 clause 2.2: check that the msg-id is the same as in the Geolocation header field sic@ */
+        f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "locationURI is not a cid-url indicating the Content-Id of the PIDF-LO");
+      }
+      // Check PDIF
+      f_IMS_DecodeAndCheckGeolocation(v_MIME_PartPIDF.body.xmlBody);  /* @sic R5s210009 - Additional MCC160 changes sic@ */
+
+    } else {
+      v_SdpBody := p_MessageBody.sdpMessageBody;
+    }
+    return f_IMS_SIP_DecodeMatchAndCheckSDP(v_SdpBody, p_SDP_MessageTemplate);
+  }
+
+  /*
+   * @desc      function to determine Callee URI
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_Context           (default value: A_2_1_A4)
+   * @return    template (present) SipUrl
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_INVITE_CalleeUriRX(template SipUrl p_OtherCalleeUri := omit,
+                                    INVITE_A_2_1_Context_Type p_Context := A_2_1_A4) return template (present) SipUrl
+  {
+    var template (present) SipUrl v_ExpectedCalleeUri;
+
+    if (ispresent(p_OtherCalleeUri)) { // compiler warning may be ignored due to check
+      v_ExpectedCalleeUri := p_OtherCalleeUri;    /* @sic R5s150204 sic@ */
+    } else {
+      select (p_Context) {
+        case (A_2_1_A4) {                // A4: INVITE creating a dialog
+          v_ExpectedCalleeUri := f_SIP_BuildSipUri_RX(px_IMS_CalleeUri);
+        }
+        case (A_2_1_A5) {                // A5: re-INVITE
+          v_ExpectedCalleeUri := f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri);  /* @sic R5s140020 change 8.1 sic@ @sic R5s220953 Further changes by MCC160: port number ('*') removed sic@ */
+        }
+        case (A_2_1_A6, A_2_1_A7, A_2_1_A19) {      // A6, A7, 19: emergency call /* @sic R5-174545, Change 1 R5s180463 sic@ */
+          v_ExpectedCalleeUri := cr_SipUrl_Common(c_urnScheme, cr_UriComponents_SOS);
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "");
+        }
+      }
+    }
+    return v_ExpectedCalleeUri;
+  }
+
+  /*
+   * @desc      Common function to receive and check INVITE against 34.229-1 A.2.1
+   *            when the INVITE is optional a wait duration shall be given
+   * @param     p_Context
+   * @param     p_ExpectedCalleeUri
+   * @param     p_MessageHeader_Invite
+   * @param     p_WaitDuration      (default value: omit)
+   * @param     p_A3                (default value: pc_MultimediaTelephonyService)
+   * @param     p_A11               (default value: false)
+   * @param     p_OriginatingIdentificationRestriction (default value: false)
+   * @return    template (omit) IMS_DATA_REQ
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_INVITE_ReceiveRequest_A_2_1_Optional(INVITE_A_2_1_Context_Type p_Context,
+                                                      template (present) SipUrl p_ExpectedCalleeUri,
+                                                      template (present) MessageHeader p_MessageHeader_Invite,
+                                                      template (omit) float p_WaitDuration := omit,
+                                                      boolean p_A3 := pc_MultimediaTelephonyService,    /* @sic R5s130510 additional change 1: tsc_IMS_MTSI replaced by pc_MultimediaTelephonyService sic@ */
+                                                      boolean p_A11 := false,
+                                                      boolean p_OriginatingIdentificationRestriction := false)
+    runs on IMS_PTC return template (omit) IMS_DATA_REQ
+  { /* p_OtherCalleeUri .. if present to be used as CalleeUri; if omit default CalleeUri is used acc. to PIXITs and context */
+    /* @sic R5-133276, R5-133301 Cleanup of functions for MO Call Setup sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5-140799: additional parameter p_MessageHeader to deal with Reason header sic@ */
+    /* @sic R5s140370 change 7: pc_IMS_SRVCCAlert default value for p_A12, p_A12 renamed to p_SrvccAlertingSupported  sic@ */
+    /* @sic R5s150180: p_A10 removed sic@ */
+    /* @sic R5s150177 change 9, R5s150204: p_OtherCalleeUri changed to "template SipUrl p_OtherCalleeUri"; NOTE: p_OtherCalleeUri shall either omit or "template (present)" (but not e.g. "*") sic@ */
+    /* @sic R5s150846: p_A8 := false per default sic@ */
+    /* @sic R5-160975: p_OriginatingIdentificationRestriction sic@ */
+    /* @sic R5s170305: p_A9 := pc_IMS_SessionIdSupported per default sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5s190882: p_AdditionalOptionTagsForSupported removed sic@ */
+    /* @sic R5s220485: p_A8 removed sic@ */
+    /* @sic R5s240677: p_SrvccAlertingSupported removed sic@ */
+    var template (omit) IMS_DATA_REQ v_IMS_DATA_REQ;
+    var boolean v_MimeWithPIDF := ispresent(p_MessageHeader_Invite.geolocation);    /* @sic R5s230480 sic@ NOTE: there is no Geolocation without PIDF body part and no PIDF body part without Geolocation and the Geolcation addresses the PIDF body part within the MIME body */
+    var boolean v_MimeWithUSSD := ispresent(p_MessageHeader_Invite.recvInfo) and match(valueof(cs_RecvInfo_Def("g.3gpp.ussd")), p_MessageHeader_Invite.recvInfo);   /* @sic R5s230734 sic@ */
+    var boolean v_MimeWithXML := v_MimeWithPIDF or v_MimeWithUSSD;
+    var boolean v_MimeWithBinaryData := ispresent(p_MessageHeader_Invite.callInfo);   /* @sic R5s230480 sic@ NOTE: there is no Call-Info without MSD and no MSD without Call-Info and Call-Info addresses the MSD body part within the MIME body */
+    var template (present) MessageBody v_MessageBody := f_SIP_MessageBodyWithSDP_RX(v_MimeWithXML, v_MimeWithBinaryData);  /* @sic R5w140112 sic@ @sic R5s210009: v_UseMIME instead of p_A8 sic@ @sic R5s230480: v_MimeWithXML, v_MimeWithBinaryData instead of v_UseMIME sic@ */
+    var boolean v_IsReInvite := (p_Context == A_2_1_A5);
+    var boolean v_IsEmergencyCallWithoutRegistration := (p_Context == A_2_1_A6);
+
+    v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest_Optional(p_ExpectedCalleeUri, p_MessageHeader_Invite, v_MessageBody, p_WaitDuration, v_IsReInvite, v_IsEmergencyCallWithoutRegistration);    // @sic R5s190882 sic@
+    if (isvalue(v_IMS_DATA_REQ)) {
+      f_IMS_A_2_1_Invite_CommonChecks(valueof(v_IMS_DATA_REQ), p_Context, p_A3, p_A11, p_OriginatingIdentificationRestriction);  /* @sic R5-160975: p_OriginatingIdentificationRestriction sic@ */
+    }
+    return v_IMS_DATA_REQ;
+  }
+
+  /*
+   * @desc      Common function to receive and check INVITE
+   * @param     p_Context           (default value: A_2_1_A4)
+   * @param     p_OptionTagsForSupported (default value: tsc_OptionTagList_100rel)
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_A3                (default value: pc_MultimediaTelephonyService)
+   * @param     p_A8                (default value: false)
+   * @param     p_A11               (default value: false)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_INVITE_ReceiveRequest(INVITE_A_2_1_Context_Type p_Context := A_2_1_A4,
+                                       OptionTag_List p_OptionTagsForSupported := tsc_OptionTagList_100rel,
+                                       template SipUrl p_OtherCalleeUri := omit,
+                                       boolean p_A3 := pc_MultimediaTelephonyService,    /* @sic R5s130510 additional change 1: tsc_IMS_MTSI replaced by pc_MultimediaTelephonyService sic@ */
+                                       boolean p_A8 := false,   // A8: UE is capable of obtaining location information, has obtained its location and is setting up an emergency session
+                                       boolean p_A11 := false)  // A11: INVITE for creating a video stream
+    runs on IMS_PTC return IMS_DATA_REQ
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s140370 change 7: pc_IMS_SRVCCAlert default value for p_A12, p_A12 renamed to p_SrvccAlertingSupported  sic@ */
+    /* @sic R5s150180: p_A10 removed sic@ */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+    /* @sic R5s150846: p_A8 := false per default sic@ */
+    /* @sic R5s170305: p_A9 := pc_IMS_SessionIdSupported per default sic@ */
+    /* @sic R5-174544: SessionId removed sic@ */
+    /* @sic R5-214531: p_AdditionalOptionTagsForSupported := tsc_OptionTagList_Empty -> p_OptionTagsForSupported := tsc_OptionTagList_100rel sic@ */
+    /* @sic R5s240677: p_SrvccAlertingSupported removed sic@ */
+    var template (omit) float v_WaitDuration := omit;   // no wait duration
+    var template (omit) IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (present) SipUrl v_ExpectedCalleeUri := f_IMS_INVITE_CalleeUriRX(p_OtherCalleeUri, p_Context);
+    var template (present) MessageHeader v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderRX(v_ExpectedCalleeUri, p_OptionTagsForSupported, p_Context, p_A3, p_A8, p_A11);    // @sic R5s190882 sic@
+    
+    v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest_A_2_1_Optional(p_Context, v_ExpectedCalleeUri, v_MessageHeader_Invite, v_WaitDuration, p_A3, p_A11);
+    return valueof(v_IMS_DATA_REQ);                     // as we don't have any WaitDuration f_IMS_INVITE_ReceiveRequest_A_2_1_Optional returns a value (omit could only occur when a timer expires)
+  }
+
+  /*
+   * @desc      MO Call release scc. to 34.229-1 C.32
+   * @param     p_DialogIndex       (default value: omit)
+   * @param     p_ContactSipUrl
+   * @param     p_MessageHeader
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  altstep a_IMS_ReceiveByeSendOK(template (omit) IMS_PTC_DialogIndex_Type p_DialogIndex := omit,
+                                 template (present) SipUrl p_ContactSipUrl,
+                                 template (present) MessageHeader p_MessageHeader) runs on IMS_PTC
+  {
+    var IMS_DATA_REQ v_IMS_DATA_REQ_ByRef;
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo;
+
+    // --- Receive BYE
+    [] a_IMS_ReceiveBye(v_IMS_DATA_REQ_ByRef, p_DialogIndex, p_ContactSipUrl, p_MessageHeader)     // @sic R5s200000: a_IMS_ReceiveBye sic@
+      {
+        // --- Send 200 OK
+        v_RoutingInfo := f_IMS_RoutingInfo_ULtoDL(v_IMS_DATA_REQ_ByRef.RoutingInfo);
+        IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo, cs_Response(c_statusLine200, f_IMS_OtherResponse_200_MessageHeaderTX(v_IMS_DATA_REQ_ByRef.Request.Bye.msgHeader))));
+      }
+  }
+
+  /*
+   * @desc      MO Call release scc. to 34.229-1 C.32
+   * @param     p_InviteRequest
+   * @param     p_ContactSipUrl     (default value: f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri))
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_AutonomousCallRelease (default value: false)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_CallReleaseMO(template (value) INVITE_Request p_InviteRequest,
+                               template (present) SipUrl p_ContactSipUrl := f_SIP_BuildSipUri_RX(px_IMS_CalleeContactUri),
+                               IMS_CallType_Type p_CallType := NORMAL_CALL,
+                               boolean p_AutonomousCallRelease := false) runs on IMS_PTC
+  { /* @sic R5s130333 change 6 - new parameter p_ContactUri sic@ */
+    /* @sic R5-134116: parameter p_RecordRouteOfPrevResponse removed sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s140370 change 14: p_AutonomousCallRelease sic@ */
+    /* @sic R5s150692 change 20: parameter p_CallType sic@ */
+    /* @sic R5-160505: p_A5 := false per default sic@ */
+    /* @sic R5-172934: p_A5 removed as not needed sic@ */
+    var boolean v_IsEmergencyCall := f_IMS_CallIsEmergency(p_CallType);     /* @sic R5-172934 sic@ */
+    var template (present) MessageHeader v_MessageHeader_Bye := f_IMS_ByeRequest_MessageHeaderRX(p_InviteRequest, p_CallType, -, v_IsEmergencyCall); /* @sic R5s150692 change 20 sic@ */
+    
+    if (not p_AutonomousCallRelease) {
+      f_UT_HangupIMSCall(MMI);   /* @sic R5s130333 change 20, R5-134290 sic@ */
+    }
+    a_IMS_ReceiveByeSendOK(-, p_ContactSipUrl, v_MessageHeader_Bye);    /* @sic R5s150382 - Additional Change by MCC160 sic@ */
+  }
+
+  /*
+   * @desc      MT Call release acc. to 34.229-1 C.33
+   * @param     p_ContactSipUrl
+   * @param     p_ContentType       (default value: omit)
+   * @param     p_MessageBody       (default value: omit)
+   * @param     p_IsEmergency       (default value: false)
+   * @status    APPROVED (IMS, LTE_A_IRAT, LTE_A_PRO, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_CallReleaseMT(template (value) SipUrl p_ContactSipUrl,
+                               template (omit) ContentType p_ContentType := omit,
+                               template (omit) MessageBody p_MessageBody := omit,
+                               boolean p_IsEmergency := false) runs on IMS_PTC
+  { /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5s201620: p_InviteRequest removed sic@ */
+    /* @sic R5-251377, R5-251424: p_IsEmergency for MT call release and PSAP callback sic@ */
+    var template (value) MessageHeader v_MessageHeader_Bye := f_IMS_ByeRequest_MessageHeaderTX(p_ContentType, -, p_IsEmergency);
+    var template (present) MessageHeader v_MessageHeader200OK := f_IMS_OtherResponse_200_MessageHeaderRX(v_MessageHeader_Bye);
+
+    f_IMS_CallReleaseMT_Common(p_ContactSipUrl, v_MessageHeader_Bye, v_MessageHeader200OK, p_MessageBody);
+  }
+
+  /*
+   * @desc      Wrapper function
+   * @param     p_ContactSipUrl
+   * @status    APPROVED (IMS, LTE_A_PRO, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_EmergencyCallReleaseMT(template (value) SipUrl p_ContactSipUrl) runs on IMS_PTC
+  {
+    var boolean v_IsEmergency := true;
+    f_IMS_CallReleaseMT(p_ContactSipUrl, -, -, v_IsEmergency);
+  }
+
+  /*
+   * @desc      Emergency Call release (wrapper function)
+   * @param     p_InviteRequest
+   * @param     p_AutonomousCallRelease  (default value: false)
+   * @param     p_WithGlobalRelease  (default value: true)
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_EmergencyCallReleaseMO(INVITE_Request p_InviteRequest,
+                                        boolean p_AutonomousCallRelease := false,
+                                        boolean p_WithGlobalRelease := true) runs on IMS_PTC
+  { /* @sic R5s141286 change 2: new parameter p_AutonomousCallRelease sic@ */
+    /* @sic R5s250337 change 1: new parameter p_WithGlobalRelease sic@ */
+    f_IMS_CallReleaseMO(p_InviteRequest, -, REGULAR_EMERGENCY, p_AutonomousCallRelease);
+    if (p_WithGlobalRelease == true) {
+      f_IMS_GlobalRelease(tsc_IMS_WaitForTcpClose);     /* @sic R5s130988 change 1 - MCC160 implementation sic@
+                                                         * @sic R5s140219 - additional changes sic@
+                                                         * NOTE 1: for emergency call there is no user-initiated emergency deregistration (see 24.229 cl. 5.1.6.6);
+                                                         *         => if there is no further SIP signalling TCP connections IP servers and connections can be released as well as the security contexts
+                                                         *            and the IMS PTC can be reset
+                                                         * NOTE 2: It is not clear whether the GlobalRelease is really needed as in general there should be no further signalling at IMS
+                                                         *         and there is no GlobalRelease at MT call release (-> f_IMS_EmergencyCallReleaseMT)
+                                                         * @sic R5s250228 change 2.1.7: f_IMS_GlobalRelease instead of f_IMS_TCP_CloseHandling sic@ */
+    }
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 2: receive INVITE acc. to A.2.1;
+   *            if the INVITE is optional a wait duration shall be given
+   * @param     p_WaitDuration      (default value: omit)
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_SDP_Message       (default value: omit)
+   * @param     p_AudioCodecList
+   * @param     p_PreconditionSupported  (default value: true)
+   * @param     p_OIR               (default value: false)
+   * @param     p_GeolocationInfoAvailable (default value: false)
+   * @return    template (omit) IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceiveINVITE_Optional(template (omit) float p_WaitDuration := omit,
+                                                    template SipUrl p_OtherCalleeUri := omit,
+                                                    template SDP_Message p_SDP_Message := omit,
+                                                    IMS_SDP_AudioCodecList_Type p_AudioCodecList,
+                                                    boolean p_PreconditionSupported := true,
+                                                    boolean p_OIR := false,
+                                                    boolean p_GeolocationInfoAvailable := false) runs on IMS_PTC return template (omit) IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-133276, R5-133301 Cleanup of functions for MO Call Setup sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: return type changed to IMS_InviteRequestWithSdp_Type to carry decoded SDP offer */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+    /* @sic R5-151968: p_AudioCodecList sic@ */
+    /* @sic R5s150704 - additional changes: parameter p_SDP_Message sic@ */
+    /* @sic R5-160975: p_OIR sic@ */
+    /* @sic R5-170781: p_VideoCodec sic@ */
+    /* @sic R5-172931: p_AdditionalAudioCodecList replaced by p_AudioCodecList sic@ */
+    /* @sic R5-172931: p_VideoCodec removed as this is no function dealing with video calls sic@ */
+    /* @sic R5-172931: p_OptionTagList_precondition replaced by p_AdditionalOptionTagsForSupported sic@ */
+    /* @sic R5-180231: p_A_2_1_Context removed, p_SDP_Message changed to "template", p_AdditionalOptionTagsForSupported replaced by p_PreconditionSupported sic@ */
+    /* @sic R5s180197: function renamed, parameters re-ordered, p_A_2_1_Context removed, p_AdditionalOptionTagsForSupported replaced by p_PreconditionSupported sic@ */
+
+    var OptionTag_List v_OptionTagsForSupported := f_IMS_Invite_OptionTagsSupported(p_PreconditionSupported);  /* @sic R5s180197 sic@ */
+    var template (omit) IMS_DATA_REQ v_IMS_DATA_REQ;
+    var template (omit) IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp := omit;
+    var template (present) SDP_Message v_SDP_MessageTemplate;
+    var INVITE_A_2_1_Context_Type v_Context := A_2_1_A4;
+    var template (present) SipUrl v_ExpectedCalleeUri := f_IMS_INVITE_CalleeUriRX(p_OtherCalleeUri, v_Context);
+    var template (present) MessageHeader v_MessageHeader_Invite := f_IMS_InviteRequest_MessageHeaderRX(v_ExpectedCalleeUri, v_OptionTagsForSupported, v_Context, -, p_GeolocationInfoAvailable);  // @sic R5s190882 sic@
+    var IMS_DATA_REQ v_IMS_DATA_REQ_Value;
+    var SDP_Message v_SDP_Message;
+    var INVITE_Request v_InviteRequest;
+    var boolean v_CheckForbiddenCodecParameters;                /* @sic R5-180231 sic@ */
+
+    if (ispresent(p_SDP_Message)) {                             /* specific SDP message content @sic R5s180197 sic@ */
+      v_SDP_MessageTemplate := p_SDP_Message;
+      v_CheckForbiddenCodecParameters := false;                 /* no automatic check for forbidden parameters in case of specific (i.e. non C.21(abcd)) SDP messages */
+    }
+    else {                                                      /* SDP message content according to C.21(abcd) */
+      v_SDP_MessageTemplate := f_IMS_BuildSDP_InitialOfferAudio_RX(p_PreconditionSupported, p_AudioCodecList); /* @sic R5s150704 - additional changes sic@ @sic R5-172931 sic@ */
+      v_CheckForbiddenCodecParameters := true;                  /* automatic check for forbidden parameters for Cat-M1 (C.21d), EVS (C.44), WLAN (C.21a) and normal cases (C.21);
+                                                                   @sic R5-180231: grace period, R5-192309: grace period for normal cases expired sic@ */
+    }
+    // Step 2. Receive INVITE Request
+    v_IMS_DATA_REQ := f_IMS_INVITE_ReceiveRequest_A_2_1_Optional(v_Context, v_ExpectedCalleeUri, v_MessageHeader_Invite, p_WaitDuration, -, -, p_OIR);
+
+    if (isvalue(v_IMS_DATA_REQ)) {
+      v_IMS_DATA_REQ_Value := valueof(v_IMS_DATA_REQ);
+      v_InviteRequest := v_IMS_DATA_REQ_Value.Request.Invite;
+      v_SDP_Message := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_InviteRequest.messageBody, v_SDP_MessageTemplate, v_InviteRequest.msgHeader.geolocation);
+
+      // check media description:
+      f_IMS_SDP_CheckMediaDescr_AudioCodecs(v_SDP_Message.media_list[0], p_AudioCodecList, v_CheckForbiddenCodecParameters);  /* @sic R5-151968: f_IMS_SDP_CheckMediaDescr_EVS_16000_1, f_IMS_SDP_CheckMediaDescr_AMR_16000_1 replaced by f_IMS_SDP_CheckMediaDescr_AudioCodec sic@
+                                                                                                                                 @sic R5-172931: f_IMS_SDP_CheckMediaDescr_AudioCodecs instead of f_IMS_SDP_CheckMediaDescr_AudioCodec sic@
+                                                                                                                                 @sic R5-180231: v_CheckForbiddenCodecParameters sic@ */
+      v_InviteRequestWithSdp := f_IMS_InviteRequestWithSdpMO(v_IMS_DATA_REQ_Value, v_SDP_Message);
+    }
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 and C.44 - Step 2: receive INVITE acc. to A.2.1
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @param     p_SDP_Message       (default value: omit)
+   * @param     p_AudioCodecList    (default value: tsc_IMS_SDP_AudioCodecList_WBAMR_AMR)
+   * @param     p_PreconditionSupported  (default value: true)
+   * @param     p_OIR               (default value: false)
+   * @return    IMS_InviteRequestWithSdp_Type
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceiveINVITE_Common(template SipUrl p_OtherCalleeUri := omit,
+                                                  template SDP_Message p_SDP_Message := omit,
+                                                  IMS_SDP_AudioCodecList_Type p_AudioCodecList := tsc_IMS_SDP_AudioCodecList_WBAMR_AMR,
+                                                  boolean p_PreconditionSupported := true,
+                                                  boolean p_OIR := false) runs on IMS_PTC return IMS_InviteRequestWithSdp_Type
+  { /* @sic R5-133276, R5-133301 Cleanup of functions for MO Call Setup sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: return type changed to IMS_InviteRequestWithSdp_Type to carry decoded SDP offer */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+    /* @sic R5-151968: p_AdditionalAudioCodecList sic@ */
+    /* @sic R5-160975: p_OIR sic@ */
+    /* @sic R5-174483: p_AudioCodecList instead of p_AdditionalAudioCodecList sic@ */
+    /* @sic R5s180197: function renamed, parameters re-ordered, p_A_2_1_Context removed, p_SDP_Message added to cope with test cases having specific SDP message content (i.e. none of the C.21(abcd) message contents) sic@ */
+
+    var template (omit) float v_WaitDuration := omit;
+    var IMS_InviteRequestWithSdp_Type v_InviteRequestWithSdp;
+
+    v_InviteRequestWithSdp := valueof(f_IMS_MOCallSetup_ReceiveINVITE_Optional(v_WaitDuration,
+                                                                               p_OtherCalleeUri,
+                                                                               p_SDP_Message,
+                                                                               p_AudioCodecList,
+                                                                               p_PreconditionSupported,
+                                                                               p_OIR));
+    return v_InviteRequestWithSdp;
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 3: send 100 Trying
+   * @param     p_InviteRequestWithSdp
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_Send100Trying(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp) runs on IMS_PTC
+  {
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(p_InviteRequestWithSdp.Invite))));
+  }
+
+  /*
+   * @desc      Common function to receive PRACK with optional SDP offer
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader_PrevReliableResponse
+   * @param     p_ContentTypePRACK  (default value: omit)
+   * @param     p_SdpTemplatePRACK  (default value: omit)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    IMS_PrackOrUpdateWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceivePRACK(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                          template (value) MessageHeader p_MessageHeader_PrevReliableResponse,
+                                          template ContentType p_ContentTypePRACK := omit,
+                                          template SDP_Message p_SdpTemplatePRACK := omit,
+                                          IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return IMS_PrackOrUpdateWithSdp_Type
+  {
+    var template (present) MessageHeader v_MessageHeaderPRACK;
+    var template (present) SipUrl v_ContactUrl;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var PRACK_Request v_PrackRequest;
+    var template (omit) SDP_Message v_SdpOffer;
+
+    v_ContactUrl := f_MessageHeader_GetContactSipUrl(p_MessageHeader_PrevReliableResponse);     /* @sic R5s201620: ContactUrl retrieved from response being sent reliable sic@ */
+    v_MessageHeaderPRACK := f_IMS_PrackRequest_MessageHeaderRX(p_InviteRequestWithSdp.Invite, p_MessageHeader_PrevReliableResponse, p_ContentTypePRACK, p_CallType);    /* @sic R5s221098: p_CallType sic@ */
+
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Prack_Request(cr_PRACK_Request(v_ContactUrl, v_MessageHeaderPRACK)));
+    v_PrackRequest := v_IMS_DATA_REQ.Request.Prack;
+    
+    if (isvalue(v_PrackRequest.messageBody) xor isvalue(v_PrackRequest.msgHeader.contentType)) {
+      f_IMS_SetVerdictFailOrInconc(__FILE__, __LINE__, "Either the ContentType or the MessageBody is missing");
+    }
+    v_SdpOffer := f_IMS_SIP_SdpMessageBody_DecodeMatchAndCheckSDP_Ifpresent(v_PrackRequest.messageBody, p_SdpTemplatePRACK);
+
+    if (isvalue(v_SdpOffer)) {
+      f_IMS_MessageHeader_CheckPreconditionIndicationForOffer(v_PrackRequest.msgHeader, PreconditionRequired);     /* check that PRACK contains Require with "preconditions" */
+    }
+    return valueof(cs_IMS_PrackOrUpdateWithSdp(v_IMS_DATA_REQ, v_SdpOffer));
+  }
+
+  /*
+   * @desc      Common function to receive PRACK and send 200 OK
+   * @param     p_InviteRequestWithSdp
+   * @param     p_MessageHeader_PrevReliableResponse
+   * @param     p_ContentTypePRACK  (default value: omit)
+   * @param     p_SdpTemplatePRACK  (default value: omit)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    template (omit) SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceivePRACK_Send200OK(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                    template (value) MessageHeader p_MessageHeader_PrevReliableResponse,
+                                                    template ContentType p_ContentTypePRACK := omit,
+                                                    template SDP_Message p_SdpTemplatePRACK := omit,
+                                                    IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return template (omit) SDP_Message
+  { /* @sic R5s201620: p_ContactUrl removed sic@ */
+    /* @sic R5-211439: Handling of SDP sic@ */
+    /* @sic R5-213531, R5-214884: p_CallType sic@ */
+    /* @sic R5-223463: return SDP_Message - SDP offer in PRACK sic@ */
+    /* @sic R5-254984 (new IMS datachannel test cases): split into f_IMS_MOCallSetup_ReceivePRACK/f_IMS_MOCallSetup_ReceivePRACK_Send200OK sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) MessageHeader v_MessageHeader200OK;
+    var template (omit) MessageBody v_MessageBody200OK := omit;
+    var template (omit) ContentType v_ContentType200OK := omit;
+    var boolean v_PreconditionsRequired200OK := false;
+    var template (value) SDP_Message v_SdpAnswer;
+    var IMS_PrackOrUpdateWithSdp_Type v_PrackRequestWithSdp;
+
+    v_PrackRequestWithSdp := f_IMS_MOCallSetup_ReceivePRACK(p_InviteRequestWithSdp, p_MessageHeader_PrevReliableResponse, p_ContentTypePRACK, p_SdpTemplatePRACK, p_CallType);
+
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_PrackRequestWithSdp.RoutingInfo);                   /* @sic R5s201620: RoutingInfo derived from PRACK but not from INVITE sic@ */
+
+    if (isvalue(v_PrackRequestWithSdp.SdpOffer)) {
+      v_SdpAnswer := f_IMS_BuildSDP_UpdatedAnswer_TX(v_PrackRequestWithSdp.SdpOffer);
+      v_MessageBody200OK := cs_MessageBody_SDP(v_SdpAnswer);
+      v_ContentType200OK  := cs_ContentTypeSDP;
+      v_PreconditionsRequired200OK := true;
+    }
+
+    v_MessageHeader200OK := f_IMS_OtherResponse_200_MessageHeaderTX(v_PrackRequestWithSdp.MessageHeader, v_ContentType200OK, -, v_PreconditionsRequired200OK, p_CallType); /* @sic R5-212076: v_PreconditionIndication200OK sic@
+                                                                                                                                                                              @sic R5-213531, R5-214884: p_CallType sic@ */
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader200OK, v_MessageBody200OK)));
+
+    return v_PrackRequestWithSdp.SdpOffer;
+  }
+
+  /*
+   * @desc      Common function to send a 180 Ringing or 183 Session Progress
+   *            the 18X response may carry an SDP message
+   * @param     p_InviteRequestWithSdp
+   * @param     p_StatusLine
+   * @param     p_MessageHeader_Response
+   * @param     p_SDP_Message       (default value: omit)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_Send18X(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                     StatusLine p_StatusLine,
+                                     template (value) MessageHeader p_MessageHeader_Response,
+                                     template (omit) SDP_Message p_SDP_Message := omit) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  {
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var template (omit) MessageBody v_MessageBody := omit;
+    var template (value) IMS_Response_Type v_Response;
+
+    if (ispresent(p_SDP_Message)) {
+      v_MessageBody := cs_MessageBody_SDP(valueof(p_SDP_Message));
+    }
+
+    // Send 180/183 response
+    v_Response := cs_Response(p_StatusLine, p_MessageHeader_Response, v_MessageBody);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, v_Response));
+
+    return valueof(cs_IMS_ResponseWithSdp(v_Response, p_SDP_Message));
+  }
+
+  /*
+   * @desc      Common function to send a 180 Ringing or 183 Session Progress reliable (i.e. with option tag 100rel),
+   *            to receive the PRACK and to send the 200 OK for the PRACK;
+   *            the 18X response may carry an SDP message, the PRACK and 200OK are not expected to carry an SDP message
+   * @param     p_InviteRequestWithSdp
+   * @param     p_StatusLine
+   * @param     p_MessageHeader_Response
+   * @param     p_SDP_Message       (default value: omit)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @return    IMS_ResponseWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_Send18X_Reliable(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                              StatusLine p_StatusLine,
+                                              template (value) MessageHeader p_MessageHeader_Response,
+                                              template (omit) SDP_Message p_SDP_Message := omit,
+                                              IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC return IMS_ResponseWithSdp_Type
+  { /* @sic R5-254984 (new IMS datachannel test cases): split into f_IMS_MOCallSetup_Send18X/f_IMS_MOCallSetup_Send18X_Reliable sic@ */
+    var IMS_ResponseWithSdp_Type v_ResponseWithSdp;
+
+    // Send 180/183 response
+    v_ResponseWithSdp := f_IMS_MOCallSetup_Send18X(p_InviteRequestWithSdp, p_StatusLine, p_MessageHeader_Response, p_SDP_Message);
+
+    // Receive PRACK, send 200 OK
+    f_IMS_MOCallSetup_ReceivePRACK_Send200OK(p_InviteRequestWithSdp, p_MessageHeader_Response, -, -, p_CallType); /* @sic R5-213531, R5-214884: p_CallType sic@ */
+
+    return v_ResponseWithSdp;
+  }
+
+  /*
+   * @desc      34.229-5 A.4.1 Step 8 - 10: Send 180 Ringing, receive PRACK, send 200 OK
+   *            34.229-5 A.15.1 Step 8 - 10: Send 180 Ringing, receive PRACK, send 200 OK
+   *            The function is applicable for A.4.1a too
+   * @param     p_InviteRequestWithSdp
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_Send180_Reliable(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                              charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                              IMS_CallType_Type p_CallType := NORMAL_CALL) runs on IMS_PTC
+  {
+    var template (value) MessageHeader v_MessageHeader180 := f_IMS_InviteResponse_180_MessageHeaderTX(p_InviteRequestWithSdp.Invite, p_ContactUri, -, tsc_OptionTagList_100rel, p_CallType);
+    f_IMS_MOCallSetup_Send18X_Reliable(p_InviteRequestWithSdp, c_statusLine180, v_MessageHeader180, -, p_CallType); // @sic R5s230324 sic@
+  }
+
+  /*
+   * @desc      Common function to receive UPDATE request with updated SDP offer
+   * @param     p_InviteRequest
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_ExpectedSdpOffer
+   * @param     p_GeolocationInfoAvailable (default value: false)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_PreconditionIndicationForUPDATE (default value: PreconditionRequired)
+   * @return    IMS_PrackOrUpdateWithSdp_Type
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceiveUPDATE(INVITE_Request p_InviteRequest,
+                                           charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                           template (present) SDP_Message p_ExpectedSdpOffer,
+                                           boolean p_GeolocationInfoAvailable := false,
+                                           IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                           IMS_PreconditionIndication_Type p_PreconditionIndicationForUPDATE := PreconditionRequired) runs on IMS_PTC return IMS_PrackOrUpdateWithSdp_Type
+  { /* p_PreconditionIndicationForUPDATE: specifies whether there is a 'precondition' option tag in the Supported header or in the Require header or not included at all in the UPDATE */
+    var SipUrl v_ContactUrl := f_SIP_ParseURI(p_ContactUri);    /* Contact address of the SS as assigned to the UE e.g. in the 183 Session Progress
+                                                                 * NOTE 1: in general the SipUrl is exactly the same as sent to the UE in the 183 Session Progress (f_MessageHeader_GetContactSipUrl)
+                                                                 *         => the template does not have any matching pattern
+                                                                 * NOTE 2: in general px_IMS_CalleeContactUri is used in the 183 Session Progress */
+    var template (present) MessageHeader v_MessageHeader_Update;
+    var template (present) MessageBody v_MessageBody;
+    var IMS_DATA_REQ v_IMS_DATA_REQ;
+    var SDP_Message v_SdpOffer;
+    var UPDATE_Request v_UpdateRequest;
+
+    v_MessageHeader_Update := f_IMS_UpdateRequest_MessageHeaderRX(p_InviteRequest, p_CallType);  /* @sic R5s150692 change 16 sic@ */
+    v_MessageBody := f_SIP_MessageBodyWithSDP_RX(p_GeolocationInfoAvailable);
+    if (p_GeolocationInfoAvailable) {
+      v_MessageHeader_Update.geolocation := cr_GeolocationAny;
+      v_MessageHeader_Update.geolocationRouting := cr_GeolocationRoutingSupported;              // @sic R5-134798 sic@
+      v_MessageHeader_Update.contentType := cr_ContentType(tsc_MimeType_MultipartMixed);        // @sic R5s150851: ContentType depending on condition A1 for TC_19_3_1 too sic@
+    }
+
+    v_IMS_DATA_REQ := f_IMS_ReceiveRequest(car_IMS_Update_Request(cr_UPDATE_Request(v_ContactUrl, v_MessageHeader_Update, v_MessageBody)));
+    v_UpdateRequest := v_IMS_DATA_REQ.Request.Update;
+
+    v_SdpOffer := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_UpdateRequest.messageBody, p_ExpectedSdpOffer, v_UpdateRequest.msgHeader.geolocation);  /* @sic R5w140112, R5s190985 sic@ */
+    f_IMS_MessageHeader_CheckPreconditionIndicationForOffer(v_UpdateRequest.msgHeader, p_PreconditionIndicationForUPDATE);      /* @sic R5-160794 sic@ */
+
+    //fl_IMS_Params_CheckSigComp(v_UpdateRequest.msgHeader.route.routeBody[0].rrParam);     // acc. to 34.229-1 cl. 13.2.4 step 6 (UPDATE) "comp=sigcomp" is optional for Via and Route
+
+    // check session version increased @sic R5-150702: done in f_IMS_SIP_DecodeMatchAndCheckSDP sic@ */
+      
+    if (p_CallType == ASSERTED_EMERGENCY) {  // @sic R5s150851: Acc. to 24.229, 5.1.6.10 the Contact header is well-defined for non-detectable emergency calls and needs to be checked (in contrast to R5-150692) sic@
+      f_IMS_MessageHeader_CheckContactAddr(v_UpdateRequest.msgHeader);  // @sic R5-153760: check contct header sic@
+    }
+    
+    return valueof(cs_IMS_PrackOrUpdateWithSdp(v_IMS_DATA_REQ, v_SdpOffer));
+  }
+
+  /*
+   * @desc      Common function to receive UPDATE request with updated SDP offer and to send the corresponding SDP answer in the 200 OK
+   *            returns the SDP offer which has been contained in the UPDATE
+   * @param     p_InviteRequest
+   * @param     p_ContactUri
+   * @param     p_ExpectedSdpOffer
+   * @param     p_GeolocationInfoAvailable (default value: false)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_PreconditionIndicationForUPDATE (default value: PreconditionRequired)
+   * @return    SDP_Message
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_ReceiveUpdateSend200OK(INVITE_Request p_InviteRequest,
+                                                    charstring p_ContactUri,
+                                                    template (present) SDP_Message p_ExpectedSdpOffer,
+                                                    boolean p_GeolocationInfoAvailable := false,
+                                                    IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                    IMS_PreconditionIndication_Type p_PreconditionIndicationForUPDATE := PreconditionRequired) runs on IMS_PTC return SDP_Message
+  { /* p_PreconditionIndicationForUPDATE: specifies whether there is a 'precondition' option tag in the Supported header or in the Require header or not included at all in the UPDATE */
+    /* @sic R5-254984 (new IMS datachannel test cases): split into f_IMS_MOCallSetup_ReceiveUpdate/f_IMS_MOCallSetup_ReceiveUpdateSend200OK sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (value) SDP_Message v_SdpAnswer;
+    var boolean v_PreconditionsRequired200OK := false;
+    var IMS_PrackOrUpdateWithSdp_Type v_UpdateRequestWithSdp;
+
+    v_UpdateRequestWithSdp := f_IMS_MOCallSetup_ReceiveUPDATE(p_InviteRequest, p_ContactUri, p_ExpectedSdpOffer, p_GeolocationInfoAvailable, p_CallType, p_PreconditionIndicationForUPDATE);
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(v_UpdateRequestWithSdp.RoutingInfo);
+
+    v_SdpAnswer := f_IMS_BuildSDP_UpdatedAnswer_TX(v_UpdateRequestWithSdp.SdpOffer);    /*  @sic R5w140112 sic@ */
+
+    if (p_PreconditionIndicationForUPDATE != NoPreconditionIndication) {  /* NOTE: case of test case 17.1 (adding of video) uses PreconditionSupported instead of PreconditionRequired */
+      v_PreconditionsRequired200OK := true;                               /* @sic R5s150237 change 2 sic@ @sic R5s150692 change 16 sic@ @sic R5-160794, R5-162925, R5-162927, R5-162928, R5-162929: PreconditionRequired sic@ */
+    }
+
+    // Step 8 Optional. Send 200 OK
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL,
+                                     cs_Response(c_statusLine200,
+                                                 f_IMS_OtherResponse_200_MessageHeaderTX(v_UpdateRequestWithSdp.MessageHeader, cs_ContentTypeSDP, -, v_PreconditionsRequired200OK, p_CallType),
+                                                 cs_MessageBody_SDP(v_SdpAnswer))));
+      
+    return v_UpdateRequestWithSdp.SdpOffer;
+  }
+
+  /*
+   * @desc      34.229-1 Annex C.21 - Step 12..13
+   * @param     p_InviteRequestWithSdp
+   * @param     p_ContactUri        (default value: px_IMS_CalleeContactUri)
+   * @param     p_CallType          (default value: NORMAL_CALL)
+   * @param     p_HistoryInfo       (default value: omit)
+   * @param     p_IsReInvite        (default value: false)
+   * @status    APPROVED (IMS, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R12, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_MOCallSetup_Send200OK_ReceiveACK(IMS_InviteRequestWithSdp_Type p_InviteRequestWithSdp,
+                                                  charstring p_ContactUri := px_IMS_CalleeContactUri,
+                                                  IMS_CallType_Type p_CallType := NORMAL_CALL,
+                                                  template (omit) HistoryInfo p_HistoryInfo := omit,
+                                                  boolean p_IsReInvite := false) runs on IMS_PTC
+  { /* @sic R5s130333 change 9.3 - parameter p_ContactUri: acc. to A.2.7 contact in request line of ACK shall be the same in as PRACK sic@ */
+    /* @sic R5s130756 additional changes: p_IsGIBA removed sic@ */
+    /* @sic R5w140112: p_IMS_INVITE_REQ changed to p_InviteRequestWithSdp */
+    /* @sic R5s150692 change 21: parameter p_CallType sic@ */
+    /* @sic R5-214880: p_HistoryInfo sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_InviteRequestWithSdp.RoutingInfo);
+    var INVITE_Request v_InviteRequest := p_InviteRequestWithSdp.Invite;
+    var template (value) MessageHeader v_MessageHeader200;
+    var template (present) MessageHeader v_MessageHeaderACK;
+
+    // Step 12. Send 200 OK (response to INVITE)
+    v_MessageHeader200 := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, -, p_ContactUri, -, p_CallType); /* @sic R5s150692 change 21 sic@ @sic R5s150739 sic@
+                                                                                                                                 @sic R5s250088 EmergencyTelURI not handed over anymore sic@ */
+    v_MessageHeader200.historyInfo := p_HistoryInfo;
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader200)));
+    
+    // Step 13. Finally, UE acknowledges call setup.
+    v_MessageHeaderACK := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200, p_CallType, p_IsReInvite); /* @sic R5s150692 change 21 sic@ */
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(f_SIP_BuildSipUri_RX(p_ContactUri), v_MessageHeaderACK)));
+    
+    //fl_IMS_Params_CheckSigComp(v_IMS_DATA_REQ.Request.Ack.msgHeader.route.routeBody[0].rrParam);   // acc. to 34.229-1 cl. 13.2.4 step 12 (ACK) "comp=sigcomp" is optional for Route
+  }
+
+  /*
+   * @desc      Emergency speech call setup according to 34.229-1 Annex C.22 step 1
+   * @param     p_Context           (default value: A_2_1_A7)
+   * @param     p_GeolocationInfoAvailable (default value: false)
+   * @param     p_OtherCalleeUri    (default value: omit)
+   * @return    IMS_DATA_REQ
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_EmergencyCallSetup_Step1(INVITE_A_2_1_Context_Type p_Context := A_2_1_A7,
+                                          boolean p_GeolocationInfoAvailable := false,
+                                          template SipUrl p_OtherCalleeUri := omit) runs on IMS_PTC return IMS_DATA_REQ
+  { /* p_Context   ..   A_2_1_A6 (INVITE for creating an emergency session in case of no registration) or
+     *                  A_2_1_A7 (INVITE for creating an emergency session within an emergency registration) */
+    /* @sic R5s130988 change 6/7: sic@
+     * in case of A_2_1_A6 there has been no registration beforehand and therefore we don't know whether the UE uses IPv4 or IPv6
+     * => we cannot setup any address information before we have received the INVITE
+     * => as the SDP message at step 1 contains address information we cannot build up the template in advance but need to match after the INVITE has been received */
+    /* @sic R5-140920: additional parameter p_OtherCalleeUri sic@ */
+    /* @sic R5s150204: p_OtherCalleeUri charstring -> SipUrl sic@ */
+
+    // Step 1. Receive INVITE for an Emergency call
+    return f_IMS_INVITE_ReceiveRequest(p_Context, -, p_OtherCalleeUri, -, p_GeolocationInfoAvailable);
+  }
+
+  /*
+   * @desc      Emergency speech call setup according to 34.229-1 Annex C.22 (apart from Invite)
+   * @param     p_IMS_DATA_REQ
+   * @return    INVITE_Request
+   * @status    APPROVED (IMS, IMS_IRAT, LTE, LTE_A_R12, LTE_IRAT, NR5GC, NR5GC_IRAT)
+   */
+  function f_IMS_EmergencyCallSetup_Step2ToEnd(IMS_DATA_REQ p_IMS_DATA_REQ) runs on IMS_PTC return INVITE_Request
+  { /* @sic R5s210875: split function into step 1 and the rest sic@ */
+    /* @sic R5-231989: p_GeolocationInfoAvailable removed, as v_InviteRequest.msgHeader.geolocation is used instead sic@ */
+    var template (value) IMS_RoutingInfo_Type v_RoutingInfo_DL;
+    var template (present) SipUrl v_CalleeContactSipUri;
+
+    var INVITE_Request v_InviteRequest;
+    var template (value) MessageHeader v_MessageHeader_InviteResponse_200;
+    var template (present) MessageHeader v_MessageHeader_Ack;
+    var template (present) SDP_Message v_SDP_Message_Step1;
+    var template (value) SDP_Message v_SDP_Message_Step4;
+    var SDP_Message v_SDP_Message;
+    var IMS_CallType_Type v_EmergencyType := REGULAR_EMERGENCY;
+    var IMS_SDP_AudioCodecList_Type v_AudioCodecList;
+    var IMS_SDP_AudioCodecInfo_Type v_AudioCodecInfo;
+
+    v_InviteRequest := p_IMS_DATA_REQ.Request.Invite;
+    v_RoutingInfo_DL := f_IMS_RoutingInfo_ULtoDL(p_IMS_DATA_REQ.RoutingInfo);
+
+    v_SDP_Message_Step1 := f_IMS_BuildSDP_EmergencyCallOffer_RX();   /* @sic R5s130988 change 6/7: has to be done after the INVITE has been received and the address information has been initialised even for A_2_1_A6 sic@ */
+    v_SDP_Message := f_IMS_MessageBody_CheckSdpMessageAndGeolocation(v_InviteRequest.messageBody, v_SDP_Message_Step1, v_InviteRequest.msgHeader.geolocation); /* @sic R5w140112 sic@ sic@ */
+
+    if (f_IMS_PTC_RanTypeIsNR5GC()) {   // 34.229-5 A.6
+      v_AudioCodecList := { AMR_16000 };                                                /* @sic R5-222021: AMR_16000 instead of EVS_16000 sic@ */
+    } else {                            // 34.229-5 C.22
+      v_AudioCodecList := { AMR_16000, AMR_8000 };
+    }
+    v_AudioCodecInfo := f_IMS_SDP_GetAudioCodecInfo(v_SDP_Message, v_AudioCodecList);   /* @sic R5-222021: f_IMS_SDP_GetAudioCodecInfo sic@ */
+
+    // Step 2. SS sends a 100 Trying provisional response.
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine100, f_IMS_InviteResponse_100_MessageHeaderTX(v_InviteRequest))));
+    
+    // Step 3. SS sends a 180 Ringing.
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine180, f_IMS_InviteResponse_180_MessageHeaderTX(v_InviteRequest, -, -, -, v_EmergencyType))));
+    
+    // Step 4. SS responds to the invite INVITE with 200 OK including the SDP record.
+    v_SDP_Message_Step4 := f_IMS_BuildSDP_EmergencyCallAnswer_TX(v_AudioCodecInfo.Fmt, v_AudioCodecInfo.Codec);   /* @sic R5s141244: no origin address to be handed over anymore sic@ @sic R5s170327 sic@ */
+    v_MessageHeader_InviteResponse_200 := f_IMS_OtherResponse_200_MessageHeaderTX(v_InviteRequest.msgHeader, cs_ContentTypeSDP, -, -, v_EmergencyType);
+    v_CalleeContactSipUri := f_Addr_Union_GetSipUrl(v_MessageHeader_InviteResponse_200.contact.contactBody.contactAddresses[0].addressField);
+    IMS_Server.send(cas_IMS_DATA_RSP(v_RoutingInfo_DL, cs_Response(c_statusLine200, v_MessageHeader_InviteResponse_200, cs_MessageBody_SDP(v_SDP_Message_Step4))));
+    
+    // Step 5. Finally, UE acknowledges call setup.
+    v_MessageHeader_Ack := f_IMS_AckRequest_MessageHeaderRX(v_InviteRequest, c_statusLine200, v_EmergencyType);  // @sic R5s130897 change 2 sic@
+    f_IMS_ReceiveRequest(car_IMS_Ack_Request(cr_ACK_Request(v_CalleeContactSipUri, v_MessageHeader_Ack)));
+    return v_InviteRequest;
+  }
+
+}

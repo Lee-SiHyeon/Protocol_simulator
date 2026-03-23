@@ -1,0 +1,466 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-11-01 08:32:18 +0100 (sá., 01 nov. 2025) $
+// $Rev: 42143 $
+/******************************************************************************/
+
+module RRC_ConnEst_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from LoopbackIP all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_FrequencyInit_SA all;
+  import from NR_RRC_Templates all;
+  import from NR_SysInfo_Templates all;
+  import from NR_Timing all;
+  import from UpperTesterFunctions all;
+
+  template (value) ConnEstFailureControl cs_ConnEstFailureControl_TC81121 :=
+  { // ConnEstFailureControl for TC8.1.1.2.1
+    /* @status    APPROVED (NR5GC) */
+    connEstFailCount          := n1,
+    connEstFailOffsetValidity := s60,
+    connEstFailOffset         := omit
+  };
+
+  template (value) SIB22_r18 cs_SIB22_r18 :=
+  {  /* @status    APPROVED (NR5GC) */
+    atg_Config_r18                 := omit,
+    hs_ATG_cellReselectionSet_r18  := omit,
+    atg_NeighCellConfigList_r18    := omit,
+    lateNonCriticalExtension   := omit
+  };
+
+  /*
+   * @desc      Modify sysinfo combination specific to TC 8.1.1.2.4
+   * @param     p_NR_CellId
+   * @param     p_SIB22
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR_SetSysinfoCombination_Specific8_1_1_2_4 (NR_CellId_Type  p_NR_CellId,
+                                                          template (value) SIB22_r18 p_SIB22) runs on NR_BASE_PTC
+   { //@sic R5-230109 R5-245198 sic@
+    var FreqBandIndicatorNR v_FreqBandIndicatorNR := f_NR_CellInfo_GetBandIndicator(p_NR_CellId);
+    var template SI_SchedulingInfo v_SI_SchedulingInfo_81124;
+    var template (value) SI_SchedulingInfo.schedulingInfoList v_SchedulingInfoList_81124;
+    var SubcarrierSpacing v_SCS := f_NR_CellInfo_GetSSB_SCS(p_NR_CellId);
+    var template (value) SIB2 v_SIB2 := fl_NR_InitSIB2(v_FreqBandIndicatorNR, v_SCS);
+    var template BCCH_DL_SCH_Message v_BCCH_SI1;
+    var template NR_SI_List_Type v_SI_List;
+    var SI_SchedulingInfo.si_WindowLength v_SI_WindowLength;
+
+    v_BCCH_SI1 := cs_NR_BCCH_DL_SCH_SIB(cs_NR_SI(cs_NR_SystemInformation_SIB2_SIB22(v_SIB2, p_SIB22)));
+    v_SI_List := { v_BCCH_SI1 };
+    
+    if (f_NR_IsBandFR1(v_FreqBandIndicatorNR)) {
+      v_SI_WindowLength := s80;
+    } else {
+      v_SI_WindowLength := s160;
+    }
+    // Note 1: The NR-2 in Table 4.4.3.1.2-1 Combinations of system information blocks of TS 38.508-1 is used with SIB1 according to Table 8.1.1.2.4.3.3-2A and SystemInformation acording to Table 8.1.1.2.4.3.3-2.
+    v_SchedulingInfoList_81124 := cs_NR_SI_SchedulingInfo_List1(cs_NR_SchedulingInfoDef(tsc_SIB2_Periodicity,{cs_NR_SIB_TypeInfoDef(sibType2), //schedulingInfo acc. to Table 8.1.1.2.4.3.3-2A
+                                                                                                              cs_NR_SIB_TypeInfoDef(spare3)}));
+    v_SI_SchedulingInfo_81124 := cs_NR_SI_SchedulingInfoDef(v_SchedulingInfoList_81124, v_SI_WindowLength);
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(p_NR_CellId, valueof(v_SI_SchedulingInfo_81124));
+    
+    f_NR_CellInfo_SetSIs (p_NR_CellId, valueof(v_SI_List));
+   }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.1.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_1_2_1_NR5GC() runs on NR5GC_PTC //@sic R5-190680 sic@
+  { // RRC connection establishment / Return to idle state after T300 expiry
+    var DeltaValues_Type v_DeltaPrimaryBand;
+    f_NR5GC_Init(NR_4);//@sic R5-201216 sic@
+
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, -78, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-201216 sic@
+
+    if (not f_NR_CellInfo_GetIsFR1(nr_Cell1)) {
+        v_DeltaPrimaryBand := f_NR_MobileInfo_GetPrimaryDeltaValue();
+        f_NR_CellInfo_SetAndCalculateQ_RxLevMin(nr_Cell1, -91.0, v_DeltaPrimaryBand.DeltaNRf1);
+    }
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    f_NR_CellConfig_Def(nr_Cell3);//@sic R5-201216 sic@
+
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A);
+    //SS re-adjusts the SS levels according to row "T0" in table 8.1.1.2.1.3.2-1/2.
+    f_NR_SetCellPower (nr_Cell1, -78, tsc_NR_ServingCellSSS_EPRE_FR2); //@sic R5s240569 sic@
+
+    f_NR_TestBody_Set(true);
+    fl_TC_8_1_1_2_1_TestBody();
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell3, STATE_IDLE_1A);//@sic R5-201216 R5s210715 sic@
+  }
+
+  /*
+   * @desc      test body of TC_8_1_1_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_1_2_1_TestBody() runs on NR5GC_PTC
+  { //@sic R5-197054 R5s240569 sic@
+    var template (value) InterFreqCarrierFreqList v_InterFreqCarrierFreqList;
+    var DeltaValues_Type v_DeltaPrimaryBand;
+    var float v_Wait := 5.0;
+
+    //@siclog "Step 1" siclog@
+    //The SS transmits a Paging message including a matched ng-5G-S-TMSI.
+    f_NR_Paging_Def(nr_Cell1, RRC_IDLE);
+
+    //@siclog "Step 2" siclog@
+    //The UE transmits an RRCSetupRequest message.
+    f_NR_RRC_SetupRequest_Def(nr_Cell1, mt_Access);
+
+    //@siclog "Step 3" siclog@
+    //The SS waits for 2s (T300 expire).
+    f_Delay(2.0);
+
+    //@siclog "Step 4" siclog@
+    //Check: Does UE send RRCSetupRequest in 5 second?
+    if (f_NR_CheckNoRRCSetupReq(nr_Cell1, v_Wait, -, omit)) {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    } else {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4");
+    }
+
+    //@siclog "Step 5" siclog@
+    //Check: Does the test result of generic test procedure step 1-8 in TS 38.508-1 Table 4.9.4.2.2-1 indicate that the UE is in RRC_IDLE?
+    f_NR5GC_CheckRRCIdle(nr_Cell1, noRrcConnectionRelease);
+
+    //@siclog "Step 6" siclog@
+    //SS transmits an RRCRelease message to release RRC connection and move the UE to RRC_IDLE
+    f_NR_RRCRelease(nr_Cell1);
+
+    //@siclog "Step 7" siclog@
+    //The SS remove connEstFailOffset in SIB1.
+    f_NR_CellInfo_SetSIB1_ConnEstFailureControl(nr_Cell1, cs_ConnEstFailureControl_TC81121);
+
+    //@siclog "Step 8" siclog@
+    //The SS transmits a Short message on PDCCH using P-RNTI indicating a systemInfoModification.
+    f_NR_ModifySysinfo(nr_Cell1); //Modify Sysinfo in SS
+
+    //@siclog "Step 8A" siclog@
+    //@sic R5-201216 sic@
+    // Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods(nr_Cell1);
+
+    //@siclog "Step 9" siclog@
+    //void
+
+    //@siclog "Step 10" siclog@
+    //The SS transmits a Paging message including a matched ng-5G-S-TMSI.
+    f_NR_Paging_Def(nr_Cell1, RRC_IDLE);
+
+    //@siclog "Step 11" siclog@
+    //The UE transmits an RRCSetupRequest message.
+    f_NR_RRC_SetupRequest_Def(nr_Cell1, mt_Access);
+ 
+    //@siclog "Step 12" siclog@
+    //The SS waits for 2s to let T300 expire.
+    f_Delay(2.0);
+
+    //@siclog "Step 12A" siclog@
+    //SS re-adjusts the SS levels according to row "T1" in table 8.1.1.2.1.3.2-1/2.
+    if (not f_NR_CellInfo_GetIsFR1(nr_Cell3)) {
+        v_DeltaPrimaryBand := f_NR_MobileInfo_GetPrimaryDeltaValue();
+        f_NR_CellInfo_SetAndCalculateQ_RxLevMin(nr_Cell3, -100.0, v_DeltaPrimaryBand.DeltaNRf2);
+        f_NR_ModifySysinfo(nr_Cell3, false);
+    }
+    f_NR_SetCellPower (nr_Cell3, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_SuitableInterFreqCellSSS_EPRE_FR2);
+    f_Delay(35.0);
+
+    //@siclog "Step 13" siclog@
+    //The SS transmits a Paging message including a matched ng-5G-S-TMSI on NR Cell 1.
+    f_NR_Paging_Def(nr_Cell1, RRC_IDLE);
+
+    //@siclog "Step 14" siclog@
+    //Check: Does UE send RRCSetupRequest in 5 second?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, v_Wait, - , "Step 14");  //  @sic R5s201387 sic@
+
+    //@siclog "Step 15" siclog@
+    //@sic R5-202619 sic@
+    //void
+    
+    //@siclog "Step 16" siclog@
+    //After expiry of connEstFailOffsetValidity, the SS waits 35s to allow UE to perform cell reselection.
+    f_Delay(35.0);//@sic R5-201216 sic@
+
+    //@siclog "Step 17" siclog@
+    //Check: Does the test result of generic test procedue step 1-9a1 in TS 38.508-1 [4] Table 4.9.4.2.2-1 indicate that the UE is in RRC_IDLE on NR Cell 1?
+    f_NR5GC_CheckRRCIdle(nr_Cell1);// @sic R5-198911 sic@
+
+    //@sic R5-213466 sic@
+    //@siclog "Step 18" siclog@
+    //The SS changes NR Cell 3 to high priority in SIB4 and the ValueTag of SIB4 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 1.
+    v_InterFreqCarrierFreqList := f_NR5GC_CellInfo_GetSIB4_InterFreqCarrierFreqList(nr_Cell1);
+    v_InterFreqCarrierFreqList[0].cellReselectionPriority := 7;
+    f_NR5GC_CellInfo_SetSIB4_InterFreqCarrierFreqList(nr_Cell1, {v_InterFreqCarrierFreqList[0]});
+    f_NR_IncrementValueTag(nr_Cell1, sibType4);//@sic R5-216775, R5s210805 sic@
+
+    //@siclog "Step 18A" siclog@
+    //The SS changes NR cell reselection priority of NR Cell 3 in the SIB2 of NR Cell 3and the ValueTag of SIB2 in the SI-SchedulingInfo of SIB1 is increased on NR Cell 3.
+    f_NR_CellInfo_SetSIB2_CellReselectionPriority(nr_Cell3, 7); //@sic R5s210715 sic@
+    f_NR_IncrementValueTag(nr_Cell3, sibType2);//@sic R5-216775, R5s210805 sic@
+
+    //@siclog "Step 19" siclog@
+    //The SS transmits a Short message on PDCCH using P-RNTI indicating a systemInfoModification.
+    f_NR_ModifySysinfo(nr_Cell1);
+    f_NR_ModifySysinfo(nr_Cell3);//@sic R5s210715 sic@
+
+    //@siclog "Step 20" siclog@
+    //Wait for 2.1* modification period to allow the new system information to take effect.
+    f_NR_WaitModificationPeriods (nr_Cell1);
+
+    //@siclog "Step 21" siclog@
+    //Check: Does the test result of generic test procedure step 1-9a1 in TS 38.508-1 [4] Table 4.9.4.2.2-1 indicate that the UE is in RRC_IDLE on NR Cell 3?
+    f_NR5GC_CheckRRCIdle(nr_Cell3);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.1.2.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_1_2_3_NR5GC() runs on NR5GC_PTC
+  { // RRC connection establishment / RRC Reject with wait time
+
+    var Octet_Type v_IP_PDU_delay := '05'O;
+
+    f_NR5GC_Init(NR_1);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    f_NR5GC_Preamble(nr_Cell1, STATE_IDLE_1A, TESTModeB_ON); // @sic R5s240149 sic@
+    f_NR5GC_RRC_ConnectedState3N_Def(nr_Cell1, TEST_LOOPModeB_ON, -, v_IP_PDU_delay);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_1_2_3_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A); // @sic R5s221102 sic@
+  }
+
+  /*
+   * @desc      test body of TC_8_1_1_2_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_1_2_3_TestBody() runs on NR5GC_PTC
+  {
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters(nr_Cell1);
+    var template (present) NG_MobileIdentity v_S_TMSI := f_NG_S_TMSI2MobileIdentity(omit, v_GutiParams);
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var RejectWaitTime v_RejectWaitTime := 10;
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var integer v_DRBId;
+    var template (value) QosFlow_Identification_Type v_QoS_Id;
+    var float v_Wait := f_NR_SetTimerToleranceMin(nr_Cell1, rrcTimer, int2float(v_RejectWaitTime)); //@sic R5s191085, R5s210051 sic@
+    var float v_Timer_1 := 10.0;
+    timer t_Timer_1;
+
+    //@siclog "Step 1" siclog@
+    //The SS transmits one IP packet to the UE on the DRB associated with the first PDU session on Cell 1.
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession(); // @sic R5s220416, R5-225381, R5s220851 sic@
+    v_QoS_Id := f_NR_GetQosFlowIdentification_ForDRBId(v_DRBId);
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_SDUList(nr_Cell1, v_QoS_Id, {v_IPData}));
+
+    //@siclog "Step 2" siclog@
+    //Wait for 1 second after the IP packet has been transmitted in step 1. (Note 1)
+    f_Delay(1.0);
+
+    //@siclog "Step 3" siclog@
+    //The SS transmits an RRCRelease message on Cell 1.
+    f_NR_RRCRelease(nr_Cell1);
+
+    //@siclog "Step 4-4A" siclog@
+    //Steps 1-2 of the NR RRC_CONNECTED procedure in table 4.5.4.2-3 in TS 38.508-1[4] are performed.
+    //@sic R5-197258 sic@
+    f_NR_Paging_Def(nr_Cell1, RRC_IDLE);
+    f_NR_RRC_SetupRequest_Def(nr_Cell1);
+
+    //@siclog "Step 5" siclog@
+    //The SS responds with RRCReject message with IE waitTime set to 10s.
+    SRB.send(cas_NR_SRB0_RrcPdu_REQ(nr_Cell1,
+                                    -,
+                                    cs_38508_RRCReject(v_RejectWaitTime)));
+
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit an RRCSetupRequest message while timer T302 is running?
+    f_NR_CheckNoRRCSetupReq(nr_Cell1, v_Wait, -, "Step 6");   //@sic R5s201387 sic@
+
+    //@siclog "Step 6A" siclog@
+    //@sic R5-225381 sic@
+    //The SS starts timer Timer_1 = 10 s
+    //Note 4: Timer_1 is an arbitrary timer to check whether the UE sends RRCSetupRequest or not.
+    t_Timer_1.start( v_Timer_1);
+
+    //EXCEPTION: Steps 15a1 to 15b1 describe a transaction that depends on the UE behaviour; the "lower case letter" identifies a step sequence that takes place if a specific behaviour happens. (Note 3)
+    //Note 3: A UE may or may not send RRCSetupRequest for the pending data sent at step 1.
+
+    //@siclog "Steps 7-14" siclog@
+    //@sic R5-225381 sic@
+    //Void
+
+    alt {
+      //@siclog "Step 15a1" siclog@
+      //@sic R5-225381 sic@
+      //Check: Does UE transmit RRCSetupRequest message for sending the IP packet received in step 1 after timer T302 expires?
+      [] SRB.receive(car_NR_SRB0_RrcPdu_IND(nr_Cell1, cr_38508_RRCSetupRequest))
+        {
+          t_Timer_1.stop;
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 15a1");
+
+          //@siclog "Steps 15a2 - 15a6" siclog@
+          //@sic R5-225381 sic@
+          //Steps 3 to 7 of the NR RRC_CONNECTED procedure in TS 38.508-1 Table 4.5.4.2-3 are executed.
+          f_NR_RRCSetup_Def(nr_Cell1);
+          
+          v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell1,
+                                                     cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                                     tsc_SHT_IntegrityProtected);
+          if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu, cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), tsc_NasKsi_NativeSecurityContext), v_S_TMSI, '0001'B)) { //@sic R5-198757, R5s191085 sic@
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+          }
+          
+          f_NR_RRC_ActivateSecurity (nr_Cell1, v_ReceivedMsg.SecurityProtection.NasCount);
+          
+          f_NR_RRCReconfigExistingDRBs (nr_Cell1,
+                                       {cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, f_Get_NG_ServiceAcceptMsg(v_ReceivedMsg.Pdu.Msg.service_Request.pduSessionStatus))},  // @sic R5s201387 Baseline Moving, R5-232970 sic@
+                                        -,
+                                        -,
+                                        -,
+                                        -,
+                                        -,
+                                        false);//@sic R5s191085 sic@
+          
+          //EXCEPTION: Steps 15a7 and 15a8 can occur in any order.
+          //@siclog "Steps 15a7 - 15a8" siclog@
+          //@sic R5-225381 sic@
+          //The UE transmits an RRCReconfigurationComplete message on Cell 1.
+          //The UE loop backs the IP packet received in step 1 on the DRB associated with the default PDU session on Cell 1.
+          //Note 2: Default PDU session type is set in the PICS pc_APN_Default_Configuration
+          interleave {
+            [] SRB.receive(car_NR_SRB_RrcPdu_IND(nr_Cell1, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete)){} //@sic R5s191085 sic@
+            [] DRB.receive(car_NR_DRB_COMMON_IND_SDAP_SDUList(nr_Cell1, v_QoS_Id, {v_IPData})) {}
+          }
+          
+          //@siclog "Step 15a9" siclog@
+          //@sic R5-225381 sic@
+          //The SS transmits an RRCRelease message on NR Cell 1.
+          f_NR_RRCRelease(nr_Cell1);
+        }
+
+      //@siclog "Step 15b1" siclog@
+      //@sic R5-225381 sic@
+      //The SS waits for Timer_1 expiry
+      [] t_Timer_1.timeout{}
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 8.1.1.2.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_8_1_1_2_4_NR5GC() runs on NR5GC_PTC
+  { // RRC connection establishment / Extended value, spare fields and non-critical extensions in SI
+
+    f_NR5GC_Init(NR_2);  //Initialised as NR-2 to get SIB2 initialised by default - scheduling updated in test case body
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // Preamble: The UE is switched off
+    f_NR5GC_Preamble(nr_Cell1, STATE_OFF_0A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_8_1_1_2_4_TestBody();
+
+    f_NR_TestBody_Set(false);
+    f_NR_Postamble(nr_Cell1, STATE_IDLE_1A); //@sic R5s210243 Ch. 1 sic@
+  }
+
+  /*
+   * @desc      test body of TC_8_1_1_2_4
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_8_1_1_2_4_TestBody() runs on NR5GC_PTC
+  { //@sic R5-211312 R5s210243 Ch. 2 R5s210595 R5s240099 sic@
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var UE_NR_Capability v_NrCapability;
+    var NR_CellInfo_Type v_NR_CellInfo := f_NR_CellInfo_Get(nr_Cell1);
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    
+    //@siclog "Step 1" siclog@
+    //System information messages, that include fields and values that the UE does not comprehend, are broadcasted on BCCH.
+    v_NR_CellInfo.Sysinfo.BcchInfo.MIB.message_.mib.spare := '1'B;  // Table 8.1.1.2.4.3.3-1: MIB
+    f_NR_CellInfo_Set(nr_Cell1, v_NR_CellInfo);
+    //Add SIB21 with SIB2 in SI[0] as per Table 8.1.1.2.4.3.3-2: SystemInformation (step 1, Table 8.1.1.2.4.3.2-1)
+    //Modify Sysinfo combination to NR_21
+    f_NR_SetSysinfoCombination_Specific8_1_1_2_4(nr_Cell1, cs_SIB22_r18); //@sic R5-223423 R5-226045 R5-230109 R5-245198 sic@
+    f_NR_CellInfo_SetSIB1_v1800_IEs(nr_Cell1, cs_SIB1_v1800_IEs_NCR_Support_r18(true_)); //@sic R5-237351 R5-245198 sic@
+    f_NR_SS_ConfigureSysinfo(nr_Cell1, -, f_NR_InitialiseBcchToPdschConfig(nr_Cell1));
+
+    //@siclog "Step 2" siclog@
+    //The UE is switched on.
+    f_UT_SwitchOnUE(UT);
+
+    //@siclog "Step 3" siclog@
+    // Check: Does the UE transmit an RRCSetupRequest message on NR Cell 1?
+    f_NR_RRC_SetupRequest_Def(nr_Cell1);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    
+    //@siclog "Step 4" siclog@
+    // The SS transmits an RRCSetup message on NR Cell 1.
+    f_NR_RRCSetup_Def (nr_Cell1);
+    
+    //@siclog "Step 5" siclog@
+    // Check: Does the UE transmit an RRCSetupComplete message to confirm the successful completion of the connection establishment and initiates the registration procedure by including the REGISTRATION REQUEST message?
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(nr_Cell1,
+                                               cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                               (tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected));
+
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_NoSecurity)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+                                               
+    //@siclog "Step 6 - 10a2" siclog@
+    // Steps 5 to 20a1 of the registration procedure described in TS 38.508-1 Table 4.5.2.2-2 are performed on NR Cell 1.
+    f_NR5GC_RRC_Idle_Steps5_20(v_GMM_MobilityInfo, nr_Cell1, v_ReceivedMsg, TESTMode_OFF, -, Initial_NoSecurity);
+    
+    v_NrCapability := f_NR_MobileInfo_NRCap_Get();
+    if (not match (v_NrCapability.accessStratumRelease, (rel15, rel16, rel17))) //@sic R5-211412 R5-226045 R5-245203 sic@
+    {
+      f_SetVerdictInconc(__FILE__, __LINE__, "Test Case applicable up to Rel-17 UE"); // Condition for Rel-15 to 17 UEs only checked at the very end of the test case due to test flow as UE is only registered at the end and preamble is done with STATE_OFF_0A
+    }
+   }
+
+}

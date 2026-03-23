@@ -1,0 +1,709 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-12-04 11:56:56 +0100 (Thu, 04 Dec 2025) $
+// $Rev: 42413 $
+/******************************************************************************/
+
+module NBIOT_ConfigurationSteps {
+
+  import from NBIOT_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EUTRA_NB_ASP_Templates all;
+  import from EUTRA_NB_ASP_TypeDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_Parameters all;
+  import from NBIOT_ASP_TypeDefs all;
+  import from NBIOT_AspCommon_Templates all;
+  import from NBIOT_CellCfg_Templates all;
+  import from NBIOT_CellInfo all;
+  import from NBIOT_CommonDefs all;
+  import from NBIOT_Component all;
+  import from NBIOT_Imported_EUTRA_ASN1_Types all;
+  import from NBIOT_RRC_Templates all;
+  import from NBIOT_SRB_DRB_Templates all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Cell Configuration
+   * @param     p_CellId
+   * @param     p_SYSTEM_CTRL_REQ
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_CommonCellConfig(NBIOT_CellId_Type p_CellId,
+                                       template (value) NB_SYSTEM_CTRL_REQ p_SYSTEM_CTRL_REQ) runs on NBIOT_PTC
+  { /* Note: function updates DRX parameters in cell configuration */
+    var NB_CellConfigInfo_Type v_CellConfigInfo;
+    var NB_DrxCtrl_Type v_DrxCtrl;
+
+    if (not ischosen(p_SYSTEM_CTRL_REQ.Request.Cell)) {
+      FatalError(__FILE__, __LINE__, "f_NBIOT_SS_CommonCellConfig shall get handed over CellConfigRequest");
+    }
+    if (ischosen(p_SYSTEM_CTRL_REQ.Request.Cell.AddOrReconfigure)) {
+      v_CellConfigInfo := valueof(p_SYSTEM_CTRL_REQ.Request.Cell.AddOrReconfigure);
+      if (ispresent(v_CellConfigInfo.Active)) {
+        if (ispresent(v_CellConfigInfo.Active.CcchDcchDtchConfig)) {
+          if (ispresent(v_CellConfigInfo.Active.CcchDcchDtchConfig.DrxCtrl)) {
+            v_DrxCtrl := v_CellConfigInfo.Active.CcchDcchDtchConfig.DrxCtrl;
+            f_NBIOT_CellInfo_SetDrxCtrl(p_CellId, v_DrxCtrl);
+          }
+        }
+      }
+    }
+
+    SYS.send(p_SYSTEM_CTRL_REQ);
+    if (valueof(p_SYSTEM_CTRL_REQ.Common.ControlInfo.CnfFlag) == true) {
+      SYS.receive(car_NB_CellConfig_CNF(p_CellId));
+    }
+  }
+
+  /*
+   * @desc      configure DL CCCH message to be sent within the Msg4 during RACH procedure
+   * @param     p_CellId
+   * @param     p_DL_CCCH_Message   (default value: omit)
+   * @param     p_DL_DCCH_Message   (default value: omit)
+   * @param     p_RAR_TA            (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigRachProcedureMsg4(NBIOT_CellId_Type p_CellId,
+                                              template (omit) DL_CCCH_Message_NB p_DL_CCCH_Message := omit,
+                                              template (omit) DL_DCCH_Message_NB p_DL_DCCH_Message := omit,
+                                              template (omit) RACH_TimingAdvance_Type p_RAR_TA := omit) runs on NBIOT_PTC
+  { /* @sic R5-172058/R5-172053: p_RAR_TA sic@ */
+    /* @sic R5-182302 change 4, R5w180105: p_DL_DCCH_Message sic@ */
+    var octetstring v_EncodedMsg4;
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList;
+    var template (value) ContentionResolution_ContainedDlschSdu_Type v_ContentionResolution_ContainedRlcPdu;
+    var NBIOT_CellInfo_Type v_CellInfo;
+    var RACH_TimingAdvance_Type v_RAR_TA;
+
+    if (ispresent(p_DL_CCCH_Message)) {
+      v_EncodedMsg4 := f_RRC_DL_CCCH_NB_Encvalue(valueof(p_DL_CCCH_Message));
+      v_ContentionResolution_ContainedRlcPdu := cs_ContentionResolution_DlschSdu(v_EncodedMsg4);
+    } else if (ispresent(p_DL_DCCH_Message)) {                           /* @sic R5-182302 change 4, R5w180105: RRC Connection Resume as Msg4 of the RACH procedure sic@ */
+      v_EncodedMsg4 := f_RRC_DL_DCCH_NB_Encvalue(valueof(p_DL_DCCH_Message));
+      v_ContentionResolution_ContainedRlcPdu := cs_ContentionResolution_PdcpSduDCCH(v_EncodedMsg4);
+    } else {
+      v_ContentionResolution_ContainedRlcPdu := cs_ContentionResolution_DlschSdu_None;
+    }
+    if (ispresent(p_RAR_TA)) {
+      v_RAR_TA := valueof(p_RAR_TA);
+    } else {
+      v_CellInfo := f_NBIOT_CellInfo_Get(p_CellId);
+      v_RAR_TA := v_CellInfo.PhysicalParameters.RAR_TA;
+    }
+    
+    v_RachProcedureList := cs_NB_RachProcedureList_Def(v_RAR_TA, v_ContentionResolution_ContainedRlcPdu);
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_RachProcedure_Config_REQ(p_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+  }
+
+  /*
+   * @desc      configure RACH procedure without contention resolution to be used when according to the test requirements the SS shall not respond to the RRC request sent by the UE as Msg3
+   * @param     p_CellId
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigRachProcedureWithNoMsg4(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC
+  {
+    var template (value) NB_RachProcedureList_Type v_RachProcedureList := { cs_NB_RachProcedure(cs_NB_RandomAccessResponseConfig_Def, cs_NB_ContentionResolutionCtrl_TCRNTI_None) };
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_RachProcedure_Config_REQ(p_CellId, cs_TimingInfo_Now, -, -, v_RachProcedureList));
+  }
+
+  /*
+   * @desc      Function to Config/Reconfig Active cell info of a cell
+   * @param     p_CellId
+   * @param     p_TimingInfo
+   * @param     p_ActiveCellConfig
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigActiveCellInfo(NBIOT_CellId_Type p_CellId,
+                                           template (value) TimingInfo_Type p_TimingInfo,
+                                           template (value) NB_ActiveCellConfig_Type p_ActiveCellConfig) runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_CellConfig_REQ(p_CellId, p_TimingInfo, -, -, p_ActiveCellConfig));
+  }
+
+  /*
+   * @desc      Cell Configuration: enable/disable L1 and MAC indications
+   * @param     p_CellId
+   * @param     p_SYSTEM_CTRL_REQ
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_CommonL1MacIndCtrlConfig(NBIOT_CellId_Type p_CellId,
+                                               template (value) NB_SYSTEM_CTRL_REQ p_SYSTEM_CTRL_REQ) runs on NBIOT_PTC
+  {
+    SYS.send(p_SYSTEM_CTRL_REQ);
+    if (valueof(p_SYSTEM_CTRL_REQ.Common.ControlInfo.CnfFlag) == true) {
+      SYS.receive(car_NB_SYSTEM_CTRL_L1MACInd_CNF(p_CellId));
+    }
+  }
+
+  /*
+   * @desc      create cell and send out system information
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_NWUS_Config       (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_CellConfig_Def(NBIOT_CellId_Type p_CellId,
+                                  IOT_STATE_Type p_IOT_State,
+                                  template (omit) NB_WUS_Config_Type p_NWUS_Config := omit) runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_ConfigureActiveCell(p_CellId, p_NWUS_Config); //@sic R5w210112 sic@
+    f_NBIOT_SS_ConfigureSRBs(p_CellId, p_IOT_State);
+  }
+
+  /*
+   * @desc      To PER encode and DL CCCH ASN.1 type message
+   * @param     p_CCCH_Message
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function f_RRC_DL_CCCH_NB_Encvalue(template (value) DL_CCCH_Message_NB p_CCCH_Message) return octetstring
+  {
+    var bitstring v_Bitstring := encvalue(p_CCCH_Message);
+    var octetstring v_Octetstring := bit2oct(f_OctetAlignedBitString(v_Bitstring));
+    return v_Octetstring;
+  }
+
+  /*
+   * @desc      To PER encode and DL DCCH ASN.1 type message
+   * @param     p_DCCH_Message
+   * @return    octetstring
+   * @status    APPROVED (NBIOT)
+   */
+  function f_RRC_DL_DCCH_NB_Encvalue(template (value) DL_DCCH_Message_NB p_DCCH_Message) return octetstring
+  {
+    var bitstring v_Bitstring := encvalue(p_DCCH_Message);
+    var octetstring v_Octetstring := bit2oct(f_OctetAlignedBitString(v_Bitstring));
+    return v_Octetstring;
+  }
+
+  /*
+   * @desc      function to build up the RRC connection setup depending on the cell configuration
+   *            NOTE: for NBIOT currently there are no cell depencdencies (yet)
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @param     p_SRBList           (default value: { cs_SRB_ToAddMod_NB_DEFAULT })
+   * @param     p_MAC_MainConfig    (default value: cs_MAC_MainConfig_NB_SRB)
+   * @param     p_NPDCCH_ConfigDedicated_NB (default value: cs_NPDCCH_ConfigDedicated_NB_DEFAULT)
+   * @param     p_TwoHARQ_ProcessesConfig_r14 (default value: omit)
+   * @return    template (value) DL_CCCH_Message_NB
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_508_RRCConnectionSetup(EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def,
+                                          template (value) SRB_ToAddModList_NB_r13 p_SRBList := { cs_SRB_ToAddMod_NB_DEFAULT },
+                                          template (value) MAC_MainConfig_NB_r13 p_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB,
+                                          template (value) NPDCCH_ConfigDedicated_NB_r13 p_NPDCCH_ConfigDedicated_NB := cs_NPDCCH_ConfigDedicated_NB_DEFAULT,
+                                          template (omit)  PhysicalConfigDedicated_NB_r13.twoHARQ_ProcessesConfig_r14 p_TwoHARQ_ProcessesConfig_r14 := omit) return template (value) DL_CCCH_Message_NB
+  {
+    var template (value) NPUSCH_ConfigDedicated_NB_r13 v_NPUSCH_ConfigDedicated_NB := cs_NPUSCH_ConfigDedicated_NB_DEFAULT;
+    var template (value) UplinkPowerControlDedicated_NB_r13 v_UplinkPowerControlDedicated_NB := cs_UplinkPowerControlDedicated_NB_DEFAULT;
+
+    return cs_508_RRCConnectionSetup_NB(p_RRC_TI,
+                                        p_SRBList,
+                                        p_MAC_MainConfig,
+                                        p_NPDCCH_ConfigDedicated_NB,
+                                        v_NPUSCH_ConfigDedicated_NB,
+                                        v_UplinkPowerControlDedicated_NB,
+                                        p_TwoHARQ_ProcessesConfig_r14);
+  }
+
+  /*
+   * @desc      function to build up the RRC connection reesteblishment depending on the cell configuration
+   *            NOTE: for NBIOT currently there are no cell depencdencies (yet)
+   * @param     p_RRC_TI            (default value: tsc_RRC_TI_Def)
+   * @return    template (value) DL_CCCH_Message_NB
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_508_RRCConnectionReestablishment(EUTRA_ASN1_RRC_TransactionIdentifier_Type p_RRC_TI := tsc_RRC_TI_Def) return template (value) DL_CCCH_Message_NB
+  {
+    var template (value) SRB_ToAddModList_NB_r13 v_SRBList := { cs_SRB_ToAddMod_NB_DEFAULT };
+    var template (value) MAC_MainConfig_NB_r13 v_MAC_MainConfig := cs_MAC_MainConfig_NB_SRB;
+    var template (value) NPDCCH_ConfigDedicated_NB_r13 v_NPDCCH_ConfigDedicated_NB := cs_NPDCCH_ConfigDedicated_NB_DEFAULT;
+    var template (value) NPUSCH_ConfigDedicated_NB_r13 v_NPUSCH_ConfigDedicated_NB := cs_NPUSCH_ConfigDedicated_NB_DEFAULT;
+    var template (value) UplinkPowerControlDedicated_NB_r13 v_UplinkPowerControlDedicated_NB := cs_UplinkPowerControlDedicated_NB_DEFAULT;
+    var template (value) RadioResourceConfigDedicated_NB_r13 v_RadioResourceConfigDedicated := cs_RadioResourceConfigDedicated_NB_SRB(v_SRBList,
+                                                                                                                                      v_MAC_MainConfig,
+                                                                                                                                      v_NPDCCH_ConfigDedicated_NB,
+                                                                                                                                      v_NPUSCH_ConfigDedicated_NB,
+                                                                                                                                      v_UplinkPowerControlDedicated_NB);
+    return cs_RRCConnectionReestablishment_NB(p_RRC_TI, v_RadioResourceConfigDedicated);
+  }
+
+  /*
+   * @desc      basic cell configuration (active cell)
+   * @param     p_CellId
+   * @param     p_NWUS_Config       (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigureActiveCell(NBIOT_CellId_Type p_CellId, template (omit) NB_WUS_Config_Type p_NWUS_Config := omit) runs on NBIOT_PTC
+  { /* @sic R5s170258 - additional MCC160 changes: attribute DlCcchMsgInSeparateMacPdu removed for NBIOT sic@ */
+    var NBIOT_CellInfo_Type v_CellInfo := f_NBIOT_CellInfo_Get(p_CellId);
+    var template (value) ContentionResolution_ContainedDlschSdu_Type v_ContentionResolution_ContainedRlcPdu;
+    var template (value) DL_CCCH_Message_NB v_RrcConnSetup;
+    var octetstring v_EncodedRrcConnSetup;
+    var template (omit) NB_CommonStaticLteCellInfo_Type v_LteCellInfo;
+    var EUTRA_ASN1_PhysCellId_Type v_NCellId := f_NBIOT_CellInfo_GetPhyCellId (p_CellId);
+    var EUTRA_ASN1_PhysCellId_Type v_LTEId := v_NCellId;
+    var template (value) NB_SYSTEM_CTRL_REQ   v_NB_CellConfig_REQ;
+    var NTN_Satellite_Type v_NTN_Scenario := f_NBIOT_MobileInfo_GetNTNSatelliteType();
+
+    v_RrcConnSetup := f_NBIOT_508_RRCConnectionSetup();
+    v_EncodedRrcConnSetup := f_RRC_DL_CCCH_NB_Encvalue(v_RrcConnSetup);
+    v_ContentionResolution_ContainedRlcPdu := cs_ContentionResolution_DlschSdu(v_EncodedRrcConnSetup);
+    
+    // @sic R5-185180 sic@
+    if (f_NBIOT_OperationMode() == inband_differentPCI) { // @sic R5s210007 sic@
+      v_LTEId := (v_NCellId +6) mod 504; // @sic R5-222388 sic@
+    }
+    if (f_NBIOT_OperationMode() == standalone) { // @sic R5w180205r1 sic@
+      v_LteCellInfo := omit;
+    } else {
+      v_LteCellInfo := cs_NB_CommonStaticLteCellInfo (f_NBIOT_CellInfo_GetEUTRA_ARFCN(p_CellId), px_ePrimaryBandChannelBandwidth, normal, v_LTEId, v_CellInfo);
+    }
+      
+    v_NB_CellConfig_REQ := cas_NB_CellConfig_Def_REQ(p_CellId,
+                                                     cs_TimingInfo_Now,
+                                                     v_CellInfo,
+                                                     v_ContentionResolution_ContainedRlcPdu,
+                                                     -, -,
+                                                     v_LteCellInfo,      // @sic R5w180205r1 sic@
+                                                     p_NWUS_Config);      // @sic R5w210112 sic@
+                                                                    
+      
+      
+    if(v_NTN_Scenario == ntn_GSO)
+    {// @sic R5w230102, R5-233454, R5-235468, R5-237126 sic@
+        v_NB_CellConfig_REQ.Request.Cell.AddOrReconfigure.Active.PhysicalLayerConfigUL.TimingAdvance.NtnTA := cs_NTN_TimingAdvanceConfig_GSO_Array[v_CellInfo.NtnInfo.NtnCellType-1];  //coded according to 36.523-3 cl. 7A.14.2.2
+        v_NB_CellConfig_REQ.Request.Cell.AddOrReconfigure.Active.NtnConfig := cs_NB_NTN_Config; //default values acc 36.508 Table 8.1.4.3.3-10
+    }
+    else if (v_NTN_Scenario == ntn_NGSO)
+    {// @sic R5w240103 sic@
+        v_NB_CellConfig_REQ.Request.Cell.AddOrReconfigure.Active.PhysicalLayerConfigUL.TimingAdvance.NtnTA := cs_NTN_TimingAdvanceConfig_NGSO_Array[v_CellInfo.NtnInfo.NtnCellType-1];  //coded according to 36.523-3 cl. 7A.14.2.2
+        v_NB_CellConfig_REQ.Request.Cell.AddOrReconfigure.Active.NtnConfig := cs_NTN_Config_NGSO_Array[v_CellInfo.NtnInfo.NtnCellType-1]; //default values acc 36.508 Table 6.3.5.2-1
+    }
+      
+
+    f_NBIOT_SS_CommonCellConfig(p_CellId, v_NB_CellConfig_REQ);
+  }
+
+  /*
+   * @desc      calculate new attenuation for a cell based on the previous attenuation and the given absolute cell power;
+   *            the attenuation is written back to the global TTCN-3 NBIOT_CellInfo but no configuration is performed at SS
+   * @param     p_CellId
+   * @param     p_NewPowerLevel   absolute (negative) value as specified in the test prose
+   * @return    Attenuation_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function fl_NBIOT_ChangeCellAttenuation(NBIOT_CellId_Type p_CellId,
+                                          AbsoluteCellPower_Type p_NewPowerLevel) runs on NBIOT_PTC return Attenuation_Type
+  {
+    var ReferenceCellPower_Type v_CurrentCellPower := f_NBIOT_CellInfo_GetCellPower(p_CellId);
+    var AbsoluteCellPower_Type v_CurrentRefPowerLevel := v_CurrentCellPower.MaxReferencePower;
+    var Attenuation_Type v_Attenuation;
+    var integer v_AttenuationValue;
+
+    if (p_NewPowerLevel == tsc_NonSuitableOffNBIOTCellRS_EPRE) {
+      v_Attenuation.Off := true;
+    } else {
+      v_AttenuationValue := v_CurrentRefPowerLevel - p_NewPowerLevel;  // v_CurrentRefPowerLevel and p_NewPowerLevel both are negative values
+
+      if (v_AttenuationValue < 0) {  // i.e. |p_NewPowerLevel| < |v_CurrentRefPowerLevel|
+        FatalError (__FILE__, __LINE__, "Initial reference power has invalid value");
+      } else {
+        v_Attenuation.Value := v_AttenuationValue;
+      }
+    }
+
+    v_CurrentCellPower.Attenuation := v_Attenuation;
+    f_NBIOT_CellInfo_SetCellPower(p_CellId, v_CurrentCellPower);
+
+    return v_Attenuation;
+  }
+
+  type record NB_CellPower_Type {                               /* @status    APPROVED (NBIOT) */
+    NBIOT_CellId_Type CellId,
+    AbsoluteCellPower_Type NewPowerLevel
+  };
+
+  type record of NB_CellPower_Type NB_CellPowerList_Type;       /* used together with f_NBIOT_SetCellPowerList
+                                                                   @status    APPROVED (NBIOT) */
+
+  template (value) NB_CellPower_Type cs_NB_CellPower(NBIOT_CellId_Type p_CellId,
+                                                     AbsoluteCellPower_Type p_NewPowerLevel) :=
+  { /* @status    APPROVED (NBIOT) */
+    CellId := p_CellId,
+    NewPowerLevel := p_NewPowerLevel
+  };
+
+  /*
+   * @desc      Calculate timing info based on timing info of the given cell and the SFN offset and Tcell of the given cells
+   * @param     p_CellId1
+   * @param     p_TimingInfo1
+   * @param     p_CellId2
+   * @return    template (value) TimingInfo_Type
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_TimingOtherCell(NBIOT_CellId_Type p_CellId1,
+                                   template (value) TimingInfo_Type p_TimingInfo1,
+                                   NBIOT_CellId_Type p_CellId2) runs on NBIOT_PTC return template (value) TimingInfo_Type
+  {
+    var CellTimingInfo_Type v_CellTimingInfo1 := f_NBIOT_CellInfo_GetCellTimingInfo(p_CellId1);
+    var CellTimingInfo_Type v_CellTimingInfo2 := f_NBIOT_CellInfo_GetCellTimingInfo(p_CellId2);
+
+    return f_CellTimingInfo_TimingOtherCell(v_CellTimingInfo1, p_TimingInfo1, v_CellTimingInfo2);
+  }
+
+  /*
+   * @desc      to configure power of several cells in one go
+   * @param     p_CellPowerList
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_CellId            (default value: nbiot_Cell_NonSpecific)
+                 .. has to refer to specific cell when p_TimingInfo is not cs_TimingInfo_Now
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SetCellPowerList(template (value) NB_CellPowerList_Type p_CellPowerList,
+                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                    NBIOT_CellId_Type p_CellId := nbiot_Cell_NonSpecific) runs on NBIOT_PTC
+  {
+    var integer i;
+    var boolean v_CnfFlag;
+    var NB_CellPower_Type v_CellPower;
+    var template (value) NB_CellAttenuationList_Type v_CellAttenuationList;
+
+    v_CnfFlag := f_TimingInfo_IsNow(p_TimingInfo);
+
+    if (v_CnfFlag and (p_CellId != nbiot_Cell_NonSpecific)) {
+      FatalError(__FILE__, __LINE__, "p_CellId shall be NBIOT_Cell_NonSpecific when p_TimingInfo is cs_TimingInfo_Now");
+    }
+    if (not v_CnfFlag and (p_CellId == nbiot_Cell_NonSpecific)) {
+      FatalError(__FILE__, __LINE__, "p_CellId shall refer to cell related to given p_TimingInfo");
+    }
+    
+    for (i:=0; i<lengthof(p_CellPowerList); i:=i+1) {
+      v_CellPower := valueof(p_CellPowerList[i]);   // valueof cannot be avoided here
+      v_CellAttenuationList[i].CellId := v_CellPower.CellId;
+      v_CellAttenuationList[i].Attenuation := fl_NBIOT_ChangeCellAttenuation(v_CellPower.CellId, v_CellPower.NewPowerLevel);
+      
+      if (v_CnfFlag) { v_CellAttenuationList[i].TimingInfo := omit; }
+      else           { v_CellAttenuationList[i].TimingInfo := f_NBIOT_TimingOtherCell(p_CellId, p_TimingInfo, v_CellPower.CellId); }
+    }
+
+    SYS.send( cas_NB_CellConfig_Power_REQ(v_CellAttenuationList, p_TimingInfo, p_CellId, v_CnfFlag));
+    if (v_CnfFlag) {
+      SYS.receive(car_NB_CellConfig_Power_CNF);
+    }
+  }
+
+  /*
+   * @desc      Sets the cell power attenuation and stores the value in the NBIOT_CellInfo
+   * @param     p_CellId
+   * @param     p_NewPowerLevel     absolute (negative) value as specified in the test prose
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SetCellPower(NBIOT_CellId_Type p_CellId,
+                                AbsoluteCellPower_Type p_NewPowerLevel,
+                                template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var template (value) NB_CellPowerList_Type v_CellPowerList := { cs_NB_CellPower(p_CellId, p_NewPowerLevel) };
+    var NBIOT_CellId_Type v_ReferenceCellId;
+
+    if (f_TimingInfo_IsNow(p_TimingInfo)) {
+      v_ReferenceCellId := nbiot_Cell_NonSpecific;
+    } else {
+      v_ReferenceCellId := p_CellId;
+    }
+    f_NBIOT_SetCellPowerList(v_CellPowerList, p_TimingInfo, v_ReferenceCellId);
+  }
+
+  /*
+   * @desc      starts UL grant transmission
+   *            to be called when UE enters connected mode in a cell (after reception of RRCConnectionReq)
+   * @param     p_CellId
+   * @param     p_GrantScheduling
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_CnfFlag           (default value: false)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ULGrantTransmission(NBIOT_CellId_Type p_CellId,
+                                       template (value) NB_UESS_GrantScheduling_Type p_GrantScheduling,
+                                       template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                       template (omit) boolean p_CnfFlag := false) runs on NBIOT_PTC
+  { /* @sic R5s170474: p_CnfFlag sic@ */
+    var template (value) NB_CcchDcchDtchConfig_Type v_CcchDcchDtchConfig := cs_NB_CcchDcchDtchConfig(-, cs_NB_CcchDcchDtchConfigUL(-, p_GrantScheduling));  // @sic R5s210039: MCC160 Implementation sic@
+
+    f_NBIOT_SS_CommonCellConfig(p_CellId, cas_NB_CellConfig_REQ(p_CellId, p_TimingInfo, p_CnfFlag, -, cds_NB_ActiveCellConfig_CcchDcchDtchConfig(v_CcchDcchDtchConfig)));
+  }
+
+  /*
+   * @desc      assign single grant with explicit Iru and Itbs according to 36.213 table 16.5.1.2-2
+   *            NOTE: for N(RU, sc) == 1 (single tone) Itbs and Imcs are different for Itbs = 1, 2 (36.213 table 16.5.1.2-1); furthermore the maximum value for Itbs is 10.
+   *            with minimum value for Iru the transport block sizes according to 36.213 Table 16.5.1.2-2 are associated to pairs of Itbs and Iru as
+   *            TBS    16   24   32   40   56   72   88  104  120  136  144  152  176  208  224  256  296  328  344  392  408  424  440  456  472  504  536  552  568  584  600  616  680  712  776  808  872  936 1000
+   *            Iru     0    0    0    0    0    0    0    0    0    0    0    5    1    2    1    1    1    1    7    2    5    4    6    2    3    2    3    6    7    4    5    3    3    5    4    5    4    5    5
+   *            Itbs    0    1    2    3    4    5    6    7    8    9   10    0    6    4    7    8    9   10    1    8    4    5    3    9    7   10    8    4    3    7    6    9   10    7    9    8   10    9   10
+   *            NOTE: according to 36.508 Table 8.1.3.3.4-1 NBIOT signalling conformance test are using single tone and 15 kHz subcarrier spacing
+   * @param     p_CellId
+   * @param     p_Iru
+   * @param     p_Itbs
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ULGrantTransmission_ExplicitGrant(NBIOT_CellId_Type p_CellId,
+                                                     integer p_Iru,
+                                                     integer p_Itbs,
+                                                     template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var template (value) NB_DciUlInfo_Type v_DciUlInfo;
+    var integer v_Imcs;
+    
+    select (p_Itbs) {  // 36.213 table 16.5.1.2-1 for N(RU, sc) == 1
+      case (1)  { v_Imcs := 2; }
+      case (2)  { v_Imcs := 1; }
+      case else { v_Imcs := p_Itbs; }
+    }
+
+    v_DciUlInfo := cs_NB_DciInfo_CcchDcchDtchUL(p_Iru, v_Imcs);
+
+    f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Start(cs_NB_SingleGrant(v_DciUlInfo)), p_TimingInfo);
+  }
+
+  /*
+   * @desc      stops UL grant transmission
+   *            configures SS to not maintain UE in PUCCH synchronised state
+   *            needs to be called when UE enters idle mode in a cell (after RRCConnectionRelease)
+   * @param     p_CellId
+   * @param     p_DelayBeforeReset  (default value: noDelay)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_StopULGrantTransmission(NBIOT_CellId_Type p_CellId,
+                                           DelayBeforeConfiguration_Type p_DelayBeforeReset := noDelay) runs on NBIOT_PTC
+  {
+    f_DelayBeforeConfiguration(p_DelayBeforeReset);
+    f_NBIOT_ULGrantTransmission(p_CellId, cs_NB_UL_GrantScheduling_Stop, -, tsc_NoCnfReq);  // @sic R5s210039: MCC160 Implementation sic@
+  }
+
+  /*
+   * @desc      enable/disable reporting of RACH preambles
+   * @param     p_CellId
+   * @param     p_Mode
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigRachPreambleIndMode(NBIOT_CellId_Type p_CellId,
+                                                IndicationAndControlMode_Type p_Mode) runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_NB_Common_IndConfig_REQ(p_CellId, cs_NB_EnableRachPreamble_Req(p_Mode)));
+  }
+
+  /*
+   * @desc      enable/disable reporting of TA
+   * @param     p_CellId
+   * @param     p_Mode
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigTimingAdvanceReportMode(NBIOT_CellId_Type p_CellId,
+                                                IndicationAndControlMode_Type p_Mode) runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_CommonL1MacIndCtrlConfig(p_CellId, cas_NB_Common_IndConfig_REQ(p_CellId, cds_NB_TimingAdvanceControl_Req(p_Mode)));
+  }
+
+  /*
+   * @desc      Configuration of DRX for the given cell
+   * @param     p_CellId
+   * @param     p_NewDrxCtrl
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_DrxCtrlConfig(NBIOT_CellId_Type p_CellId,
+                                    template (value) NB_DrxCtrl_Type p_NewDrxCtrl,
+                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var NB_DrxCtrl_Type v_OldDrxCtrl := f_NBIOT_CellInfo_GetDrxCtrl(p_CellId);
+    
+    if (match(v_OldDrxCtrl, p_NewDrxCtrl)) {
+      return;
+    }
+    if (not ischosen(p_NewDrxCtrl.None) and not ischosen(v_OldDrxCtrl.None)) {
+      FatalError(__FILE__, __LINE__, "Reconfiguration of DRX - not supported (yet)");
+    }
+    f_NBIOT_SS_ConfigActiveCellInfo(p_CellId, p_TimingInfo, cds_NB_ActiveCellConfig_CcchDcchDtchConfig(cs_NB_CcchDcchDtchConfig(-, -, p_NewDrxCtrl)));  // @sic R5s210039: MCC160 Implementation sic@
+  }
+
+  /*
+   * @desc      Common function to release specific cell
+   * @param     p_CellId
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ReleaseCellSpecific(NBIOT_CellId_Type p_CellId) runs on NBIOT_PTC
+  {
+    SYS.send(cas_NB_ReleaseCell_REQ(p_CellId, cs_TimingInfo_Now));
+    // cas_ReleaseCell_REQ requires no confirmation
+  }
+
+  /*
+   * @desc      Common function to release all cells
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_ReleaseAllCells() runs on NBIOT_PTC
+  {
+    var NBIOT_CellId_Type v_CellId := nbiot_Cell_NonSpecific;
+    SYS.send(cas_NB_ReleaseCell_REQ(v_CellId, cs_TimingInfo_Now));
+    // cas_ReleaseCell_REQ requires no confirmation
+  }
+
+  /*
+   * @desc      Release SRB1/SRB1bis and all given DRBs
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_TimingInfo         (default value: cs_TimingInfo_Now)
+   * @param     p_DrbList            (default value: tsc_DrbList_Def)
+   * @param     p_CnfFlag            (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_SRBs_DRBs_Release(NBIOT_CellId_Type p_CellId,
+                                        IOT_STATE_Type p_IOT_State,
+                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                        DRB_IdentityList_Type p_DrbList := tsc_DrbList_Def,
+                                        template (omit) boolean p_CnfFlag := omit) runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearerList_Type v_RadioBearerList;
+    var integer i;
+    var integer k;
+    
+    v_RadioBearerList[0] := cs_NB_SRB_Release(tsc_SRB1bis);
+    if (p_IOT_State == USER_PLANE) {
+      v_RadioBearerList[1] := cs_NB_SRB_Release(tsc_SRB1);
+      i := lengthof(v_RadioBearerList);
+      for (k:=0; k < lengthof(p_DrbList); k:= k+1) {
+        v_RadioBearerList[i+k] := cs_NB_DRB_Release(p_DrbList[k]);
+      }
+    }
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_RadioBearerList, p_TimingInfo, p_CnfFlag);
+  }
+
+  /*
+   * @desc      configure DRB for NBIOT UP mode
+   * @param     p_CellId
+   * @param     p_RadioBearer
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_CommonRadioBearerConfig_SingleDRB(NBIOT_CellId_Type p_CellId,
+                                                        template (value) NB_RadioBearer_Type p_RadioBearer,
+                                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearerList_Type v_RadioBearerList := { p_RadioBearer };
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_RadioBearerList, p_TimingInfo);
+  }
+
+  /*
+   * @desc      release DRB (UP mode)
+   * @param     p_CellId
+   * @param     p_DrbId             (default value: tsc_DRB1)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_Release_SingleDRB(NBIOT_CellId_Type  p_CellId,
+                                        EUTRA_ASN1_DRB_Identity_Type p_DrbId := tsc_DRB1,
+                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    f_NBIOT_SS_CommonRadioBearerConfig_SingleDRB(p_CellId, cs_NB_DRB_Release(p_DrbId), p_TimingInfo);
+  }
+
+  /*
+   * @desc      SRB Configuration
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_TimingInfo         (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_ConfigureSRBs(NBIOT_CellId_Type p_CellId,
+                                    IOT_STATE_Type p_IOT_State,
+                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now) runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearerList_Type v_SrbList;
+    
+    v_SrbList[0] := cs_NB_SRB0_ConfigDef;
+    v_SrbList[1] := cs_NB_SRB1bis_ConfigDef;
+    if (p_IOT_State == USER_PLANE) {
+      v_SrbList[2] := cs_NB_SRB1_ConfigDef;
+    }
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_SrbList, p_TimingInfo);
+  }
+
+  /*
+   * @desc      Configure SRB1 and given DRBs
+   * @param     p_CellId
+   * @param     p_IOT_State
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_DrbConfigList     (default value: cs_NB_DrbConfigList_DRB1)
+   * @param     p_CnfFlag           (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_SRBs_DRBs_Config(NBIOT_CellId_Type  p_CellId,
+                                       IOT_STATE_Type p_IOT_State,
+                                       template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                       template (omit) NB_RadioBearerList_Type p_DrbConfigList := cs_NB_DrbConfigList_DRB1,
+                                       template (omit) boolean p_CnfFlag := omit) runs on NBIOT_PTC
+  {
+    var template (value) NB_RadioBearerList_Type v_DrbConfigList;
+    var template (value) NB_RadioBearerList_Type v_RadioBearerList;
+    var integer i;
+    var integer k;
+    
+    v_RadioBearerList[0] := cs_NB_SRB1bis_ConfigDef;
+    if (p_IOT_State == USER_PLANE) {
+      v_RadioBearerList[1] := cs_NB_SRB1_ConfigDef;
+      if (ispresent(p_DrbConfigList)) {
+        v_DrbConfigList := valueof(p_DrbConfigList);
+        i := lengthof(v_RadioBearerList);
+        for (k:=0; k < lengthof(v_DrbConfigList); k:= k+1) {
+          v_RadioBearerList[i+k] := v_DrbConfigList[k];
+        }
+      }
+    }
+    f_NBIOT_SS_CommonRadioBearerConfig(p_CellId, v_RadioBearerList, p_TimingInfo, p_CnfFlag);
+  }
+
+  /*
+   * @desc      Readio Bearer configuration
+   * @param     p_CellId
+   * @param     p_RadioBearerList
+   * @param     p_TimingInfo         (default value: cs_TimingInfo_Now)
+   * @param     p_CnfFlag            (default value: omit)
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_SS_CommonRadioBearerConfig(NBIOT_CellId_Type p_CellId,
+                                              template (value) NB_RadioBearerList_Type p_RadioBearerList,
+                                              template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                              template (omit) boolean p_CnfFlag := omit) runs on NBIOT_PTC
+  {
+    var boolean v_CnfFlag := f_CnfFlag_Set(p_TimingInfo, p_CnfFlag);
+
+    SYS.send(cas_NB_CommonRadioBearerConfig_REQ(p_CellId, p_TimingInfo, p_RadioBearerList, v_CnfFlag));
+    if (v_CnfFlag == tsc_CnfReq) {
+      SYS.receive(car_NB_CommonRadioBearerConfig_CNF(p_CellId));
+    }
+  }
+
+  /*
+   * @desc      To preconfigure NBIOT NTN UE with the position and to disable
+   *            the prediction of the NGSO satellite movement tragectory
+   * @status    APPROVED (NBIOT)
+   */
+  function f_NBIOT_PreconfigureNTN_UE() runs on NBIOT_PTC{
+      if(f_NBIOT_MobileInfo_GetNTNSatelliteType() == ntn_NGSO){
+            f_UT_DisableNGSO_SatellitePrediction(UT, DISABLE); /*@sic R5-253187 sic@*/
+      }
+      f_UT_ConfigureNTNPosition(UT, -, NO_CNF_REQUIRED); // @sic R5s240281, R5s250291 sic@
+      
+  }
+
+}

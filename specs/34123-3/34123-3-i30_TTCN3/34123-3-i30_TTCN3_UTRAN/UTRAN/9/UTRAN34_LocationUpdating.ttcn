@@ -1,0 +1,905 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2023-10-09 22:34:37 +0200 (Mon, 09 Oct 2023) $
+// $Rev: 37215 $
+/******************************************************************************/
+module UTRAN34_LocationUpdating {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from TestcaseProperties all;
+  import from UTRAN34_CellInfo all;
+  import from UTRAN34_CommonDefs all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_ConfigurationSteps all;
+  import from UTRAN34_NAS_PDU_Templates all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRAN34_RRC_Templates all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_RAB_Templates all;
+  import from UTRAN_ASN1_ASP_RAB_Templates_r10 all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_ASN1_ASP_Templates_r10 all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_RRC_CommonTemplates all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_RRC_Templates_r10 all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  const float tsc_RadioLinkFailure := 13.500;                   /* @status    APPROVED (UTRAN) */
+
+  const bitstring       tsc_KeySeqDeleted := '111'B;            /* @status    APPROVED (UTRAN) */
+
+  const RejCau      tsc_RejCau_NtwFailure := '11'O;             /* Reject cause: Network Failure #17
+                                                                   @status    APPROVED (UTRAN) */
+
+  const RejCau      tsc_RejCau_CallNotIdentified := '26'O;      /* Reject cause: Call cannot be identified #38
+                                                                   @status    APPROVED (UTRAN) */
+
+  const RejCau      tsc_RejCau_RetryUponEntry := '30'O;         /* Reject cause: retry upon entry into a new cell #48
+                                                                   @status    APPROVED (UTRAN) */
+
+  template (value) Cau cs_Cau(B7_Type p_CauValue) := cs_Cau_Common(-, tsc_CodingStd_GSM, tsc_Location_PLMN, p_CauValue);     /* @status    APPROVED (UTRAN) */
+
+  template (present) RRCDataIndType cr_U_LocationUpdatingRequest_9433a(template (present) KeySeq p_KeySeq,
+                                                                       template (present) LocAreaId p_LocAreaId := cr_LAI_Any_v,
+                                                                       template (present) MobileIdentity p_MobileId := cr_MobileIdAny) :=
+  { /* @status    APPROVED (LTE_IRAT, UTRAN) */
+    locationUpdatingRequest := cr_LocUpdReq_Common(p_KeySeq,
+                                                   cr_LocUpdTypeNormal,
+                                                   p_LocAreaId,
+                                                   cr_MS_Clsmk1_Def,
+                                                   p_MobileId,
+                                                   cr_MS_Clsmk2_Any_tlv('33'O) ifpresent)
+  };
+
+  /*
+   * @desc      To generate a lower layer failure, SS modifies the scrambling code of downlink transmission (DL DPCH).
+   *            Then waits long enough to enable UE to perform cell update procedure.
+   *            The SS sends RRC CONNECTION RELEASE message as a response to the CELL UPDATE message.
+   *            Then SS re-modifies the scrambling code of downlink transmission (DL DPCH) to the original one.
+   *            NOTE: only cell_DCH_StandAloneSRB configuration is handled
+   *            for Rel-10 only
+   * @param     p_CellId
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_LowerLayerFailureCheck(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC
+  {
+    var UTRAN_CellInfo_Type v_CellInfo := f_UTRAN_CellInfo_Get(p_CellId);
+    
+    timer t_RadioLinkFailure := tsc_RadioLinkFailure; // 13500 ms
+    
+    // Reconfigure SS with a scrambling code of downlink transmission (DL DPCH) different from the default one
+    f_SS_LowerLayerFailure(p_CellId,
+                           tsc_DL_DPCH1_2ndScrC + 1);
+    // SS Receives Cell Update
+    // Start Radio Link Failure timer
+    t_RadioLinkFailure.start;
+    f_UTRAN_RRC_ReceiveCellUpdateNonPeriodic(p_CellId,
+                                                             cr_108_CellUpdate_r10(v_CellInfo.uRNTI, radiolinkFailure));
+    
+    t_RadioLinkFailure.stop;
+    
+    // SS sends RRC CONNECTION RELEASE message
+    U_UM.send(cas_RRC_ConnRelCCCH(p_CellId,
+                                  tsc_RB0,
+                                  f_UTRAN34_Get_cs_108_RRC_ConnRelCCCH(p_CellId)));
+    
+    f_UTRAN34_CRLC_RelReconfSRB(p_CellId);
+    f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_StandAloneSRB_NoConn);
+    
+    // Reconfigure SS with the default scrambling code
+    f_SS_LowerLayerFailure(p_CellId,
+                           tsc_DL_DPCH1_2ndScrC);
+  }
+
+  /*
+   * @desc      To reconfigure the DL scrambling code
+   *            NOTE: for Rel-10 only
+   *            NOTE: only cell_DCH_StandAloneSRB configuration is handled
+   * @param     p_CellId
+   * @param     p_SecondaryScramblingCode
+   * @status    APPROVED (UTRAN)
+   */
+  function f_SS_LowerLayerFailure(UTRAN_CellId_Type p_CellId,
+                                  SecondaryScramblingCode p_SecondaryScramblingCode) runs on UTRAN_PTC
+  {
+    var UTRAN_CFN_Info_Type v_CfnInfo := f_CalculateActTime(p_CellId);
+    var template (value) SS_ActivationTime v_SS_ActivationTime := cs_ActivateCFN(v_CfnInfo.actTime);
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    var template (value) DL_DPCHInfo_r10_FDD v_DL_DPCHInfo_r10_FDD;
+    var UTRAN_FDD_TDD_Type v_UTRAN_FDD_TDD_Type := f_IRAT_GetUTRAN_FDD_TDD_Mode();   //@sic R5-176156 sic@
+
+    if (v_UTRAN_FDD_TDD_Type == UTRAN_FDD) {
+        select (f_GetTestcaseAttrib_UtraFDD_Release(testcasename())) {
+            case ("FDDr10") {  //for Rel-10 only
+              select (v_CellConfig) {
+                case (cell_DCH_StandAloneSRB, cell_DCH_StandAloneSRB_NoConn) {
+                    v_DL_DPCHInfo_r10_FDD := cs_DL_DPCH_FDD_r10(cs_DL_CommonInfoDCH_SRB_FDD_r10(tsc_DL_DPCH1_SFP_SRB, fixed, false),
+                                                                tsc_DL_DPCH1_ChC_SRB,
+                                                                p_SecondaryScramblingCode);
+                    f_UTRAN_CPHY_RL_Modify(cas_RL_Modify_DPCHInfo_FDD(p_CellId,
+                                                                      tsc_DL_DPCH1,
+                                                                      cs_DPCHInfo_Extension_FDD(cs_DL_DPCHInfo_r10_Extension_FDD(v_DL_DPCHInfo_r10_FDD)),
+                                                                      v_SS_ActivationTime));
+                }
+                case else {
+                    FatalError(__FILE__, __LINE__, "UTRAN configuration not handled");
+                }
+              }
+            }
+            case else {
+                FatalError(__FILE__, __LINE__, "FDD UTRAN release not handled");  //@sic R5-176156 sic@
+            }
+        }
+    } else { // TDD
+        select (f_GetTestcaseAttrib_UtraTDD_Release(testcasename())) {
+            case ("TDDr10") {  // TDD for Rel-10 only
+                select (v_CellConfig) {
+                    case (cell_DCH_StandAloneSRB, cell_DCH_StandAloneSRB_NoConn) {
+                        f_UTRAN_CPHY_RL_Modify(cas_RL_Modify_DPCHInfo_TDD(p_CellId,
+                                                                          tsc_DL_DPCH1,
+                                                                          cs_DPCHInfo_Extension_TDD(cs_DL_DPCHInfo_r10_Extension_TDD(cs_DL_DPCH_TDD_r10(cs_DL_DPCH_InfoPerRL_SRB_TDD))),
+                                                                          v_SS_ActivationTime));
+                    }
+                    case else {
+                        FatalError(__FILE__, __LINE__, "UTRAN configuration not handled");
+                    }
+                }
+            }
+            case else {
+                FatalError(__FILE__, __LINE__, "TDD UTRAN release not handled");  //@sic R5-176156 sic@
+            }
+        }
+    }
+  }
+
+  /*
+   * @desc      Procedure to send Location Updating Reject with Reject Cause passed as parameter
+   *            Registered, Connected Mode on an UTRAN cell.
+   * @param     p_RejCau
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SendLocationUpdatingReject(RejCau p_RejCau) runs on UTRAN_PTC
+  {
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_LocationUpdatingRej(p_RejCau)));
+  }
+
+  /*
+   * @desc      Rejection of a LocationUpdatingRequest with a reject cause provided as parameter
+   * @param     p_U_LocationUpdatingRequest
+   * @param     p_RejCau
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_9_4_3_3a_LU_Rejection(template (present) RRCDataIndType p_U_LocationUpdatingRequest,
+                                       RejCau p_RejCau) runs on UTRAN_PTC
+  {
+    var START_Value v_START_Value_cs := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+    
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, p_U_LocationUpdatingRequest)) -> value v_RRC_DataInd; // receive LocationUpdating Request
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value_cs);
+    
+    f_UTRAN34_SendLocationUpdatingReject(p_RejCau); // send LocationUpdating Reject
+  }
+
+  /*
+   * @desc      Steps 132 to 135 which may be called from different preceding steps of UTRAN TC 9.4.3.3
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_9_4_3_3a_Steps132_135() runs on UTRAN_PTC
+  {
+    var START_Value v_START_Value_cs := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+
+    //@siclog "Step 132" siclog@
+    //CM SERVICE REQUEST. CKSN = initial value, Mobile identity = TMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_ServReq_MO_TMSI(?))) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value_cs);
+
+    //@siclog "Step 133" siclog@
+    //CM SERVICE REJECT. Cause #17 (network failure).
+    U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_CM_ServRej(tsc_RejCau_NtwFailure)));
+
+    //@siclog "Step 134-135" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+  }
+
+  /*
+   * @desc      REFERENCE TS 34.123-1 clause 9.4.3.3a
+   * @status    APPROVED (UTRAN)
+   */
+  function f_TC_9_4_3_3a_UTRAN() runs on UTRAN_PTC
+  {
+    //Initialise all UTRAN cells according to 34.108
+    f_UTRAN34_Init();
+    
+    // Initialization of Cell B per Initial conditions
+    // Info for cell B
+    f_UTRAN34_CellInfo_SetAttFlag(utran34_CellB, tsc_AttOn);
+    f_UTRAN34_CellInfo_SetT3212(utran34_CellB, tsc_T3212_1);  // 6 minutes, see initial conditions
+    f_UTRAN_CellInfo_SetLAC(utran34_CellB, tsc_LAC_2);
+    f_UTRAN_CellInfo_SetNMO(utran34_CellB, tsc_NMO_II);
+    
+    // CellB started switched on with default power level
+    f_UTRAN34_SS_CreateCellDCH(utran34_CellB);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_CellB);
+    
+    // Initialization of Cell A per Initial conditions
+    // Info for cell A
+    f_UTRAN34_CellInfo_SetAttFlag(utran34_CellA, tsc_AttOn);
+    f_UTRAN34_CellInfo_SetT3212(utran34_CellA, tsc_T3212_1);  // 6 minutes, see initial conditions
+    f_UTRAN_CellInfo_SetNMO(utran34_CellA, tsc_NMO_II);
+    
+    // CellA started switched off
+    f_UTRAN34_SS_CreateCellDCH(utran34_CellA);
+    
+    //Send default system information
+    f_UTRAN34_SendDefSysInfo(utran34_CellA);
+    
+    // Set attenuation, switch on UE, and Idle update to bring UE to Cell_DCH state to register
+    // The UE is "Idle updated" on cell B with a valid CKSN and a TMSI.
+    f_UTRAN34_Preamble(utran34_CellB);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    fl_TC_9_4_3_3a_Body();
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    // Release RRC connection on cell 1 and release the cells
+    f_UTRAN34_Postamble(utran34_CellA, U1_IDLE, IMSI_DetachOnly); //@sic R5s150247 sic@
+    f_UTRAN_ReleaseCell(utran34_CellB, f_UTRAN_CellInfo_GetConfigType(utran34_CellB));
+  }
+
+  /*
+   * @desc      test body of TC_9_4_3_3a
+   * @status    APPROVED (UTRAN)
+   */
+  function fl_TC_9_4_3_3a_Body() runs on UTRAN_PTC
+  {
+    var UTRAN_CellInfo_Type v_CellInfoA;
+    var UTRAN_CellInfo_Type v_CellInfoB;
+    var NAS_PlmnId v_PLMN_IdentityA;
+    var NAS_PlmnId v_PLMN_IdentityB;
+    var START_Value v_START_Value_ps := '00000000000000000000'B;
+    var START_Value v_START_Value_cs := '00000000000000000000'B;
+    var RRC_DATA_IND v_RRC_DataInd;
+    var RRC_DATA_IND v_RRC_DataInd_ps;
+    var float v_T3211_min := f_UG_SetTimerToleranceMin(15.0); // 24.008 cl. 11
+    var float v_T3212_min;
+    var float v_T30sec := 30.0; // absolute value of 30 sec
+    var template (present) RRCDataIndType v_U_LocationUpdatingRequest_Step5;  // used in steps 5, 89
+    var template (present) RRCDataIndType v_U_LocationUpdatingRequest_Step34; // used in steps 34, 140
+    var template (present) RRCDataIndType v_U_LocationUpdatingRequest_Step13; // used in all other steps using Location Update Request
+    var NAS_Lac v_LAC_B;
+    var NAS_Lac v_LAC_A;
+    var template (present) LocAreaId v_LAI_A;
+    var template (present) LocAreaId v_LAI_B;
+    var template (present) LocAreaId v_LAI_Deleted;
+    var octetstring v_TMSI := px_TMSI_Def;
+    var TI v_TI_R;
+    var TI v_TI_S;
+    var B1_Type v_FollowOnRequest;
+    var B7_Type v_CauUnassNumber := '0000001'B;
+    
+    timer t_WaitForGMM := 5.0;
+    timer t_WaitForCMService := 10.0;
+    
+    v_CellInfoA := f_UTRAN_CellInfo_Get(utran34_CellA);
+    // Variables to be used with cell A
+    v_PLMN_IdentityA := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(utran34_CellA));
+    v_LAC_A := v_CellInfoA.lac;
+    v_LAI_A := cr_LAI(omit, v_PLMN_IdentityA, v_LAC_A);
+    
+    // Variables to be used with cell B
+    v_CellInfoB := f_UTRAN_CellInfo_Get(utran34_CellB);
+    v_PLMN_IdentityB := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(utran34_CellB));
+    v_LAC_B := v_CellInfoB.lac;
+    v_LAI_B := cr_LAI(omit, v_PLMN_IdentityB, v_LAC_B);
+    
+    // Variables independent of Cell A or B
+    v_T3212_min := (int2float(tsc_T3212)/1000.0) - 15.0; // 6 min - 15 seconds, see step 9, same for both cells
+    v_LAI_Deleted := cr_LAI(omit, v_PLMN_IdentityA, tsc_LAC_Deleted); // same for both cells as they use the same PLMN
+    
+    // TMSI used throughout the test case is px_TMSI_Def; this is the same principle as applied in 9.4.3.3
+    // new TMSI allocated will therefore always be the same; UE ack's this via TMSI Reallocation Complete
+    // changing the TMSI value is tested in a specific test case
+    v_U_LocationUpdatingRequest_Step5 :=  cr_U_LocationUpdatingRequest_9433a(?, // CKSN = initial value
+                                                                             v_LAI_B, // LAI = b
+                                                                             cr_MobileIdTMSI_lv(v_TMSI)); // mobile identity = TMSI
+    v_U_LocationUpdatingRequest_Step34 := cr_U_LocationUpdatingRequest_9433a(?, // CKSN = initial value
+                                                                             v_LAI_A, // LAI = a
+                                                                             cr_MobileIdTMSI_lv(v_TMSI)); // mobile identity = TMSI
+    v_U_LocationUpdatingRequest_Step13 := cr_U_LocationUpdatingRequest_9433a(tsc_KeySeqDeleted, // CKSN = no key available
+                                                                             v_LAI_Deleted, // LAI = deleted LAI(the MCC and MNC hold the previous values, the LAC is coded FFFE)
+                                                                             f_Imsi2MobileIdentity(px_IMSI_Def)); // mobile identity = IMSI
+    
+    //@siclog "Step 1" siclog@
+    //Set the cell type of cell A to the "Serving cell". Set the cell type of cell B to the "non-suitable cell".
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationServingCell, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationCellOFF, tsc_AttenuationCellOFF);
+    
+    //@siclog "Step 2-4" siclog@
+    //RRC CONNECTION Establishment with cause: Registration. If PS mode: a ROUTING AREA UPDATE REQUEST should be rejected with the cause "GPRS services not allowed".
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellA, utran34_CellB); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 5-6" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = initial value, LAI = b, mobile station classmark 1 as given by the ICS and mobile identity = TMSI.
+    //LOCATION UPDATING REJECT. IE Reject cause is set to #22 in table 10.5.95 of TS 24.008, causes #2, #3, #6, #11, #12, #13 and #15 being excluded.
+    if (pc_PS == true) {
+      // wait for RAU and LAU in any order and reject
+      t_WaitForGMM.start;
+      interleave { // interleave does not allow calling user defined functions (TTCN standard V4.5.1 cl. 20.4)
+        [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated,
+                                                  tsc_RB3,
+                                                  cr_U34_RA_UpdReqAny(cr_GMM_UpdateType(?, ?)))) {} //@sic R5s150682 sic@ @sic R5s150829 ch. 4.6.2 sic@
+        [] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step5)) {} //@sic R5s150829 ch. 4.6.2 sic@
+      }
+    }
+    else { // only CS
+      // wait for LAU and reject
+      U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step5));
+    }
+    
+    // if (pc_PS == true) RAU is rejected
+    if (pc_PS == true) { // @sic R5s150829 ch. 4.6.2 sic@
+      t_WaitForGMM.stop;
+      f_UTRAN34_SendRoutingAreaUpdateReject(tsc_RejCau_GPRS_SrvNotAllowed);
+    }
+
+    // if (pc_PS == true) or  (pc_CS == true) LAU is rejected    @sic R5s150829 ch. 4.6.2 sic@
+    f_UTRAN34_SendLocationUpdatingReject(tsc_RejCau_Congestion); // @sic R5-144637 sic@ @sic R5s141390 sic@ @sic R5-150634 sic@
+    
+    //@siclog "Step 7-8" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    
+    //@siclog "Step 9" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3212 (tolerance -15s; 45s) at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3212_min);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 9"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 10-12" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 13" siclog@
+    //LOCATION UPDATING REQUEST. location updating type: "normal location update", CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 14" siclog@
+    //LOCATION UPDATING REJECT. IE Reject cause = #17 "network failure".
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step13, tsc_RejCau_NtwFailure);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 14"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 15-16" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 16"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 17" siclog@
+    // The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 18-20" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 21" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = "normal location update", CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 22-23" siclog@
+    //AUTHENTICATION REQUEST and RESPONSE. CKSN = initial CKSN
+    //@siclog "Step 24-25" siclog@
+    //SECURITY MODE COMMAND and COMPLETE.
+    //@siclog "Step 26" siclog@
+    //LOCATION UPDATING ACCEPT. IE mobile Identity = new TMSI.
+    //@siclog "Step 27" siclog@
+    //TMSI REALLOCATION COMPLETE
+    f_UTRAN34_LocationUpdate(utran34_CellA, true, TMSI, v_U_LocationUpdatingRequest_Step13);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 27"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 28-29" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    
+    //@siclog "Step 30" siclog@
+    //Set the cell type of cell B to the "Serving cell". Set the cell type of cell A to the "non-suitable cell".
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationServingCell, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationCellOFF, tsc_AttenuationCellOFF);
+    
+    //@siclog "Step 31-33" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellB, utran34_CellA); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 34" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = initial value, LAI = a, mobile station classmark 1 as given by the ICS and mobile identity = TMSI.
+    //@siclog "Step 35" siclog@
+    //LOCATION UPDATING REJECT. IE Reject cause is set to #38 in table 10.5.95 of TS 24.008, causes #2, #3, #6, #11, #12, #13 and #15 being excluded.
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step34, tsc_RejCau_CallNotIdentified);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 35"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 36-37" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    
+    //@siclog "Step 38" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 39-41" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 41"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 42" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13)) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    
+    //@siclog "Step 43" siclog@
+    //The SS modifies the scrambling code of DL DPCH for generating lower layer failure.
+    //@siclog "Step 44" siclog@
+    //CELL UPDATE. CCCH
+    //@siclog "Step 45" siclog@
+    //RRC CONNECTION RELEASE. CCCH
+    //@siclog "Step 46" siclog@
+    //The SS re-modifies the scrambling code of DL DPCH to the original one.
+    f_UTRAN34_LowerLayerFailureCheck(utran34_CellB);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 46"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 47" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 48-50" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 51" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13));
+    
+    //@siclog "Step 52-53" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 53"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 54" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 55-57" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 58" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 59-60" siclog@
+    //SS performs step 35 and 36, and step 37.
+    //LOCATION UPDATING REJECT. IE Reject cause is set to #38 in table 10.5.95 of TS 24.008, causes #2, #3, #6, #11, #12, #13 and #15 being excluded.
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step13, tsc_RejCau_CallNotIdentified);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 60"); // @sic R5s141390 sic@
+    
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    
+    if (pc_EmergSpeech == true) {
+      // Cause the UE to originate Emergency call. The request is assumed to be triggered by AT command D.
+      f_UT_RequestCSCall(UT, px_EmergencyCallNumber);
+      
+      //@siclog "Step 61-63" siclog@
+      //RRC CONNECTION Establishment with cause: Emergency.
+      f_UTRAN34_RRC_ConnEst(utran34_CellB, emergencyCall);
+      
+      //@siclog "Step 64" siclog@
+      //CM SERVICE REQUEST. CM service type = Emergency call establishment; CKSN = no key available; Mobile Identity = IMSI.
+      U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ServReq_MO_Emergency(tsc_KeySeqDeleted, f_Imsi2MobileIdentity(px_IMSI_Def))))-> value v_RRC_DataInd;
+      v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+      f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value_cs);
+      f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 64"); // @sic R5s141390 sic@
+      
+      //@siclog "Step 65" siclog@
+      //CM SERVICE ACCEPT
+      U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_CM_ServAcc));
+      
+      //@siclog "Step 66" siclog@
+      //EMERGENCY SETUP
+      U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                            tsc_RB3,
+                                            cr_U_ESetup(cr_BcapSpeechMO))) -> value v_RRC_DataInd;
+      v_TI_R := v_RRC_DataInd.msg.esetup.ti;
+      v_TI_S := v_TI_R;
+      v_TI_S.tiFlag := '1'B;
+      
+      //@siclog "Step 67" siclog@
+      //RELEASE COMPLETE. Cause = unassigned number
+      U_Dc.send(cas_DataReq_CS(utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_ReleaseComplete(v_TI_S, -, cs_Cau(v_CauUnassNumber))));
+      
+      //@siclog "Step 68-69" siclog@
+      //The SS waits for the disconnection of the main signalling link.
+      f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    }
+    
+    //@siclog "Step 70" siclog@
+    // If possible (see ICS) USIM detachment is performed. Otherwise if possible (see ICS) switch off is performed. Otherwise the power is removed.
+    f_UT_SwitchOffUE(UT, true, CNF_REQUIRED);
+    
+    //@siclog "Step 71" siclog@
+    // The UE shall not initiate an RRC connection establishment on cell A or on cell B. This is checked during 30 s.
+    f_UTRAN34_RRC_RandAccFail(v_T30sec); // no IMSI Detach as there has been a LU rejection before
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 71"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 72" siclog@
+    // Depending on what has been performed in step 70 the UE is brought back to operation. The subsequent GMM attach should be rejected if received in the PS mode.
+    f_UT_SwitchOnUE(UT, true, CNF_REQUIRED);
+    
+    //@siclog "Step 73-75" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellB, utran34_CellA); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 76" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    //@siclog "Step 77-78" siclog@
+    //AUTHENTICATION REQUEST and RESPONSE. CKSN = initial CKSN
+    //@siclog "Step 79-80" siclog@
+    //SECURITY MODE COMMAND and COMPLETE.
+    //@siclog "Step 81" siclog@
+    //LOCATION UPDATING ACCEPT. IE mobile Identity = new TMSI.
+    //@siclog "Step 82" siclog@
+    //TMSI REALLOCATION COMPLETE
+    
+    if (pc_PS == true) {
+      // wait for GMM Attach and LAU in any order and reject GMM Attach
+      t_WaitForGMM.start;
+      interleave { // interleave does not allow calling user defined functions (TTCN standard V4.5.1 cl. 20.4)
+        [] U_Dc.receive(car_PS_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_AttachReq(cr_AttachType(?, (tsc_I_AttachTypeGPRSAtt, tsc_I_AttachTypeCombined))))) -> value v_RRC_DataInd_ps {} // @sic R5s150829 ch. 4.6.2 sic@
+        [] U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13))  -> value v_RRC_DataInd {} // @sic R5s150829 ch. 4.6.2 sic@
+      }
+    }
+    else { // only CS
+      // wait for LAU
+      f_UTRAN34_LocationUpdate(utran34_CellB, true, TMSI, v_U_LocationUpdatingRequest_Step13);
+    }
+    
+    // if (pc_PS == true)
+    if (pc_PS == true) {
+      // 1. Attach Reject @sic R5s150829 ch. 4.6.2 sic@
+      t_WaitForGMM.stop;
+      v_START_Value_ps := v_RRC_DataInd_ps.ttcn_start;
+      f_UTRAN_SS_SecurityDownloadStart(ps_domain, v_START_Value_ps);
+      U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_AttachReject(tsc_RejCau_GPRS_SrvNotAllowed)));
+      // 2. Handle LAU @sic R5s150829 ch. 4.6.2 sic@
+      v_START_Value_ps := v_RRC_DataInd.ttcn_start;
+      f_UTRAN34_LocationUpdate_WithoutLAUReq(utran34_CellB, v_START_Value_ps, true, TMSI);
+    }
+    
+    //@siclog "Step 83-84" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 84"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 85" siclog@
+    //Set the cell type of cell A to the "Serving cell". Set the cell type of cell B to the "non-suitable cell".
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationServingCell, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationCellOFF, tsc_AttenuationCellOFF);
+
+    //@siclog "Step 86-88" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellA, utran34_CellB); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 89" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = initial value, LAI = b, mobile station classmark 1 as given by the ICS and mobile identity = TMSI.
+    //@siclog "Step 90" siclog@
+    //LOCATION UPDATING REJECT. IE Reject cause is set to #38 in table 10.5.95 of TS 24.008, causes #2, #3, #6, #11, #12, #13 and #15 being excluded
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step5, tsc_RejCau_CallNotIdentified);
+    
+    //@siclog "Step 91-92" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 92"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 93" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 94-96" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 97" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13)) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    
+    //@siclog "Step 98" siclog@
+    //The SS modifies the scrambling code of DL DPCH for generating lower layer failure.
+    //@siclog "Step 99" siclog@
+    //CELL UPDATE. CCCH
+    //@siclog "Step 100" siclog@
+    //RRC CONNECTION RELEASE. CCCH
+    //@siclog "Step 101" siclog@
+    //The SS re-modifies the scrambling code of DL DPCH to the original one.
+    f_UTRAN34_LowerLayerFailureCheck(utran34_CellA);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 101"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 102" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 103-105" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+
+    //@siclog "Step 106" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13));
+    
+    //@siclog "Step 107-108" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 108"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 109" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 110-112" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 113" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_LocationUpdatingRequest)) -> value v_RRC_DataInd
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13)) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    
+    //@siclog "Step 114" siclog@
+    //The SS modifies the scrambling code of DL DPCH for generating lower layer failure.
+    //@siclog "Step 115" siclog@
+    //CELL UPDATE. CCCH
+    //@siclog "Step 116" siclog@
+    //RRC CONNECTION RELEASE. CCCH
+    //@siclog "Step 116a" siclog@
+    //The SS re-modifies the scrambling code of DL DPCH to the original one.
+    f_UTRAN34_LowerLayerFailureCheck(utran34_CellA);
+    
+    //@siclog "Step 116b" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 116b"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 117-119" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    
+    //@siclog "Step 120" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 121-122" siclog@
+    //AUTHENTICATION REQUEST and RESPONSE. CKSN = initial CKSN
+    //@siclog "Step 123-124" siclog@
+    //SECURITY MODE COMMAND and COMPLETE.
+    //@siclog "Step 125" siclog@
+    //LOCATION UPDATING ACCEPT. IE mobile Identity = new TMSI. If the location updating type in the LOCATION UPDATING REQUEST contains 'FOR', then IE Follow-on Proceed is included in the ACCEPT and steps 127 to 131 will be omitted.
+    //@siclog "Step 126" siclog@
+    //TMSI REALLOCATION COMPLETE
+    v_FollowOnRequest := f_UTRAN34_LocationUpdate(utran34_CellA, true, TMSI, v_U_LocationUpdatingRequest_Step13);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 126"); // @sic R5s141390 sic@
+    
+    // If the location updating type in the LOCATION UPDATING REQUEST contains 'FOR', then IE Follow-on Proceed is included in the ACCEPT and steps 127 to 131 will be omitted.
+    if (v_FollowOnRequest == '0'B) { // LOCATION UPDATING REQUEST does not contain 'FOR'; FOP included in ACCEPT by default !!
+      //@siclog "Step 127-128" siclog@
+      //The SS waits for the disconnection of the main signalling link.
+      f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+      
+      // UE is now "idle, updated" in cell A.
+      // The UE may or may not have memorised the request for CM connection. The steps 129 to 135 are therefore optional for the MS.
+      // The SS waits for 10 seconds to check if the UE attempts to make a CM service request, else it will directly go to step 136.
+      
+      t_WaitForCMService.start;
+      alt {
+        [] U_TM.check(receive(car_RRC_ConnReq(utran34_CellA,
+                                              tsc_RB0,
+                                              cr_108_RRC_ConnReq_r8(?))))
+          {
+            // there is an RRCConnectionRequest sent by the UE which can be received by TTCN-3 in a sub-sequent function
+            //@siclog "Step 129-131" siclog@
+            //RRC CONNECTION Establishment
+            f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+            //@siclog "Step 132" siclog@
+            //CM SERVICE REQUEST. CKSN = initial value, Mobile identity = TMSI.
+            //@siclog "Step 133" siclog@
+            //CM SERVICE REJECT. Cause #17 (network failure).
+            //@siclog "Step 134-135" siclog@
+            //The SS waits for the disconnection of the main signalling link.
+            fl_TC_9_4_3_3a_Steps132_135();
+          }
+        [] t_WaitForCMService.timeout
+          {
+            // nothing to be done, directly go to step 136
+          }
+      }
+    }
+    else { // LOCATION UPDATING REQUEST contains 'FOR'
+      //@siclog "Step 132" siclog@
+      //CM SERVICE REQUEST. CKSN = initial value, Mobile identity = TMSI.
+      //@siclog "Step 133" siclog@
+      //CM SERVICE REJECT. Cause #17 (network failure).
+      //@siclog "Step 134-135" siclog@
+      //The SS waits for the disconnection of the main signalling link.
+      fl_TC_9_4_3_3a_Steps132_135();
+    }
+    
+    //@siclog "Step 136" siclog@
+    //Set the cell type of cell B to the "Serving cell". Set the cell type of cell A to the "non-suitable cell".
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationServingCell, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationCellOFF, tsc_AttenuationCellOFF);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 136"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 137-139" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellB, utran34_CellA); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 140" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = initial value, LAI = a, mobile station classmark 1 as given by the ICS and mobile identity = TMSI.
+    //@siclog "Step 141" siclog@
+    //LOCATION UPDATING REJECT. IE Reject cause is set to #38 in table 10.5.95 of TS 24.008, causes #2, #3, #6, #11, #12, #13 and #15 being excluded
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step34, tsc_RejCau_CallNotIdentified);
+    
+    //@siclog "Step 142-143" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    
+    //@siclog "Step 144" siclog@
+    // The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 145-147" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 148" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13));
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 148"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 149" siclog@
+    //The SS modifies the scrambling code of DL DPCH for generating lower layer failure.
+    //@siclog "Step 150" siclog@
+    //CELL UPDATE. CCCH
+    //@siclog "Step 151" siclog@
+    //RRC CONNECTION RELEASE. CCCH
+    //@siclog "Step 152" siclog@
+    //The SS re-modifies the scrambling code of DL DPCH to the original one.
+    f_UTRAN34_LowerLayerFailureCheck(utran34_CellB);
+    
+    //@siclog "Step 153" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 154-156" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 157" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE), Mobile Identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13)) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+
+    //@siclog "Step 158-159" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+    
+    //@siclog "Step 160" siclog@
+    // The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 160"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 161-163" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellB, registration);
+    
+    //@siclog "Step 164" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 165" siclog@
+    //LOCATION UPDATING REJECT. IE Reject cause = "retry upon entry into a new cell".
+    fl_TC_9_4_3_3a_LU_Rejection(v_U_LocationUpdatingRequest_Step13, tsc_RejCau_RetryUponEntry);
+    
+    //@siclog "Step 166-167" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellB, cell_Dch);
+
+    //@siclog "Step 168" siclog@
+    //Set the cell type of cell A to the "Serving cell". Set the cell type of cell B to the "non-suitable cell".
+    f_UTRAN_SetCellPower(utran34_CellA, tsc_AttenuationServingCell, tsc_AttenuationServingCell);
+    f_UTRAN_SetCellPower(utran34_CellB, tsc_AttenuationCellOFF, tsc_AttenuationCellOFF);
+    
+    //@siclog "Step 169-171" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN_PrepareCellRRC_ConnEst(utran34_CellA, utran34_CellB); // @sic R5s141390 sic@
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 171"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 172" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    U_Dc.receive(car_InitDirectTransfer(utran_CellDedicated, tsc_RB3, v_U_LocationUpdatingRequest_Step13)) -> value v_RRC_DataInd;
+    v_START_Value_cs := v_RRC_DataInd.ttcn_start;
+    
+    //@siclog "Step 173" siclog@
+    //The SS modifies the scrambling code of DL DPCH for generating lower layer failure.
+    //@siclog "Step 174" siclog@
+    //CELL UPDATE. CCCH
+    //@siclog "Step 175" siclog@
+    //RRC CONNECTION RELEASE. CCCH
+    //@siclog "Step 176" siclog@
+    //The SS re-modifies the scrambling code of DL DPCH to the original one.
+    f_UTRAN34_LowerLayerFailureCheck(utran34_CellA);
+    
+    //@siclog "Step 177" siclog@
+    //The UE shall not initiate an RRC connection establishment on cell A or on cell B during T3211 seconds at least after the RRC connection is released.
+    f_UTRAN34_RRC_RandAccFail(v_T3211_min);
+    
+    //@siclog "Step 178-180" siclog@
+    //RRC CONNECTION Establishment with cause: Registration.
+    f_UTRAN34_RRC_ConnEst(utran34_CellA, registration);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 180"); // @sic R5s141390 sic@
+    
+    //@siclog "Step 181" siclog@
+    //LOCATION UPDATING REQUEST. location updating type = normal, CKSN = no key available, LAI = deleted LAI (the MCC and MNC hold the previous values, the LAC is coded FFFE) mobile station classmark 1 as given by the ICS and mobile identity = IMSI.
+    //@siclog "Step 182-183" siclog@
+    //AUTHENTICATION REQUEST and RESPONSE. CKSN = initial CKSN
+    //@siclog "Step 184-185" siclog@
+    //SECURITY MODE COMMAND and COMPLETE.
+    //@siclog "Step 186" siclog@
+    //LOCATION UPDATING ACCEPT. IE mobile Identity = new TMSI.
+    //@siclog "Step 187" siclog@
+    //TMSI REALLOCATION COMPLETE
+    f_UTRAN34_LocationUpdate(utran34_CellA, true, TMSI, v_U_LocationUpdatingRequest_Step13);
+
+    //@siclog "Step 188-189" siclog@
+    //The SS waits for the disconnection of the main signalling link.
+    f_UTRAN34_RRC_ConnRel(utran34_CellA, cell_Dch);
+    f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 189"); // @sic R5s141390 sic@
+    
+  } // fl_TC_9_4_3_3_3a_Body
+
+}

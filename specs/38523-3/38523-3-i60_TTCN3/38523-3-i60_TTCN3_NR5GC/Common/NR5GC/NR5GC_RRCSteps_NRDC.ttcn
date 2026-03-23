@@ -1,0 +1,782 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-01-21 23:20:37 +0100 (Wed, 21 Jan 2026) $
+// $Rev: 42700 $
+/******************************************************************************/
+module NR5GC_RRCSteps_NRDC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G all;
+  import from Common4G5G_LoopBack all;
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from EPS_NAS_LoopBack_TypeDefs all;
+  import from EUTRA_NR_Parameters all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_LoopBack all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR5GC_SysinfoPaging all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_Templates_RB_Config all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CellInfoInit all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_HandoverCommonFunctions all;
+  import from NR_NTN_Configuration all;
+  import from NR_PDCP_Templates all;
+  import from NR_RRC_Templates all;
+  import from NR_SecurityFunctions all;
+  import from NR_SecuritySteps all;
+  import from NR_Timing all;
+  import from SDAP_TypeDefs all;
+
+  type enumerated NRDC_DRB_Configuration_Type { MCG_SCG,    //MCG configured with SRB1/SRB2/Default MCG DRB(s) + SCG DRB configured SN terminated (secured with Secondary keys)
+                                                MCG_Split,  //MCG configured with SRB1/SRB2/Default MCG DRB(s) + split SCG DRB configured SN terminated (secured with Secondary keys)
+                                                MCG_SCG_MNTerminated //MCG configured with SRB1/SRB2/Default MCG DRB(s) + SCG DRB configured MN terminated (secured with Master keys)
+                                               }; /* @status    APPROVED (NR5GC) */
+
+  type enumerated NRDC_SecurityActivation_Type {MCG_SCG_MasterKeys, MCG_SCG_SecondaryKeys, MCG, SCG, None }; /* @status    APPROVED (NR5GC) */
+
+  /*
+   * @desc      Bring UE to CONNECTED state as per 38.508-1 Table 4.5.4.2-5: NR-DC RRC_CONNECTED
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_NRDC_DRB_Type
+   * @param     p_TestMode          (default value: TESTMode_OFF)
+   * @param     p_UE_TestLoopModeA_NR_LB_Setup (default value: cs_UE_TestLoopModeA_NR_LB_Setup_NoScaling)
+   * @param     p_IpPduDelayTime    (default value: '00'O)
+   * @param     p_PDCP_ConfigSCG_DRB (default value: cs_38508_PDCP_Config)
+   * @param     p_SS_ConfigMCG      (default value: omit)
+   * @param     p_SS_ConfigSCG      (default value: omit)
+   * @param     p_DRBToAddModList   (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR5GC_RRC_ConnectedState3N_NRDC(NR_CellId_Type p_MCG_CellId,
+                                             NR_CellId_Type p_SCG_CellId,
+                                             NRDC_DRB_Configuration_Type p_NRDC_DRB_Type,
+                                             NR_TESTMODE_STATE_Type p_TestMode := TESTMode_OFF,
+                                             template (value) UE_TestLoopModeA_NR_LB_Setup_Type p_UE_TestLoopModeA_NR_LB_Setup := cs_UE_TestLoopModeA_NR_LB_Setup_NoScaling,
+                                             UE_TestLoopModeB_LB_Setup_Type p_IpPduDelayTime := '00'O,
+                                             template (omit) PDCP_Config p_PDCP_ConfigSCG_DRB := cs_38508_PDCP_Config,
+                                             template (omit) NR_RadioBearerList_Type p_SS_ConfigMCG := omit,//@sic R5s230377 sic@
+                                             template (omit) NR_RadioBearerList_Type p_SS_ConfigSCG := omit, //@sic R5s230377 sic@
+                                             template (omit) DRB_ToAddModList p_DRBToAddModList := omit
+                                             ) runs on NR5GC_PTC
+  { //@sic R5-205332 R5-605339 R5-606298 R5s211470 sic@
+    //@sic R5-256660: added p_DRBToAddModList sic@
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var template (omit) MAC_CellGroupConfig v_MAC_CellGroupConfig := omit;
+
+    if (f_NR_TestcaseIsL2Testcase()) { //@sic R5s210315 sic@
+        f_NR_CellInfo_SetMAC_CellGroupConfigL2(p_SCG_CellId);
+        f_NR_CellInfo_SetMAC_CellGroupConfigL2(p_MCG_CellId);
+        v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(p_MCG_CellId);
+    }
+    
+    //Steps 1-8: Same as table 4.5.4.2-3, steps 1-8.
+    f_NR_Paging_Def(p_MCG_CellId, RRC_IDLE);
+    v_ReceivedMsg := f_NR5GC_RRCIdleToConnected_Steps2_4(p_MCG_CellId);
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(p_MCG_CellId, v_ReceivedMsg, -, v_MAC_CellGroupConfig, p_DRBToAddModList, -, -, -);  //Reconfigure SRB2 + MCG DRBs as per default
+
+    // Steps 8A to 8C
+    // The SS transmits an RRCReconfiguration message and a PDU SESSION MODIFICATION COMMAND to add a new SCG DRB or a new split DRB
+    // The UE transmits an RRCReconfigurationComplete message including nr-SCG-Response.
+    // The UE transmits a ULInformationTransfer message and an PDU SESSION MODIFICATION COMPLETE message.
+    f_NR_RRCReconfig_AddSCG_DRBs_NRDC(p_MCG_CellId, p_SCG_CellId, p_NRDC_DRB_Type, p_PDCP_ConfigSCG_DRB, p_SS_ConfigMCG, p_SS_ConfigSCG); //@sic R5s230377 sic@
+    // Step 9a1 - 9a2
+    //IF Test Loop Function=On, the SS transmits a CLOSE UE TEST LOOP message to enter the UE test loop mode. The CLOSE UE TEST LOOP is using the associated condition for the test loop.
+    //The UE transmits a CLOSE UE TEST LOOP COMPLETE message to confirm that loopback entities for the radio bearer(s) have been created and loop back is activated.
+    select (p_TestMode) {
+      case (TEST_LOOPModeA_ON) {
+        f_NR5GC_CloseUE_TestLoopModeA (p_MCG_CellId, p_UE_TestLoopModeA_NR_LB_Setup);
+      }
+      case (TEST_LOOPModeB_ON) {
+        f_NR5GC_CloseUE_TestLoopModeB (p_MCG_CellId, p_IpPduDelayTime);
+      }
+      case (PING_Or_TEST_LOOPModeB_ON) {
+       if (not pc_IP_Ping) {
+        f_NR5GC_CloseUE_TestLoopModeB (p_MCG_CellId, p_IpPduDelayTime);
+       }
+      }
+      case else { // do nothing
+      }
+    }
+  }
+
+  /*
+   * @desc   Add NR-DC SCG DRB including PDU SESSION MODIFICATION as per 3.508-1 Table 4.5.4.2-5: NR-DC RRC_CONNECTED steps 8A to 8C
+   *         Function to be used when bringing UE from IDLE to CONNECTED state
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_NRDC_DRB_Type
+   * @param     p_PDCP_Config       (default value: cs_38508_PDCP_Config)
+   * @param     p_SS_ConfigMCG      (default value: omit)
+   * @param     p_SS_ConfigSCG      (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_RRCReconfig_AddSCG_DRBs_NRDC( NR_CellId_Type p_MCG_CellId,
+                                              NR_CellId_Type p_SCG_CellId,
+                                              NRDC_DRB_Configuration_Type p_NRDC_DRB_Type,
+                                              template (omit) PDCP_Config p_PDCP_Config := cs_38508_PDCP_Config,
+                                              template (omit) NR_RadioBearerList_Type p_SS_ConfigMCG := omit,
+                                              template (omit) NR_RadioBearerList_Type p_SS_ConfigSCG := omit
+                                            ) runs on NR5GC_PTC
+  { //@sic R5s211335 sic@
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+    var template (omit) RadioBearerConfig v_RadioBearerConfig1 := omit;
+    var template (omit) RadioBearerConfig v_RadioBearerConfig2 := omit;
+    var template (omit) CellGroupConfig v_CellGroupConfigMCG := omit;
+    var template (value) CellGroupConfig v_CellGroupConfigSCG;
+    var template (omit) NR_RadioBearerList_Type v_SS_ConfigMCG := omit;
+    var template (omit) NR_RadioBearerList_Type v_SS_ConfigSCG := omit;
+    var template (value) SDAP_Config v_SDAP_ConfigSCG;
+    var integer v_SCG_DRB_Id := f_NR_GetNextSCGDRBId();
+    var boolean v_IsFR1_SCG := f_NR_CellInfo_GetIsFR1(p_SCG_CellId);
+    var template (value) DRB_ToAddMod v_DRBToAddMod_SCG;
+    var template (value) SDAP_Configuration_Type v_SDAP_ConfigurationSCG;
+    var NRDC_SecurityActivation_Type v_NRDC_SecurityActivation;
+    var RNTI_Value v_RNTI_ValueSecondary :=  tsc_C_RNTI_Value4;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+    var template (value) QoS_Flow v_QoSFlow;
+    var template (value) NG_NAS_DL_Pdu_Type v_NG_NAS_DL_Pdu;
+    var CellGroupId v_CellGroupIdSCG := f_NR_CellInfo_Get_CellGroupId(p_SCG_CellId);
+    
+    if (isvalue(v_GSM_MobilityInfo)) {
+      v_QoSFlow := cs_QoS_Flow5;
+      v_QoSFlow.qfi := '000101'B;  // QFI = 5
+      v_NG_NAS_DL_Pdu := f_Get_NG_PDUSessionModificationCommand(v_GSM_MobilityInfo.SessionId, -, -, -, -, -, f_BuildDefaultQoSRules("5", '7A'O), cs_QoSFlowDescr({v_QoSFlow})); // compiler warning can be ignored due to previous check
+      // SDAP parameter for the new SCG DRB Id
+      // The SDAP needs to include the QFI of the QoS Flow of the SCG bearer.  This will never be a default bearer
+      v_SDAP_ConfigSCG := cs_SDAP_Config(oct2int(valueof(v_GSM_MobilityInfo.SessionId)), false, {5});
+      v_SDAP_ConfigurationSCG:= f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(v_SDAP_ConfigSCG));
+    } else {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "No internet PDU session found to modify");
+    }
+    
+    select(p_NRDC_DRB_Type) {
+        case(MCG_SCG){  // Configure SCG DRB
+            //@sic R5s210791 R5s210888 sic@
+            if (isvalue(p_PDCP_Config)) {
+                v_DRBToAddMod_SCG := cs_38508_NRDRB_ToAddMod(v_SDAP_ConfigSCG, v_SCG_DRB_Id, p_PDCP_Config);
+            }
+            v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef(omit, {v_DRBToAddMod_SCG}, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get_SCG(), f_NR_AS_IntegrityAlgorithm_Get_SCG()), secondary));
+            if (isvalue(p_SS_ConfigSCG)) {
+                v_SS_ConfigSCG := p_SS_ConfigSCG;
+            } else {
+                v_SS_ConfigSCG := { cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                                        cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB),
+                                                        cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                                        v_SDAP_ConfigurationSCG) };
+            }
+            v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(p_SCG_CellId, v_SCG_DRB_Id, v_RNTI_ValueSecondary);
+            v_NRDC_SecurityActivation := MCG_SCG_SecondaryKeys;
+        }
+        case(MCG_SCG_MNTerminated){          // Configure SCG DRB MN terminated
+            //Add SCG DRB to RadioBearerConfig1 -> MN terminated
+            //@sic R5s210888 sic@
+            if (isvalue(p_PDCP_Config)) {
+                v_DRBToAddMod_SCG := cs_38508_NRDRB_ToAddMod(v_SDAP_ConfigSCG, v_SCG_DRB_Id, p_PDCP_Config);
+            }
+            v_RadioBearerConfig1 := cs_38508_RadioBearerConfigDef(omit, {v_DRBToAddMod_SCG}, -, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), master));
+            v_RadioBearerConfig2 := omit;
+            //In SS configure the SCG DRB in the MCG Cell
+            v_SS_ConfigMCG := { cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                                    cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB),
+                                                    cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                                    v_SDAP_ConfigurationSCG)};
+            v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(p_SCG_CellId, v_SCG_DRB_Id, v_RNTI_ValueSecondary);
+            v_NRDC_SecurityActivation := MCG_SCG_MasterKeys;
+        }
+        case(MCG_Split) {   //MCG DRB reconfigured with Split - New SCG DRB is split SN terminated
+            //@sic R5s210888 sic@
+            if (isvalue(p_PDCP_Config)) {
+                v_RadioBearerConfig2 := cs_NRDRB_SplitBearer(cs_NR_DRB_SDAP(v_SDAP_ConfigSCG), v_SCG_DRB_Id, p_PDCP_Config, secondary, f_NR_AS_CipheringAlgorithm_Get_SCG(), f_NR_AS_IntegrityAlgorithm_Get_SCG()); //@sic R5s211471 sic@
+            } else {
+                v_RadioBearerConfig2 := cs_NRDRB_SplitBearer(cs_NR_DRB_SDAP(v_SDAP_ConfigSCG), v_SCG_DRB_Id, cs_NR_PDCP_Config_Split(cs_38508_PDCP_Config_DRB, omit, v_CellGroupIdSCG), secondary,f_NR_AS_CipheringAlgorithm_Get_SCG(), f_NR_AS_IntegrityAlgorithm_Get_SCG());//@sic R5s211471 sic@
+            }
+            //Add RLC SCG DRB in MCG
+            v_CellGroupConfigMCG := f_NR_GetCellgroupConfig_DRB (p_MCG_CellId, {v_SCG_DRB_Id}, false);
+            v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(p_SCG_CellId, v_SCG_DRB_Id, v_RNTI_ValueSecondary);
+            //Add the new SCG DRB
+            if (isvalue(p_SS_ConfigMCG)) {
+                v_SS_ConfigMCG := p_SS_ConfigMCG;
+            } else {
+                v_SS_ConfigMCG := { cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                                        cs_NR_PDCP_Configuration_Proxy(cs_RlcBearerRouting_NR(p_SCG_CellId)),
+                                                        cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                                        cs_SDAP_Configuration_None  //@sic R5s220786 sic@
+                                                        ) };
+            }
+            if (isvalue(p_SS_ConfigSCG)) {
+                v_SS_ConfigSCG := p_SS_ConfigSCG;
+            } else {
+                v_SS_ConfigSCG := {cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                                       cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB, cs_RlcBearerRouting_NR(p_MCG_CellId)),
+                                                       cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                                       v_SDAP_ConfigurationSCG)};
+            }
+            v_NRDC_SecurityActivation := SCG;  //@sic R5s220784 sic@
+            v_DRBToAddMod_SCG := cs_38508_NRDRB_ToAddMod(v_SDAP_ConfigSCG, v_SCG_DRB_Id, cs_38508_PDCP_Config);
+        }
+        case else {}
+    }
+    // Build info for SCG and store in DRB list
+    fl_StoreSCG_InDRBList (valueof(v_DRBToAddMod_SCG), valueof(v_SS_ConfigSCG[0]), valueof(v_CellGroupConfigSCG));
+
+    // Calculate security keys for SCG
+    v_SecurityParams := f_NR_Security_InitSCG(v_SecurityParams);
+    f_NR_Security_Set(v_SecurityParams);
+
+    //Steps 8A-8C
+    //The SS transmits an RRCReconfiguration message and a PDU SESSION MODIFICATION COMMAND to add a new SCG DRB or a new split DRB
+    //EXCEPTION: In parallel to steps 8B and 8C the UE performs a C-RNTI based Contention Based Random Access (CBRA) procedure on the PSCell.
+    //The UE transmits an RRCReconfigurationComplete message including nr-SCG-Response.
+    //UE transmits a ULInformationTransfer message and an PDU SESSION MODIFICATION COMPLETE message.
+    f_ReconfigureDRBs_NRDC( p_MCG_CellId, p_SCG_CellId,
+                            { cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_NG_NAS_DL_Pdu) },
+                            -,
+                            v_RadioBearerConfig1, v_RadioBearerConfig2,
+                            v_CellGroupConfigMCG, v_CellGroupConfigSCG,
+                            v_SS_ConfigMCG, v_SS_ConfigSCG,
+                            v_NRDC_SecurityActivation,
+                            v_RNTI_ValueSecondary,
+                            -, -,
+                            true  );  // Adding the SCG
+                              
+  }
+
+  /*
+   * @desc      Local function to build info for SCG and store in DRB list
+   *            and Configure SS to reconfigure either new or existing DRBs
+   *            ** Only to be called from common functions **
+   * @param     p_NewDRB
+   * @param     p_SS_Config
+   * @param     p_CellGroupConfig
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_StoreSCG_InDRBList (DRB_ToAddMod p_NewDRB,
+                                  NR_RadioBearer_Type p_SS_Config,
+                                  CellGroupConfig p_CellGroupConfig) runs on NR5GC_PTC
+  {
+    var NR_DRBInfoList_Type v_ExistingDRBs := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var NR_DRBInfoList_Type v_NewSCG_DRBList := f_BuildDRBNewDRBList ({p_NewDRB}, {p_SS_Config}, p_CellGroupConfig);
+
+    // As this is an SCG, the flag needs to be set
+    v_NewSCG_DRBList[0].DC_SCG := true;
+    v_ExistingDRBs := f_NR_DRBInfo_AddListOfEntries (v_ExistingDRBs, v_NewSCG_DRBList);
+    f_NR5GC_MobileInfo_SetDRBInfoList(v_ExistingDRBs);
+  }
+
+  /*
+   * @desc      Send RRC Reconfiguration message with an optional piggybacked NAS message
+   *            and Configure SS to reconfigure either new or existing DRBs on SCG
+   *            ** SRB/DRB Release scenario on MCG or SCG is NOT HANDLED **
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_NASMsg
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_RadioBearerConfig1
+   * @param     p_RadioBearerConfig2
+   * @param     p_CellGroupConfigMCG
+   * @param     p_CellGroupConfigSCG
+   * @param     p_SS_ConfigMCG
+   * @param     p_SS_ConfigSCG
+   * @param     p_NRDC_SecurityActivation
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value4)
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB1)
+   * @param     p_WaitForRachPreamble (default value: reconfigurationWithSync_CheckRACH)
+   * @param     p_AddingSCG         (default value: false)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?))))
+   * @param     p_ActivateSecurity  (default value: true)
+   * @param     p_DuplicatePDU      (default value: false)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_ReconfigureDRBs_NRDC( NR_CellId_Type p_MCG_CellId,
+                                   NR_CellId_Type p_SCG_CellId,
+                                   template (omit) NG_NAS_MSG_RequestList_Type p_NASMsg,
+                                   template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                   template (omit) RadioBearerConfig p_RadioBearerConfig1,
+                                   template (omit) RadioBearerConfig p_RadioBearerConfig2,
+                                   template (omit) CellGroupConfig p_CellGroupConfigMCG,
+                                   template (omit) CellGroupConfig p_CellGroupConfigSCG,
+                                   template (omit) NR_RadioBearerList_Type p_SS_ConfigMCG,
+                                   template (omit) NR_RadioBearerList_Type p_SS_ConfigSCG,
+                                   NRDC_SecurityActivation_Type  p_NRDC_SecurityActivation,
+                                   RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value4,
+                                   NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB1,
+                                   ReconfigurationWithSyncAvailable_Type p_WaitForRachPreamble := reconfigurationWithSync_CheckRACH,
+                                   boolean p_AddingSCG := false,
+                                   template (present) UL_DCCH_Message p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?))),
+                                   boolean p_ActivateSecurity := true,
+                                   boolean p_DuplicatePDU := false
+                                 ) runs on NR5GC_PTC
+  { //@sic R5s220185 : added p_ActivateSecurity sic@
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var template (omit) SK_Counter v_SK_Counter := omit;
+    var boolean v_PDUSessionModificationComplete := false;
+    
+    if (p_AddingSCG) {  // @sic R5s210716 sic@
+      v_PDUSessionModificationComplete := true;
+      // This field is always included upon initial configuration of an NR SCG
+      v_SK_Counter := 0;
+    }
+    
+    v_V1530Ext := f_NRDC_BuildRRCReconfiguration_v1530( p_CellGroupConfigSCG, p_CellGroupConfigMCG, p_RadioBearerConfig2, -, v_SK_Counter ); // @sic R5s210716 sic@
+
+    //Reconfigure SS
+    f_ReconfigureSS_DRBs_NRDC( p_MCG_CellId, p_SCG_CellId, p_TimingInfo, p_SS_ConfigMCG, p_SS_ConfigSCG, p_NRDC_SecurityActivation, p_RNTI_Value, p_ActivateSecurity);
+    
+    //Send RRCReconfiguration Receive RRCReconfiurationComplete and checl PRACH premable in the SCG cell
+    f_NR_SendRRCReconfiguration_NRDC(p_MCG_CellId, p_SCG_CellId,
+                                     p_RadioBearerConfig1, v_V1530Ext, p_NASMsg, p_TimingInfo,
+                                     p_SRB, p_WaitForRachPreamble, v_PDUSessionModificationComplete,   // @sic R5s210716 sic@
+                                     p_RRCConnReconfigComplete,
+                                     p_DuplicatePDU
+                                     );
+  }
+
+  /*
+   * @desc      Reconfigure SS during the RRC Reconfiguration for NR-DC
+   *            and Configure SS to reconfigure either new or existing DRBs on SCG
+   *            ** SRB/DRB Release scenario on MCG or SCG is NOT HANDLED **
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SS_ConfigMCG
+   * @param     p_SS_ConfigSCG
+   * @param     p_NRDC_SecurityActivation
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value4)
+   * @param     p_ActivateSecurity  (default value: true)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_ReconfigureSS_DRBs_NRDC( NR_CellId_Type p_MCG_CellId,
+                                      NR_CellId_Type p_SCG_CellId,
+                                      template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                      template (omit) NR_RadioBearerList_Type p_SS_ConfigMCG,
+                                      template (omit) NR_RadioBearerList_Type p_SS_ConfigSCG,
+                                      NRDC_SecurityActivation_Type  p_NRDC_SecurityActivation,
+                                      RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value4,
+                                      boolean p_ActivateSecurity := true
+                                    ) runs on NR_BASE_PTC
+  { //@sic R5s220185 : added p_ActivateSecurity sic@
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+
+    //Reconfigure DRB in SS - existing DRBs are not reconfigured during release
+    if (isvalue(p_SS_ConfigMCG)) {
+        f_NR_SS_CommonRadioBearerConfig(p_MCG_CellId, p_SS_ConfigMCG, p_TimingInfo); // compiler warning can be ignored due to previous check
+    }
+
+    //Reconfigure SS SCG
+    if (isvalue(p_SS_ConfigSCG)) {
+        f_NR_SS_CommonRadioBearerConfig(p_SCG_CellId, p_SS_ConfigSCG, p_TimingInfo); // compiler warning can be ignored due to previous check
+        f_NR_CellInfo_SetRNTI(p_SCG_CellId, p_RNTI_Value);
+        f_NR_SS_C_RNTI_Config(p_SCG_CellId, p_RNTI_Value);
+        f_NR_ULGrantConfiguration_Start(p_SCG_CellId);
+    }
+    //Configure PDCP security on MCG and SCG
+    if (p_ActivateSecurity)
+    {
+        select (p_NRDC_SecurityActivation) {
+            case (MCG) {
+                v_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetCurrent(p_MCG_CellId, false);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_MCG_CellId,
+                                                    v_SecurityParams.AS_Integrity,
+                                                    v_SecurityParams.AS_Ciphering);
+            }
+            case (MCG_SCG_MasterKeys) {
+                v_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetCurrent(p_MCG_CellId, false);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_MCG_CellId,
+                                                    v_SecurityParams.AS_Integrity,
+                                                    v_SecurityParams.AS_Ciphering);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_SCG_CellId,
+                                                    v_SecurityParams.AS_Integrity,
+                                                    v_SecurityParams.AS_Ciphering);
+            }
+            case (MCG_SCG_SecondaryKeys) {
+                v_SecurityParams.AS_Ciphering.ActTimeList := f_NR_RRC_CipherActTime_GetCurrent(p_MCG_CellId, false);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_MCG_CellId,
+                                                    v_SecurityParams.AS_Integrity,
+                                                    v_SecurityParams.AS_Ciphering);
+                v_SecurityParams.AS_Ciphering_S.ActTimeList := f_NR_RRC_CipherActTime_SCG(p_SCG_CellId, p_SS_ConfigSCG);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_SCG_CellId,
+                                                    v_SecurityParams.AS_Integrity_S,
+                                                    v_SecurityParams.AS_Ciphering_S);
+            }
+            case(SCG) {
+                v_SecurityParams.AS_Ciphering_S.ActTimeList := f_NR_RRC_CipherActTime_SCG(p_SCG_CellId, p_SS_ConfigSCG);
+                f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_SCG_CellId,
+                                                    v_SecurityParams.AS_Integrity_S,
+                                                    v_SecurityParams.AS_Ciphering_S);
+            }
+        }
+    }
+  }
+
+  /*
+   * @desc     Send RRCReconfiguration - if required receive RRCReconfiurationComplete and if reauired check PRACH premable in the SCG cell
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_RadioBearerConfig1 (default value: omit)
+   * @param     p_V1530Ext          (default value: omit)
+   * @param     p_NASMsg            (default value: omit)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB1)
+   * @param     p_WaitForRachPreamble (default value: reconfigurationWithSync_CheckRACH)
+   * @param     p_PDUSessionModificationComplete (default value: false)
+   * @param     p_RRCConnReconfigComplete (default value: cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?))))
+   * @param     p_DuplicatePDU      (default value: false)
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_SendRRCReconfiguration_NRDC (NR_CellId_Type p_MCG_CellId,
+                                             NR_CellId_Type p_SCG_CellId,
+                                             template (omit) RadioBearerConfig p_RadioBearerConfig1 := omit,
+                                             template (omit) RRCReconfiguration_v1530_IEs p_V1530Ext := omit,
+                                             template (omit) NG_NAS_MSG_RequestList_Type p_NASMsg := omit,
+                                             template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                             NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB1,
+                                             ReconfigurationWithSyncAvailable_Type p_WaitForRachPreamble := reconfigurationWithSync_CheckRACH,
+                                             boolean p_PDUSessionModificationComplete := false,
+                                             template (present) UL_DCCH_Message p_RRCConnReconfigComplete := cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?))),
+                                             boolean p_DuplicatePDU := false
+                                             ) runs on NR5GC_PTC
+  { /* @sic R5s211470: added p_RRCConnReconfigComplete sic@ */
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+
+    //Reconfigure PSCell to enable PRACH indication - UE performs a C-RNTI based Contention Based Random Access (CBRA) procedure on the PSCell.
+    if (p_WaitForRachPreamble == reconfigurationWithSync_CheckRACH) {  // @sic R5s210716 sic@
+        f_NR_SS_SystemIndCtrlConfig(p_SCG_CellId, cds_NR_SystemIndCtrl_RachPreamble(enable));
+    }
+    // Send RRCReconfigurationmessage to UE - Don't wait for RRCReconfigurationComplete as it may come in parallel to the PRACH indication on PSCell
+    f_NR_SendRRCReconfiguration (p_MCG_CellId, p_SRB, p_RadioBearerConfig1, p_V1530Ext, p_NASMsg, -, p_TimingInfo, false);
+
+    if (p_WaitForRachPreamble == reconfigurationWithSync_CheckRACH) { // @sic R5s210716 sic@
+      if (p_PDUSessionModificationComplete) { // @sic R5-215678 sic@
+        interleave {
+          //@sic R5-206300 sic@
+          [] SRB.receive(car_NR_SRB_RrcPdu_IND(p_MCG_CellId, tsc_NR_RbId_SRB1, p_RRCConnReconfigComplete)) {}
+          //@sic R5s2111341 sic@
+          [] SRB.receive(car_NR_SRB_NasPdu_IND(p_MCG_CellId, tsc_NR_RbId_SRB2,
+                                                  cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp{}
+          [] SYSIND.receive(car_NR_PRACH_Preamble_IND(p_SCG_CellId, cr_TimingInfo_Any, ?)) {}
+        }
+      } else { // No NAS message expected @sic R5-215678 sic@
+        interleave {
+          //@sic R5-206300 sic@
+          [] SRB.receive(car_NR_SRB_RrcPdu_IND(p_MCG_CellId, tsc_NR_RbId_SRB1, p_RRCConnReconfigComplete)) {}
+          [] SYSIND.receive(car_NR_PRACH_Preamble_IND(p_SCG_CellId, cr_TimingInfo_Any, ?)) {}
+        }
+      }
+      f_NR_SS_SystemIndCtrlConfig(p_SCG_CellId, cds_NR_SystemIndCtrl_RachPreamble(disable));
+    } else {
+        if (p_DuplicatePDU) {//@sic R5-225393 sic@
+          interleave {
+             [] SRB.receive(car_NR_SRB_RrcPduSplit_IND(p_MCG_CellId, tsc_NR_RbId_SRB1, p_RRCConnReconfigComplete, cr_RlcBearerRouting_NR(p_MCG_CellId))) {}
+             [] SRB.receive(car_NR_SRB_RrcPduSplit_IND(p_MCG_CellId, tsc_NR_RbId_SRB1, p_RRCConnReconfigComplete, cr_RlcBearerRouting_NR(p_SCG_CellId))) {}
+           }
+        }
+        else { // no RACH check, so just wait for RRC message @sic R5s210716 sic@
+             SRB.receive(car_NR_SRB_RrcPdu_IND(p_MCG_CellId, tsc_NR_RbId_SRB1, p_RRCConnReconfigComplete)); //@sic R5-206300 sic@
+        }
+    }
+    
+    if (p_PDUSessionModificationComplete) { // @sic R5s210716 sic@
+      if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_GSM_MobilityInfo.SessionId)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Modification Complete failed");
+      }
+    }
+   }
+
+  /*
+   * @desc  Send RRCReconfiguration to UE and reconfigure SS to add SRB3 on SCG
+   *        Function to be used when NR-DC is already started i.e. an SCG DRB is already established
+   * @param     p_MCG_CellId
+   * @param     p_SCG_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NR_ReconfigureAddSRB3_NRDC(NR_CellId_Type p_MCG_CellId,
+                                         NR_CellId_Type p_SCG_CellId,
+                                         template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now
+                                         ) runs on NR5GC_PTC
+   {
+    var template (omit) RLC_Config_v1700 v_RLC_Config_v1700 := f_NR_RLC_Config_v1700(); //@sic R5-256933 sic@
+    var template (value) RadioBearerConfig v_RadioBearerConfig2 := cs_38508_RadioBearerConfigDef({cs_NR_SRB_ToAddMod(tsc_SRB3)}, omit, omit, cs_38508_SecurityConfig(cs_38508_SecurityAlgorithmConfig(f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get()), secondary));
+    var template (value) CellGroupConfig v_CellGroupConfigSCG := cs_38508_CellGroupConfig(f_NR_CellInfo_Get_CellGroupId(p_SCG_CellId),{cs_38508_RLC_BearerConfig_SRB(tsc_SRB3,-,-,-,v_RLC_Config_v1700)});
+    var template (value) NR_RadioBearer_Type v_SS_ConfigSCG := cs_NR_SS_SRB3_Config(cs_SDAP_Configuration_None);  //@sic R5s221315 change 1 sic@
+    
+    // Send RRCReconfigurationmessage to UE and wait for RRCReconfigurationComplete
+    f_ReconfigureDRBs_NRDC( p_MCG_CellId, p_SCG_CellId, omit, p_TimingInfo,
+                            omit, //p_RadioBearerConfig1,
+                            v_RadioBearerConfig2,
+                            omit, //p_CellGroupConfigMCG,
+                            v_CellGroupConfigSCG,
+                            omit, //p_SS_ConfigMCG
+                            {v_SS_ConfigSCG},
+                            SCG,  //Security on SCG only
+                            -,
+                            -,
+                            noRACH_Check
+                           );
+   }
+
+  /*
+   * @desc      Get Default CellGroupConfig acc to 38.508-1 Table 4.6.3-19: CellGroupConfig with with condition NR-DC_SCG
+   * @param     p_SCG_CellId
+   * @param     p_DRB_Id
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value4)
+   * @param     p_ReestablishRLC    (default value: omit)
+   * @return    template (value) CellGroupConfig
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_GetSCGConfigNRDC_SCG(NR_CellId_Type p_SCG_CellId,
+                                     integer p_DRB_Id,
+                                     RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value4,
+                                     template (omit) RLC_BearerConfig.reestablishRLC p_ReestablishRLC := omit
+                                     )  runs on NR_BASE_PTC return template (value) CellGroupConfig
+  {
+    var template (value) CellGroupConfig v_SCGConfig;
+    var template (value) RLC_BearerConfig v_RLC_BearerConfig;
+    var template (value) MAC_CellGroupConfig v_MAC_CellGroupConfig := f_NR_CellInfo_GetMAC_CellGroupConfig(p_SCG_CellId);
+    var template (value) PhysicalCellGroupConfig v_PhysicalCellGroupConfig := f_NR_CellInfo_GetPhysicalCellGroupConfig(p_SCG_CellId);
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_SCG_CellId);
+    var template (value) UL_AM_RLC v_ParametersTX := f_NR_UL_AM_RLC(v_IsFR1);
+    var template (value) DL_AM_RLC v_ParametersRX := f_NR_DL_AM_RLC(v_IsFR1);
+    var template (value) SpCellConfig v_SpCellConfig := f_NR_GetSpCellConfigNRDC_SCG(p_SCG_CellId, p_RNTI_Value);
+    var template (omit) RLC_Config_v1700 v_RLC_Config_v1700 := f_NR_RLC_Config_v1700(); //@sic R5-256933 sic@
+    
+    
+    v_RLC_BearerConfig := cs_38508_RLC_BearerConfig_DRB(p_DRB_Id,
+                                                        cs_38508_RLC_Config_AM_DRB(v_ParametersTX, v_ParametersRX),
+                                                        cs_38508_LogicalChannelConfig_DRB,
+                                                        p_ReestablishRLC,
+                                                        v_RLC_Config_v1700);
+    
+    v_SCGConfig := cs_38508_CellGroupConfig(f_NR_CellInfo_Get_CellGroupId(p_SCG_CellId),
+                                            {v_RLC_BearerConfig},
+                                            omit,
+                                            v_MAC_CellGroupConfig,
+                                            v_PhysicalCellGroupConfig,
+                                            v_SpCellConfig);
+    return v_SCGConfig;
+  }
+
+ /*
+  * @desc      Get  SpCellConfig in CellGroupConfig according to TS 38.508-1 Table 4.6.3-19 with condition NR-DC_SCG
+   * @param     p_SCG_CellId
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value4)
+   * @return    template (value) SpCellConfig
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NR_GetSpCellConfigNRDC_SCG(NR_CellId_Type p_SCG_CellId,
+                                        RNTI_Value p_RNTI_Value :=  tsc_C_RNTI_Value4  ) runs on NR_BASE_PTC return template (value) SpCellConfig
+  {
+    var template (value) ServingCellConfig v_ServingCellConfig := f_NR_GetServingCellConfig(p_SCG_CellId);
+    var integer v_NR_ServingCellIndex := f_NR_CellInfo_Get_ServingCellIndex(p_SCG_CellId);
+    var template (value) ServingCellConfigCommon v_ServingCellConfigCommon := f_NR_GetServingCellConfigCommon(p_SCG_CellId);
+    var template (omit) ReconfigurationWithSync v_ReconfigurationWithSync := cs_38508_ReconfigurationWithSync(v_ServingCellConfigCommon, p_RNTI_Value);
+    var template (value) RLF_TimersAndConstants v_RLF_TimersAndConstants := f_NR_CellInfo_GetRLF_TimersAndConstants(p_SCG_CellId);
+
+    return cs_38508_SpCellConfig(v_NR_ServingCellIndex, v_ReconfigurationWithSync, v_ServingCellConfig, v_RLF_TimersAndConstants);
+  }
+
+  /*
+   * @desc      Return RRCResume_v1610 including NR-DC SCG secondary cell information
+   * @param     p_CellGroupConfigSCG (default value: omit)
+   * @param     p_RadioBearerConfig2 (default value: omit)
+   * @param     p_MRDC_NRSCG        (default value: true)
+   * @param     p_SK_Counter        (default value: omit)
+   * @param     p_RestoreSCG        (default value: omit)
+   * @return    template (value) RRCResume_v1560_IEs
+   * @status    APPROVED (NR5GC)
+   */
+  function f_NRDC_BuildRRCResumeSCG_v1560(template (omit) CellGroupConfig p_CellGroupConfigSCG := omit,
+                                          template (omit) RadioBearerConfig p_RadioBearerConfig2 := omit,
+                                          boolean p_MRDC_NRSCG := true,
+                                          template (omit) SK_Counter  p_SK_Counter := omit,
+                                          template (omit) RRCResume_v1610_IEs.restoreSCG_r16 p_RestoreSCG := omit
+                                          ) return template (value) RRCResume_v1560_IEs
+  {
+    var template (omit) RRCResume_v1610_IEs.mrdc_SecondaryCellGroup_r16 v_MRDC_SecondaryCellGroupConfig := omit;
+    var template (omit) octetstring v_RadioBearerConfig2 := omit;
+
+    if(p_MRDC_NRSCG){
+      if (isvalue(p_CellGroupConfigSCG)) {
+        v_MRDC_SecondaryCellGroupConfig := {
+          nr_SCG_r16 := bit2oct(encvalue(cs_38508_RRCReconfigurationIE(tsc_NR_RRC_TI_Def, omit, bit2oct(encvalue(p_CellGroupConfigSCG)))))
+        }
+      }
+    }
+    if (isvalue(p_RadioBearerConfig2)) {
+      v_RadioBearerConfig2 := bit2oct(encvalue(p_RadioBearerConfig2));
+    }
+    return cs_NR_RRCResume_v1560_IEs (p_SK_Counter, v_RadioBearerConfig2, cs_NR_RRCResume_v1610_IEs(-, -, p_RestoreSCG, v_MRDC_SecondaryCellGroupConfig));
+  }
+
+  /*
+   * @desc    PSCell change procedure as per 38.523-3 clause 7.3.5.5.1 Sequence of NR-DC inter-cell PSCell change with MCG RLC reestablishment but MCG without key change
+   *          NOTE: with RLC Re-establishemnt applied on MCG PCell
+   * @param     p_MCG_PCellId
+   * @param     p_Source_PSCellId
+   * @param     p_Target_PSCellId
+   * @param     p_RBConfig_KeyChange (default value: true)
+   * @param     p_RNTI_Value        (default value: tsc_C_RNTI_Value3)
+   * @param     p_SK_Counter        (default value: omit)
+   * @status    APPROVED (NR5GC)
+   */
+   function f_NRDC_RRC_PSCellChange_InterCell_SplitMCGReestablish( NR_CellId_Type      p_MCG_PCellId,
+                                                                   NR_CellId_Type      p_Source_PSCellId,
+                                                                   NR_CellId_Type      p_Target_PSCellId,
+                                                                   boolean             p_RBConfig_KeyChange := true,
+                                                                   RNTI_Value          p_RNTI_Value :=  tsc_C_RNTI_Value3,
+                                                                   template (omit) SK_Counter  p_SK_Counter := omit
+                                                                  ) runs on NR5GC_PTC
+  { //@sic R5-240547 R5s240049 sic@
+    var integer v_SCG_DRB_Id := f_NR_GetDefaultDRB_SCG();
+    var template (value) SDAP_Config v_SDAP_ConfigSCG;
+    var template (value) SDAP_Configuration_Type v_SDAP_ConfigurationSCG;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Internet_DNN);
+    var template (value) NR_RadioBearer_Type v_SS_RadioBearerDRB_SCG;
+    var template (value) NR_RadioBearerList_Type v_SS_TargetSCG_RadioBearerList;
+    var template (value) NR_RadioBearerList_Type v_SourceSCG_RadioBearerToReleaseList := {cs_NR_SS_DRB_Release(v_SCG_DRB_Id)};
+    var template (value) CellGroupConfig v_CellGroupConfigSCG;
+    var template (value) RadioBearerConfig v_RadioBearerConfig2;
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerToAddModListMCG:= f_NR5GC_GetExisting_BearerToAddModList(true_);
+    var template (value) CellGroupConfig v_CellGroupConfigMCG:= cs_38508_CellGroupConfig(tsc_NR_CellGroupId_MCG, v_RLC_BearerToAddModListMCG );
+    var template (value) NR_RachProcedureConfig_Type v_RachProcedureConfig := f_NR_GetRACHProcedureConfigPSCell( p_Target_PSCellId, -);
+    var NR_SecurityParams_Type v_SecurityParams := f_NR_Security_Get();
+    var template (value) RRCReconfiguration_v1530_IEs v_V1530Ext;
+    var IntegerList_Type v_SS_DrbToReleaseMCG := f_NR_GetActiveDRBs(p_MCG_PCellId);
+    var template (value) NR_DRBInfoList_Type v_MCG_DRBInfoList := f_NR5GC_MobileInfo_GetDRBInfoList();
+    var template (omit) NR_RadioBearerList_Type v_SS_MCG_RadioBearerList := f_NR5GC_GetRadioBearerList(v_MCG_DRBInfoList, true);
+    var boolean v_IsFR1_SCG := f_NR_CellInfo_GetIsFR1(p_Target_PSCellId);
+    var SubFrameTiming_Type v_Timing;
+    var SubFrameTiming_Type v_Timing_RBRelease;
+    var SubFrameTiming_Type v_Timing_RBSetup;
+    var SubFrameTiming_Type v_Timing_RBCount;
+    var SubFrameTiming_Type v_Timing_ULGrant;
+    var NR_PdcpCountInfoList_Type v_NR_PdcpCountInfoList;
+        
+    //To include in RRCReconfiguration
+    //Get SDAP - @sic R5s211604 sic@
+    if (isvalue(v_GSM_MobilityInfo)) {
+      v_SDAP_ConfigSCG := cs_SDAP_Config(oct2int(valueof(v_GSM_MobilityInfo.SessionId)), false, {5});
+      v_SDAP_ConfigurationSCG:= f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(v_SDAP_ConfigSCG));
+    } else {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "No internet PDU session found to modify");
+    }
+    v_SS_RadioBearerDRB_SCG := cs_NR_SS_DRB_Config(v_SCG_DRB_Id,
+                                                   cs_NR_PDCP_Configuration_RBTerminating(cs_NR_PDCP_RbConfig_ParamsDRB, cs_RlcBearerRouting_NR(p_MCG_PCellId)),
+                                                   cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),
+                                                   v_SDAP_ConfigurationSCG); //@sic R5s240049 change 2.1.1 sic@
+
+    v_SS_TargetSCG_RadioBearerList := {v_SS_RadioBearerDRB_SCG};
+    v_CellGroupConfigSCG := f_NR_GetSCGConfigNRDC_SCG(p_Target_PSCellId, v_SCG_DRB_Id, p_RNTI_Value);
+    v_CellGroupConfigSCG.rlc_BearerToAddModList[0].reestablishRLC := true_;
+    //@sic R5s221057 sic@
+    v_RadioBearerConfig2 := cs_NRDRB_SplitBearer(omit, v_SCG_DRB_Id, cs_NR_PDCP_Config_Split(cs_38508_PDCP_Config_DRB, omit, tsc_NR_CellGroupId_SCG), secondary, f_NR_AS_CipheringAlgorithm_Get(), f_NR_AS_IntegrityAlgorithm_Get(), true_);
+    v_V1530Ext := f_NRDC_BuildRRCReconfiguration_v1530( v_CellGroupConfigSCG, v_CellGroupConfigMCG, v_RadioBearerConfig2, -, p_SK_Counter );
+    
+    // Add SCG DRB configured in proxy (split SCG DRB)
+    v_SS_MCG_RadioBearerList[lengthof(v_SS_MCG_RadioBearerList)] := cs_NR_SS_DRB_Config(v_SCG_DRB_Id, cs_NR_PDCP_Configuration_Proxy(cs_RlcBearerRouting_NR(p_Target_PSCellId)), cs_NR_RlcBearerConfig_AM(v_IsFR1_SCG, -, f_NR_LogicalChannelId_DRB(v_SCG_DRB_Id)),cs_SDAP_Configuration_None); // @sic R5s240049 change 2.1.2 sic@
+
+   //0A. NR Source PSCell: Get PDCP COUNT for SRB3 (if necessary) and DRBs.
+   //NOTE 1: No further sending/receiving of DRB data before the PSCell change is done.
+    v_NR_PdcpCountInfoList := f_NR_GetPdcpCountInfoListIntraNR_HO(p_Source_PSCellId, v_SS_TargetSCG_RadioBearerList, p_RBConfig_KeyChange);
+
+    // 0B. NR Target PSCell: Inform the SS about the PSCell change and about the source PSCell id.
+    f_NR_SS_PdcpHandoverCtrl(p_Target_PSCellId, cas_NR_PdcpHandoverInit_REQ(p_Source_PSCellId, p_Target_PSCellId));
+    
+    //0C. NR Source PSCell: Release SRB3 (if necessary) and DRBs
+    f_NR_SS_CommonRadioBearerConfig(p_Source_PSCellId, v_SourceSCG_RadioBearerToReleaseList);
+    
+    //1. NR Target PSCell: Configuration of DRBs (no SRB3 in this context)
+    f_NR_SS_CommonRadioBearerConfig(p_Target_PSCellId, v_SS_TargetSCG_RadioBearerList);
+    
+    // 2. NR Target PSCell: Set PDCP COUNT for SRB3 (if necessary) and DRBs.
+    //NOTE 2:   For AM DRBs the PDCP count is maintained. For SRB3 (if applied) and UM DRBs, the PDCP count is maintained or reset depending on the RRCReconfiguration message content.
+    f_NR_SS_PdcpCount_Set(p_Target_PSCellId, v_NR_PdcpCountInfoList, cs_TimingInfo_Now);
+    
+    //3. Void
+        
+    //4. NR Target PSCell: Configure RACH procedure either dedicated or C-RNTI based.
+    //NOTE 3: The FollowOnFlag is set to true in the ASP reconfiguring C-RNTI.
+    f_NR_CellInfo_SetRNTI(p_Target_PSCellId, p_RNTI_Value);
+    f_NR_SS_C_RNTI_Config(p_Target_PSCellId, p_RNTI_Value, -, tsc_NoCnfReq, tsc_FollowOnFlag);
+    f_NR_SS_RachProcedureConfigHO(p_Target_PSCellId, v_RachProcedureConfig);
+    
+    //5. NR Target PSCell: Activate security.
+    if (isvalue(p_SK_Counter)) {
+        v_SecurityParams.SK_Counter := valueof(p_SK_Counter);
+        v_SecurityParams := f_NR_Security_InitSCG(v_SecurityParams);
+        f_NR_Security_Set(v_SecurityParams);
+    }
+    v_SecurityParams.AS_Ciphering_S.ActTimeList := f_NR_RRC_CipherActTime_SCG(p_Target_PSCellId, v_SS_TargetSCG_RadioBearerList);
+    f_NR_SS_RRC_EnableIntProt_CiphULandDL(p_Target_PSCellId,
+                                          v_SecurityParams.AS_Integrity_S,
+                                          v_SecurityParams.AS_Ciphering_S);
+                                          
+    //6. NR Target PSCell: Configure UL grant configuration ("OnSR", default grant).
+    //NOTE 3: Unless explicitly specified UL grant configuration keeps configured as per default at the NR source cell.
+    f_NR_ULGrantConfiguration_Start(p_Target_PSCellId, -, -, -, -, cs_UL_GrantConfig_OnSR);
+ 
+    //7. NR PCell(at T): Send RRCReconfiguration.
+    // If RLC re-establishment applies on SRBs and DRBs in NR PCell, RRCReconfiguration is sent at activation time T otherwise activation Time is set to 'Now'
+    //=> RLC re-establishemnt does apply on MCG - TC 8.2.3.14.2
+    v_Timing := f_NR_GetNextSendOccasion_DL(p_MCG_PCellId);
+    v_Timing_RBRelease := f_SubFrameTiming_AddMilliSeconds(v_Timing, 5);            //T+5
+    v_Timing_RBSetup := f_SubFrameTiming_AddMilliSeconds(v_Timing_RBRelease, 5);    //T+10
+    v_Timing_RBCount := f_SubFrameTiming_AddMilliSeconds(v_Timing_RBSetup, 5);      //T+15
+    v_Timing_ULGrant := f_SubFrameTiming_AddMilliSeconds(v_Timing_RBCount, 5);      //T+20
+    v_NR_PdcpCountInfoList:=f_NR_SS_PdcpCount_Get(p_MCG_PCellId);
+    //on the queried SN , we need to increment SRB1 DL value as +1 due to below reconfiguration transmission
+    v_NR_PdcpCountInfoList[0].DL.Value := int2bit((bit2int(v_NR_PdcpCountInfoList[0].DL.Value) + 1), 32);
+
+    f_NR_SendRRCReconfiguration (p_MCG_PCellId, tsc_NR_RbId_SRB1, -, v_V1530Ext, -, -, cs_TimingInfo_NR(v_Timing), false);
+      
+    //Steps 7A to 7E are applicable if RLC re-establishment applies on SRBs and DRBs in NR PCell.
+    //7A. NR PCell at T:        Stop UL grants.
+    f_NR_ULGrantConfiguration_Stop(p_MCG_PCellId, cs_TimingInfo_NR(v_Timing));
+    //7B. NR PCell at T+5:      Release SRB1, SRB2 and DRBs.
+    f_NR_SS_SRBs_DRBs_Release(p_MCG_PCellId, cs_TimingInfo_NR(v_Timing_RBRelease), v_SS_DrbToReleaseMCG);
+    //7C. NR PCell at T+10: (Re-)configure SRB1, SRB2 and DRBs.
+    f_NR_SS_SRBs_DRBs_Config(p_MCG_PCellId, cs_TimingInfo_NR(v_Timing_RBSetup), v_SS_MCG_RadioBearerList);
+    //7D. NR PCell at T+15: Restore the PDCP counts.
+    //NOTE 6:  For the bearers, the PDCP count is maintained or reset depending on the RRCReconfiguration message content.
+    f_NR_SS_PdcpCount_Set(p_MCG_PCellId, v_NR_PdcpCountInfoList, cs_TimingInfo_NR(v_Timing_RBCount));
+    //7E. NR PCell at T+20: Configure UL grant configuration ("OnSR", default grant).
+    f_NR_ULGrantConfiguration_Start(p_MCG_PCellId, cs_TimingInfo_NR(v_Timing_ULGrant));
+
+    //8. NR PCell: Receive RRCReconfigurationComplete.
+    SRB.receive(car_NR_SRB_RrcPdu_IND(p_MCG_PCellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete(cr_RRCReconfigurationComplete_v1530(-, cr_RRCReconfigurationComplete_v1560(?)))));
+
+    //9. NR Target PSCell: Inform the SS about completion of the PSCell change (e.g. to trigger PDCP STATUS REPORT PDU).
+    f_NR_SS_PdcpHandoverCtrl(p_Target_PSCellId, cas_NR_PdcpHandoverComplete_REQ(p_Target_PSCellId));
+
+    //10. void
+   }
+
+}

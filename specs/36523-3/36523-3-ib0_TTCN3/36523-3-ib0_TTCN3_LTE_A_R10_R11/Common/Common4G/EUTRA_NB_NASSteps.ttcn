@@ -1,0 +1,147 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-06-18 11:30:22 +0200 (Wed, 18 Jun 2025) $
+// $Rev: 41494 $
+/******************************************************************************/
+
+module EUTRA_NB_NASSteps {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+
+  type enumerated UE_NetworkCap_ToBeTested {DEFAULT, PROSE_D2D_DISCOVERY, PROSE_D2D_COMMUNICATION, CIOT_CP, CIOT_UP, V2X, CP_Backoff}; /* @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS) */
+
+  /*
+   * @desc      Check pc_IPv6/pc_IPv4 and return corresponding PDN Type.
+   * @return    PdnTypeValue
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_GetPdnType() return PdnTypeValue
+  {
+    var PdnTypeValue v_PdnType := tsc_PdnType_IPv4;
+    if (pc_IPv6) {
+      if (pc_IPv4) {
+        v_PdnType := tsc_PdnType_IPv4v6;
+      } else {
+        v_PdnType := tsc_PdnType_IPv6;
+      }
+    }
+    return v_PdnType;
+  }
+
+  /*----------------------------------------------------------------------------
+   * @desc      Extract UE security capabilities from Attach Request message and store for use later
+   * @param     p_ATTACH_REQUEST
+   * @return    UE_SecurityCapability
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_FillNAS_SecurityCapability(ATTACH_REQUEST p_ATTACH_REQUEST) return UE_SecurityCapability
+  { /* @sic R5s110014 sic@ */
+    var UE_SecurityCapability v_SecurityCapability;
+    var template (omit) MS_NetworkCap v_MS_NetworkCap := omit;
+    
+    v_SecurityCapability.eiaCap := bit2oct(p_ATTACH_REQUEST.ueNetworkCapability.eiaCap); // @sic R5s180271 Baseline Moving 2018 Phase 1 sic@
+    
+    if (ispresent(p_ATTACH_REQUEST.msNetworkCapability)) {
+      v_MS_NetworkCap := p_ATTACH_REQUEST.msNetworkCapability;
+    }
+    v_SecurityCapability := f_EPS_FillNAS_SecurityCapability_Common (p_ATTACH_REQUEST.ueNetworkCapability, v_MS_NetworkCap);
+    
+    return v_SecurityCapability;
+  }
+
+  /*
+   * @desc      PDN Address TS 24.301 clause 9.9.4.9 (TV version IEI is omit)
+   *            Default value according to TS 36.508 table 6.6.1-1 (which requires a 'static' value) and table 4.7.3-6
+   *            NOTE: Acc. to table 4.7.3-6 conditions IPv4 and IPv6 are corresponding to the PDN type sent in the previous PDN CONNECTIVITY REQUEST;
+   *                  but this is checked against f_GetPdnType what evaluates pc_IPv4 and pc_IPv6 i.e. the UE shall send the PDN type as expected acc. to pc_IPv4 and pc_IPv6
+   * @param     p_IPv4AllocationViaNas
+   * @param     p_PdnIndex          (default value: PDN_1)
+   * @param     p_PDN_TypeToBeUsed  (default value: pdnTypeAsSupportedByUE)
+   * @return    PDN_Address
+   * @status    APPROVED (ENDC, IMS, IMS_IRAT, LTE, LTE_A_IRAT, LTE_A_PRO, LTE_A_R10_R11, LTE_A_R12, LTE_IRAT, MCX, NBIOT, NR5GC_IRAT, POS)
+   */
+  function f_EUTRA_NB_GetPDNAddress(boolean p_IPv4AllocationViaNas,
+                                    PDN_Index_Type p_PdnIndex := PDN_1,
+                                    PDN_TypeToBeUsed_Type p_PDN_TypeToBeUsed := pdnTypeAsSupportedByUE) return PDN_Address
+  { /* @sic R5-112600: Clarification to conditions for IP address configuration over user plane sic@ */
+    /* @sic R5s130362 - MCC160 Implementation: tsc_PDN_AddressInfo; p_UseSecondAddress changed to p_PDN_Index sic@ */
+    var PDN_AddressInfo_Type v_PDN_AddressInfo := f_PDN_AddressInfo_Get(p_PdnIndex);
+    var O4_Type v_Addr4 := f_Convert_IPv4Addr2OctString(v_PDN_AddressInfo.UE_IPAddressIPv4);    // @sic R5-113734, R5s130362sic@
+    var octetstring v_Addr6:= f_Convert_IPv6Addr2OctString(v_PDN_AddressInfo.UE_IPAddressIPv6); // @sic R5-113734, R5s130362 sic@
+    var Type4Length_Type v_IeLength;
+    var B3_Type v_TypeValue;
+    var octetstring v_AddressInfo;
+    var PDN_Address v_PDN_Address;
+    
+    // set IP addresses
+    v_Addr6 := substr(v_Addr6, 8, 8);  // Use only the IPv6 interface identifier, which are the 8 least significant octets of theIPv6 address
+
+    if (not p_IPv4AllocationViaNas) {       // => IPv4 address via DHCP signalling (if IPv4)
+      v_Addr4 := '00000000'O;
+    }
+
+    // set PDN TypeValue
+    select (p_PDN_TypeToBeUsed) {           /* @sic R5-120234, R5-120541, R5-120542 sic@ */
+      case (forceIPv4only) {
+        v_TypeValue := tsc_PdnType_IPv4;
+      }
+      case (forceIPv6only) {
+        v_TypeValue := tsc_PdnType_IPv6;
+      }
+      case (pdnTypeAsSupportedByUE) {
+        if (pc_IPv4 and pc_IPv6) {
+          v_TypeValue := tsc_PdnType_IPv4v6;
+        }
+        else if (pc_IPv4) {
+          v_TypeValue := tsc_PdnType_IPv4;
+        }
+        else if (pc_IPv6) {
+          v_TypeValue := tsc_PdnType_IPv6;
+        }
+        else {
+          FatalError(__FILE__, __LINE__, "neither IPv4 nor IPv6 are supported");
+        }
+      }
+    }
+
+    // set IE
+    select (v_TypeValue) {
+      case (tsc_PdnType_IPv4) {
+        v_IeLength := '05'O;
+        v_AddressInfo := v_Addr4;
+      }
+      case (tsc_PdnType_IPv6) {
+        v_IeLength := '09'O;
+        v_AddressInfo := v_Addr6;
+      }
+      case (tsc_PdnType_IPv4v6) {
+        v_IeLength := '0D'O;
+        v_AddressInfo := v_Addr6 & v_Addr4;
+      }
+    }
+
+    v_PDN_Address := {
+      iei := omit, // '59'O,
+      iel := v_IeLength,
+      spare := tsc_Spare5,
+      typeValue := v_TypeValue,
+      adressInfo := v_AddressInfo
+    };
+
+    return v_PDN_Address;
+  }
+
+}

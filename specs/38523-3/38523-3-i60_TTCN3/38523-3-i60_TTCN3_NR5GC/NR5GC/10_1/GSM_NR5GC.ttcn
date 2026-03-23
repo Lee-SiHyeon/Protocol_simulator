@@ -1,0 +1,2224 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-12-10 10:32:45 +0100 (mi., 10 dic. 2025) $
+// $Rev: 42613 $
+/******************************************************************************/
+module GSM_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from LoopbackIP all;
+  import from NAS_5GC_Parameters all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_SecurityFunctions all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_LoopBack all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_Parameters all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Get the NSSAI for PDU Session id
+   * @param     p_PDUSessionInfo
+   * @param     p_PDUSessionId
+   * @return    template (omit) S_NSSAI_Type
+   * @status    APPROVED (NR5GC)
+   */
+  function f_Get_NSSAIForPDUSessionId(PDUSessionInfoList_Type p_PDUSessionInfo, O1_Type p_PDUSessionId) return template (omit) S_NSSAI_Type
+  {
+   var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+   var integer i;
+   
+   for (i :=0; i < lengthof(p_PDUSessionInfo); i := i+1) {
+     v_GSM_MobilityInfo := p_PDUSessionInfo[i];
+     if (match (v_GSM_MobilityInfo.SessionId, p_PDUSessionId)) {  // @sic R5s200564 sic@
+       return v_GSM_MobilityInfo.NSSAI;
+     }
+   }
+   return omit;
+ }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.1.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_1_1_NR5GC() runs on NR5GC_PTC
+  {
+    //PDU session authentication and authorization / During the UE-requested PDU session procedure // @sic R5-212847 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_IDLE_1A);
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_1_1_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_1_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_1_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA));
+    var NG_NAS_SecurityParams_Type v_SecurityParams := f_NR5GC_Security_Get();
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_s;
+    var NR_RadioBearerId_Type v_SRB;
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (v_NGC_NASCellA); // @sic R5s200400 sic@
+    var template (present) NG_MobileIdentity v_S_TMSI := f_NG_S_TMSI2MobileIdentity(omit, v_GutiParams); // @sic R5s200400 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NG_NAS_UL_Message_Type v_GSMMsg;
+    var ProcedureTransactionIdentifier v_PTI := '00'O;
+    var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var O1_Type v_PDUSessionId := v_PDUSessionInfo[0].SessionId;
+    var DNN v_DNN_1;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo(); // @sic R5-227126 sic@
+    var template (omit) integer v_BearerId := lengthof(f_NR5GC_MobileInfo_GetEPS_BearerIdList()) +10; // @sic R5-227126 sic@
+    var O1_Type v_EPSBearerId := hex2oct(int2hex(valueof(v_BearerId), 1) & '0'H); // @sic R5-227126 sic@
+    var template (value) QoSFlowDescr v_QoSFlowDescr := cs_QoSFlowDescr ({cs_QoS_Flow ('000011'B, { cs_QoSParameters(tsc_QoSFlowParameter_5QI, '01'O, '09'O)})}); // @sic R5-227126 sic@
+
+    v_SRB := tsc_NR_RbId_SRB2;
+    if (v_GMM_MobilityInfo.GMMCap.s1Cap == '1'B) { // @sic R5-227126 sic@
+        v_QoSFlowDescr := cs_QoSFlowDescr ({cs_QoS_Flow ('000011'B,
+                                                        { cs_QoSParameters(tsc_QoSFlowParameter_5QI, '01'O, '09'O),
+                                                          cs_QoSParameters(tsc_QoSFlowParameter_EPSBearerId, '01'O, v_EPSBearerId)}
+                                                        )});
+    }
+    
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN); // @sic R5s200738, R5s201230 sic@
+
+    //@siclog "Steps 2 - 4A" siclog@ @sic R5-200213 sic@
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?); // @sic R5s200400 sic@
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu,       cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), // @sic R5s200400 sic@
+                                      tsc_NasKsi_NativeSecurityContext),
+                                      v_S_TMSI, '0000'B)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+    }
+
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(v_NGC_NASCellA, v_ReceivedMsg);
+
+    //@siclog "Step 5" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  omit, //No NSSAI
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId; // @sic R5s200564 sic@
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    v_DNN_1 := v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg.ul_Nas_Transport.dnn; // @sic R5s201371 sic@
+    
+    if(match (v_DNN_1.dnnValue, px_AccessPointName)){     // @sic R5s2013714 sic@
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Incorrect PDU session ID");
+    }
+    if(match (v_PDUSessionId, v_GSM_MobilityInfo_s.SessionId)){     // @sic R5s200564 sic@
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Incorrect PDU session ID");
+    }
+    if(v_PTI == '00'O){
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Incorrect ProcedureTransactionIdentifier");
+    }
+
+    //@siclog "Step 6" siclog@
+    // Send PDU Session AUTHENTICATION COMMAND
+    v_SecurityParams := f_NR5GC_Security_Get();
+    v_MsgToSend := f_Get_PDUSessionAuthenticationCmd(v_SecurityParams, v_GSM_MobilityInfo, v_PLMN);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, v_SRB, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 7" siclog@
+    // Receive PDU Session AUTHENTICATION COMPLETE
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionAuthenticationComplete(v_GSM_MobilityInfo, v_SecurityParams, v_ReceivedAsp.Signalling.Nas[0].Pdu, *, *)) { // @sic R5s200400 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "GSM Authentication Failed");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 7");
+
+    //@siclog "Step 8" siclog@
+    // send PDU Session Reject with cause "insufficient resources"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '00011101'B));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 9" siclog@
+    // SS releases the rrc connection
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    //@siclog "Steps 10" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN); // @sic R5s200738, R5s201230 sic@
+
+    //@siclog "Steps 11 - 11B" siclog@ @sic R5-200213 sic@
+    v_ReceivedMsg := f_NR5GC_RRCIdleToConnected_Steps2_4(v_NGC_NASCellA, '0000'B); // @sic R5s200922 sic@
+
+    //@siclog "Steps 12 - 12A" siclog@
+    f_NR_RRC_ActivateSecurity (v_NGC_NASCellA, v_ReceivedMsg.SecurityProtection.NasCount); // @sic R5s201371 sic@
+
+    //@siclog "Steps 13" siclog@
+    f_NR_RRCReconfigExistingDRBs (v_NGC_NASCellA,
+                                 {cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                    f_Get_NG_ServiceAcceptMsg(v_ReceivedMsg.Pdu.Msg.service_Request.pduSessionStatus))},
+                                                    -, -, -, -, -,
+                                                    true); // @sic R5s201371 sic@ // @sic R5s210110 sic@
+
+    /*alt {  // @sic R5s201371 sic@ // @sic R5s210110 sic@
+      [] SRB.receive(car_NR_SRB_RrcPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete)){}
+      [] SRB.check(receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))))
+         {repeat;}
+    }*/
+    
+    //@siclog "Step 14 - 19a1" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA,
+                                     1, -, // @sic R5s210110 sic@
+                                     cs_SDAP_Config(-,-,{3}),   // @sic R5s201371 sic@
+                                     -, -, -,
+                                     v_DNN_1,  // @sic R5s201371 sic@
+                                     cs_QoS_Rules ({cs_QoS_Rule('01'O, int2bit(3,6), '00'O)}), // @sic R5-216186 sic@ // @sic R5s211488 sic@ // @sic R5-217279 sic@
+                                     -, -,
+                                     v_QoSFlowDescr, // @sic R5-227126 sic@
+                                     -,-,-,-,-,-,
+                                     -,-,-,-,-,-,-,-,-,
+                                     cs_EAP_Message(bit2oct(encvalue(cs_EAP_Success))) , -, true);
+
+    //@siclog "Step 20" siclog@
+    // SS releases the rrc connection
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    } //End of test body of TC_10_1_1_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.1.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_1_2_NR5GC() runs on NR5GC_PTC
+  {
+    //PDU session authentication and authorization/ After the UE-requested PDU session procedure // @sic R5-212847 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A); // @sic R5-203785 sic@
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_1_2_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_1_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_1_2_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA));
+    var PDUSessionInfoList_Type v_PDUSessionInfo;
+    var O1_Type v_PDUSessionIdToRelease;
+    var NG_NAS_SecurityParams_Type v_SecurityParams := f_NR5GC_Security_Get();
+    var PDUSessionInfoList_Type v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    
+    v_GSM_MobilityInfo := v_PDUSessionInfoList[0];
+    
+    
+    //@siclog "Steps 0A - 0B" siclog@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, tsc_RandomAPN); // @sic R5-203785, Rs201230, R5s210148 sic@
+    
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_GSM_MobilityInfo := v_PDUSessionInfoList[1];
+
+    //@siclog "Steps 1 - 2" siclog@
+    //Send PDU Session Authentication Command and receive PDU Session Authentication Complete
+    f_PDUSessionAuthentication( v_NGC_NASCellA, v_SecurityParams, v_GSM_MobilityInfo, v_PLMN, tsc_NR_RbId_SRB2); // @sic R5s20956 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+
+    //@siclog "Step 3" siclog@ @sic R5-200214 sic@
+    //SS transmits PDU Session Authentication result
+    v_MsgToSend := f_Get_PDUSessionAuthenticationResult(v_GSM_MobilityInfo, cs_EAP_Message(bit2oct(encvalue(cs_EAP_Success))));
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Steps 4 - 5" siclog@
+    //Send PDU Session Authentication Command and receive PDU Session Authentication Complete
+    f_PDUSessionAuthentication( v_NGC_NASCellA, v_SecurityParams, v_GSM_MobilityInfo, v_PLMN, tsc_NR_RbId_SRB2); // @sic R5s20956 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 5");
+
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionIdToRelease := v_PDUSessionInfo[f_NR5GC_MobileInfo_GetNoOfSessions()-1].SessionId;
+    
+    //@siclog "Steps 6 - 17" siclog@
+    //VOIDED // @sic R5-203785 sic@
+    
+    //@siclog "Steps 18 - 19" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5-206354 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00011101'B), //5GSM cause User Authentication or Authorization failed
+                              cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00000'B),
+                              -,
+                              -,
+                              cs_EAP_Message(bit2oct(encvalue(cs_EAP_Failure))));
+
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 19");
+
+    } //End of test body of TC_10_1_1_2
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_2_1_NR5GC() runs on NR5GC_PTC
+  {
+    //Network-requested PDU session modification / Accepted / Reactivation
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var integer v_DRBId; // @sic R5s230095 sic@
+    var template (omit) NR_DRBInfo_Type v_DRBInfo; // @sic R5s230095 sic@
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A, TESTModeB_ON); // @sic R5-198972, R5s240305 sic@
+
+    // check if internet PDU session established in preamble // @sic R5s230095 sic@
+    v_DRBId :=  f_NR_GetDefaultDRB_ForFirstNonIMSPDUSession();
+    v_DRBInfo := f_NR_GetDRBInfo_FromId(v_DRBId);
+    if (not (isvalue(v_DRBInfo))) {
+      f_UT_RequestPDUSession(UT, 2, pc_APN_ID_Internet);
+      f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1);
+      // @sic R5s250244 sic@
+    }
+
+    // @sic R5s240305 sic@
+    // @sic R5s250012 sic@
+    f_NR5GC_CloseUE_TestLoopModeB (v_NGC_NASCellA, '00'O);
+    
+      
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_2_1_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    //f_NR5GC_OpenUE_TestLoopMode_Deactivate_TestMode(v_NGC_NASCellA); // @sic R5s190944 sic@ //@sic R5s230130 sic@
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_2_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    //var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var O1_Type v_PDUSessionIdToModify := f_GetLastConfiguredInternetPDUSessionID(); // @sic R5s230095 sic@
+    /* FFS:
+    To implement the Step 1 of R5198972 cleanly, the mechanism to determine which PDU session ID is Internet is required.
+    At present this cant be done because here are no PICS defined in 38.523-2 (v15.4.0) which can be used to determine if the first PDU session is IMS, or Internet.
+    As of now it is assumed that the first PDU session will be internet, but this can be revisited later based on how 38.523-2 evolves.*/
+
+    var octetstring v_IPData := f_IPv4IPv6_IcmpEchoReply(f_LoopbackModeB_IP_Address_UE());
+    var template (value) QosFlow_Identification_Type v_QoS_Id := f_NR_GetQosFlowIdentification_ForDRBId(f_NR_GetDefaultDRB_ForFirstNonIMSPDUSession()); // @sic R5s230095 sic@;
+    
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) QoS_Rules v_QoS_Rules := f_BuildDefaultQoSRules ("3", '7A'O);  // @sic R5-202585, R5s190944 sic@
+
+    //@siclog "Steps 1" siclog@
+    //Send PDU Session Modification Command
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand (v_PDUSessionIdToModify, -, -, -, -, -, v_QoS_Rules);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, -, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Steps 2" siclog@
+    //receive PDU Session Modification Complete
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToModify)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+    }
+
+    //@siclog "Steps 3" siclog@
+    DRB.send(cas_NR_DRB_COMMON_REQ_SDAP_SDUList(v_NGC_NASCellA, v_QoS_Id, {v_IPData}));
+    
+    //@siclog "Steps 4" siclog@
+    DRB.receive(car_NR_DRB_COMMON_IND_SDAP_SDUList(v_NGC_NASCellA, v_QoS_Id, {v_IPData}));
+    
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+       
+    } //End of test body of TC_10_1_2_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.2.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_2_2_NR5GC() runs on NR5GC_PTC
+  {
+    //Network-requested PDU session modification / Abnormal / PDU session in state PDU SESSION INACTIVE / Invalid PDU session identity
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var integer v_DRBId; // @sic R5s221167 sic@
+    var template (omit) NR_DRBInfo_Type v_DRBInfo; // @sic R5s221167 sic@
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    v_DRBId :=  f_NR_GetDefaultDRB_ForFirstNonIMSPDUSession(); // @sic R5s221167 sic@
+    v_DRBInfo := f_NR_GetDRBInfo_FromId(v_DRBId); // @sic R5s221167 sic@
+    if (not (isvalue(v_DRBInfo))) { // @sic R5s221167 sic@
+      f_UT_RequestPDUSession(UT, 2, pc_APN_ID_Internet);
+      f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1);
+    }
+
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_2_2_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_2_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_2_2_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var integer v_InternetPduSessionID :=0;
+    var O1_Type v_PDUSessionIdToRelease;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    
+    //@siclog "Steps 0A - 0B" siclog@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, tsc_RandomAPN);// @sic R5-217817 sic@
+    
+    //Find out the first non-IMS , i.e Internet PDU session
+    v_InternetPduSessionID := f_Get_PDUSessionIdForDNNType(v_PDUSessionInfo, Internet_DNN);
+    v_PDUSessionIdToRelease := int2oct(v_InternetPduSessionID, 1);// @sic R5s200921 sic@
+
+    //@siclog "Steps 1-2" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDUSessionIdToRelease); // @sic R5-206356 sic@
+
+    //@siclog "Steps 3" siclog@
+    //Send PDU Session Modification Command
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand (v_PDUSessionIdToRelease);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, -, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Steps 4" siclog@
+    //Receive 5GSM status
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_GSMStatus (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease, ?, cr_GMM_GSM_Cause(omit, tsc_NR5GCCause_InvalidPDUSessionIdentity))) { // @sic R5s190622, R5s200564 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+       
+    } //End of test body of TC_10_1_2_2
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.2.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_2_3_NR5GC() runs on NR5GC_PTC
+  {//Network-requested PDU session modification / new P-CSCF address / Initial IMS registration
+  
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN); //@sic R5-244198 sic@
+    
+    f_NR5GC_Init_NAS(NR_1);
+    
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_10_1_2_3_Body();
+   
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(v_NGC_NASCellA, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_2_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_2_3_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN); //@sic R5-244198 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (omit) GSM_MobilityInfo_Type v_PDUSessionInfo;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var GSM_MobilityInfo_Type v_PDUSessionToModify;
+    var template (omit) ExtdProtocolConfigOptions v_ExtdPCO := omit;
+    var NR_RadioBearerId_Type v_SRB:= tsc_NR_RbId_SRB2;
+    
+    //@siclog "Steps 1" siclog@
+    //The SS transmits a PDU SESSION MODIFICATION COMMAND message containing new P-CSCF addresses.
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionInfo := f_Get_PDUSessionForDNNType(v_PDUSessionInfoList, IMS_DNN);
+    v_PDUSessionToModify := valueof(v_PDUSessionInfo);
+    
+    // @sic R5s250098 sic@
+    // Check new PCSCF addresses are unique and send them to IMS
+    v_ExtdPCO := f_NR5GC_GetPCO_NewPCSCFaddr(IMS[tsc_Index_IMS1], v_PDUSessionToModify.PCO, PDN_5, PDN_6);
+    if (not isvalue(v_ExtdPCO)) {
+      FatalError(__FILE__, __LINE__, "PCSCF addresses shall be different");
+    }
+    
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand (v_PDUSessionToModify.SessionId, -, -, -, -, -, -, -, -, v_ExtdPCO);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, -, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 2" siclog@
+    //The UE transmits a PDU SESSION MODIFICATION COMPLETE message.
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionToModify.SessionId )) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+    }
+    
+    //@siclog "Steps 3-10" siclog@
+    //Check: Does the UE correctly initiate and complete initial IMS registration using the first address from received new P-CSCF addresses?
+    //(Steps 1-8 of Annex A.2 in TS 34.229-5 [41])
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1], "IMS registered on new address");
+
+    //SS transmits an RRCRelease message.
+    f_NR_RRCRelease(v_NGC_NASCellA);
+    
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.3.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_3_2_NR5GC() runs on NR5GC_PTC
+  {
+    //Network-requested PDU session release / Insufficient resources / Insufficient resources for specific slice and DNN / abnormal / Invalid PDU session identity // @sic R5-212847 sic@
+
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_3_2_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_3_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_3_2_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var O1_Type v_PDUSessionIdToRelease;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (omit) DNN v_DNN;
+    var integer v_InternetPduSessionID;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend; // @sic R5-206355 sic@
+    timer t_T3396 := 120.0; // @sic R5-201629 sic@
+    timer t_T3584 := 120.0; // @sic R5-201629 sic@
+    timer t_Wait := 5.0;
+
+    v_InternetPduSessionID := f_NR5GC_MobileInfo_GetNoOfSessions()+1;
+
+    //@siclog "Steps 1-2" siclog@
+    //AT command to trigger a PDU session WITHOUT DNN (APN)
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, omit); // @sic R5s210148 sic@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210417 sic@
+
+    //@siclog "Steps 3-4" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00011010'B), //5GSM cause Insufficient resources
+                              cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00010'B)); //T3396 = 2 minutes // @sic R5-201629 sic@ // @sic R5-225052 sic@
+
+    //@siclog "Steps 5" siclog@
+    f_UT_RequestPDUSession(UT, v_InternetPduSessionID, -, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session WITHOUT DNN (APN) @sic R5s230789 sic@
+    //@siclog "Steps 6" siclog@
+    t_T3396.start; // @sic R5s200585 sic@
+    alt{
+
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered)))
+            {
+                t_T3396.stop;
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 6");
+            }
+        []t_T3396.timeout
+            {
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+            }
+    }
+    //@siclog "Steps 7-9" siclog@
+    //AT command to trigger a PDU session WITHOUT DNN (APN)
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, omit); // @sic R5s200585, R5s201659, R5s210148 sic@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210417 sic@
+    //@siclog "Steps 10-11" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00011010'B), //5GSM cause Insufficient resources
+                              cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00000'B)); //T3396 = 0 minutes // @sic R5-201629 sic@
+
+    //@siclog "Steps 12-14" siclog@
+    //AT command to trigger a PDU session WITHOUT DNN (APN)
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, omit); // @sic R5s200585, R5s201659, R5s210148 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 13");
+    //@siclog "Steps 15-16" siclog@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210585, R5s210417 sic@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00011010'B), //5GSM cause Insufficient resources
+                              cs_GPRS_Timer2_3_IEI('37'O, '111'B, '00000'B)); //T3396 = Deactivated
+
+
+
+    //@siclog "Steps 17" siclog@
+    f_UT_RequestPDUSession(UT, v_InternetPduSessionID, -, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session WITHOUT DNN (APN) @sic R5s230789 sic@
+    //@siclog "Steps 18" siclog@
+    t_Wait.start;
+    alt{
+
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered)))
+            {
+                t_Wait.stop;
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 18");
+            }
+        []t_Wait.timeout
+            {
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 18");
+            }
+    }
+    //@siclog "Step 19" siclog@
+    f_NR_UE_DeRegisterOnSwitchOff(v_NGC_NASCellA, STATE_CONNECTED_3A);
+    //@siclog "Step 20" siclog@
+    f_NR5GC_SwitchOnAndResetIMS(); //The UE is Switched ON @sic R5s211299 sic@
+    //@siclog "Step 21" siclog@
+    //Steps from Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellA, -, noRrcConnectionRelease); // @sic R5s200585 sic@
+
+    //@siclog "Steps 22-24" siclog@
+    //AT command to trigger a PDU session WITHOUT DNN (APN)
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, omit); // @sic R5s200585, R5s201659, R5s210148 sic@
+    v_InternetPduSessionID := v_InternetPduSessionID +1;
+    //@siclog "Steps 25-26" siclog@
+    //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659 sic@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, tsc_APN1_String, cs_S_NSSAI_SST1eMBB, ?); // @sic R5s200585, R5s201659, R5s210148 sic@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210417 sic@
+    //Check that DNN is present in the PDU session established at Step 26
+    v_DNN := f_Get_DNNForPDUSessionId(f_NR5GC_MobileInfo_GetSessionInfoList(), v_PDUSessionIdToRelease); //Store it for further use
+    if (not isvalue(v_DNN)){
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "No DNN being sent in Step 26");
+    }
+    //@siclog "Steps 27-28" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '01000011'B), //5GSM cause Insufficient resources for specific slice and DNN
+                              cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00010'B)); //T3584 = 2 minutes // @sic R5-201629 sic@ // @sic R5-225052 sic@
+
+    //@siclog "Steps 29" siclog@
+    f_UT_RequestPDUSession(UT, v_InternetPduSessionID, tsc_APN1_String, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659, R5s230789 sic@
+    //@siclog "Steps 30" siclog@
+    t_T3584.start; // @sic R5s200585 sic@
+    alt{
+
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered)))
+            {
+                t_T3584.stop;
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 30");
+            }
+        []t_T3584.timeout
+            {
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 30");
+            }
+    }
+    //@siclog "Steps 31-33" siclog@
+    //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659 sic@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, tsc_APN1_String, cs_S_NSSAI_SST1eMBB, cs_S_NSSAI_SST1eMBB_WithIEI); // @sic R5s210148 sic@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210417 sic@
+    //@siclog "Steps 34-35" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '01000011'B), //5GSM cause Insufficient resources for specific slice and DNN
+                              cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00000'B)); //T3584 = 0 minutes
+
+
+
+    //@siclog "Steps 36-38" siclog@
+    //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659 sic@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, tsc_APN1_String, cs_S_NSSAI_SST1eMBB, cs_S_NSSAI_SST1eMBB_WithIEI); // @sic R5s200585, R5s201659, R5s210148 sic@
+    v_PDUSessionIdToRelease := f_NR_GetSessionId_ForLastPDUSession(); // @sic R5s210417 sic@
+    //@siclog "Steps 39-40" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, // @sic R5s201131 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '01000011'B), //5GSM cause Insufficient resources for specific slice and DNN
+                              cs_GPRS_Timer2_3_IEI('37'O, '111'B, '00000'B)); //T3584 = Deactivated
+
+    //@siclog "Steps 41" siclog@
+    f_UT_RequestPDUSession(UT, v_InternetPduSessionID, tsc_APN1_String, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659, R5s230789 sic@
+    //@siclog "Steps 42" siclog@
+    t_Wait.start;
+    alt{
+
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered)))
+            {
+                t_Wait.stop;
+                f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 42");
+            }
+        []t_Wait.timeout
+            {
+                f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 42");
+            }
+    }
+    
+    //@siclog "Steps 43" siclog@
+    //Build the PDU Session Release
+    v_MsgToSend := f_Get_NG_PDUSessionReleaseCommand(v_PDUSessionIdToRelease, cs_GMM_GSM_Cause (omit, '00100100'B), omit);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend))); // @sic R5-206355 sic@
+    //@siclog "Steps 44" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5-206355 sic@
+    if (not f_Check_NG_GSMStatus (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease, ?, cr_GMM_GSM_Cause(omit, tsc_NR5GCCause_InvalidPDUSessionIdentity))) {
+       f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 44");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 44");
+    //@siclog "Step 45" siclog@
+    f_NR_UE_DeRegisterOnSwitchOff(v_NGC_NASCellA, STATE_CONNECTED_3A);
+    //@siclog "Step 46" siclog@
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299 sic@
+    //@siclog "Step 47" siclog@
+    //Steps from Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellA, -, noRrcConnectionRelease); // @sic R5s200585 sic@
+    //@siclog "Steps 48-50" siclog@
+    //AT command to trigger a PDU session with S-NSSAI and DNN // @sic R5s201659 sic@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_InternetPduSessionID, -, tsc_APN1_String, cs_S_NSSAI_SST1eMBB, cs_S_NSSAI_SST1eMBB_WithIEI); // @sic R5s210148 sic@
+
+    } //End of test body of TC_10_1_3_2
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.3.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_3_3_NR5GC() runs on NR5GC_PTC
+  { //Network-requested PDU session release / reactivation requested / new P-CSCF address / Initial IMS registration
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_3_3_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_3_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_3_3_Body() runs on NR5GC_PTC
+  { // @sic R5s250189 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var O1_Type v_PDUSessionIdToRelease;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfoToRelease;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_New;
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) NR_RadioBearerList_Type v_SSConfig;
+    var template (value) SDAP_ConfigurationList_Type v_SDAP_ConfigurationList;
+    var integer v_NoOfSessions := f_NR5GC_MobileInfo_GetNoOfSessions();
+    var template (omit)S_NSSAI_Type v_RequestedNSSAI:= omit;
+    var template (omit) DNN v_RequestedDNN:= omit;
+    var template (omit) ExtdProtocolConfigOptions v_ExtdPCO := omit;
+    var IntegerList_Type v_ListOfDRBs;
+    var NR_DRBInfo_Type v_DRBInfo;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo_IMS;
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var default v_MyDefaultVar := null;
+    timer t_Wait;
+    
+    // Get GSM info for existing PDU session
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_GSM_MobilityInfo_IMS := f_Get_PDUSessionForDNNType(v_PDUSessionInfoList, IMS_DNN);
+    v_GSM_MobilityInfoToRelease := valueof(v_GSM_MobilityInfo_IMS);
+    v_PDUSessionIdToRelease := v_GSM_MobilityInfoToRelease.SessionId;
+
+    v_RequestedDNN := f_Get_DNNForPDUSessionId(v_PDUSessionInfoList, v_PDUSessionIdToRelease);
+    v_RequestedNSSAI:= f_Get_NSSAIForPDUSessionId(v_PDUSessionInfoList, v_PDUSessionIdToRelease);
+
+    // Get DRB info for existing PDU session
+    v_ListOfDRBs := f_NR_GetDRBList_ForGivenPDUSession(oct2int(v_PDUSessionIdToRelease));
+    v_DRBInfo := valueof(f_NR_GetDRBInfo_FromId(v_ListOfDRBs[0])); // only 1 DRB in list as haven't modified PDU session
+    
+    // Don't use the generic functions as need to re-use PDN and DRB info
+    
+    //@siclog "Steps 1" siclog@
+    //The generic test procedure in TS 38.508-1[4] clause 4.9.21 for PDU Session Release is performed with PDU SESSION RELEASE COMMAND message includes 5GSM cause #39 "reactivation requested" to release IMS PDU session.
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionReleaseCommand(v_PDUSessionIdToRelease,
+                                                                cs_GMM_GSM_Cause (omit, '00100111'B)); //5GSM cause Reactivation Request
+    
+
+    // The SS transmits an RRCReconfiguration message with a DRB ToReleaseList and PDU SESSION RELEASE COMMAND
+    v_ReceivedAsp := f_NR_RRCReconfigReleaseDRBs(v_NGC_NASCellA, v_ListOfDRBs, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend)); // @sic R5s220595 sic@
+     
+    if (not f_Check_NG_PDUSessionReleaseComplete (v_PDUSessionInfoList, v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Complete failed");
+    }
+
+    // Clear store of msgs received in parallel
+    f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq();
+    // Then activate store in case a PDUSessionEstablishmentReq comes before we can process it
+    v_MyDefaultVar := activate(a_NR5GC_AdditionalPDUSessionEstablishmentReq(v_NGC_NASCellA));
+
+    // Check new PCSCF addresses are unique and send them to IMS
+    v_ExtdPCO := f_NR5GC_GetPCO_NewPCSCFaddr(IMS[tsc_Index_IMS1], v_GSM_MobilityInfoToRelease.PCO, PDN_5, PDN_6);
+    if (not isvalue(v_ExtdPCO)) {
+      FatalError(__FILE__, __LINE__, "PCSCF addresses shall be different");
+    }
+
+    deactivate(v_MyDefaultVar);
+
+    //@siclog "Steps 2" siclog@
+    //The UE transmits a PDU SESSION ESTABLISHMENT REQUEST message and the S-NSSAI and DNN in UL NAS TRANSPORT message are the same values as released (Note 1).    --> 5GMM: UL NAS TRANSPORT 5GSM: PDU SESSION ESTABLISHMENT REQUEST  1   P
+    if (f_NR5GC_MsgInDefault_GetNumOfNASMessageReq() > 0) {
+      v_ReceivedAsp := f_NR5GC_MsgInDefault_GetOneNASMessageReq(1);
+    } else {
+      t_Wait.start (8.0); //@sic R5-252163 sic@
+      alt{
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+            {
+                t_Wait.stop;
+               
+            }
+        []t_Wait.timeout
+            {
+               
+               f_UT_RequestPDUSession(UT, v_NoOfSessions +1);
+               
+               SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+            }
+      }
+    }
+
+    if (f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo_New,
+                                              v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                              ?,
+                                              -, -, -, -, -, -, -, -, -, -, -,
+                                              v_RequestedNSSAI, v_RequestedDNN)) {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    }
+
+    f_BuildRRCReconfigParamsNewDRBs (v_RadioBearerConfig,
+                               v_CellGroupConfig,
+                               v_SSConfig,
+                               v_SDAP_ConfigurationList,
+                               v_NGC_NASCellA,
+                               {v_GSM_MobilityInfo_New},
+                               SRB1_2,
+                               v_DRBInfo.SDAP_Config); // @sic R5s250453 sic@
+                                      
+    // Update the routing table with the new session id
+    f_IP_ChangeDrbMappingNR(IP, v_NGC_NASCellA,
+                                cs_IP_QosFlowId(oct2int(v_GSM_MobilityInfo_New.SessionId),
+                                                        valueof(v_SDAP_ConfigurationList[0].Config.SdapConfig.MappedQoS_Flows[0])),   // @sic R5s250453 sic@
+                                v_GSM_MobilityInfoToRelease.PdnIndex);
+    // re-use the existing EPS Bearer Id @sic R5s250241 sic@
+    v_GSM_MobilityInfo_New.EPS_Bearer := v_GSM_MobilityInfoToRelease.EPS_Bearer;
+    
+    //@siclog "Steps 3" siclog@
+    //The SS transmits a PDU SESSION ESTABLISHMENT ACCEPT message containing new P-CSCF addresses.
+    f_SendPDUSessionAcceptOverReconfig (v_NGC_NASCellA,
+                                        v_GSM_MobilityInfo_New,
+                                        v_RequestedDNN,
+                                        v_RadioBearerConfig, // @sic R5s250453 sic@
+                                        v_CellGroupConfig,   // @sic R5s250453 sic@
+                                        v_SSConfig,          // @sic R5s250453 sic@
+                                        -, -, -, -, -,
+                                        v_RequestedNSSAI,
+                                        -, -,
+                                        omit, omit, v_ExtdPCO);
+                                     
+    //@siclog "Steps 4-11" siclog@
+    //Check: Does the UE correctly initiate and complete initial IMS registration using the first address from received new P-CSCF addresses?
+    //(Steps 1-8 of Annex A.2 in TS 34.229-5 [41])
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1], "IMS registered on new address");
+    
+    //@siclog "Step 12" siclog@
+    //SS transmits an RRCRelease message.
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+  
+ } //End of test body
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.4.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_4_1_NR5GC() runs on NR5GC_PTC
+  {
+   //UE-requested PDU session establishment / Abnormal / T3580
+    
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDU_PDN_DNN_Type v_PDNType;
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    // @sic R5s210148 sic@
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    
+    if (f_NR5GC_MobileInfo_GetNoOfSessions() == 0){
+        v_PDNType := f_GetDefaultAPN_DNNType_FromPICS();// @sic R5-217280 sic@
+        f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, 1, v_PDNType, tsc_RandomAPN, cs_S_NSSAI_SST1eMBB);
+    }
+    
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_4_1_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+
+  }
+
+  /*
+   * @desc      test body of TC_10_1_4_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_4_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDUSessionInfoList_Type v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var O1_Type v_PDUSessionIdToRelease;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_Type;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (omit) DNN v_RequestedDNN;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var integer v_Count := 0;
+    var float v_T3580Val := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 16.0);
+    var charstring v_NSSAI := ""; // @sic R5-213490 sic@
+    var charstring v_DNN := ""; // @sic R5-213490 sic@
+    var template (omit)S_NSSAI_Type v_RequestedNSSAI; // @sic R5s210148 sic@
+    var integer v_NoOfSessions := f_NR5GC_MobileInfo_GetNoOfSessions(); // @sic R5s230865 sic@
+    var default v_MyDefaultVarForPDUSessEstReq := null; // @sic R5s250250 sic@
+    timer t_Wait;
+
+    
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_NoOfSessions +1, -, tsc_RandomAPN);// @sic R5-217818 sic@
+    
+    // @sic R5s250250 sic@
+    f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq();
+    v_MyDefaultVarForPDUSessEstReq := activate(a_NR5GC_AdditionalPDUSessionEstablishmentReq(v_NGC_NASCellA));
+    
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList(); // @sic R5-217818 sic@
+    v_PDUSessionIdToRelease := v_PDUSessionInfoList[v_NoOfSessions -1].SessionId; // @sic R5-217818 sic@
+
+    
+    v_RequestedDNN := f_Get_DNNForPDUSessionId(v_PDUSessionInfoList, v_PDUSessionIdToRelease);
+    v_RequestedNSSAI:= f_Get_NSSAIForPDUSessionId(v_PDUSessionInfoList, v_PDUSessionIdToRelease);
+    
+    // @sic R5-213490 sic@
+     if (isvalue(v_RequestedNSSAI)){ // compiler warning may be ignored due to check
+        // @sic R5s201028 sic@
+        v_NSSAI := f_ConvertS_NSSAI_ForATCommand (v_RequestedNSSAI.lvPart); // @sic R5s221179 Baseline Moving sic@
+     }
+     if (isvalue(v_RequestedDNN)){
+        // @sic R5s210437 sic@
+        v_DNN := oct2char(valueof(substr((v_RequestedDNN.dnnValue),1,lengthof(v_RequestedDNN.dnnValue)-1)));
+     }
+    
+    
+    // @sic R5-206357 sic@
+    //@siclog "Steps 1" siclog@
+    // The generic test procedure in TS 38.508-1 clause 4.9.21 for PDU Session Release is performed withThe SS transmits an PDU SESSION RELEASE COMMAND message includes 5GSM cause #39 "reactivation requested" to release PDU session X.
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA,  // @sic R5s230497 sic@
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00100111'B)); //5GSM cause "Reactivation requested"
+                             
+
+    deactivate(v_MyDefaultVarForPDUSessEstReq); // @sic R5s250250 sic@
+   
+    //@siclog "Steps 2 - 15 void" siclog@
+    //@siclog "Steps 16" siclog@
+    //@sic R5-202664 sic@
+    //The UE transmits a PDU SESSION ESTABLISHMENT REQUEST message and the S-NSSAI and DNN in UL NAS TRANSPORT message are the same values as released (Note 2).
+    //@sic R5s250250 sic@
+    if (f_NR5GC_MsgInDefault_GetNumOfNASMessageReq() > 0) {
+      v_ReceivedAsp := f_NR5GC_MsgInDefault_GetOneNASMessageReq(1);
+    } else {
+      t_Wait.start (1.0);
+      alt{
+        []SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+            {
+                t_Wait.stop;
+               
+            }
+        []t_Wait.timeout
+            {
+               
+                // @sic R5-213490 sic@
+               f_UT_RequestPDUSession(UT, v_NoOfSessions +2, v_DNN, -, -, v_NSSAI); // @sic R5s230865 sic@ //AT command to trigger a PDU session @sic R5s201230 sic@
+               
+               SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+            }
+      }
+    }
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo_Type,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu, -, -, -, -, -, -, -, -, -, -, -, -, v_RequestedNSSAI, v_RequestedDNN)) // @sic R5s201028 sic@
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+   
+    
+    //@siclog "Steps 17-25" siclog@
+    for (v_Count := 1; v_Count < 5; v_Count := v_Count + 1) {
+    //@siclog "Steps 17-19-21-23" siclog@
+    //The SS waits 16 seconds (T3580).
+     f_Delay(v_T3580Val);
+     
+    //@siclog "Steps 18-20-22-24" siclog@
+    //Check: Does the UE re-transmit the PDU SESSION ESTABLISHMENT REQUEST message sent in step 16?
+     SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+       
+        if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo_Type,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu, -, -, -, -, -, -, -, -, -, -, -, -,  v_RequestedNSSAI, v_RequestedDNN)) // @sic R5s201028 sic@
+        {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+        }
+    }
+    
+    //@siclog "Step 25" siclog@
+    //The SS waits 16 seconds (5th expiry of T3580).
+    f_Delay(v_T3580Val);
+    
+    //@siclog "Step 26" siclog@
+   t_Wait.start(20.0);
+    
+   alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo_Type,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu,-, -, -, -, -, -, -, -, -, -, -, -, v_RequestedNSSAI, v_RequestedDNN))// @sic R5s201028 sic@
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 26");
+      }
+
+   }
+ } //End of test body of TC_10_1_4_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.5.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_5_1_NR5GC() runs on NR5GC_PTC
+  {
+    //UE-requested PDU session modification
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_5_1_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_5_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_5_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var O1_Type v_PDUSessionIdToModify := v_PDUSessionInfo[0].SessionId;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) QoS_Rules v_QoS_Rules := cs_QoS_Rules ({cs_QoS_Rule('01'O, int2bit(1,6), '02'O, '100'B)}); // @sic R5s190673 sic@ // @sic R5-197259 sic@ //@sic R5s190987, R5-202585 sic@ //@sic R5s230528
+
+    select (pc_APN_Default_Configuration) { // @sic R5-217281 sic@
+      case (internet) {
+        v_QoS_Rules := cs_QoS_Rules ({cs_QoS_Rule('01'O, int2bit(1,6), '02'O, '100'B)}); // @sic R5s190673 sic@ // @sic R5-197259 sic@ //@sic R5s190987, R5-202585 sic@ // @sic R5-217281 sic@ //@sic R5s230528
+      }
+      case (ims) {
+        v_QoS_Rules := cs_QoS_Rules ({cs_QoS_Rule('02'O, int2bit(2,6), '02'O, '100'B)});    // @sic R5-217281 sic@ //@sic R5s230528
+      }
+    }
+    v_QoS_Rules.iei :='7A'O; // @sic R5s190673 sic@
+
+    //@siclog "Steps 1" siclog@
+    f_UT_RequestModifyQosFlow(UT,1, f_Convert5G_QoSFlow_ForATCommand(cs_QoS_Flow('000001'B, { cs_QoSParameters(tsc_QoSFlowParameter_5QI, '01'O, '07'O)}))); //@sic R5s230528 sic@
+
+
+    //@siclog "Steps 2" siclog@
+    // The UE transmits a PDU SESSION MODIFICATION REQ
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190673 sic@
+    if (not f_Check_NG_PDUSessionModificationReq (v_GSM_MobilityInfo, v_PDUSessionInfo,
+                                             v_ReceivedAsp.Signalling.Nas[0].Pdu,v_PDUSessionIdToModify)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    } else {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+    }
+
+    //@siclog "Steps 3" siclog@
+    //Send PDU Session Modification Command
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand (v_PDUSessionIdToModify, v_GSM_MobilityInfo, -, -, -, -, v_QoS_Rules); // @sic R5s190673 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, -, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Steps 4" siclog@
+    //receive PDU Session Release Complete
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToModify)) { // @sic R5s190673 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+    }
+    } //End of test body of TC_10_1_5_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.6.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_6_1_NR5GC() runs on NR5GC_PTC
+  {
+    //UE-requested PDU session release / Abnormal / Collision with network-requested PDU session modification procedure
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_6_1_Body();
+
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_6_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_6_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    var PDUSessionInfoList_Type v_PDUSessionInfo;
+    var integer v_SessionId := f_NR5GC_MobileInfo_GetNoOfSessions()+1;   // @sic R5s201362 sic@
+    var O1_Type v_PDUSessionIdToRelease;  // @sic R5s201362 sic@
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var NR_RadioBearerId_Type v_SRB;
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var ProcedureTransactionIdentifier v_PTI; // @sic R5s201063 sic@
+    timer t_Wait := 3.0; // @sic R5-195981 sic@
+    
+    v_SRB := tsc_NR_RbId_SRB2;
+    
+    //@siclog "Steps 1-2" siclog@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_SessionId, -, tsc_RandomAPN, cs_S_NSSAI_SST1eMBB); // @sic Rs201230, R5s210148 sic@
+
+    //@siclog "Steps 3" siclog@
+    //Cause the UE to transmit a PDU SESSION RELEASE REQ
+    f_UT_DeactivateBearer(UT, v_SessionId); // @sic R5s201362 sic@
+
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionIdToRelease := v_PDUSessionInfo[f_NR5GC_MobileInfo_GetNoOfSessions()-1].SessionId; // @sic R5s201550 sic@
+
+    //@siclog "Steps 4" siclog@
+    // The UE transmits a PDU SESSION RELEASE REQ
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered)))) -> value v_ReceivedAsp; // @sic R5s190629 sic@
+    if (not f_Check_NG_PDUSessionReleaseReq (v_GSM_MobilityInfo, v_PDUSessionInfo,
+                                             v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease)) {  // @sic R5s190629, R5s200564 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Request Message Failed");
+    } else {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+    }
+
+    v_PTI := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg.pdu_Session_Release_Request.procedureTransactionIdentifier; // @sic R5s201063 sic@
+
+    //@siclog "Steps 5" siclog@
+    // send PDU Session Modification command
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand(v_PDUSessionIdToRelease);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Steps 6" siclog@
+    // Check: Does the UE transmit a PDU SESSION MODIFICATION COMPLETE or PDU SESSION MODIFICATION COMMAND REJECT  ?
+    t_Wait.start;
+    alt
+    {
+        []SRB.receive (car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+        {
+            t_Wait.stop;
+        }
+        []t_Wait.timeout
+        {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+        }
+    }
+    if (match (v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg , cr_NG_PDU_SESSION_MODIFICATION_COMPLETE(?,?))) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 6");
+    } else if (match (v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg, cr_NG_PDU_SESSION_MODIFICATION_COMMAND_REJECT(?,?))) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 6");
+    }
+
+    //@siclog "Steps 7 -8" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA,
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00100100'B),
+                              -, -, -, -,
+                              v_PTI); // @sic R5-206358 sic@
+
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+    } //End of test body of TC_10_1_6_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.6.2
+   * @status    APPROVED (NR5GC)
+   */
+
+  function f_TC_10_1_6_2_NR5GC() runs on NR5GC_PTC
+  {
+    //UE-requested PDU session release / Abnormal / Collision with network-requested PDU session release procedure
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    //The UE is in 5GS state 3N-A
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    
+    f_NR_TestBody_Set(true); // @sic R5s220796 sic@
+    //Main test body
+    fl_TC_10_1_6_2_Body();
+    f_NR_TestBody_Set(false); // @sic R5s220796 sic@
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_6_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_6_2_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    //var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    //var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var PDUSessionInfoList_Type v_PDUSessionInfo;
+    var integer v_SessionId := f_NR5GC_MobileInfo_GetNoOfSessions()+1;  // @sic R5s201362 sic@
+    var O1_Type v_PDUSessionIdToRelease;  // @sic R5s201362 sic@
+    
+    //@siclog "Steps 1-2" siclog@
+    f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, v_SessionId, -, tsc_RandomAPN, cs_S_NSSAI_SST1eMBB); // @sic Rs201230, R5s210148 sic@
+
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); // @sic R5s190717 sic@
+    v_PDUSessionIdToRelease := v_PDUSessionInfo[f_NR5GC_MobileInfo_GetNoOfSessions()-1].SessionId; // @sic R5s201550 sic@
+
+    //@siclog "Steps 3" siclog@
+    //Cause the UE to transmit a PDU SESSION RELEASE REQ
+    f_UT_DeactivateBearer(UT, v_SessionId);  // @sic R5s201362 sic@
+
+    //@siclog "Steps 4" siclog@
+    // The UE transmits a PDU SESSION RELEASE REQ
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190717 sic@
+    if (not f_Check_NG_PDUSessionReleaseReq (v_GSM_MobilityInfo, f_NR5GC_MobileInfo_GetSessionInfoList(),
+                                             v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToRelease)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Request Message Failed");
+    } else {
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 3");
+    }
+
+    //@siclog "Steps 5 - 6" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA,
+                              v_PDUSessionIdToRelease,
+                              cs_GMM_GSM_Cause (omit, '00100100'B)); // @sic R5-206359 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+    } //End of test body of TC_10_1_6_2
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.8.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_8_1_NR5GC() runs on NR5GC_PTC
+  {
+    //PDU session establishment reject / Maximum number of PDU sessions reached / Back-off timer is neither zero nor deactivated
+    // @sic R5-243590 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_8_1_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_8_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_8_1_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_s;
+    var NR_RadioBearerId_Type v_SRB;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var template (value) GPRS_Timer3 v_BackOffTimer_Step3and6 := cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00011'B);
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_UL_Message_Type v_GSMMsg;
+    var ProcedureTransactionIdentifier v_PTI := '00'O;
+    var charstring v_RandomAPN_2 := "ABBC";
+    timer t_Wait;
+
+    v_SRB := tsc_NR_RbId_SRB2;
+    
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230356 sic@ // @sic R5-242773 sic@
+
+    //@siclog "Steps 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  ?, //S-NSSAI present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+
+    //@siclog "Step 3" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Step3and6);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 3A" siclog@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); // @sic R5s230217 sic@ // @sic R5s230356 sic@ // @sic R5-233404, R5s230789 sic@ // @sic R5-242773 sic@
+    //@siclog "Step 4" siclog@
+    t_Wait.start(60.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+      }
+    }
+    //@siclog "Step 5" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+    //@siclog "Step 6" siclog@
+    f_NR_UE_DeRegisterOnSwitchOff(v_NGC_NASCellA, STATE_IDLE_1A);
+    //@siclog "Step 7" siclog@
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 8" siclog@
+    f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellA, -, noRrcConnectionRelease);
+    //@siclog "Step 9" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230356, R5s230789 sic@ // @sic R5-242773 sic@
+    //@siclog "Step 10" siclog@
+    t_Wait.start(60.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+      }
+    }
+    //@siclog "Step 11" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1, after 1 minute since end of Step 10.
+    f_Delay(60.0); //Wait for 1 minute
+    //Reset the stored messages, to capture the PDU Session Establishment REQ
+    f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq();  // @sic R5s250338 sic@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //Now trigger a PDU session WITH S-NSSAI used in Step 1 // @sic R5s230356 sic@ // @sic R5-242773 sic@
+    //@siclog "Step 12 - 13" siclog@
+    t_Wait.start(60.0);
+    alt{
+     // wait until a NAS message is received
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+        t_Wait.stop;
+        // this message will be checked in detail in f_NR5GC_PDUSessionEstablishment
+        f_NR5GC_MsgInDefault_StoreNASMessageReq (v_ReceivedAsp);  // @sic R5s250338 sic@
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 12");
+      }
+     []t_Wait.timeout
+      {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 12");
+      }
+    }
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1, -,  -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -,
+                                       -, -, -, -, -, -, -, -, -, -, -, -, -, 1); // @sic R5s230217, R5s250338 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 12 - 13");
+    //@siclog "Step 14" siclog@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1,v_RandomAPN_2); // @sic R5s230356 sic@ // @sic R5-242773 sic@ // @sic R5s240453 sic@ // @sic R5-244796 sic@
+    //@siclog "Steps 15" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  omit )) //S-NSSAI not present // @sic R5-233404 sic@ // @sic R5s240453 sic@
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    //@siclog "Step 16" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Step3and6);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    //@siclog "Step 16A" siclog@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, v_RandomAPN_2, -, -, -, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); // @sic R5s230217 sic@ // @sic R5s230356 sic@ // @sic R5-233404, R5s230789 sic@ // @sic R5-242773 sic@ // @sic R5s240453 sic@ // @sic R5-244796 sic@
+    //@siclog "Step 17" siclog@
+    t_Wait.start(60.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 17");
+      }
+    }
+    //@siclog "Step 18" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    //@siclog "Step 19" siclog@
+    f_Delay(120.0); // @sic R5-254897 sic@ //
+
+  } //End of test body of TC_10_1_8_1
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.8.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_8_2_NR5GC() runs on NR5GC_PTC
+  {
+    //PDU session establishment reject / Maximum number of PDU sessions reached / Back-off timer is deactivated
+    // @sic R5-243590 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    // @sic R5-242958 sic@
+
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_8_2_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A); // @sic R5s230226 sic@
+  }
+
+  /*
+   * @desc      test body of TC_10_1_8_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_8_2_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //Get PDU sessions established
+    var O1_Type v_PDUSessionIdToModify := v_PDUSessionInfo[0].SessionId;
+    var O1_Type v_PDUSessionIdToRelease;
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA));
+    var NG_NAS_SecurityParams_Type v_SecurityParams := f_NR5GC_Security_Get();
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_s;
+    var NR_RadioBearerId_Type v_SRB;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var template (value) GPRS_Timer3 v_BackOffTimer_Deactivated := cs_GPRS_Timer2_3_IEI('37'O, '111'B, '00000'B);
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_UL_Message_Type v_GSMMsg;
+    var ProcedureTransactionIdentifier v_PTI := '00'O;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg; // @sic R5s230782 sic@
+    timer t_Wait;
+
+    v_SRB := tsc_NR_RbId_SRB2;
+    
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230782 sic@
+    //@siclog "Steps 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  ?, //S-NSSAI present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    //@siclog "Step 3" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Deactivated); // @sic R5s230782 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    //@siclog "Step 4" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session WITH S-NSSAI @sic R5s230789 sic@
+    //@siclog "Step 5" siclog@
+    t_Wait.start(15.0); // @sic R5-231545 sic@
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+      }
+    }
+    //@siclog "Step 6" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+    //@siclog "Step 7" siclog@
+    f_NR_UE_DeRegisterOnSwitchOff(v_NGC_NASCellA, STATE_IDLE_1A);
+    //@siclog "Step 8" siclog@
+    f_NR5GC_SwitchOnAndResetIMS();
+    //@siclog "Step 9" siclog@
+    f_NR5GC_Registration(v_NGC_NASCellA); // @sic R5s230782 sic@
+    if (pc_noOf_PDUsSameConnection > 0) // @sic R5s230782 sic@
+    {
+          f_NR5GC_RRC_Idle_Steps16_20(v_NGC_NASCellA, -, TESTMode_OFF);
+          f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, tsc_RandomAPN, cs_S_NSSAI_SST1eMBB);
+    }else {
+              if (pc_noOf_PDUsNewConnection > 0 or pc_noOf_PDUsSameConnection == 0) {  //@sic R5s240104 sic@
+                 if (pc_noOf_PDUsNewConnection ==  0 and pc_noOf_PDUsSameConnection == 0) {  //@sic R5s240104 sic@
+                    f_NR_RRCRelease(v_NGC_NASCellA);
+                    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI);
+                    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?); // @sic R5s200489 sic@
+                    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu,  cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (),
+                                                  tsc_NasKsi_NativeSecurityContext),
+                                                  ?, '0000'B)) {   // @sic R5s210189 sic@
+                          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+                    }
+                    f_NR_RRC_ActivateSecurity (v_NGC_NASCellA, v_ReceivedMsg.SecurityProtection.NasCount); // Use NasCount returned from Service Req
+                    SRB.send (cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, tsc_NR_RbId_SRB1, -,
+                                                    cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                      f_Get_NG_ServiceAcceptMsg(v_ReceivedMsg.Pdu.Msg.service_Request.pduSessionStatus))));
+                    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA,
+                                                 1, //@sic R5s240104 sic@
+                                                 tsc_NR_RbId_SRB1, // @sic R5-206291 sic@
+                                                 omit, // @sic R5s210134 sic@
+                                                 *,
+                                                 *,
+                                                 crs_SSC_Mode(-, '001'B),
+                                                 cs_DNN(-, f_DomainName_Encode(tsc_RandomAPN)), // @sic R5s240163 sic@
+                                                 omit,
+                                                 cs_Session_AMBR ('06'O, '05'O, '0004'O, '05'O, '0004'O),
+                                                 cs_S_NSSAI_SST1eMBB_WithIEI,
+                                                 omit);
+                 }
+               }
+    }
+
+    //@siclog "Step 9a1 - 9a2" siclog@ // @sic R5-233405 sic@
+    //Void // @sic R5-237375 sic@
+    v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    v_PDUSessionIdToModify := v_PDUSessionInfo[0].SessionId;
+
+    //@siclog "Step 10" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, pc_APN_ID_Internet, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230782 sic@ // @sic R5s240455 sic@
+    //@siclog "Step 11" siclog@
+    // @sic R5-231545 sic@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                              v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                              ?,?,-,-,
+                                              -,-,-,-,
+                                              -,-,-,-,
+                                              ?, //S-NSSAI present
+                                              ?
+                                              ))
+    {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 11");
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+
+    //@siclog "Step 12" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Deactivated);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    //@siclog "Step 13" siclog@
+    v_MsgToSend := f_Get_NG_PDUSessionModificationCommand (v_PDUSessionIdToModify);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, -, -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //@siclog "Step 14" siclog@
+    //receive PDU Session Modification Complete
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionIdToModify)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 14");
+    }
+    //@siclog "Step 15" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, pc_APN_ID_Internet, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230782 sic@ // @sic R5s240455 sic@
+    //@siclog "Step 16" siclog@
+    // @sic R5-231545 sic@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    t_Wait.stop;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                              v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                              ?,?,-,-,
+                                              -,-,-,-,
+                                              -,-,-,-,
+                                              ?, //S-NSSAI present
+                                              ?
+                                              ))
+    {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+
+    //@siclog "Step 17" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Deactivated);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    v_SecurityParams := f_NR5GC_Security_Get();
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_GSM_MobilityInfo := v_PDUSessionInfoList[f_NR5GC_MobileInfo_GetNoOfSessions() - 1]; // @sic R5s230782 sic@
+    
+    if (pc_5GC_PDU_EAP_AKA_Prime) { // @sic R5-237375 sic@ // @sic R5s230782 sic@
+        //@siclog "Steps 18 - 19" siclog@
+        //Send PDU Session Authentication Command and receive PDU Session Authentication Complete
+        f_PDUSessionAuthentication( v_NGC_NASCellA, v_SecurityParams, v_GSM_MobilityInfo, v_PLMN, tsc_NR_RbId_SRB2);
+        //@siclog "Steps 20" siclog@
+        v_MsgToSend := f_Get_PDUSessionAuthenticationResult(v_GSM_MobilityInfo, cs_EAP_Message(bit2oct(encvalue(cs_EAP_Success))));
+        SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+        //@siclog "Step 21" siclog@
+        //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+        f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, pc_APN_ID_Internet, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230782 sic@ // @sic R5s240455 sic@
+        //@siclog "Step 22" siclog@
+        // @sic R5-231545 sic@
+        SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+        if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  ?, //S-NSSAI present
+                                                  ?
+                                                  ))
+        {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+        }
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 22");
+        v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+        v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+        v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+
+        //@siclog "Step 23" siclog@
+        // send PDU Session Reject with cause "insufficient resources for specific slice"
+        v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_Deactivated);
+        SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    }
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionIdToRelease := v_PDUSessionInfoList[f_NR5GC_MobileInfo_GetNoOfSessions() - 1].SessionId; // @sic R5s230782 sic@
+
+    //@siclog "Steps 24 - 25" siclog@
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDUSessionIdToRelease);
+    //@siclog "Steps 26" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, pc_APN_ID_Internet, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230782 sic@ // @sic R5s240455 sic@
+    //@siclog "Steps 27 - 28" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1, -, -, cs_S_NSSAI_SST1eMBB_WithIEI,-,-, cs_DNN(-, f_DomainName_Encode(pc_APN_ID_Internet))); // @sic R5s240163 sic@ // @sic R5s240455 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 27 - 28");
+    } //End of test body of TC_10_1_8_2
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.8.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_8_3_NR5GC() runs on NR5GC_PTC
+  {
+    //PDU session establishment reject / Maximum number of PDU sessions reached / Back-off timer is zero or not included
+    // @sic R5-243590 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var PDU_PDN_DNN_Type v_PDNType;
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    if (f_NR5GC_MobileInfo_GetNoOfSessions() == 0){
+        v_PDNType := f_GetDefaultAPN_DNNType_FromPICS();
+        f_NR5GC_TriggerSinglePDUSession(v_NGC_NASCellA, 1, v_PDNType, tsc_RandomAPN, cs_S_NSSAI_SST1eMBB);
+    }
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_8_3_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A); // @sic R5s240094 sic@
+  }
+
+  /*
+   * @desc      test body of TC_10_1_8_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_8_3_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    //var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList(); //How many PDU sessions are established ?
+    var O1_Type v_PDUSessionIdToRelease;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_s;
+    var NR_RadioBearerId_Type v_SRB;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var template (value) GPRS_Timer3 v_BackOffTimer_ValueZero := cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00000'B);
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_UL_Message_Type v_GSMMsg;
+    var ProcedureTransactionIdentifier v_PTI := '00'O;
+
+    v_SRB := tsc_NR_RbId_SRB2;
+    
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s240094 sic@
+    //@siclog "Steps 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  ?, //S-NSSAI present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    //@siclog "Step 3" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_ValueZero);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    //Cause the UE to request establishment of PDU session.
+    //@siclog "Step 3A" siclog@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s240094 sic@ // @sic R5-241523 sic@
+    //@siclog "Step 4 - 5" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1); // @sic R5-233403 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionIdToRelease := v_PDUSessionInfoList[1].SessionId; // @sic R5s240094 sic@
+    //@siclog "Step 6" siclog@
+    //The generic test procedure in TS 38.508-1 Table 4.9.21.2.2-1 of Procedure for PDU Session Release is performed.
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDUSessionIdToRelease);
+    //@siclog "Step 7" siclog@
+    //Cause the UE to request establishment of PDU session without S-NSSAI.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN); // @sic R5s240094 sic@
+    //@siclog "Step 8" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  omit, //S-NSSAI not present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    //@siclog "Step 9" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice" and BackOff timer set to 0.
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer_ValueZero);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    
+    //Cause the UE to request establishment of PDU session.
+    //@siclog "Step 9A siclog@
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN); //AT command to trigger a PDU session WITHOUT S-NSSAI // @sic R5s240094 sic@ // @sic R5-241523 sic@
+    //@siclog "Step 10 - 11" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1); // @sic R5-233403 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 10");
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDUSessionIdToRelease := v_PDUSessionInfoList[1].SessionId; // @sic R5s240094 sic@
+    //@siclog "Step 12 siclog@
+    //The generic test procedure in TS 38.508-1 Table 4.9.21.2.2-1 of Procedure for PDU Session Release is performed.
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDUSessionIdToRelease);
+    //@siclog "Step 13" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s240094 sic@
+    //@siclog "Step 14" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  ?, //S-NSSAI present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+    //@siclog "Step 9" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice" and BackOff timer not included.
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B));
+    //@siclog "Step 15" siclog@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    //Prose CR needed : Step 15A needs to be introduced
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, -, -, v_NSSAI);
+    //@siclog "Step 16 - 17" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1); // @sic R5-233403 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 16");
+  } //End of test body of TC_10_1_8_3
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.8.4
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_8_4_NR5GC() runs on NR5GC_PTC
+  {// @sic R5-233401 sic@
+    //5GSM message not forwarded / Back-off timer
+    // @sic R5-243590 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_8_4_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish // @sic R5s240158 sic@
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_10_1_8_4
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_8_4_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var template (value) GPRS_Timer3 v_BackOffTimer := cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00101'B);//5 mins
+    var template (value) PayloadContainerType v_PayloadContainerType := cs_PayloadContainerType ('0001'B); // @sic R5-236457 sic@
+    var template (value) GMM_GSM_Cause v_GMM_Cause := cs_GMM_GSM_Cause ('58'O, '01000101'B); // @sic R5-236457, R5s240158 sic@
+    var template (value) NG_NAS_DL_Pdu_Type v_PduToSend;
+    var octetstring v_EncodedNasPdu;
+    var O1_Type v_PDU_SessionId; // @sic R5-236457 sic@
+    var PDUSessionInfoList_Type v_PDUSessionInfoList;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    timer t_Wait;
+    timer t_T3585Max := f_NR_SetTimerToleranceMax(v_NGC_NASCellA, nasTimer, 300.0);
+
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session with S_NSSAI.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, -, -, v_NSSAI);
+
+    //@siclog "Steps 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  cs_S_NSSAI_SST1eMBB_WithIEI //S-NSSAI specific // @sic R5s240158 sic@
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+
+
+    //@siclog "Step 3" siclog@ // @sic R5-236457 sic@
+    v_PDU_SessionId := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    //PDU SESSION ESTABLISHMENT REQUEST message received in Step 2 is included in the payload container
+    v_EncodedNasPdu := bit2oct(encvalue(v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg.pdu_Session_Establishment_Request));
+    v_PduToSend := f_Get_NG_DLNASTransport (v_PayloadContainerType, omit, cs_PayloadContainer(omit, v_EncodedNasPdu), v_PDU_SessionId, -, v_GMM_Cause, v_BackOffTimer, omit);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, v_SRB, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_PduToSend.Msg)));
+
+    //@siclog "Step 4" siclog@
+    t_T3585Max.start;
+    t_Wait.start(60.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+      }
+    }
+
+    //@siclog "Step 5" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+
+    //@siclog "Step 6" siclog@
+    t_Wait.start(15.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 6");
+      }
+    }
+
+    //@siclog "Steps 7" siclog@
+    //Cause the UE to request establishment of PDU session without S-NSSAI.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN); // @sic R5s250159 sic@
+
+    //@siclog "Step 8 - 9" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1);// @sic R5-233403 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDU_SessionId := v_PDUSessionInfoList[1].SessionId; // @sic R5s240158 sic@
+    //@siclog "Step 10" siclog@
+    //The generic test procedure in TS 38.508-1 Table 4.9.21.2.2-1 of Procedure for PDU Session Release is performed.
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDU_SessionId);
+
+    //@siclog "Step 11" siclog@
+    //T3585 + 10% tolerance expired (330 seconds)
+    t_T3585Max.timeout;
+
+    //@siclog "Step 12" siclog@
+    //Cause the UE to request establishment of PDU session with same S-NSSAI which was used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, -, -, -, v_NSSAI);
+
+    //@siclog "Step 13" siclog@
+    //Void
+
+    //@siclog "Steps 14 - 15" siclog@
+    f_NR5GC_PDUSessionEstablishment (v_NGC_NASCellA, 1, -, -, cs_S_NSSAI_SST1eMBB_WithIEI);
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 14 - 15");
+    
+    v_PDUSessionInfoList := f_NR5GC_MobileInfo_GetSessionInfoList();
+    v_PDU_SessionId := v_PDUSessionInfoList[1].SessionId; // @sic R5s240158 sic@
+    //@siclog "Step 16" siclog@
+    //The generic test procedure in TS 38.508-1 Table 4.9.21.2.2-1 of Procedure for PDU Session Release is performed.
+    f_NR5GC_PDUSessionRelease(v_NGC_NASCellA, v_PDU_SessionId);
+
+   }//End of test body of TC_10_1_8_4
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 10.1.8.5
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_10_1_8_5_NR5GC() runs on NR5GC_PTC
+  { // @sic R5-233402 sic@
+    //Maximum number of PDU sessions reached / Emergency service
+    // @sic R5-243590 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cells
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    //Preamble
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    f_NR_TestBody_Set(true);
+    //Main test body
+    fl_TC_10_1_8_5_Body();
+    f_NR_TestBody_Set(false);
+
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A); // @sic R5s230632 sic@
+  }
+
+  /*
+   * @desc      test body of TC_10_1_8_5
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_10_1_8_5_Body() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo_s;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var charstring v_NSSAI := f_ConvertS_NSSAI_ForATCommand (cs_S_NSSAI_SST1eMBB);
+    var template (value) GPRS_Timer3 v_BackOffTimer := cs_GPRS_Timer2_3_IEI('37'O, '101'B, '00101'B);//5 mins
+    var template (value) NG_NAS_DL_Pdu_Type v_MsgToSend;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_UL_Message_Type v_GSMMsg;
+    var ProcedureTransactionIdentifier v_PTI := '00'O;
+    timer t_Wait;
+
+    //@siclog "Steps 1" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI); //AT command to trigger a PDU session WITH S-NSSAI // @sic R5s230632 sic@
+
+    //@siclog "Steps 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                  v_ReceivedAsp.Signalling.Nas[0].Pdu,
+                                                  ?,?,-,-,
+                                                  -,-,-,-,
+                                                  -,-,-,-,
+                                                  cs_S_NSSAI_SST1eMBB_WithIEI, //S-NSSAI present
+                                                  ?
+                                                  ))
+    {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Establishment Message Failed");
+    }
+    v_GSMMsg := v_ReceivedAsp.Signalling.Nas[0].Pdu.PiggybackedPduList[0].Msg;
+    v_GSM_MobilityInfo_s.SessionId := v_GSMMsg.pdu_Session_Establishment_Request.pduSessionId.sessionId;
+    v_PTI := v_GSMMsg.pdu_Session_Establishment_Request.procedureTransactionIdentifier;
+
+    //@siclog "Step 3" siclog@
+    // send PDU Session Reject with cause "insufficient resources for specific slice"
+    v_MsgToSend := f_Get_NG_PDUSessionEstablishmentReject(v_GSM_MobilityInfo_s.SessionId , v_PTI, cs_GMM_GSM_Cause (omit, '01000101'B), v_BackOffTimer);
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, - , -, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    //@siclog "Step 3A" siclog@
+    //@sic R5s230632 sic@
+    // Cause the UE to request establishment of PDU session with same S-NSSAI used in Step 1.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, -, -, v_NSSAI, -, -, -, -, -, -, LOCAL_CNF_REQUIRED); //AT command to trigger a PDU session WITH S-NSSAI @sic R5s230789 sic@
+    //@siclog "Step 4" siclog@
+    t_Wait.start(60.0);
+    alt{
+     [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, v_SRB, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp
+      {
+         t_Wait.stop;
+         if (not f_Check_NG_PDUSessionEstablishmentReq(v_GSM_MobilityInfo,
+                                                      v_ReceivedAsp.Signalling.Nas[0].Pdu))
+         {
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Received PDU Session Establishment REQ");
+         }
+      }
+     []t_Wait.timeout
+      {
+            f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+      }
+    }
+
+    //@siclog "Steps 7" siclog@
+    //Cause the UE to request establishment of PDU session.
+    f_UT_RequestPDUSession(UT, f_NR5GC_MobileInfo_GetNoOfSessions()+1, tsc_RandomAPN, Emergency); //AT command to trigger an emergency PDU session //@sic R5s230632 sic@
+
+    //@siclog "Step 8 - 9" siclog@
+    f_NR5GC_PDUSessionEstablishment(v_NGC_NASCellA, 1, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, cr_NG_Request_Type('011'B));//RequestType '011'B,'initial emergency request'
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");
+   }//End of test body of TC_10_1_8_5
+
+}

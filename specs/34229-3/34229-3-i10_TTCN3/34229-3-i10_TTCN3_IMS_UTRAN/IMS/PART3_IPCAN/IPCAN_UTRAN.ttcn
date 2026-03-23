@@ -1,0 +1,334 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2023-05-04 17:38:01 +0200 (Thu, 04 May 2023) $
+// $Rev: 35902 $
+/******************************************************************************/
+
+module IPCAN_UTRAN {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from IMS_IPCAN_Coordination all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_AuxiliaryDefsAndFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from TestcaseProperties all;
+  import from UTRAN34_CellInfo all;
+  import from UTRAN34_CommonFunctions all;
+  import from UTRAN34_ConfigurationSteps all;
+  import from UTRAN34_RRC_CommonFunctions all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IP_Component all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_CommonProcedures all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_RAB_Functions all;
+  import from UpperTesterFunctions all;
+
+  const UTRAN_CellId_Type tsc_IMS_UTRAN_CellId := utran34_CellA; /* @status    APPROVED (IMS) */
+
+  /*
+   * @desc      get PCOs either from the IMS PTC or as sent by the UE
+   * @param     p_Port
+   * @param     p_ProtocolConfigOptions
+   * @return    template (value) NAS_ProtocolConfigOptions_Type
+   * @status    APPROVED (IMS)
+   */
+  function fl_IPCAN_GetPCOs(IMS_IPCAN_CO_ORD_PORT p_Port,
+                            template (omit) NAS_ProtocolConfigOptions_Type p_ProtocolConfigOptions) return template (value) NAS_ProtocolConfigOptions_Type
+  { /* @sic R5s150267: f_IPCAN_GetPCOs moved from IMS_CC_IPCAN_Coordination as being test model specific sic@ */
+    var NAS_ProtocolConfigOptions_Type v_ProtocolConfigOptionsRX := {};
+    var template (value) NAS_ProtocolConfigOptions_Type v_ProtocolConfigOptionsTX;
+
+    if (isvalue(p_ProtocolConfigOptions)) {
+      v_ProtocolConfigOptionsRX := valueof(p_ProtocolConfigOptions);
+    }
+    if (f_GetTestcaseAttrib_SpecificPCO(testcasename())) {
+      f_IMS_IPCAN_SendPCOs(p_Port, v_ProtocolConfigOptionsRX);
+      v_ProtocolConfigOptionsTX := f_IMS_IPCAN_WaitForPCOs(p_Port);
+    } else {
+      v_ProtocolConfigOptionsTX := f_NAS_GetProtocolConfigOptionList(v_ProtocolConfigOptionsRX);
+    }
+    return v_ProtocolConfigOptionsTX;
+  }
+
+  /*
+   * @desc      Initialise IPCAN
+   * @param     p_Port
+   * @param     p_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_Init(IMS_IPCAN_CO_ORD_PORT p_Port,
+                              UTRAN_CellId_Type p_CellId)
+    runs on UTRAN_IP_PTC
+  { /* @sic R5s150338: p_TestConfiguration removed sic@ */
+    f_UTRAN34_Init();                              // Initialise cell info acc to 34.108
+    vc_UTRAN_Global_IP.NoOfPDPContexts := 0; // @sic R5s180247 sic@
+    f_UTRAN34_SS_CreateCellDCH(p_CellId);
+    f_UTRAN34_SendDefSysInfo(p_CellId);            // Broadcast sysinfo acc to scheduling defined in 34.108
+
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port, cms_IPCAN_IMS_Response(IPCAN_INIT));
+  }
+
+  /*
+   * @desc      Perform Idleupdated followed by PDP Context Activation
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_RB_Configuration
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_IdleUpdated_ActivatePdpContext(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                                        UTRAN_CellId_Type p_CellId,
+                                                        RB_ConfigType p_RB_Configuration) runs on UTRAN_PTC
+  {
+    var template (omit)  ProtocolConfigOptions v_PcoFromUE;
+    var template (value) ProtocolConfigOptions v_PcoToUE;
+    var ACTIVATEPDPCONTEXTREQUESTul v_ActPdpContextReq;
+    var template (value) NAS_ProtocolConfigOptions_Type v_ProtocolContainerList;
+    var template (value) EstablishmentCause v_EstCause := f_GetMoEstCause();
+    var template (value) PktDataProtoAddr v_ExpectedPDN_Address := f_UG_GetPktDataProtoAddr(true);
+    var template (value) QualityOfService v_QualityOfService := f_UTRAN_InitialiseQoS(p_CellId, p_RB_Configuration);
+    var boolean v_NewKeyFlag := true;
+    var TI v_Ti_S;
+    
+    // PS Attach procedure with optional CS branch
+    // FOP in Attach accept is set to No Follow-on proceed
+    // RRC connection is released
+    f_UTRAN34_GMMOnly_Attach(p_CellId,-, -, -,- ,-, -, -, -, tsc_FOP_NoFollowOnProceed);
+    
+    // Similar procedure to f_UTRAN34_EstablishPDP_Context but the PCO initialisation is different
+    //Steps 1-3 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+    //IMS capable UEs automatically do IMS registration after switch on
+    //=> No UT command is needed to trigger IMS registration
+    f_UTRAN34_RRC_ConnEst(p_CellId, v_EstCause);
+    
+    // Step 4 in 34.108 cl. 7.4.2.2.2.3: RRC connection establishment procedure for MO PS calls on DCH
+    f_UTRAN_GMM_ServReq(); // @sic R5s150838 sic@
+    
+    //Perform NAS session activation procedure for packet switched sessions (34.108 cl. 7.4.2.4.2)
+    //Steps 1-2 in 34.108 cl. 7.4.2.4.2: Generate authentication and run authentication procedure
+    f_UTRAN_GMM_Authentication();
+    
+    //Step 3-4 in 34.108 cl. 7.4.2.4.2: Transmit Security Mode Comamnd & Receive Security Mode Comlpete
+    f_UTRAN34_RRC_Security(p_CellId, v_NewKeyFlag, ps_domain);
+    
+    //Step 5 in 34.108 cl. 7.4.2.4.2: Receive PDP Context Activation Request
+    v_ActPdpContextReq := f_UTRAN_PS_SessionAct_ReceivePDP_Req( -, true);
+    v_PcoFromUE  := v_ActPdpContextReq.protocolConfOpts;
+    v_ProtocolContainerList := fl_IPCAN_GetPCOs(p_Port, v_PcoFromUE.pco);  // Get PCOs to be sent to the UE
+    v_PcoToUE := f_NAS_ProtocolConfigOptionsTX(v_ProtocolContainerList);
+    
+    v_Ti_S := f_NAS_TI_InitAndSetFlag(v_ActPdpContextReq.ti, '1'B);
+
+    //Step 1-3 in 34.108 cl. 7.4.2.6.2.3: Radio access bearer establishment procedure for PS mobilie originated calls.
+    //Step 1-2 in 34.108 cl. 7.4.2.6.2.3: Send RADIO BEARER SETUP and receive COMPLETE
+    f_UTRAN_RB_SetUp_PS_RAB(p_CellId, p_RB_Configuration, -, -, true); //@sic R5s141127 sic@
+                                      
+    f_UTRAN_SendActivatePDP_Accept(v_ExpectedPDN_Address.pDP_TypeNo,
+                                   v_ExpectedPDN_Address.addrInfo,
+                                   v_ExpectedPDN_Address.iel,
+                                   v_Ti_S,
+                                   v_QualityOfService,
+                                   p_RB_Configuration,
+                                   v_PcoToUE);  //@sic R5s141127 sic@
+    }
+
+  /*
+   * @desc      Initial registration
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_RB_Configuration  (default value: cell_DCH_64kPS_RAB_SRB)
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_InitialRegistration(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                             UTRAN_CellId_Type p_CellId,
+                                             RB_ConfigType p_RB_Configuration := cell_DCH_64kPS_RAB_SRB) runs on UTRAN_IP_PTC
+  {
+    f_UTRAN_SetCellPower(p_CellId, tsc_AttenuationServingCell);
+    
+    // Switch on UE
+    f_UT_SwitchOnUE(UT, false);
+
+    f_UTRAN_IP_Handling_Start_Configuration(PDN_1, p_RB_Configuration);
+
+    f_UTRAN_IPCAN_IdleUpdated_ActivatePdpContext(p_Port, p_CellId, p_RB_Configuration);
+  }
+
+  /*
+   * @desc      start IPCAN procedure
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_ProcedureType
+   * @return    TriggerResult_Type
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_StartProcedure(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                        UTRAN_CellId_Type p_CellId,
+                                        IMS_TestProcedure_Type p_ProcedureType)
+    runs on UTRAN_IP_PTC return TriggerResult_Type
+  {
+    var TriggerResult_Type v_Result := NORMAL;
+    
+    select (p_ProcedureType) {
+      case (IPCAN_InitialRegistration) {                                        // initial registration
+        f_UTRAN_IPCAN_InitialRegistration(p_Port, p_CellId);
+      }
+      case (IPCAN_EmergencyCall_NormalService) {                                // emergency call, normal service, uses 112 as default emg number
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_EmergencyCall_NormalService not implemented yet");
+      }
+      case (IPCAN_EmergencyCall_LimitedService) {                               // emergency call, limited service
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_EmergencyCall_LimitedService not implemented yet");
+      }
+      case (IPCAN_MO_SpeechCall) {                                              // MO speech call
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MO_SpeechCall not implemented yet");
+      }
+      case (IPCAN_MT_SpeechCall) {                                              // MT speech call
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MT_SpeechCall not implemented yet");
+      }
+      case (IPCAN_MO_VideoCall) {                                               // MO video call
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MO_VideoCall not implemented yet");
+      }
+      case (IPCAN_MT_VideoCall) {                                               // MT video call
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MT_VideoCall not implemented yet");
+      }
+      case (IPCAN_MO_IMS_Signalling) {                                          // MO IMS signalling
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MO_IMS_Signalling not implemented yet");
+      }
+      case (IPCAN_MT_IMS_Signalling) {                                          // MT IMS signalling
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_MT_IMS_Signalling not implemented yet");
+      }
+      case (IPCAN_XCAP_Signalling) {                                            // XCAP signalling
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_StartProcedure: IPCAN_XCAP_Signalling not implemented yet");
+      }
+    }
+    return v_Result;
+  }
+
+  /*
+   * @desc      Release connection(s) at the end of a procedure
+   * @param     p_Port
+   * @param     p_CellId
+   * @param     p_ProcedureType
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_ConnectionRelease(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                           UTRAN_CellId_Type p_CellId,
+                                           IMS_TestProcedure_Type p_ProcedureType) runs on UTRAN_PTC
+  {
+    select (p_ProcedureType) {
+      case (IPCAN_InitialRegistration, IPCAN_MO_IMS_Signalling, IPCAN_MT_IMS_Signalling) {
+        // just release RRC connection
+      }
+      case (IPCAN_EmergencyCall_NormalService) {
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_ConnectionRelease: IPCAN_EmergencyCall_NormalService not implemented yet");
+      }
+      case (IPCAN_EmergencyCall_LimitedService) {
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_ConnectionRelease: IPCAN_EmergencyCall_LimitedService not implemented yet");
+      }
+      case (IPCAN_MO_SpeechCall, IPCAN_MT_SpeechCall) {
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_ConnectionRelease: IPCAN_MO_SpeechCall, IPCAN_MT_SpeechCall not implemented yet");
+      }
+      case (IPCAN_MO_VideoCall, IPCAN_MT_VideoCall) {
+        FatalError(__FILE__, __LINE__, "f_UTRAN_IPCAN_ConnectionRelease: IPCAN_MO_VideoCall, IPCAN_MT_VideoCall not implemented yet");
+      }
+    }
+
+    f_UTRAN34_RRC_ConnRel(p_CellId, cell_Dch);
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      postamble for IPCAN
+   * @param     p_Port
+   * @param     p_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_Release(IMS_IPCAN_CO_ORD_PORT p_Port,
+                                 UTRAN_CellId_Type p_CellId) runs on UTRAN_IP_PTC
+  {
+    //@sic R5s141127 sic@
+    f_UTRAN_SwitchPower_Off(p_CellId, U1_IDLE, NotSpecified);      /* @sic R5s170947, R5s180061: sic@
+                                                                      This should be UTRAN34 instead of UTRAN but the IRAT version allows for Service Req and de-registration, so use IRAT version in this one instance */
+
+    //Release the UTRAN cell
+    f_UTRAN_ReleaseCell(p_CellId, f_UTRAN_CellInfo_GetConfigType(p_CellId));
+
+    f_IMS_IPCAN_SendCoOrdMsg(p_Port);
+  }
+
+  /*
+   * @desc      Main loop to handle commands from the IMS PTC:
+   *            - IPCAN_INIT
+   *            - IPCAN_STARTPROCEDURE  (procedure)
+   *            - IPCAN_ENDPROCEDURE    (procedure)
+   *            - IPCAN_RELEASE
+   * @status    APPROVED (IMS)
+   */
+  function f_UTRAN_IPCAN_MainLoop() runs on UTRAN_IRAT_PTC
+  {
+    var UTRAN_CellId_Type v_CellId := tsc_IMS_UTRAN_CellId;
+    var IMS_IPCAN_Coordination_MSG v_IMS_IPCAN_Coordination_MSG;
+    var IMS_IPCAN_Command_Type v_Command;
+    var integer v_PdnIndex;
+    var boolean v_Done := false;
+    var boolean v_ConnectionEstablished := false;
+    var boolean v_SecondaryPdpContextEstablished := false;
+
+    while (not v_Done) {
+      alt {
+        [] IMS[tsc_Index_IMS1].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS1;
+        }
+        [] IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Command) -> value v_IMS_IPCAN_Coordination_MSG {
+          v_PdnIndex := tsc_Index_IMS2;
+        }
+      }
+      v_Command := v_IMS_IPCAN_Coordination_MSG.IMS_IPCAN_Command;
+      select (v_Command.Name) {
+        case (IPCAN_INIT) {
+          f_UTRAN_IPCAN_Init(IMS[v_PdnIndex], v_CellId);
+        }
+        case (IPCAN_STARTPROCEDURE) {
+          if (f_UTRAN_IPCAN_StartProcedure(IMS[v_PdnIndex], v_CellId, v_Command.TestProcedure) == NORMAL) {
+            v_SecondaryPdpContextEstablished := true;
+          }
+          v_ConnectionEstablished := true;      /* @sic R5s140490 change 7 MCC160 implementation sic@ */
+        }
+        case (IPCAN_ENDPROCEDURE) {
+          f_UTRAN_IPCAN_ConnectionRelease(IMS[v_PdnIndex], v_CellId, v_Command.TestProcedure);
+          /* => RRC connection is released */
+          v_SecondaryPdpContextEstablished := false;
+          v_ConnectionEstablished := false;     /* @sic R5s140490 change 7 MCC160 implementation sic@ */
+        }
+        case (IPCAN_RELEASE) {
+          f_UTRAN_IPCAN_Release(IMS[v_PdnIndex], v_CellId);
+          v_Done := true;
+        }
+        case (IPCAN_QUERY) {  /* @sic R5s130133 additional changes: handling of queries from the IMS PTC sic@ */
+          IMS[v_PdnIndex].send(cms_IPCAN_IMS_QueryResponse(f_UTRAN_IMS_IpcanInfo()));
+        }
+        case (IPCAN_PROVIDELOCATIONINFORMATION) {
+          FatalError(__FILE__, __LINE__, "'IPCAN_PROVIDELOCATIONINFORMATION' not implemented for UTRAN");  /* only used in (EUTRA) emergency call test cases */
+        }
+        case else {
+          FatalError(__FILE__, __LINE__, "invalid command");
+        }
+      }
+    }
+  }
+
+}

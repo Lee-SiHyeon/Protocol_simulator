@@ -1,0 +1,665 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2026-02-27 11:06:34 +0100 (Fri, 27 Feb 2026) $
+// $Rev: 43034 $
+/******************************************************************************/
+
+module ECall_IRAT_NR5GC_NR {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EUTRA_NR_CoordMsg all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_IMSProcedures all;
+  import from NR5GC_IRAT_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_Templates_SysInd all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.1
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_5_1_NR5GC() runs on NR5GC_PTC
+  { /* eCall Only mode / T3444 / eCall inactivity procedure / Removal of eCall only restriction after an eCall over IMS / 5GS to EPS */
+
+    f_NR5GC_IRAT_Init(NR_6);
+    f_NR_CellInfo_SetSIB1_eCallOverIMS_Support(nr_Cell1, true_);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //The eCall capable UE is equipped with eCall only enabled USIM configured as per TS 38.508-1 [4] Table 6.4.1-24.
+    f_UT_USIM_Insert(UT, "USIM configuration 24 specified in table 6.4.1-24 TS 38.508-1");
+
+    // Preamble: The UE is in test state 0-A (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_5_1_Body();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_DEREGISTERED);
+
+    // Now tell EUTRA test is finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Postamble"));
+
+  } //End of function f_TC_11_5_1_NR5GC()
+
+  /*
+   * @desc      test body of TC_11_5_1
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_5_1_Body()runs on NR5GC_PTC
+  {
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var float v_WaitMin := f_NR_SetTimerToleranceMin (nr_Cell1, nasTimer, 120.0);    // step 3
+    timer t_T3444_Min := f_NR_SetTimerToleranceMin(nr_Cell1, nasTimer, 43200.0); // 12 hours
+    timer t_T3512_Min := f_NR_SetTimerToleranceMin(nr_Cell1, nasTimer, 25200.0); // 7  hours
+
+    //@siclog "Step 1" siclog@
+    //The SS configures:
+    // - NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Cell Power");
+
+    // @siclog "Step 2" siclog@
+    // The UE is Switched ON
+    f_UT_SwitchOnUE(UT);
+
+    // @siclog "Step 3" siclog@
+    // Check: Does the UE send an RRCSetupRequest on NR Cell 1 within 120 seconds?
+    f_NR_CheckNoRRCSetupReq (nr_Cell1, v_WaitMin);
+
+    // @siclog "Step 4" siclog@
+    // A manual eCall is initiated. (Note 1)
+    // Note 1: The request to originate a manual eCall may be performed by MMI or AT command.
+    f_UT_InitiateECall(UT, MANUAL);
+
+    // @siclog "Step 5" siclog@
+    // Check: Does the UE send REGISTRATION REQUEST message with 5GS registration type set to 'initial registration'?
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, (tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected));
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_NoSecurity)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 5 PASS");
+    }
+
+    // @siclog "Steps 6-14" siclog@
+    // Steps 5-13 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                nr_Cell1,
+                                v_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                TESTMode_OFF,
+                                Initial_NoSecurity); // @sic R5s250362 sic@
+
+    // @siclog "Step 15" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message and assigns value of 7 hours for the timer T3512.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_NoSecurity,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                               {bit2oct(f_NR_CellInfo_GetTAC(nr_Cell1))}),
+                                                   -, -, -, -, -,-, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI ('5E'O, '001'B, '00111'B)); //T3512 value = 7 hours
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // @siclog "Steps 15A" siclog@ // @sic R5-R5-251283 sic@/
+    // The UE transmits an ULInformationTransfer message and a REGISTRATION COMPLETE message.
+    f_NR5GC_Registration_Complete(nr_Cell1);
+
+    // @siclog "Steps 16-19" siclog@ // @sic R5-251283 sic@/
+    // Void
+
+    // @siclog "Steps 20A-26" siclog@
+    // EXCEPTION: Step 20 can occur in parallel with steps 21-26 // @sic R5-251283 sic@/
+    // Steps 20A of Table 4.9.29.2.2-1 of the generic procedure in TS 38.508-1 [4] are performed.
+    // Check: The UE transmits an ULInformationTransfer message with Request type set to "initial emergency request" and a PDU SESSION ESTABLISHMENT REQUEST message?
+    // Steps 22-26 of Table 4.9.29.2.2-1 of the test procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_eCallSteps20A_26(nr_Cell1);// @sic R5s250362 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 21 PASS");
+
+    // @siclog "Steps 27-28" siclog@
+    // Release eCall over IMS using the generic procedure described in  TS 38.508-1 [4] subclause 4.9.12B.
+    // Void
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2]);     //Trigger eCall release over IMS using the generic procedure described in TS 34.229-5 [41] subclause A.8
+    f_NR5GC_EmergencyCallReleaseMT(nr_Cell1, false);   //IMS messages have completed in IMS PTC, now to handle NAS and RRC actions.
+
+    // @siclog "Step 29" siclog@
+    // The SS releases the RRC connection. (Note 2)
+    // Note 2: Timer T3444 of 12hours starts.
+    f_NR_RRCRelease(nr_Cell1);
+    t_T3444_Min.start;
+
+    // @siclog "Step 30" siclog@
+    // The SS waits 1 minute.
+    f_Delay(60.0);
+
+    // @siclog "Steps 31-43" siclog@
+    // Steps 1 to 13 of the generic test procedure for IMS MT speech call establishment in 5GC specified in TS 38.508-1 [4] subclause 4.9.16 are performed.
+    f_NR5GC_MTSpeechCall(nr_Cell1);
+
+    // @siclog "Steps 44-45" siclog@
+    // Generic test procedure for IMS MT call release in 5GS described in TS 38.508-1 [4] subclause 4.9.18 takes place.
+    // Void
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1]); // @sic R5s250362 sic@
+    f_NR5GC_CallRelease(nr_Cell1, IPCAN_SpeechCall, false); //MT release required
+
+    // @siclog "Step 46" siclog@
+    // The SS releases the RRC connection.
+    // Note 3: Timer T3512 of 7hours starts.
+    f_NR_RRCRelease(nr_Cell1);
+    t_T3512_Min.start;
+
+    // @siclog "Step 47" siclog@
+    // Check: Does the UE transmit a REGISTRATION REQUEST message at the expiry of T3512? (Note 3)
+    t_T3512_Min.timeout;
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Periodic)) {
+       f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message failed");
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 47 PASS");
+    }
+
+    // @siclog "Step 48" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message including T3512 value IE.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_NoSecurity,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                               {bit2oct(f_NR_CellInfo_GetTAC(nr_Cell1))}),
+                                                   -, -, -, -, -,-, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI ('5E'O, '001'B, '00111'B)); //T3512 value = 7 hours
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // @siclog "Step 49" siclog@
+    // The UE transmits a REGISTRATION COMPLETE message
+    f_NR5GC_Registration_Complete(nr_Cell1, tsc_NR_RbId_SRB1);// @sic R5s250362 sic@
+
+    // @siclog "Step 50" siclog@
+    // The SS releases the RRC connection.
+    f_NR_RRCRelease(nr_Cell1);
+
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_Trigger("Cell Power")); //Set EUTRA Cell power
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Cell Power");
+    // @siclog "Step 51" siclog@
+    // The SS configures:
+    // - NR Cell 1 as " Non-suitable "off" cell"
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);// @sic R5s250362 sic@
+
+    // @siclog "Step 52" siclog@
+    // Check: Does the UE perform on the E-UTRA Cell 1 the TAU procedure for Inter-system change from N1 mode to S1 mode as described in TS 38.508-1 [4], Table 4.9.7.2.2-1?
+    f_NR5GC_TrackingAreaUpdateFromN1(nr_Cell1);
+
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Cell Power");
+    //@siclog "Step 53" siclog@
+    //The SS configures:
+    // - NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // @siclog "Step 54" siclog@
+    // Check: Does the UE perform on the NR Cell 1 the Test procedure for UE Tracking area updating for Inter-system change from S1 mode to N1 mode as described in TS 38.508-1 [4], Table 4.9.9.2.2-1?
+    f_NR5GC_IRAT_S1ToN1_IdleMode(nr_Cell1, -, -);
+
+    // @siclog "Step 55" siclog@
+    // Check: Does the UE transmit a DEREGISTRATION REQUEST message at expiry of T3444?
+    t_T3444_Min.timeout;
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);// @sic R5s250362 sic@
+    if (not f_Check_NG_DeregistrationReqMOMsg (v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B))) {// @sic R5s250362 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Deregistration Request Message Failed");// @sic R5s250362 sic@
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 55 PASS");// @sic R5s250362 sic@
+    }
+    // @siclog "Step 5" siclog@
+    // SS responds with DEREGISTRATION ACCEPT message.// @sic R5-255875 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+  } //End of fl_TC_11_5_1_Body()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.2
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_5_2_NR5GC() runs on NR5GC_PTC
+  { /* eCall Only mode / T3445 / eCall inactivity procedure / Removal of eCall only restriction after a call to URI for test service / 5GS to EPS */
+
+    f_NR5GC_IRAT_Init(NR_6);
+    f_NR_CellInfo_SetSIB1_eCallOverIMS_Support(nr_Cell1, true_);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //The eCall capable UE is equipped with eCall only enabled USIM configured as per TS 38.508-1 [4] Table 6.4.1-24.
+    f_UT_USIM_Insert(UT, "USIM configuration 24 specified in table 6.4.1-24 TS 38.508-1");
+
+    // Preamble: The UE is in test state 0-A (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_5_2_Body();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_DEREGISTERED);
+
+    // Now tell EUTRA test is finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Postamble"));
+
+  } //End of function f_TC_11_5_2_NR5GC()
+
+  /*
+   * @desc      test body of TC_11_5_2
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_5_2_Body()runs on NR5GC_PTC
+  {
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+    //var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo_IMS;
+    timer t_T3445_Min := f_NR_SetTimerToleranceMin(nr_Cell1, nasTimer, 43200.0); // 12 hours
+    timer t_T3512_Min := f_NR_SetTimerToleranceMin(nr_Cell1, nasTimer, 25200.0); // 7  hours
+
+    // @siclog "Step 1" siclog@
+    // The SS configures:
+    // - NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Cell Power");
+
+    // @siclog "Step 2" siclog@
+    // The UE is Switched ON
+    f_UT_SwitchOnUE(UT);
+
+    // @siclog "Step 3" siclog@
+    // Wait for 60s for the UE to enter 5GMM-DEREGISTERED.eCALL-INACTIVE state
+    f_Delay(60.0);
+
+    // @siclog "Step 4" siclog@
+    // An eCall to URI for test service is initiated. (Note 1)
+    // Note 1: The request to originate a manual eCall may be performed by MMI or AT command.
+    f_UT_InitiateECall(UT, TEST);
+
+    // @siclog "Step 4A" siclog@
+    // UE transmits a RRCSetupRequest message.  // @sic R5-251360 sic@
+    // @siclog "Step 4B" siclog@
+    // SS transmits an RRCSetup message.
+    // @siclog "Step 5" siclog@
+    // Check: Does the UE send REGISTRATION REQUEST message with 5GS registration type set to 'initial registration'?
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, (tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected)); // @sic R5-251360 sic@
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_NoSecurity)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 4A and 5 PASS");
+    }
+
+    // @siclog "Steps 6-14" siclog@
+    // Steps 5-13 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_Idle_Steps5_13 (v_GMM_MobilityInfo,
+                                nr_Cell1,
+                                v_ReceivedMsg,
+                                f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                TESTMode_OFF,
+                                Initial_NoSecurity);// @sic R5s250392 sic@
+
+    // @siclog "Step 15" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message and assigns value of 7 hours for the timer T3512.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_NoSecurity,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                               {bit2oct(f_NR_CellInfo_GetTAC(nr_Cell1))}),
+                                                   -, -, -, -, -,-, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI ('5E'O, '001'B, '00111'B)); //T3512 value = 7 hours
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // @siclog "Step 16" siclog@
+    // The UE transmits an ULInformationTransfer message and a REGISTRATION COMPLETE message.
+    f_NR5GC_Registration_Complete(nr_Cell1);
+
+    // @siclog "Step 17" siclog@
+    // Step 19a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] is performed with 'connected without release'.
+    // Check: The UE transmits an ULInformationTransfer message with Request type set to "initial request" and a PDU SESSION ESTABLISHMENT REQUEST message?
+    // @siclog "Step 17A" siclog@
+    // The SS transmits an RRCReconfiguration message and a PDU SESSION ESTABLISHMENT ACCEPT
+    // @siclog "Step 17B" siclog@
+    // The UE transmits an RRCReconfigurationComplete message.
+    f_NR5GC_RRC_Idle_Steps16_20(nr_Cell1, -, -, noRrcConnectionRelease, -, -, -, -, -, -, -, -, -, -, -, -, false);// @sic R5s250392 sic@
+    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 17 PASS");
+
+    // @siclog "Steps 18-31" siclog@
+    // Void
+
+    // EXCEPTION: In parallel to the events described in steps 32 to 34 below steps 2 - 3 of eCall Setup and MSD Update / 5GS as defined in TS 34.229-5 [41] annex A.23 take place
+    // @siclog "Steps 32-34" siclog@
+    // Steps 11 to 13b3 of Table 4.9.15.2.2-1 of the test procedure in TS 38.508-1 [4] are performed.
+    // Wait until need to add voice QoS
+    v_GSM_MobilityInfo:= f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS1]);
+    f_NR5GC_ModifyPDUSession_AddVoice(nr_Cell1, valueof(v_GSM_MobilityInfo));
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IMS_IPCAN_Trigger());
+    // Call now established
+
+    // @siclog "Steps 35-36" siclog@
+    // Release eCall for test service using the generic procedure described in TS 38.508-1 [4] subclause 4.9.18.
+    // void
+    f_NR5GC_CallRelease(nr_Cell1, IPCAN_SpeechCall, false); //MT release required
+
+    // @siclog "Step 37" siclog@
+    // The SS releases the RRC connection. (Note 2)
+    // Note 2: Timer T3445 of 12hours starts.
+    f_NR_RRCRelease(nr_Cell1);
+    t_T3445_Min.start;
+
+    // @siclog "Step 38" siclog@
+    // The SS waits 1 minute.
+    f_Delay(60.0);
+
+    // @siclog "Steps 39-51" siclog@
+    // Steps 1 to 13 of the generic test procedure for IMS MT speech call establishment in 5GC specified in TS 38.508-1 [4] subclause 4.9.16 are performed.
+    f_NR5GC_MTSpeechCall(nr_Cell1);
+
+    // @siclog "Steps 52-53" siclog@
+    // Generic test procedure for MT release of Voice call in 5GS described in TS 34.229-5 [41] subclause A.8 TS 38.508-1 [4] subclause 4.9.18 takes place.
+    // Void
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS1], cms_IMS_IPCAN_Trigger());
+    f_NR5GC_CallRelease(nr_Cell1, IPCAN_SpeechCall, false); //MT release required
+
+    // @siclog "Step 54" siclog@
+    // The SS releases the RRC connection.
+    f_NR_RRCRelease(nr_Cell1);
+    t_T3512_Min.start;
+
+    // @siclog "Step 55" siclog@
+    // Check: Does the UE transmit a REGISTRATION REQUEST message at the expiry of T3512? (Note 3)
+    // Note 3: Timer T3512 of 7hours starts.
+    t_T3512_Min.timeout;
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Periodic)) {
+       f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message failed");
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 55 PASS");
+    }
+
+    // @siclog "Step 56" siclog@
+    // The SS transmits a REGISTRATION ACCEPT message including T3512 value IE.
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_NoSecurity,
+                                                   v_GMM_MobilityInfo,
+                                                   f_NR5GC_GetMobileIdGUTI (nr_Cell1),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (nr_Cell1)),
+                                                                               {bit2oct(f_NR_CellInfo_GetTAC(nr_Cell1))}),
+                                                   -, -, -, -, -,-, -, -, -, -, -, -,
+                                                   cs_GPRS_Timer2_3_IEI ('5E'O, '001'B, '00111'B)); //T3512 value = 7 hours
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1, tsc_NR_RbId_SRB1, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+
+    // @siclog "Step 57" siclog@
+    // The UE transmits a REGISTRATION COMPLETE message
+    f_NR5GC_Registration_Complete(nr_Cell1, tsc_NR_RbId_SRB1);// @sic R5s250392 sic@
+
+    // @siclog "Step 58" siclog@
+    // The SS releases the RRC connection.
+    f_NR_RRCRelease(nr_Cell1);
+
+    // @siclog "Step 59" siclog@
+    // The SS configures:
+    // - NR Cell 1 as " Non-suitable "off" cell"
+    f_NR_SetCellPower (nr_Cell1, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);
+    f_EUTRA_NR_SendCoOrd(EUTRA, cms_EUTRA_NR_Trigger("Cell Power"));
+
+    // @siclog "Step 60" siclog@
+    // Check: Does the UE perform on the E-UTRA Cell 1 the TAU procedure for Inter-system change from N1 mode to S1 mode as described in TS 38.508-1 [4], Table 4.9.7.2.2-1?
+    f_NR5GC_TrackingAreaUpdateFromN1(nr_Cell1);
+
+    f_EUTRA_NR_WaitForCoOrd_Trigger (EUTRA, "Cell Power");
+    // @siclog "Step 61" siclog@
+    // The SS configures:
+    // NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    // @siclog "Step 62" siclog@
+    // Check: Does the UE perform on the NR Cell 1 the Test procedure for UE Tracking area updating for Inter-system change from S1 mode to N1 mode as described in TS 38.508-1 [4], Table 4.9.9.2.2-1?
+    f_NR5GC_IRAT_S1ToN1_IdleMode(nr_Cell1, -, -);
+    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 62 PASS");
+
+    // @siclog "Step 63" siclog@
+    // Check: Does the UE transmit a DEREGISTRATION REQUEST message at expiry of T3445?
+    t_T3445_Min.timeout;
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (nr_Cell1, tsc_NR_RRC_TI_Def, ?, tsc_SHT_IntegrityProtected);// @sic R5s250392 sic@
+    if (not f_Check_NG_DeregistrationReqMOMsg (v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B))) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Deregistration Request Message Failed");
+    }
+    else{
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 63 PASS");
+    }
+    // @siclog "Step 64" siclog@
+    // SS responds with DEREGISTRATION ACCEPT message.// @sic R5-255876 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(nr_Cell1,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+  } //End of fl_TC_11_5_2_Body()
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.3
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_5_3_NR5GC() runs on NR5GC_PTC
+   {//eCall Only mode / 5GS supports IMS voice over PS session / 5GS does not support emergency service / eCall over EPS / eCall failure if EPS and CS domain are not available
+    
+    f_NR5GC_IRAT_Init(NR_6);
+    
+    f_NR_CellInfo_SetSIB1_eCallOverIMS_Support(nr_Cell1,omit);
+    f_NR_CellInfo_SetSIB1_ImsEmergencySupport(nr_Cell1,omit);
+  
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //The eCall capable UE is equipped with eCall only enabled USIM configured as per TS 38.508-1 [4] Table 6.4.1-24.
+    //f_UT_USIM_Insert(UT, "USIM configuration 24 specified in table 6.4.1-24 TS 38.508-1"); // @sic R5s240629 sic@
+
+    // Preamble: The UE is in test state 0-A (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);
+    
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_5_3_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_Postamble(nr_Cell1, STATE_DEREGISTERED);
+
+    // Now tell EUTRA test is finished
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Postamble"));
+    }
+
+  /*
+   * @desc      test body of TC_11_5_3_NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_5_3_NR5GC_TestBody() runs on NR_BASE_PTC
+  {
+    //@siclog "Step 1" siclog@
+    //The SS configures:
+    // - NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);//@sic R5-235303 sic@
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Change Power Level"));
+    // @siclog "Step 2" siclog@
+    // The UE is Switched ON
+    //f_UT_SwitchOnUE(UT); // @sic R5s240629 sic@
+
+    // @siclog "Step 3" siclog@
+    // Wait for 60s for the UE to enter 5GMM-DEREGISTERED.eCALL-INACTIVE state.
+    //f_Delay(60.0); // @sic R5s240629 sic@
+    // @siclog "Step 4" siclog@
+    //An automatic eCall is initiated. (Note 1)
+    //f_UT_InitiateECall(UT, AUTOMATIC); // @sic R5s240629 sic@
+
+    //@siclog "Step 29" siclog@
+    //The UE is switched on.
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Change Power Level");
+    f_UT_SwitchOnUE(UT);
+    //@siclog "Step 30" siclog@
+    //Wait for 60s.
+    f_Delay(60.0);
+    //@siclog "Step 31" siclog@
+    //An automatic eCall is initiated. (Note 1)
+    f_UT_InitiateECall(UT, AUTOMATIC, -, LOCAL_CNF_REQUIRED); // @sic R5s230789 sic@
+    // @siclog "Step 32" siclog@
+    // Check: Does the UE transmit an RRCConnectionRequest message in the next 30 sec?// prose CR needed.
+    f_NR_CheckNoRRCSetupReq (nr_Cell1, 30.0,-,"step 32 failed");
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.4
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_5_4_NR5GC() runs on NR5GC_PTC
+   {/* eCall Only mode / 5GS supports IMS voice over PS session / 5GS supports emergency service / eCall over IMS is supported on 5GS / RACH failure in NR cell / eCall over EPS */
+
+    f_NR5GC_IRAT_Init(NR_6);
+    
+    f_NR_CellInfo_SetSIB1_eCallOverIMS_Support(nr_Cell1, true_);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    //The eCall capable UE is equipped with eCall only enabled USIM configured as per TS 38.508-1 [4] Table 6.4.1-24.
+    f_UT_USIM_Insert(UT, "USIM configuration 24 specified in table 6.4.1-24 TS 38.508-1");
+
+    // Preamble: The UE is in test state 0-A (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);
+    
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_5_4_NR5GC_TestBody();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_ReleaseAllCells(); // @sic R5s250225 sic@
+    }
+
+  /*
+   * @desc      test body of TC_11_5_4_NR5GC
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+   function fl_TC_11_5_4_NR5GC_TestBody() runs on NR_BASE_PTC
+   {
+    timer t_Wait := 3.0;  // @sic R5s250225 subject to prose CR approval sic@
+
+    //@siclog "Step 1" siclog@
+    //The SS configures:
+    // - NR Cell 1 as "Serving cell"
+    f_NR_SetCellPower(nr_Cell1, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    // @siclog "Step 2" siclog@
+    // The UE is Switched ON
+    f_UT_SwitchOnUE(UT);
+
+    // @siclog "Step 3" siclog@
+    // Wait for 60s for the UE to enter 5GMM-DEREGISTERED.eCALL-INACTIVE state.
+    f_Delay(60.0);
+    // @siclog "Step 3A" siclog@// @sic R5-254148 sic@
+    //The SS is configured to stop RA response on NR Cell1.
+    f_NR_SS_SystemIndCtrlConfig(nr_Cell1, cds_NR_SystemIndCtrl_RachPreamble(enable));  // @sic R5s250225 sic@
+    f_NR_SS_RachProcedureConfig(nr_Cell1, cs_NR_RachProcedureConfig_NoResponse);
+    // @siclog "Step 4" siclog@
+    //An automatic eCall is initiated. (Note 1)
+    // CNF not required as a receive event is next
+    f_UT_InitiateECall(UT, AUTOMATIC);
+    //@siclog "Step 5" siclog@
+    //The UE transmits preamble on PRACH.
+    SYSIND.receive(car_NR_PRACH_Preamble_IND(nr_Cell1, cr_TimingInfo_Any, ?));  // @sic R5s250225 sic@
+    //@siclog "Step 5A" siclog@
+    //The SS does not respond.// @sic R5-254148 sic@
+    //EXCEPTION: In parallel to the events described in step 6 the steps specified in Table 11.5.4.3.2-2 shall take place.
+    // @siclog "Step 6" siclog@
+    // Change the power level in EUTRA side
+    f_EUTRA_NR_SendCoOrd (EUTRA, cms_EUTRA_NR_Trigger("Change Power Level"));
+
+    //exception:The preamble and no response below are repeated for the duration of T300.
+    t_Wait.start;
+    alt {
+         []  SYSIND.receive(car_NR_PRACH_Preamble_IND(nr_Cell1, cr_TimingInfo_Any, ?))
+         {
+           repeat;
+         }
+         []t_Wait.timeout{}
+    };
+    
+    // Now wait for EUTRA test to finish
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 11.5.12
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_TC_11_5_12_NR5GC() runs on NR5GC_PTC
+  { /* eCall Only mode / 5GS supports IMS voice over PS session / 5GS supports emergency service / eCall over IMS is not supported on 5GS / eCall over EPS */
+
+    f_NR5GC_IRAT_Init(NR_6);
+    f_NR_CellInfo_SetSIB1_eCallOverIMS_Support(nr_Cell1, omit);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    // Preamble: The UE is in test state 0-A (Switched Off) as defined in TS 38.508-1 [4], subclause 4.4A.2.
+    f_NR5GC_Preamble (nr_Cell1, STATE_OFF_0A);
+
+    f_NR_TestBody_Set(true);
+
+    fl_TC_11_5_12_Body();
+
+    f_NR_TestBody_Set(false);
+
+    f_NR_ReleaseAllCells();  //@sic R5s250125 sic@
+
+  } //End of function f_TC_11_5_12_NR5GC()
+
+  /*
+   * @desc      test body of TC_11_5_12
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function fl_TC_11_5_12_Body()runs on NR_BASE_PTC
+  {
+    // - NR Cell 1 as "Serving cell"
+    //@sic R5-235074 R5s240599 sic@
+    var NR_AbsoluteCellPower_Type v_NR_ServingCellSSS_EPRE_FR1 := -85;
+      
+    // - NR Cell 1 as "Serving cell"
+    f_NR_CellInfo_InitMaxReferencePower(nr_Cell1, v_NR_ServingCellSSS_EPRE_FR1,tsc_NR_ServingCellSSS_EPRE_FR2);
+    f_NR_SetCellPower(nr_Cell1, v_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+
+    f_EUTRA_NR_WaitForCoOrd_Trigger(EUTRA, "Postamble");
+  } //End of fl_TC_11_5_12_Body()
+
+}

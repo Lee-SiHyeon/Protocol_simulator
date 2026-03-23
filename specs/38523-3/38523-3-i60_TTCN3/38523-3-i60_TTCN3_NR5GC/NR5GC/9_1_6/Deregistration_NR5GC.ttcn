@@ -1,0 +1,762 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-03-11 13:24:52 +0100 (ma., 11 mar. 2025) $
+// $Rev: 40817 $
+/******************************************************************************/
+
+module Deregistration_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_PTC_CoordMsg all;
+  import from NAS_5GC_Parameters all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_Handover all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from Parameters all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.6.1.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_6_1_1_NR5GC() runs on NR5GC_PTC
+  {
+    //UE-initiated de-registration / switch off / Abnormal / De-registration and 5GMM common procedure collision
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);// @sic R5-192397 sic@
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_9_1_6_1_1_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    if (pc_USIM_Removal) {
+    f_NR_Postamble(v_NGC_NASCellA, STATE_DEREGISTERED);
+    }
+      else {
+    f_NR_ReleaseAllCells();
+    }
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();
+  }
+
+  /*
+   * @desc      test body of TC_9_1_6_1_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_6_1_1_TestBody() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2; //@sic R5-192397 sic@
+    timer t_T3522 := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 6.0);
+    timer t_T3570 := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 6.0);
+
+    //@siclog "Step 0" siclog@
+    //SS stops sending RLC acknowledgments.
+    f_NR_SS_ConfigRB_AckProhibit(v_NGC_NASCellA,v_SRB,Prohibit);//@sic R5-197087 sic@
+
+    //Cause switch off
+    //@siclog "Step 1" siclog@
+    f_UT_SwitchOffUE(UT, false);
+  
+    //Check: Does the UE transmit a DEREGISTRATION REQUEST with the De-registration type IE indicating "switch off"? [1,P]
+    //@siclog "Step 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('1'B, '0'B, '01'B))) { //@sic R5s190466, R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+    //@siclog "Step 3" siclog@
+    //The SS transmits a DEREGISTRATION REQUEST message.
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, v_SRB, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         f_Get_NG_DeregistrationReqMTMsg(crs_DeregisterType('0'B, '0'B), omit))));//@sic R5-192397, R5-201202 sic@
+    //@siclog "Step 3A" siclog@
+    //SS resumes sending RLC acknowledgments
+    f_NR_SS_ConfigRB_AckProhibit(v_NGC_NASCellA,v_SRB,Continue);//@sic R5-197087 sic@
+
+    //@siclog "Step 4" siclog@
+    // Check: Does the UE transmit a DEREGISTRATION ACCEPT message?
+    //@sic R5-192397 sic@
+    //@sic R5-194867 sic@
+    t_T3522.start;
+    alt {
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                        v_SRB,
+                                        cr_NG_NAS_Ind((tsc_SHT_IntegrityProtected,tsc_SHT_IntegrityProtected_Ciphered),
+                                                        cr_NG_DEREGISTRATION_ACCEPT)))
+        {
+          t_T3522.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4: DEREGISTRATION ACCEPT received");
+        }
+      [] t_T3522.timeout {}
+    }
+
+    //The SS releases the RRC connection
+    //@siclog "Step 5" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();
+  
+    //switch on the UE
+    //@siclog "Step 6" siclog@
+    f_NR5GC_SwitchOnAndResetIMS(); // @sic R5s211299, R5-192397 sic@
+  
+    //The UE performs Registration procedure as specified in TS 38.508-1 [4] subclause 4.5.2 with 'connected without release'.
+    //@siclog "Step 7" siclog@
+    f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellA, -, noRrcConnectionRelease);
+    
+    //@siclog "Step 7A" siclog@
+    //SS stops sending RLC acknowledgments.
+    f_NR_SS_ConfigRB_AckProhibit(v_NGC_NASCellA,v_SRB,Prohibit);//@sic R5-197087 sic@
+
+    //@siclog "Step 8" siclog@
+    //Cause switch off.
+    f_UT_SwitchOffUE(UT, false);
+
+    //@siclog "Step 9" siclog@
+    //The UE transmits a DEREGISTRATION REQUEST with the De-registration type IE indicating "switch off".
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190109 sic@
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('1'B, '0'B, '01'B))) { // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+      else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 9");
+    }
+
+    //@siclog "Step 10" siclog@
+    //The SS transmits an IDENTITY REQUEST message.
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, tsc_NR_RbId_SRB2, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         cs_NG_IDENTITY_REQUEST(tsc_IdType_NG_IMEI))));//@sic R5-192397 sic@
+    //@siclog "Step 10A" siclog@
+    //SS resumes sending RLC acknowledgments
+    f_NR_SS_ConfigRB_AckProhibit(v_NGC_NASCellA,v_SRB,Continue);//@sic R5-197087 sic@
+    // Check: Does the UE transmit an IDENTITY RESPONSE message?
+    //@siclog "Step 11" siclog@
+    //@sic R5-194867 sic@
+    t_T3570.start;// @sic R5s160426 sic@
+    alt {
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                        tsc_NR_RbId_SRB2,
+                                        cr_NG_NAS_Ind((tsc_SHT_IntegrityProtected,tsc_SHT_IntegrityProtected_Ciphered),
+                                                          cr_NG_IDENTITY_RESPONSE(?))))//@sic R5-192397 sic@
+        {
+          t_T3570.stop;
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 11: IDENTITY RESPONSE received");
+        }
+      [] t_T3570.timeout {}
+    }
+
+    // The SS releases the RRC connection.
+    //@siclog "Step 12" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();
+
+    //EXCEPTION: Steps 13a1 to 13a4 describe behaviour that depends on the UE capability; the "lower case letter" identifies a step sequence that take place if the UE supports remove USIM without power down: pc_USIM_Removal = TRUE [29]
+    if (pc_USIM_Removal) {
+      // The UE is switched on.
+      //@siclog "Step 13a1" siclog@
+      f_NR5GC_SwitchOnAndResetIMS();    //@sic R5s220733 sic@
+  
+      //The UE performs Registration procedure as specified in TS 38.508-1 [4] subclause 4.5.2 with 'connected without release'.
+      //@siclog "step13a2" siclog@
+      f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellA, -, noRrcConnectionRelease);
+  
+      //Cause removal of USIM from the UE without powering down.
+      //@siclog "step13a3" siclog@
+      f_UT_USIM_Remove (UT);
+  
+      //Check: Does the UE transmit a DEREGISTRATION REQUEST with the De-registration type IE indicating "switch off"?
+      //@siclog "step13a4" siclog@
+      SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190109 sic@
+      v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+      if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('1'B, '0'B, '01'B))) {  // @sic R5s240531 Baseline Moving sic@
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+      }
+        else {
+        f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 13");
+        }
+    }
+
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.6.1.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_6_1_2_NR5GC() runs on NR5GC_PTC
+  { //UE-initiated de-registration / Normal de-registration / Abnormal / Transmission failure without TAI change from lower layers,
+    //De-registration and 5GMM common procedure collision, T3521 timeout
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NR_CellId_Type v_NGC_NASCellB := f_NR5GC_MapNASCell(ngc_CellB, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_2);
+    f_NR_CellInfo_SetTAC (v_NGC_NASCellB, int2bit(1,24));
+    //Create and configure cell
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    f_NR_CellConfig_Def(v_NGC_NASCellB);
+
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_9_1_6_1_2_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellB, STATE_DEREGISTERED);
+  }
+
+  /*
+   * @desc      test body of TC_9_1_6_1_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_6_1_2_TestBody() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NR_CellId_Type v_NGC_NASCellB := f_NR5GC_MapNASCell(ngc_CellB, NG_AllCellsOnSamePLMN);
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var integer v_Expiry_Number;
+    var PLMN_Identity v_ASN_PLMN := f_NR_CellInfo_GetPLMN (v_NGC_NASCellB);
+    var NAS_PlmnId v_PLMN := f_NR_Asn2Nas_PlmnId(v_ASN_PLMN);
+    var template (value) RACH_ConfigDedicated v_RACH_ConfigDedicated;
+    var template (omit) RRCReconfiguration_v1530_IEs v_V1530Ext;//@sic R5s200125 sic@
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerConfigList;//@sic R5s200125 sic@
+    var template (value) RLC_Config v_Rlc_Config := cs_38508_RLC_Config_AM_DRB(cs_38508_UL_RLC_SRB, cs_38508_DL_RLC_SRB);//@sic R5s200125 sic@
+    timer t_T3521Min := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 15.0);
+    timer t_T3521Max := f_NR_SetTimerToleranceMax(v_NGC_NASCellA, nasTimer, 15.0);
+    timer t_Delay := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 10.0);
+
+    
+
+    //@siclog "Step 0" siclog@
+    //The SS configures:- NGC Cell B as "Suitable neighbour cell".
+    f_NR_SetCellPower (v_NGC_NASCellB, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2);//@sic R5-198949 sic@
+    
+    //@siclog "Step 0A" siclog@
+    //SS transmits NR RRCReconfiguration message to configure specific maxRetxThreshold for NGC Cell A
+    //@siclog "Step 0B" siclog@
+    //The UE transmits NR RRCReconfigurationComplete message.
+    //@sic R5s200125,R5-201145 sic@
+    v_Rlc_Config.am.ul_AM_RLC.maxRetxThreshold := t32;
+    v_RLC_BearerConfigList[0] := valueof(cs_NR_BearerConfigDef(f_NR_LogicalChannelId_SRB(tsc_SRB2),
+                                                               cs_NR_ServedRadioBearerSRB(tsc_SRB2),
+                                                               v_Rlc_Config,
+                                                               cs_38508_LogicalChannelConfig_SRB(tsc_SRB2)));
+    v_V1530Ext := cs_NR_RRCReconfiguration_v1530_IEs(bit2oct(encvalue(cs_38508_CellGroupConfig(tsc_NR_CellGroupId_MCG, v_RLC_BearerConfigList))));
+    f_NR_SendRRCReconfiguration (v_NGC_NASCellA, -,cs_38508_RadioBearerConfigDef({cs_NR_SRB_ToAddMod(tsc_SRB2)}), v_V1530Ext,-,-,-,true);
+    //@siclog "Step 1" siclog@
+    //The SS is configured not send RLC ACK for the message sent in step 2.  //@sic R5-195349 sic@
+    f_NR_SS_ConfigRB_AckProhibit(v_NGC_NASCellA,tsc_NR_RbId_SRB2,Prohibit);//@sic R5s191132,R5-201145 sic@
+    
+    //@siclog "Step 1A" siclog@
+    //AT or MMI command to cause UE to initiate de-registration.
+    //Note: The below messages will be sent/received on NGC Cell A unless otherwise stated.
+    f_UT_Deregister(UT);//@sic R5s191132,R5-201145 sic@
+    //@siclog "Step 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190109 sic@
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B))) { // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+      else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 2");
+    }
+    //The SS configures:- NGC Cell B as "Suitable neighbour cell"
+    //@siclog "Step 3" siclog@
+    //void //@sic R5-198949 sic@
+
+    //@siclog "Step 3A" siclog@
+    //@sic R5-195349 sic@
+    //The SS transmits an RRCReconfiguration message including reconfigurationWithSync with rach-ConfigDedicated to order the UE to perform intra-frequency handover to NGC Cell B.
+    //The following messages are to be observed on Cell B unless explicitly stated otherwise.
+    //@siclog "Step 3B" siclog@
+    //The UE transmits an rrcReconfigurationComplete message.
+    //@sic R5s191132 sic@
+    v_RACH_ConfigDedicated := f_NR_GetRACHConfigDedicated_Def(v_NGC_NASCellB);
+    //@sic R5-197222 R5s200819 R5s210135 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Steps1_12(v_NGC_NASCellA, v_NGC_NASCellB,
+                                                  -, -, -, -, -,
+                                                  cs_MasterKeyUpdate(false, tsc_NR_38508_NextHopChainingCount),
+                                                  cs_NR_RACH_ConfigDedicated_Uplink(v_RACH_ConfigDedicated));
+ 
+
+    //@siclog "Step 4" siclog@
+    //Check: Does the UE restart the de-registration procedure by sending DEREGISTRATION REQUEST message? Timer T3521 is started.
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190109 sic@
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B))) {// @sic R5s200967,  // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+      else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 4");
+    }
+
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_16(v_NGC_NASCellA, v_NGC_NASCellB); //@sic R5s200819 R5s210135 sic@
+
+    //@siclog "Step 4A" siclog@
+    //The SS configures:- NGC Cell A as "Non-suitable "Off" cell".
+    f_NR_SetCellPower (v_NGC_NASCellA, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);//@sic R5-198949 sic@
+    //@siclog "Step 5" siclog@
+    //With T3521 still running the SS shall send AUTHENTICATION REQUEST.
+    //@siclog "Step 6" siclog@
+    //Check: Does the UE transmit an AUTHENTICATION RESPONSE message?
+    t_T3521Min.start;
+    if (px_NAS_5GC_AuthenticationType == AKA_5G) {
+       f_NR_Authentication5G_AKA(v_NGC_NASCellB, tsc_SHT_IntegrityProtected_Ciphered, tsc_SHT_IntegrityProtected_Ciphered, v_PLMN,tsc_NR_RbId_SRB2);//@sic R5s191132 sic@
+    } else {
+      f_NR_AuthenticationEAP_AKA(v_NGC_NASCellB, tsc_SHT_IntegrityProtected_Ciphered, tsc_SHT_IntegrityProtected_Ciphered, v_PLMN,tsc_NR_RbId_SRB2);//@sic R5s191132 sic@
+    }
+    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 6");
+
+    //@siclog "Step 7" siclog@
+    //SS responds with DEREGISTRATION ACCEPT message.
+    //@sic R5s191132 sic@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellB, tsc_NR_RbId_SRB2, -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+    t_T3521Min.stop;
+    //@siclog "Step 8" siclog@
+    //The SS releases the RRC connection.
+    f_NR_RRCRelease(v_NGC_NASCellB);
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();//@sic R5s210059 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[f_PDN_PdnIndex2Integer(PDN_1)], cms_IPCAN_IMS_Reset); //@sic R5s220109 sic@
+    //The below is added because the RACH has been configured as CFRA in the handover procedure.
+    f_NR_SS_RachProcedureConfig(v_NGC_NASCellB, f_NR_InitialiseRachProcedure(v_NGC_NASCellB));
+    //@siclog "Step 9" siclog@
+    //AT or MMI command to cause UE to initiate registration.
+    f_UT_Register(UT);
+    //@siclog "Step 10-24a4" siclog@
+    //Steps 2-19a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed to complete the registration.
+    f_NR5GC_RRC_IdleState1N_Def(v_NGC_NASCellB,-,noRrcConnectionRelease);
+    //@siclog "Step 25" siclog@
+    //Cause UE to initiate de-registration.
+    f_UT_Deregister(UT);
+    //@siclog "Step 26" siclog@
+    //Check: Does the UE transmit a DEREGISTRATION REQUEST message with De-registration type IE indicating "Normal de-registration"? The UE starts timer T3521.
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp; // @sic R5s190109 sic@
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B),?,?)) {   // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+      else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 26");
+    }
+    //@siclog "Step 27" siclog@
+    //SS does not respond to the DEREGISTRATION REQUEST message.
+    //@siclog "Step 28" siclog@
+    //Check: When the timer T3521 expires does the UE re-transmit DEREGISTRATION REQUEST message? Timer T3521 is re-started (1st expiry).
+    //@siclog "Step 29" siclog@
+    //The SS does not respond to the DEREGISTRATION REQUEST message.
+    //@siclog "Step 30" siclog@
+    //Check: When the timer T3521 expires does the UE re-transmit DEREGISTRATION REQUEST message? Timer T3521 is re-started (2nd expiry).
+    //@siclog "Step 31" siclog@
+    //The SS does not respond to the DEREGISTRATION REQUEST message.
+    //@siclog "Step 32" siclog@
+    //Check: When the timer T3521 expires does the UE re-transmit DEREGISTRATION REQUEST message? Timer T3521 is re-started (3rd expiry).
+    //@siclog "Step 33" siclog@
+    //The SS does not respond to the DEREGISTRATION REQUEST message.
+    //@siclog "Step 34" siclog@
+    //Check: When the timer T3521 expires does the UE re-transmit DEREGISTRATION REQUEST message? Timer T3521 is re-started (4th expiry).
+
+    for (v_Expiry_Number := 1; v_Expiry_Number <= 4; v_Expiry_Number := v_Expiry_Number + 1)
+      {
+        t_T3521Min.start;  //SS starts a timer to check that UE sends the Detach message after timeout.
+        alt {
+          [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, ?, ?)) { // receive anything before the timer expires and it's a fail; @sic R5s100189 sic@
+            f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step " & int2str((v_Expiry_Number*2)+26));
+            t_T3521Min.stop;
+          }
+          [] t_T3521Min.timeout {
+            SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB,
+                                           tsc_NR_RbId_SRB2,
+                                           cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_NG_DEREGISTRATION_REQUEST_MO(crs_DeregisterType('0'B, '0'B,'01'B),?,?, *, *)))); // Jun24 @sic R5s240531 Baseline Moving sic@
+            f_NR_PreliminaryPass (__FILE__, __LINE__, "Step " & int2str((v_Expiry_Number*2)+26));
+          }
+        }
+      }
+    //@siclog "Step 35" siclog@
+    //The SS does not respond to the DEREGISTRATION REQUEST message.
+
+    //@siclog "Step 36" siclog@
+    //Check: When the timer T3521 expires does the UE re-transmit DEREGISTRATION REQUEST message in 10s?
+    //The UE shall abort the de-registration procedure and enter the 5GMM-DEREGISTERED (5th expiry).
+    t_T3521Max.start;
+    alt {
+      // if SS receives anything, it fails.
+      [] any port.receive
+        {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 36");
+          t_T3521Max.stop;
+        }
+      [] t_T3521Max.timeout
+        {
+          t_Delay.start;
+          alt {
+          [] SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, //@sic R5-195349 sic@
+                                           tsc_NR_RbId_SRB2,
+                                           cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered,
+                                                             cr_NG_DEREGISTRATION_REQUEST_MO(crs_DeregisterType('0'B, '0'B,'01'B),?,?, *, *)))) // Jun24 @sic R5s240531 Baseline Moving sic@
+            {
+              f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 36");
+              t_Delay.stop;
+            }
+          [] t_Delay.timeout
+            {
+              f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 36");
+            }
+        }
+      }
+    }
+  }//End of fl_TC_9_1_6_1_2_Body
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.6.1.3
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_6_1_3_NR5GC() runs on NR5GC_PTC
+  { //UE-initiated de-registration / Abnormal / Change of cell into a new tracking area
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NR_CellId_Type v_NGC_NASCellB := f_NR5GC_MapNASCell(ngc_CellB, NG_AllCellsOnSamePLMN);
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    f_NR_CellConfig_Def(v_NGC_NASCellB);
+
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+
+    f_NR_SetCellPower (v_NGC_NASCellB, tsc_NR_NonSuitableOffCellSSS_EPRE, tsc_NR_NonSuitableOffCellSSS_EPRE);//@sic R5-224029 sic@
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_9_1_6_1_3_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellB, STATE_DEREGISTERED);//@sic R5-205385 void sic@
+  }
+
+  /*
+   * @desc      test body of TC_9_1_6_1_3
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_6_1_3_TestBody() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NR_CellId_Type v_NGC_NASCellB := f_NR5GC_MapNASCell(ngc_CellB, NG_AllCellsOnSamePLMN);
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+
+    
+    //Cause UE to de-register for non Switch off reason using MMI or AT commands.
+    //@siclog "Step 1" siclog@
+    f_UT_Deregister(UT);
+    // The UE transmits DEREGISTRATION REQUEST message. (The UE starts timer T3521)
+    //@siclog "Step 2" siclog@
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B),f_NR5GC_GetMobileIdGUTI (v_NGC_NASCellA, omit))) {   // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+    //The SS does not respond to DEREGISTRATION REQUEST message.
+    //@siclog "Step 3" siclog@
+
+    //The SS configures NGC Cell A as the "suitable cell" and NGC Cell B as the "Serving cell".
+    //Note: T3521 value is specified as 15s in TS 24.501 [22] and it is assumed that SS canconfigure cells within this time.
+    //@siclog "Step 4" siclog@
+
+    f_NR_SetCellPower (v_NGC_NASCellA, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR1, tsc_NR_SuitableIntraFreqCellSSS_EPRE_FR2);
+    f_NR_SetCellPower (v_NGC_NASCellB, tsc_NR_ServingCellSSS_EPRE_FR1, tsc_NR_ServingCellSSS_EPRE_FR2);
+    //@siclog "Step 5" siclog@
+    //The SS transmits an RRCReconfiguration message on NGC Cell A to order the UE to perform intra-frequency handover to NGC Cell B.
+    //@siclog "Step 6" siclog@
+    //The UE transmits a RRCReconfigurationComplete message on NGC Cell B to confirm the successful completion of the intra frequency handover.
+    //@sic R5s200937 R5s210135 sic@
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Steps1_12(v_NGC_NASCellA, v_NGC_NASCellB,
+                                                  -, -, -, -, -,
+                                                  cs_MasterKeyUpdate(false, tsc_NR_38508_NextHopChainingCount));
+
+ 
+    //@siclog "Step 7" siclog@
+    //Check: Does the UE transmit a REGISTRATION REQUEST message with registration type value set to "mobility registration updating"?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Mobility)){// @sic R5-200208, R5-206426 sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+    }
+    else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 7 PASS");
+    }
+    //The SS configuration after HO can now be finished
+    f_NR5GC_508RRC_IntraNR_HO_InterCell_Common_Steps13_16(v_NGC_NASCellA, v_NGC_NASCellB);//@sic R5s200937 R5s210135 sic@
+
+    //@siclog "Step 8-9" siclog@
+    //Steps 4-5 of the generic procedure in TS 38.508-1 [4] subclause 4.9.5.2.2  are performed.
+    //@sic R5-200208 sic@
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Mobility,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   f_NR5GC_GetMobileIdGUTI(v_NGC_NASCellB),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellB)),// @sic R5s200350 sic@
+                                                                                {bit2oct(f_NR_CellInfo_GetTAC(v_NGC_NASCellB))}));// @sic R5s200350 sic@
+                                                   
+    // Registration Accept
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellB,
+                                   tsc_NR_RbId_SRB2,
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    //Registration Complete
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    if (not match (v_ReceivedAsp.Signalling.Nas[0].Pdu.Msg, cr_NG_REGISTRATION_COMPLETE)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Complete Message Failed");
+    }
+    //@siclog "Steps 10-22" siclog@
+    //Void//@sic R5-200208 sic@
+    //@siclog "Step 23" siclog@
+    //Check: Does the UE transmit a DEREGISTRATION REQUEST message?
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellB, tsc_NR_RbId_SRB2, cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp;
+    v_ReceivedMsg := v_ReceivedAsp.Signalling.Nas[0];
+    if(not f_Check_NG_DeregistrationReqMOMsg(v_ReceivedMsg.Pdu, crs_DeregisterType('0'B, '0'B, '01'B),f_NR5GC_GetMobileIdGUTI (v_NGC_NASCellB, omit))) {  // @sic R5s240531 Baseline Moving sic@
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "De-registration Request Message Failed");
+    }
+    else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 23 PASS");
+    }
+    //@siclog "Step 24" siclog@
+    //The SS transmits DEREGISTRATION ACCEPT message.
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellB,-, -,cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, cs_NG_DEREGISTRATION_ACCEPT)));
+    //@siclog "Step 25" siclog@
+    //The SS transmits an RRCRelease message.
+    f_NR_RRCRelease(v_NGC_NASCellB);
+    f_NR5GC_MobileInfo_Init();// @sic R5s200350 sic@
+    //@siclog "Step 26" siclog@
+    //Check: Does the test result of the generic procedure in TS 38.508-1 [4] subclause 4.9.13 indicates that the UE doesn't respond to paging when paged with NG-5G-S-TMSI?
+    f_NR5GC_PageNoResponse(v_NGC_NASCellB);
+    //@siclog "Step 27-35" siclog@
+    //@sic R5-205385 void sic@
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.6.2.1
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_6_2_1_NR5GC() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+    
+    f_NR5GC_Preamble (v_NGC_NASCellA, STATE_CONNECTED_3A);
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_9_1_6_2_1_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_IDLE_1A);
+  }
+
+  /*
+   * @desc      test body of TC_9_1_6_2_1
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_6_2_1_TestBody() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+  
+    
+    //The SS transmits a DEREGISTRATION REQUEST with indicates "re-registration required".
+    //@siclog "Step 1" siclog@
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, v_SRB, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         f_Get_NG_DeregistrationReqMTMsg(crs_DeregisterType('0'B, '1'B), omit)))); // @sic R5-201202 sic@
+   // Check: Does the UE transmit a DEREGISTRATION ACCEPT message?
+   //@siclog "Step 2" siclog@
+
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                        v_SRB,
+                                        cr_NG_NAS_Ind((tsc_SHT_IntegrityProtected,tsc_SHT_IntegrityProtected_Ciphered),
+                                                        cr_NG_DEREGISTRATION_ACCEPT)));
+    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 2: DEREGISTRATION ACCEPT received");
+
+    //The SS releases RRC connection.
+    //@siclog "Step 3" siclog@
+    f_NR_RRCRelease(v_NGC_NASCellA);
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();//@sic R5s210059 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[f_PDN_PdnIndex2Integer(PDN_1)], cms_IPCAN_IMS_Reset); //@sic R5s220109 sic@
+    //@siclog "Step 4" siclog@
+    //The UE transmits an RRCSetupRequest message.
+    f_NR_RRC_SetupRequest_Def(v_NGC_NASCellA);
+    //@siclog "Step 5" siclog@
+    //The SS transmits an RRCSetup message.
+    f_NR_RRCSetup_Def (v_NGC_NASCellA);
+    //@siclog "Step 6" siclog@
+    //The SS transmits an RRCSetup message.
+    v_ReceivedMsg := f_NR_RRCSetupComplete_Def(v_NGC_NASCellA,
+                                               cr_38508_RRCSetupComplete(tsc_NR_RRC_TI_Def),
+                                               tsc_SHT_IntegrityProtected);
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu, Initial_Secure)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+      }
+    //@siclog "Step 7-23" siclog@
+    //Steps 5-20 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_Idle_Steps5_20 (v_GMM_MobilityInfo, // @sic R5-237369 sic@
+                                v_NGC_NASCellA,
+                                v_ReceivedMsg,
+                                TESTMode_OFF);
+  }//End of fl_TC_9_1_6_2_1_TestBody
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 9.1.6.2.2
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_9_1_6_2_2_NR5GC() runs on NR5GC_PTC
+  { //Network-initiated de-registration / De-registration for 3GPP access / Re-registration not required
+    //@sic R5-197867 sic@
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var template (value) NG_NAS_DL_Message_Type v_MsgToSend;
+    var template (value) GPRS_Timer2 v_GprsTimer2_T3502 := cs_GPRS_Timer2_3_IEI('16'O, '001'B, '00010'B);
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+
+    f_NR5GC_Init_NAS(NR_1);
+
+    //Create and configure cell
+    f_NR_CellConfig_Def(v_NGC_NASCellA);
+
+    //Preamble with T3502
+    v_GMM_MobilityInfo := f_NR5GC_Preamble_Steps1_13(v_NGC_NASCellA);
+    v_MsgToSend := f_Get_NG_RegistrationAcceptMsg (Initial_Secure,
+                                                   v_GMM_MobilityInfo,  // @sic R5-206426 sic@
+                                                   f_NR5GC_GetMobileIdGUTI (v_NGC_NASCellA),
+                                                   cs_NG_TAIListNonConsecutive(f_NR_Asn2Nas_PlmnId(f_NR_CellInfo_GetPLMN (v_NGC_NASCellA)),
+                                                                                {bit2oct(f_NR_CellInfo_GetTAC(v_NGC_NASCellA))}),
+                                                   -,-,-,-,-,
+                                                   -,-,-,-,-,
+                                                   -,-,-,-,
+                                                   v_GprsTimer2_T3502);
+    
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA,
+                                   tsc_NR_RbId_SRB1, // No SRB2 so must be on SRB1
+                                   -,
+                                   cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered, v_MsgToSend)));
+    // Steps 15-19a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_Idle_Steps15_20(v_NGC_NASCellA,TESTMode_OFF);
+    f_NR5GC_RRC_ConnectedState3N_Def(v_NGC_NASCellA);
+
+    f_NR_TestBody_Set(true);
+    
+    fl_TC_9_1_6_2_2_TestBody();
+    
+    f_NR_TestBody_Set(false);
+    
+    // Finish
+    f_NR_Postamble(v_NGC_NASCellA, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      test body of TC_9_1_6_2_2
+   * @status    APPROVED (NR5GC)
+   */
+  function fl_TC_9_1_6_2_2_TestBody() runs on NR5GC_PTC
+  {
+    var NR_CellId_Type v_NGC_NASCellA := f_NR5GC_MapNASCell(ngc_CellA, NG_AllCellsOnSamePLMN);
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NR_RadioBearerId_Type v_SRB := tsc_NR_RbId_SRB2;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo;
+    timer t_T3502 := f_NR_SetTimerToleranceMin(v_NGC_NASCellA, nasTimer, 120.0);
+  
+    //@siclog "Step 1" siclog@
+    //SS sends a DEREGISTRATION REQUEST message indicates no 5GMM cause IE, "re-registration not required" and the de-registration request is for 3GPP access
+    SRB.send(cas_NR_SRB_NasPdu_REQ(v_NGC_NASCellA, v_SRB, -, cs_NG_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                                         f_Get_NG_DeregistrationReqMTMsg(crs_DeregisterType('0'B, '0'B,'01'B), omit)))); // @sic R5-201202 sic@
+   //@siclog "Step 2" siclog@
+   //Check: Does the UE transmit a DEREGISTRATION ACCEPT message? Note: Now UE should start timer T3502.
+    SRB.receive(car_NR_SRB_NasPdu_IND(v_NGC_NASCellA,
+                                        v_SRB,
+                                        cr_NG_NAS_Ind(tsc_SHT_IntegrityProtected_Ciphered,
+                                                        cr_NG_DEREGISTRATION_ACCEPT)));
+    f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 2: DEREGISTRATION ACCEPT received");
+    t_T3502.start;
+    //@siclog "Step 3" siclog@
+    //The SS releases the RRC connection.
+    f_NR_RRCRelease(v_NGC_NASCellA);
+    // Need to 'reset' all stored lists as all DRBs and PDU sessions no longer exist in UE
+    f_NR5GC_MobileInfo_Init();//@sic R5s210059 sic@
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[f_PDN_PdnIndex2Integer(PDN_1)], cms_IPCAN_IMS_Reset); //@sic R5s220109 sic@
+    //@siclog "Step 4" siclog@
+    //The SS waits 2 mins for T3502 to expire.
+    t_T3502.timeout;
+    //@siclog "Step 5-7" siclog@
+    //The UE establishes RRC connection by executing steps 2-4 of Table 4.5.2.2-2 in TS 38.508-1 [4].
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (v_NGC_NASCellA, tsc_NR_RRC_TI_Def, ?,tsc_SHT_NoSecurityProtection);
+    //@siclog "Step 8" siclog@
+    //Check: Does the UE transmit a REGISTRATION REQUEST message?
+    if (not f_Check_NG_RegistrationReqMsg (v_GMM_MobilityInfo, v_ReceivedMsg.Pdu,Initial_NoSecurity,cr_NG_MobileIdentitySUCI(?,?),'111'B ,-,-,-,-,-,omit)) {
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Registration Request Message Failed");
+      }
+      else {
+      f_NR_PreliminaryPass (__FILE__, __LINE__, "Step 8 PASS");
+      }
+    //@siclog "Step 9-23a1" siclog@
+    //Steps 5-19a1 of Table 4.5.2.2-2 of the generic procedure in TS 38.508-1 [4] are performed.
+    f_NR5GC_RRC_Idle_Steps5_20 (v_GMM_MobilityInfo,
+                                v_NGC_NASCellA,
+                                v_ReceivedMsg,
+                                TESTMode_OFF,
+                                noRrcConnectionRelease,
+                                Initial_NoSecurity);
+    }//End of fl_TC_9_1_6_2_2_TestBody
+
+}

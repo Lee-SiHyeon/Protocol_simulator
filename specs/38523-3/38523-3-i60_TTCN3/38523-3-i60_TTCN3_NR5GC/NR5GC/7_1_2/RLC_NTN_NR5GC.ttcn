@@ -1,0 +1,287 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-12-08 17:27:48 +0100 (lu., 08 dic. 2025) $
+// $Rev: 42527 $
+/******************************************************************************/
+   
+module RLC_NTN_NR5GC {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_LoopBack all;
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from L2_Common4G5G all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR_ASP_DrbDefs all;
+  import from NR_ASP_Templates_DRB_Data all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_L2_Common all;
+  import from NR_NTN_Configuration all;
+  import from NR_Parameters all;
+  import from NR_RLC_Common all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+  import from RLC_TC_Common_NR all;
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.2.2.5a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_2_2_5a_NR5GC() runs on NR5GC_PTC
+  { // NR NTN / UM RLC / Receive window operation and t-Reassembly expiry
+    var NR_RLC_SS_State_Type v_RLC_Rec;
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerConfigList;
+    var SN_FieldLengthUM v_DL_Len;
+    var SN_FieldLengthUM v_UL_Len;
+    var T_Reassembly v_T_Reassembly;
+    var T_ReassemblyExt_r17 v_T_ReassemblyExt_r17;
+    var DRB_Identity v_DRBId;
+
+    f_NR5GC_Init(NR_29); // @sic R5-250100 ch. 1, R5-251942 sic@
+   
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+    
+    // preconfigure the UE location @sic R5s250107 ch. 1.1 sic@
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A, TESTModeA_ON);
+    //Set null cipher Algorithm
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+    
+    //Retrieve DRB Id of the first PDU session
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+    // Initialization of RLC variables
+    v_RLC_Rec := f_NR_InitRLC_Record();
+    if (pc_um_WithShortSN) {
+      v_DL_Len := size6;
+      v_UL_Len := size6;
+      v_RLC_Rec.UM_SN_Size := 6;
+    } else {
+      v_DL_Len := size12;
+      v_UL_Len := size12;
+      v_RLC_Rec.UM_SN_Size := 12;
+    }
+    v_RLC_Rec.t_Reassembly := 0.2; // @sic R5s250107 ch. 1.2 sic@
+    v_RLC_Rec.t_ReassemblyExt_r17 := 1.1;
+    v_T_Reassembly := ms200;
+    v_T_ReassemblyExt_r17 := ms1100;
+    v_RLC_BearerConfigList := f_NR_ReconfigureRLC_UM (v_DRBId, v_DL_Len, v_UL_Len, v_T_Reassembly, -, -, v_T_ReassemblyExt_r17);
+    f_NR5GC_RRC_ConnectedState3N_RLC_UM (v_DRBId, v_RLC_BearerConfigList[0], v_DL_Len); // @sic R5s190548, R5-197250 sic@
+ 
+    f_NR_TestBody_Set(true);
+    f_TC_7_1_2_2_5a_NR_TestBody(v_RLC_Rec, v_DRBId);
+    f_NR_TestBody_Set(false);
+    
+    f_NR_ULGrantConfiguration_Start(nr_Cell1); // @sic R5s190312 ch. 4.3; R5s230130 sic@
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.2.2.5a
+   * @param     p_RLC_Rec
+   * @param     p_NR_DRB_Id
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_2_2_5a_NR_TestBody(NR_RLC_SS_State_Type p_RLC_Rec,
+                                       DRB_Identity p_NR_DRB_Id) runs on NR_BASE_PTC
+  { // NR NTN / UM RLC / Receive window operation and t-Reassembly expiry
+    var integer v_RLC_Len1stSeg := 7; // Length of 1st segment
+    var integer v_RLC_Len2ndSeg := 5; // Length of 2nd segment
+    var integer v_RLC_SDUsize := v_RLC_Len1stSeg + v_RLC_Len2ndSeg;
+    var NR_RLC_DataFieldList_Type v_NR_RLC_DataList;
+    var NR_RLC_DataField_Type v_NR_RLC_Data;
+    var integer v_Koffset;
+    var float v_Tolerance;
+    timer t_WatchDog;
+
+    v_Koffset := f_NR_CellInfo_GetKoffset (nr_Cell1);
+    v_Tolerance := int2float(v_Koffset)/1000.0 + p_RLC_Rec.t_Reassembly; // @sic R5s250107 ch. 2.1 sic@
+    
+    v_NR_RLC_DataList := fl_NR_GenerateRLC_UM_SDUs(p_RLC_Rec, v_RLC_SDUsize, 2);
+        
+    // @siclog "Step 1" siclog@
+    //The SS transmits UMD PDU#1 containing first segment of RLC SDU#1, SN=0.
+    f_NR_TxUMD_PDUpartofSDU (p_RLC_Rec, p_NR_DRB_Id, cs_TimingInfo_Now, v_NR_RLC_DataList[tsc_RLC_SDU1], 0, v_RLC_Len1stSeg, tsc_NR_SI_StartOfSDU);
+    
+    // @siclog "Step 2" siclog@
+    //Wait for t-Reassembly to ensure that t-Reassembly for the UMD PDU#1 expires.
+    f_Delay(f_NR_SetTimerToleranceMax (nr_Cell1, l2Timer, v_Tolerance)); // @sic R5s250107 ch. 2.1 sic@
+
+    // @siclog "Step 3" siclog@
+    //The SS transmits UMD PDU#2 containing last segment of RLC SDU#1, SN=0.
+    p_RLC_Rec.UM_TX_Next := 0;
+    f_NR_TxUMD_PDUpartofSDU (p_RLC_Rec, p_NR_DRB_Id, cs_TimingInfo_Now, v_NR_RLC_DataList[tsc_RLC_SDU1], v_RLC_Len1stSeg, v_RLC_SDUsize - v_RLC_Len1stSeg, tsc_NR_SI_EndOfSDU, true);
+
+    // @siclog "Step 4" siclog@
+    //Check: For 2 sec after step 3, does the UE transmit RLC SDU#1?
+    v_NR_RLC_Data := f_NR_PDCP_PDU_Encvalue(cs_NR_PDCP_PDU_18B(0, substr(v_NR_RLC_DataList[tsc_RLC_SDU1], 3, lengthof (v_NR_RLC_DataList[tsc_RLC_SDU1]) - 3))); // @sic R5s250107 ch. 2.2 sic@
+    t_WatchDog.start(2.0); // @sic R5s250107 ch. 2.3 sic@
+    alt {
+      [] a_NR_RxUMD_oneSDU(p_NR_DRB_Id, v_NR_RLC_Data) {
+        t_WatchDog.stop; // @sic R5s250107 ch. 2.4 sic@
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+      }
+      [] t_WatchDog.timeout {f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4");}
+    }
+
+    // @siclog "Step 5" siclog@
+    //The SS transmits UMD PDU#3 containing first segment of RLC SDU#2, SN=2.
+    p_RLC_Rec.UM_TX_Next := 2; // @sic R5s250216 sic@
+    f_NR_TxUMD_PDUpartofSDU (p_RLC_Rec, p_NR_DRB_Id, cs_TimingInfo_Now, v_NR_RLC_DataList[tsc_RLC_SDU2], 0, v_RLC_Len1stSeg, tsc_NR_SI_StartOfSDU);
+
+    // @siclog "Step 6" siclog@
+    //Wait for t-ReassemblyExt-r17 to ensure that t-ReassemblyExt-r17 for the UMD PDU#3 expires.
+    v_Tolerance := int2float(v_Koffset)/1000.0 + p_RLC_Rec.t_ReassemblyExt_r17;
+    f_Delay(f_NR_SetTimerToleranceMax (nr_Cell1, l2Timer, v_Tolerance)); // @sic R5s250107 ch. 2.5 sic@
+   
+    // @siclog "Step 7" siclog@
+    //The SS transmits UMD PDU#4 containing last segment of RLC SDU#2, SN=2.
+    // @sic R5-253970 sic@
+    f_NR_TxUMD_PDUpartofSDU (p_RLC_Rec, p_NR_DRB_Id, cs_TimingInfo_Now, v_NR_RLC_DataList[tsc_RLC_SDU2], v_RLC_Len1stSeg, v_RLC_SDUsize - v_RLC_Len1stSeg, tsc_NR_SI_EndOfSDU, true);
+    
+    // @siclog "Step 8" siclog@
+    //Check: For 2 sec after step 7, does the UE transmit RLC SDU#2?
+    v_NR_RLC_Data := f_NR_PDCP_PDU_Encvalue(cs_NR_PDCP_PDU_18B(1, substr(v_NR_RLC_DataList[tsc_RLC_SDU2], 3, lengthof (v_NR_RLC_DataList[tsc_RLC_SDU2]) - 3))); // @sic R5s250107 ch. 2.6 sic@
+    t_WatchDog.start(2.0); // @sic R5s250107 ch. 2.7 sic@
+    alt {
+      [] a_NR_RxUMD_oneSDU(p_NR_DRB_Id, v_NR_RLC_Data) {
+        t_WatchDog.stop; // @sic R5s250107 ch. 2.8 sic@
+        f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 8");
+      }
+      [] t_WatchDog.timeout {f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 8");}
+    }
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.2.3.9a
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_2_3_9a_NR5GC() runs on NR5GC_PTC
+  { // NR NTN / AM RLC / Reassembling of AMD PDUs
+    var NR_RLC_SS_State_Type v_RLC_Rec;
+    var template (value) NR_RLC_BearerToAddModList_Type v_RLC_BearerConfigList;
+    var DRB_Identity v_DRBId;
+    var UL_t_PollRetransmit_Type v_T_PollRetransmit;
+    var boolean v_PDCP_LongSN := not f_NR_SupportOfRedCap(); // @sic R5-256644 sic@ eRedCap: short PDCP header and one more data octet
+   
+    f_NR5GC_Init(NR_29); // @sic R5-250100 ch. 1, R5-251943 sic@
+    
+    //Create and configure NR cell1
+    f_NR_CellConfig_Def(nr_Cell1);
+
+    // preconfigure the UE location @sic R5s250100 ch. 12 sic@
+    f_NR5GC_Preamble (nr_Cell1, STATE_IDLE_1A, TESTModeA_ON); // @sic R5s190312 ch. 4.3 sic@
+    //Set null cipher Algorithm
+    f_NR_AS_CipheringAlgorithm_Set(nea0);
+
+    //Retrieve DRB Id of the first PDU session
+    v_DRBId := f_NR_GetDefaultDRB_ForFirstPDUSession();
+
+    // Establishing UL AM RLC  parameters
+    v_T_PollRetransmit := f_NR_UL_AM_T_PollRetransmit(f_NR_CellInfo_GetIsFR1(nr_Cell1));
+    v_RLC_BearerConfigList := f_NR_ReconfigureRLC_AM(v_DRBId,
+                                                     f_NR_38508_SetSNFieldLengthAM(),
+                                                     v_T_PollRetransmit, // t_PollRetransmit
+                                                     -,
+                                                     -,
+                                                     -,
+                                                     f_NR_38508_SetSNFieldLengthAM(),
+                                                     ms200,// t_Reassembly
+                                                     -,// t_StatusProhibit
+                                                     -,
+                                                     ms2200);// t_ReassemblyExt_r17
+    f_NR5GC_RRC_ConnectedState3N_RLC_AM (v_DRBId, v_RLC_BearerConfigList[0], f_NR_38508_SetSNFieldLengthAM(), -, cs_UE_TestLoopModeA_NR_LB_Setup_1DRB(0, v_DRBId));
+
+    // Initialization of RLC variables
+    v_RLC_Rec := f_NR_InitRLC_Record(); // @sic R5s190906 ch. 1 sic@
+    if (v_PDCP_LongSN == false) { v_RLC_Rec.AM_SN_Size := 12; } // @sic R5-226644 sic@
+    v_RLC_Rec.t_Reassembly := 0.2;
+    v_RLC_Rec.t_ReassemblyExt_r17 := 2.2;
+
+    f_NR_TestBody_Set(true);
+    f_TC_7_1_2_3_9a_NR_TestBody (v_RLC_Rec, v_DRBId);
+    f_NR_TestBody_Set(false);
+    
+    f_NR_ULGrantConfiguration_Start(nr_Cell1); // @sic R5s190312 ch. 4.3; R5s230130 sic@
+    f_NR_Postamble(nr_Cell1, STATE_CONNECTED_3A);
+  }
+
+  /*
+   * @desc      REFERENCE TS 38.523-1 clause 7.1.2.3.9a
+   * @param     p_RLC_Rec
+   * @param     p_NR_DRB_Id
+   * @status    APPROVED (NR5GC)
+   */
+  function f_TC_7_1_2_3_9a_NR_TestBody(NR_RLC_SS_State_Type p_RLC_Rec,
+                                       DRB_Identity p_NR_DRB_Id) runs on NR_BASE_PTC
+  { // NR NTN / AM RLC / Reassembling of AMD PDUs
+    var integer v_RLC_Len1stSeg := 7;
+    var integer v_RLC_Len2ndSeg := 5;
+    var integer v_RLC_SDUsize := v_RLC_Len1stSeg + v_RLC_Len2ndSeg; // = 12
+    var template (value) NR_RLC_Status_NackListSN18Bit_Type v_NR_NackSN18Bit_List;
+    var template (present) NR_RLC_AM_StatusPDU_Type v_NR_RLC_StatusPDU;
+    var template (present) NR_RLC_PDUList_Type v_NR_RLC_PDUList;
+    var NR_RLC_DataFieldList_Type v_NR_RLC_DataList;
+    timer t_WatchDog;
+    
+    // generate 1 RLC SDUs = PDCP PDUs for transmission
+    v_NR_RLC_DataList := fl_NR_GenerateRLC_AM_SDUs(p_RLC_Rec, v_RLC_SDUsize, 1);
+    
+    // @siclog "Step 1" siclog@
+    // The SS transmits AMD PDU#1 containing the last segment (5 bytes) of RLC SDU#1 (SI field=10, SO=7).
+    f_NR_TxAMD_PDUpartofSDU (p_RLC_Rec, p_NR_DRB_Id, cs_TimingInfo_Now, v_NR_RLC_DataList[tsc_RLC_SDU1], -, v_RLC_Len1stSeg, v_RLC_Len2ndSeg, tsc_NR_SI_EndOfSDU, true);
+    p_RLC_Rec.AM_RX_Next_Ack := 1; // @sic R5s250100 ch. 13.1 sic@
+    
+    // @siclog "Step 2" siclog@
+    // Check: For 2 sec after step 1, does the UE transmit an RLC STATUS PDU with ACK_SN=1, NACK_SN=0 with SOStart=0 and SOEnd=6?
+    v_NR_NackSN18Bit_List := { crs_NR_RLC_NACK_SN18_SOs(0, 0, v_RLC_Len1stSeg-1) };
+    v_NR_RLC_StatusPDU := f_NR_RLC_Get_STATUS_PDU_RX(p_RLC_Rec, v_NR_NackSN18Bit_List);
+    v_NR_RLC_PDUList := { cr_NR_RLC_PDU_Status(v_NR_RLC_StatusPDU) };
+    t_WatchDog.start(2.0); // @sic R5-251943 sic@
+    alt {
+      [] DRB.receive (car_NR_DRB_COMMON_IND_RLC_PDUList(nr_Cell1,
+                                                        p_NR_DRB_Id,
+                                                        -,
+                                                        v_NR_RLC_PDUList))
+        {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 2");
+        }
+      [] t_WatchDog.timeout
+        {}
+    }
+     
+    // @siclog "Step 3" siclog@
+    // Wait for t-ReassemblyExt-r17 from step 1 to ensure that t-ReassemblyExt-r17 for the AMD PDU#1 expires at UE side.
+    f_Delay(p_RLC_Rec.t_ReassemblyExt_r17-2.0);  // 2 sec of step 2 has already elapsed ... @sic R5s250274, R5s250426 sic@
+
+    // @siclog "Step 4" siclog@
+    // Check: For 2 sec after step 3, does the UE transmit an RLC STATUS PDU with ACK_SN=1, NACK_SN=0 with SOStart=0 and SOEnd=6? (Note 2)
+    // @sic R5-250100 ch. 13.2 sic@
+    t_WatchDog.start(2.0); // @sic R5-250100 ch. 13.3, R5-251943 sic@
+    alt {
+      [] DRB.receive (car_NR_DRB_COMMON_IND_RLC_PDUList(nr_Cell1,
+                                                        p_NR_DRB_Id,
+                                                        -,
+                                                        v_NR_RLC_PDUList))
+        {
+          t_WatchDog.stop; // @sic R5-250100 ch. 13.4 sic@
+          f_NR_PreliminaryPass(__FILE__, __LINE__, "Step 4");
+        }
+      [] t_WatchDog.timeout
+         {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Step 4");
+        }
+    }
+
+  }
+
+}

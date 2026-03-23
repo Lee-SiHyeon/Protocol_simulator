@@ -1,0 +1,252 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.579-5 v18.1.0
+// $Date: 2024-10-23 16:51:00 +0200 (Wed, 23 Oct 2024) $
+// $Rev: 39827 $
+/******************************************************************************/
+
+module MCX_SIP_Affiliation {
+
+  import from CommonDefs all;
+  import from IMS_CommonDefs all;
+  import from IMS_XML_PIDF_Templates all;
+  import from MCX_CommonDefs all;
+  import from MCX_IMS_Component all;
+  import from MCX_MIME_Functions all;
+  import from MCX_Parameters all;
+  import from MCX_SIP_Registration all;
+  import from MCX_XML_PIDF all;
+  import from MCX_XML_mcdataPresInfo all;
+  import from MCX_XML_mcdata_info all;
+  import from MCX_XML_mcpttPresInfo all;
+  import from MCX_XML_mcptt_info all;
+  import from MCX_XML_mcvideoPresInfo all;
+  import from MCX_XML_mcvideo_info all;
+  import from MCX_XML_simple_filter all;
+  import from XSD all;
+
+  type record MCX_AffiliationInfo_Type {     /* @status    APPROVED (MCX) */
+    charstring ServiceId,
+    charstring ClientId,
+    IMS_PTC_DialogIndex_Type DialogIndex
+  };
+
+  template (value) MCX_AffiliationInfo_Type cs_MCX_AffiliationInfo(charstring p_ServiceId,
+                                                                   charstring p_ClientId,
+                                                                   IMS_PTC_DialogIndex_Type p_DialogIndex) :=
+  { /* @status    APPROVED (MCX) */
+    ServiceId := p_ServiceId,
+    ClientId := p_ClientId,
+    DialogIndex := p_DialogIndex
+  };
+
+  /*
+   * @desc      Helper function to convert urn_3gpp_ns_mcpttPresInfo_1_0.StatusType to urn_3gpp_ns_mcvideoPresInfo_1_0.StatusType
+   * @param     p_Status
+   * @return    template (omit) MCVideo_Affiliation_Status_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_ConvertAffiliationStatusMCPTT2MCVideo(template (omit) MCPTT_Affiliation_Status_Type p_Status) return template (omit) MCVideo_Affiliation_Status_Type
+  {
+    var template (omit) MCVideo_Affiliation_Status_Type v_Status := omit;
+    if (isvalue(p_Status)) {
+      select (valueof(p_Status)) {
+        case (affiliated)    { v_Status := affiliated; }
+        case (affiliating)   { v_Status := affiliating; }
+        case (deaffiliating) { v_Status := deaffiliating; }
+      }
+    }
+    return v_Status;
+  }
+
+  /*
+   * @desc      Helper function to convert urn_3gpp_ns_mcpttPresInfo_1_0.StatusType to urn_3gpp_ns_mcdataPresInfo_1_0.StatusType
+   * @param     p_Status
+   * @return    template (omit) MCData_Affiliation_Status_Type
+   * @status    APPROVED (MCX)
+   */
+  function fl_MCX_ConvertAffiliationStatusMCPTT2MCData(template (omit) MCPTT_Affiliation_Status_Type p_Status) return template (omit) MCData_Affiliation_Status_Type
+  {
+    var template (omit) MCData_Affiliation_Status_Type v_Status := omit;
+    if (isvalue(p_Status)) {
+      select (valueof(p_Status)) {
+        case (affiliated)    { v_Status := affiliated; }
+        case (affiliating)   { v_Status := affiliating; }
+        case (deaffiliating) { v_Status := deaffiliating; }
+      }
+    }
+    return v_Status;
+  }
+
+  /*
+   * @desc      return template for MCPTT-Info, MCVideo-Info or MCData-Info sent by the UE for affiliation
+   * @param     p_ServiceType
+   * @param     p_TargetUserURI
+   * @return    template (present) MCX_ServiceInfo_Type
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Service_Info_Affiliation(MCX_ServiceType_Type p_ServiceType,
+                                          XSD.AnyURI p_TargetUserURI) return template (present) MCX_ServiceInfo_Type
+  {
+    var template (present) MCX_ServiceInfo_Type v_ServiceInfo := cs_MCX_Service_Info_Init;
+
+    select (p_ServiceType) {
+      case (MCPTT) {    // @sic R5s220869 Change 4: mcptt_called_party_id removed sic@
+        v_ServiceInfo.Mcptt := cr_MCPTT_Info_Base;
+        v_ServiceInfo.Mcptt.mcptt_Params.mcptt_request_uri      := cr_MCPTT_Content_URI(p_TargetUserURI);
+        v_ServiceInfo.Mcptt.mcptt_Params.mcptt_calling_user_id  := cr_MCPTT_Content_URI(px_MCPTT_ID_User_A) ifpresent;
+      }
+      case (MCVideo) {
+        v_ServiceInfo.Mcvideo := cr_MCVideo_Info_Base;
+        v_ServiceInfo.Mcvideo.mcvideo_Params.mcvideo_request_uri      := cr_MCVideo_Content_URI(p_TargetUserURI);
+        v_ServiceInfo.Mcvideo.mcvideo_Params.mcvideo_calling_user_id  := cr_MCVideo_Content_URI(px_MCVideo_ID_User_A) ifpresent;
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_ServiceInfo.Mcdata := cr_MCData_Info_Base;
+        v_ServiceInfo.Mcdata.mcdata_Params.mcdata_request_uri      := cr_MCData_Content_URI(p_TargetUserURI);
+        v_ServiceInfo.Mcdata.mcdata_Params.mcdata_calling_user_id  := cr_MCData_Content_URI(px_MCData_ID_User_A) ifpresent;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+    return v_ServiceInfo;
+  }
+
+  /*
+   * @desc      test case specific function to receive SIP SUBSCRIBE and send 200 OK
+   * @param     p_ServiceType
+   * @param     p_AffiliationInfo
+   * @param     p_SubscriptionType
+   * @param     p_SimpleFilter      (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Affiliation_Subscription(MCX_ServiceType_Type p_ServiceType,
+                                          MCX_AffiliationInfo_Type p_AffiliationInfo,
+                                          MCX_Subscription_Type p_SubscriptionType,
+                                          template MCX_SimpleFilter_Type p_SimpleFilter := omit) runs on MCX_IMS_PTC
+  {
+    var template (present) MCX_ServiceInfo_Type v_ServiceInfo := f_MCX_Service_Info_Affiliation(p_ServiceType, p_AffiliationInfo.ServiceId);
+
+    f_MCX_SIP_Subscription(p_ServiceType, p_AffiliationInfo.DialogIndex, p_SubscriptionType, -, -, v_ServiceInfo.Mcptt, -, v_ServiceInfo.Mcvideo, -, v_ServiceInfo.Mcdata, -, -, p_SimpleFilter);
+  }
+
+  /*
+   * @desc      test case specific function to send SIP NOTIFY and receive 200 OK
+   * @param     p_ServiceType
+   * @param     p_AffiliationInfo
+   * @param     p_Status
+   * @param     p_P_id              (default value: omit)
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Affiliation_Notification(MCX_ServiceType_Type p_ServiceType,
+                                          MCX_AffiliationInfo_Type p_AffiliationInfo,
+                                          template (omit) MCPTT_Affiliation_Status_Type p_Status,
+                                          template (omit) XSD.String p_P_id := omit) runs on MCX_IMS_PTC
+  {
+    var template (value) MCX_PIDF_Type v_PIDF;
+    var template (value) PIDF_Presence_Type v_PIDF_Presence;
+    var template (value) MCPTT_Affiliation_Type v_AffiliationMCPTT;
+    var template (value) MCVideo_Affiliation_Type v_AffiliationMCVideo;
+    var template (value) MCData_Affiliation_Type v_AffiliationMCData;
+    var template (omit) MCVideo_Affiliation_Status_Type v_StatusMCVideo;
+    var template (omit) MCData_Affiliation_Status_Type v_StatusMCData;
+    var XSD.AnyURI v_GroupURI := f_MCX_MCService_GroupID_Group_A(p_ServiceType);
+
+    v_PIDF_Presence := cs_MCX_PIDF_Presence_SingleTuple(p_AffiliationInfo.ServiceId, p_AffiliationInfo.ClientId);
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        v_AffiliationMCPTT := cs_MCPTT_Affiliation(-, -, v_GroupURI, p_Status);
+        v_PIDF := cs_MCPTT_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCPTT, p_P_id);
+      }
+      case (MCVideo) {
+        v_StatusMCVideo := fl_MCX_ConvertAffiliationStatusMCPTT2MCVideo(p_Status);
+        v_AffiliationMCVideo := cs_MCVideo_Affiliation(-, -, v_GroupURI, v_StatusMCVideo);
+        v_PIDF := cs_MCVideo_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCVideo, p_P_id);
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_StatusMCData := fl_MCX_ConvertAffiliationStatusMCPTT2MCData(p_Status);
+        v_AffiliationMCData := cs_MCData_Affiliation(-, -, v_GroupURI, v_StatusMCData);
+        v_PIDF := cs_MCData_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCData, p_P_id);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    f_MCX_SIP_Notification(p_ServiceType, p_AffiliationInfo.DialogIndex, -, -, -, v_PIDF);
+  }
+
+  /*
+   * @desc      test case specific function to receive SIP PUBLISH and send 200 OK
+   * @param     p_ServiceType
+   * @param     p_AffiliationInfo
+   * @param     p_ExpiresDeltaSec   (default value: tsc_MCX_ExpiresMax)
+   * @param     p_WithAffiliation   (default value: false)
+   * @return    XSD.String
+   * @status    APPROVED (MCX)
+   */
+  function f_MCX_Affiliation_Publish(MCX_ServiceType_Type p_ServiceType,
+                                     MCX_AffiliationInfo_Type p_AffiliationInfo,
+                                     charstring p_ExpiresDeltaSec := tsc_MCX_ExpiresMax,
+                                     boolean p_WithAffiliation := false) runs on MCX_IMS_PTC return XSD.String
+  {
+    var template (present) PIDF_Presence_Type v_PIDF_Presence := cr_MCX_PIDF_Presence(p_AffiliationInfo.ServiceId, p_AffiliationInfo.ClientId);
+    var template (present) MCX_ServiceInfo_Type v_ServiceInfo := f_MCX_Service_Info_Affiliation(p_ServiceType, p_AffiliationInfo.ServiceId);
+    var template MCPTT_Affiliation_Type v_AffiliationMCPTT := omit;
+    var template MCVideo_Affiliation_Type v_AffiliationMCVideo := omit;
+    var template MCData_Affiliation_Type v_AffiliationMCData := omit;
+    var template (present) MCX_PIDF_Type v_PIDF;
+    var MCX_MIME_XmlBodies_Type v_XmlBodies;
+    var XSD.String v_P_Id;
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        if (p_WithAffiliation) {
+          v_AffiliationMCPTT := cr_MCPTT_Affiliation;
+        }
+        v_PIDF := cr_MCPTT_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCPTT);
+      }
+      case (MCVideo) {
+        if (p_WithAffiliation) {
+          v_AffiliationMCVideo := cr_MCVideo_Affiliation;
+        }
+        v_PIDF := cr_MCVideo_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCVideo);
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        if (p_WithAffiliation) {
+          v_AffiliationMCData := cr_MCData_Affiliation;
+        }
+        v_PIDF := cr_MCData_PIDF_Affiliation(v_PIDF_Presence, v_AffiliationMCData);
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    v_XmlBodies := f_MCX_SIP_Publish(p_ServiceType, -, p_ExpiresDeltaSec, v_ServiceInfo.Mcptt, v_ServiceInfo.Mcvideo, v_ServiceInfo.Mcdata, v_PIDF);
+
+    select (p_ServiceType) {
+      case (MCPTT) {
+        v_P_Id := v_XmlBodies.PIDF.Extension.MCPTT.P_id;
+      }
+      case (MCVideo) {
+        v_P_Id := v_XmlBodies.PIDF.Extension.MCVideo.P_id;
+      }
+      case (MCData, MCDataSDS, MCDataFD, MCDataIPCONN) {
+        v_P_Id := v_XmlBodies.PIDF.Extension.MCData.P_id;
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "Invalid service type");
+      }
+    }
+
+    return v_P_Id;
+  }
+
+}

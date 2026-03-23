@@ -1,0 +1,236 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2023-09-14 09:54:06 +0200 (Thu, 14 Sep 2023) $
+// $Rev: 37128 $
+/******************************************************************************/
+
+module NasEmu_Main_EUTRA38_IRAT {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_ASP_SrbDefs all;
+  import from EUTRA_CommonDefs all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from NasEmu_AspTypes_EUTRA all;
+  import from NasEmu_Common all;
+  import from NasEmu_Common4G5G all;
+  import from NasEmu_Component_EUTRA38_IRAT all;
+  import from NasEmu_Main_EUTRA all;
+
+  /*
+   * @desc      Decipher and decode NAS PDU
+   *            Notes:
+   *            - When receiving a security protected NAS PDU firstly deceiphering is applied; integrity protection is applied on the deciphered NAS PDU;
+   *            - Deciphering is applied on the encoded NAS PDU only (but not on any other IE of SECURITY PROTECTED NAS MESSAGE) since the SN is used for deciphering;
+   *            - if the NAS PDU is security protected (without error) the UL NAS COUNT is incremented
+   * @param     p_NasSecurityByRef  (by reference)
+   * @param     p_NAS_DedicatedInformation
+   * @return    template (value) NasEmu_DecodingInfo_Type
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_DecipherAndDecodeNasPdu_EUTRA38(inout NasSecurity_Type p_NasSecurityByRef,
+                                     octetstring p_NAS_DedicatedInformation) runs on NASEMU_EUTRA38_IRAT_PTC return template (value) NasEmu_DecodingInfo_Type
+  {
+    var template (value) NasEmu_DecodingInfo_Type v_DecodingInfo := cs_DecodingInfo_Init; // NasIndication := omit, IntegrityError := false
+    var NasEmu_DecodedNasPduUL_Type v_DecodedNasPduUL;
+    var octetstring v_IntegrityProtectedOctets;
+    var SECURITY_PROTECTED_NAS_MESSAGE v_SecurityProtectedNasMsg;
+    var MessageAuthenticationCode v_ContainedMac;
+    var NasEmu_SN_Type v_SequenceNumber;
+    var NAS_Message v_EncodedNasPdu;
+    var NasCount_Type v_CountUL;
+    var SecurityHeaderType v_SecurityHeader;
+    var NASEmu_CoOrd_CNF v_NASEmu_CoOrd_CNF;
+
+    // Decode NAS message: message is either SECURITY_PROTECTED_NAS_MESSAGE or non-protected NAS message
+    v_DecodedNasPduUL := f_NasEmu_DecodeMsg(p_NAS_DedicatedInformation);
+
+    if (ischosen(v_DecodedNasPduUL.Invalid)) {
+      return v_DecodingInfo;            // v_DecodingInfo is {omit, false}
+    }
+
+    if (ischosen(v_DecodedNasPduUL.Msg.sECURITY_PROTECTED_NAS_MESSAGE)) {     // SECURITY_PROTECTED_NAS_MESSAGE
+
+      v_SecurityProtectedNasMsg := v_DecodedNasPduUL.Msg.sECURITY_PROTECTED_NAS_MESSAGE;
+
+      v_SecurityHeader      := v_SecurityProtectedNasMsg.securityHeaderType;
+      v_ContainedMac        := v_SecurityProtectedNasMsg.messageAuthenticationCode;
+      v_SequenceNumber.Long := oct2int(v_SecurityProtectedNasMsg.sequenceNumber);
+      v_EncodedNasPdu       := v_SecurityProtectedNasMsg.nasMessage;
+      v_CountUL             := f_NasSecurity_EstimateCOUNT(p_NasSecurityByRef.NasCount.UL, v_SequenceNumber);
+
+
+      if ((not p_NasSecurityByRef.SecurityStarted) and (v_SecurityHeader != tsc_SHT_IntegrityProtected)) { /* @sic R5s100024 tsc_SHT_EnabledSecurityProtection replaced by tsc_SHT_IntegrityProtected sic@ */
+        /* Note: A UE is allowed to transmit a security protected Attach request (Security header set to '0001'B)
+         *       at the initial registration in case the USIM used has a valid EPS security context  */
+
+        f_NasEmulationError(__FILE__, __LINE__, "security protected PDU received but security is not started");
+        return v_DecodingInfo;            // v_DecodingInfo is {omit, false}
+
+      } else {
+        if (p_NasSecurityByRef.SecurityStarted) {
+          /* Note: acc. 24.301 cl. 4.4.1 "When both ciphering and integrity protection are activated, then the NAS message is first encrypted
+             and then the encrypted NAS message and the SN are integrity protected by calculating the MAC"
+             => we apply integrity protection on the ciphered ciphering data */
+
+            // CHECK INTEGRITY
+          if (p_NasSecurityByRef.IntegrityCheck5G) {  /* Only set during 4G/5G InterSystem tests @sic 5G Integrity in 4G sic@ */
+
+            v_IntegrityProtectedOctets := v_SecurityProtectedNasMsg.sequenceNumber & v_EncodedNasPdu;
+            // ask the 5G NAS emulator to check the integrity of this message
+            NG.send (cs_NASEmu_CoOrd_REQ (v_IntegrityProtectedOctets, oct2int(v_SecurityProtectedNasMsg.sequenceNumber)));
+            NG.receive(cr_NASEmu_CoOrd_CNF) -> value v_NASEmu_CoOrd_CNF;
+
+            if (v_ContainedMac == v_NASEmu_CoOrd_CNF.MAC) {
+              // write back the latest 5G count value received in the message (so overwriting the previous EPS value)
+              // Sequence number is only one octet long
+              v_CountUL := '000000'O & v_SecurityProtectedNasMsg.sequenceNumber; // @sic R5s230474 sic@
+              p_NasSecurityByRef.NasCount.UL := v_CountUL;
+
+            } else {
+              // UL NAS COUNT is not updated in case of integrity error
+              v_DecodingInfo.IntegrityError := true;
+            }
+            // This path will only be taken for the TAU Req which is using 5G integrity
+            // Decode NAS message
+            v_DecodedNasPduUL := f_NasEmu_DecodeMsg(v_EncodedNasPdu);
+            if (ischosen(v_DecodedNasPduUL.Invalid)) {
+              // Do nothing: v_DecodingInfo.NasIndication remains omit
+            } else {
+              v_DecodingInfo.NasIndication := cs_NAS_MSG_Indication(v_SecurityHeader,
+                                                                    v_CountUL,
+                                                                    v_DecodedNasPduUL.Msg);
+            }
+            return v_DecodingInfo;
+          } else { // just call the normal function as usual
+            return f_DecipherAndDecodeNasPdu(p_NasSecurityByRef, p_NAS_DedicatedInformation);
+          }
+        } else { // just call the normal function as usual
+          return f_DecipherAndDecodeNasPdu(p_NasSecurityByRef, p_NAS_DedicatedInformation);
+        }
+      }
+    } else { // just call the normal function as usual
+      return f_DecipherAndDecodeNasPdu(p_NasSecurityByRef, p_NAS_DedicatedInformation);
+    }
+  }
+
+  /*
+   * @desc      handling of ASPs containing an RRC PDU from the system adaptor:
+   *            if the RRC PDU contains a piggybacked NAS PDU or is an ULInformationTransfer PDU,
+   *            the NAS PDU is extracted, deciphered (if necessary) and decoded
+   * @param     p_NasSecurityByRef  (by reference)
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  altstep a_AspFromSystemAdaptorHandler_EUTRA38(inout NasSecurity_Type p_NasSecurityByRef) runs on NASEMU_EUTRA38_IRAT_PTC
+  {
+    var EUTRA_RRC_PDU_IND v_AspFromSYS;
+    var RRC_MSG_Indication_Type v_RrcIndication;
+    var UL_DCCH_Message v_RrcPdu;
+    var ULInformationTransfer_r8_IEs v_ULInformationTransfer;
+    var template (value) SRB_COMMON_IND v_SRB_COMMON_IND;
+    var template (value) NasEmu_DecodingInfo_Type v_DecodingInfo;
+    var DedicatedInfoNAS v_NAS_DedicatedInformation[maxDRB];   // even though currently (DEC08) there is always only one DedicatedInfoNAS we use an array
+    var integer v_NoOfNasPdus;
+    var boolean v_RrcPduPresent;
+    var boolean v_IntegrityError;
+    var integer I;
+
+    [] SYS_SRB.receive(car_EUTRA_PduFromSYS) -> value v_AspFromSYS {
+      v_RrcIndication := v_AspFromSYS.RrcPdu;
+      v_SRB_COMMON_IND := cas_EUTRA_SignallingAspToTC_Init(v_AspFromSYS.Common);   // RRC and NAS both are initialised as omit
+
+      if (ischosen(v_RrcIndication.Ccch)) {                                     /* CCCH -> SRB0 */
+        v_SRB_COMMON_IND.Signalling.Rrc := v_RrcIndication;
+
+      } else {                                                                  /* DCCH -> SRB1/2 */
+
+        v_RrcPdu := v_RrcIndication.Dcch;
+        v_RrcPduPresent := true;
+        v_NoOfNasPdus := 0;
+        v_IntegrityError := false;
+
+        if (ischosen(v_RrcPdu.message_.c1)) {
+
+          if (ischosen(v_RrcPdu.message_.c1.rrcConnectionSetupComplete)) {
+            // RRC CONNECTION SETUP COMPLETE
+            if (ischosen(v_RrcPdu.message_.c1.rrcConnectionSetupComplete.criticalExtensions.c1.rrcConnectionSetupComplete_r8)) {
+              v_NAS_DedicatedInformation[0] := v_RrcPdu.message_.c1.rrcConnectionSetupComplete.criticalExtensions.c1.rrcConnectionSetupComplete_r8.dedicatedInfoNAS;
+              v_NoOfNasPdus := 1;
+            }
+
+          } else if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer)) {
+            // UL INFORMATION TRANSFER
+            if (ischosen(v_RrcPdu.message_.c1.ulInformationTransfer.criticalExtensions.c1.ulInformationTransfer_r8)) {
+              v_ULInformationTransfer := v_RrcPdu.message_.c1.ulInformationTransfer.criticalExtensions.c1.ulInformationTransfer_r8;
+              if (ischosen(v_ULInformationTransfer.dedicatedInfoType.dedicatedInfoNAS)) {  /* @sic R5s100135 sic@ */
+                v_NAS_DedicatedInformation[0] := v_ULInformationTransfer.dedicatedInfoType.dedicatedInfoNAS;  /* @sic R5s100135 sic@ */
+                v_RrcPduPresent := false;
+                v_NoOfNasPdus := 1;
+              }
+              else {
+                /* @sic R5-106675 (clause 4.4.3.2): ulInformationTransfer does not contain NAS PDU but CDMA2000 message(s) sic@ */
+                /* @sic C2K TUNNELING: hand-over ulInformationTransfer to EUTRA sic@ */
+              }
+            }
+          } else {
+            // OTHER RRC PDU
+          }
+        } else if (ischosen(v_RrcPdu.message_.messageClassExtension.c2.rrcConnectionResumeComplete_r13)) {     /* @sic R5s160711 BASELINE MOVING 2016 sic@ */
+          v_NAS_DedicatedInformation[0] := v_RrcPdu.message_.messageClassExtension.c2.rrcConnectionResumeComplete_r13.criticalExtensions.rrcConnectionResumeComplete_r13.dedicatedInfoNAS_r13;
+          v_NoOfNasPdus := 1;
+        }
+
+        if (v_RrcPduPresent) {
+          v_SRB_COMMON_IND.Signalling.Rrc := v_RrcIndication;
+        }
+        if (v_NoOfNasPdus > 0) {
+          for (I := 0; I < v_NoOfNasPdus; I := I + 1) {
+            v_DecodingInfo := f_DecipherAndDecodeNasPdu_EUTRA38(p_NasSecurityByRef, v_NAS_DedicatedInformation[I]);
+            v_SRB_COMMON_IND.Signalling.Nas[I] := v_DecodingInfo.NasIndication;         // omit if message cannot be decoded => shall lead to a test case error
+            v_IntegrityError := v_IntegrityError or valueof(v_DecodingInfo.IntegrityError);    // valueof cannot be avoided here
+          }
+          if (v_IntegrityError) {                                                       // set Error choice of common part only if there is an error
+            /* @sic R5s100024 sic@ */
+            if (ischosen(v_SRB_COMMON_IND.Common.Status.Error)) {     /* there is already an error flagged by the SA */
+              v_SRB_COMMON_IND.Common.Status.Error.Integrity.Nas := true;
+            } else {                                                  /* the error needs to be set */
+              v_SRB_COMMON_IND.Common.Status := cs_IndicationStatus_NasIntegrityError;
+            }
+          }
+        }
+      }
+      TC_SRB.send(v_SRB_COMMON_IND);
+    }
+  }
+
+  /*
+   * @desc      NAS emulation main loop (started by the MTC)
+   * @status    APPROVED (NR5GC_IRAT)
+   */
+  function f_NASEMU_MainLoop_EUTRA38() runs on NASEMU_EUTRA38_IRAT_PTC
+  { /* @sic R5-106675 (clause 4.4.3.2): New parameter to tell the NAS emulator whether C2K pre-registration shall be supported or not sic@
+       @sic C2K TUNNELING: parameter removed again sic@ */
+    var NasSecurity_Type v_NasSecurityByRef := f_NasEmu_NasSecurity_Init();  /* @sic R5s160711 BASELINE MOVING 2016 - NBIOT: NasSecurity no global variable anymore sic@ */
+
+    while (true) {
+      alt {
+        [] a_NasEmu_ConfigurationHandler(CTRL, v_NasSecurityByRef);
+        [] a_AspFromTestcaseHandler_EUTRA(v_NasSecurityByRef);
+        [] a_AspFromSystemAdaptorHandler_EUTRA38(v_NasSecurityByRef);
+        [] any port.receive {
+          f_NasEmulationError(__FILE__, __LINE__, "unexpected message (skipped)");
+          repeat;
+        }
+      }
+    }
+  }
+
+}

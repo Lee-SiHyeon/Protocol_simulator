@@ -1,0 +1,693 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.229-3 v18.1.0
+// $Date: 2024-09-05 15:42:38 +0200 (Thu, 05 Sep 2024) $
+// $Rev: 39504 $
+/******************************************************************************/
+
+module NR5GC_IMSProcedures {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from CommonDefs all;
+  import from CommonIP all;
+  import from IMS_PTC_CoordMsg all;
+  import from IP_PTC_CtrlMsgs all;
+  import from NAS_CommonTemplates all;
+  import from NG_NASTemplateFunctions all;
+  import from NG_NAS_Common all;
+  import from NG_NAS_MsgContainers all;
+  import from NG_NAS_Templates all;
+  import from NG_NAS_TypeDefs all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_NASSteps all;
+  import from NR5GC_RRCSteps all;
+  import from NR5GC_RRC_Templates all;
+  import from NR_ASP_SrbDefs all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_CommonFunctions all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_RRC_Templates all;
+
+  type record of IMS_TestConfiguration_Type ListOfMedia_Type; /* @status    APPROVED (IMS, NR5GC) */
+
+  template (value) QoS_Rule cs_QoS_DeleteRule (O1_Type p_Id,
+                                               B1_Type p_DQR := '0'B) :=
+  { /* @status    APPROVED (IMS, NR5GC) */
+    identifier          := p_Id,
+    iel                 := '0001'O,
+    ruleOperationCode   := '010'B,
+    dqrBit              := p_DQR,
+    numOfPacketFilters  := '0000'B,
+    packetFilterList    := omit,
+    precedence          := omit,
+    spare               := omit,
+    segregation         := omit,
+    flowIdentifier      := omit
+  };
+
+  template (value) QoS_Flow cs_QoS_DeleteFlow (B6_Type p_QFI) :=
+  { /* @status    APPROVED (IMS, NR5GC) */
+    spare2      := tsc_Spare2,
+    qfi         := p_QFI,
+    operationCode := '010'B,
+    spare6      := tsc_Spare6,
+    eBit        := '0'B,
+    numOfParameters := '000000'B,
+    parameterList := omit
+  };
+
+  /*
+   * @desc      TS 38.508-1 table 4.9.11 Emergency Call, setting up the connection (before PDU session establishment)
+    // N.B.38.508-1 states that SIB1 must include ims-EmergencySupport := true
+   *            N.B. IMS procedures in 34.229-5 currently identical to those defined in 34.229-1
+   * @param     p_NR_CellId
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_EmergencyCallWithRegistration_Steps1_8(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC return integer
+  { // Split into 2 functions to accomodate IMS emergency TCs
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    var NG_NAS_GutiParameters_Type v_GutiParams := f_NR5GC_CellInfo_GetGutiParameters (p_NR_CellId);
+    var template (present) NG_MobileIdentity v_S_TMSI := f_NG_S_TMSI2MobileIdentity(omit, v_GutiParams);
+    var integer v_PDUEstAlreadyRxd := 0;
+    var default v_MyDefaultVar := null;
+    
+    // Steps 1-3 RRC connection Setup
+    v_ReceivedMsg := f_NR_RRC_ConnEst_DefWithNas (p_NR_CellId, tsc_NR_RRC_TI_Def, emergency);
+    if (not f_Check_NG_ServiceReqMsg (v_ReceivedMsg.Pdu, cs_NAS_KeySetIdentifier_lv(f_NR_SecurityKSIamf_Get (), tsc_NasKsi_NativeSecurityContext), v_S_TMSI, '0011'B)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "Service Request Message Failed");
+    }
+    
+    // @sic R5-217286 sic@
+    // Clear store of msgs received in parallel
+    f_NR5GC_MsgInDefault_ResetStoreOfNASMessageReq(); // @sic R5s220174 sic@
+    // Then activate store for any new msgs received - this works for Modification Reqs too
+    v_MyDefaultVar := activate(a_NR5GC_AdditionalPDUSessionEstablishmentReq(p_NR_CellId));
+    // Steps 4-7 Configure SRB2 & DRB
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(p_NR_CellId, v_ReceivedMsg); // @sic R5s2111489, R5s220040 sic@
+
+    // then check if anything's been received
+    if (f_NR5GC_MsgInDefault_GetNumOfNASMessageReq() > 0) { // @sic R5s220174 sic@
+      v_PDUEstAlreadyRxd := 1;
+    }
+    // don't need this anymore so deactivate it before it needs reactivating @sic R5-217286 sic@
+    deactivate(v_MyDefaultVar);
+    
+    return v_PDUEstAlreadyRxd;
+  }
+
+  /*
+   * @desc      PDU establishment and modification for establishing an Emergency Call
+   *            Used in TS 38.508-1 table 4.9.11 and 4.9.12
+   *            N.B. TS 38.508-1 states that SIB1 must include ims-EmergencySupport := true
+   *            N.B. IMS procedures in TS 34.229-5 currently identical to those defined in TS 34.229-1
+   * @param     p_NR_CellId
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB2)
+   * @param     p_PDUEstAlreadyRxd  (default value: 0)
+   * @param     p_NormalService     (default value: true) set to false for 4.9.12
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_EmergencyCallPDUSession(NR_CellId_Type p_NR_CellId,
+                                           NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB2,
+                                           integer p_PDUEstAlreadyRxd := 0,
+                                           boolean p_NormalService := true) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo;
+
+    f_NR5GC_PDUSessionEstablishment(p_NR_CellId,
+                                    1,
+                                    p_SRB, -,                       // @sic R5s210518 sic@
+                                    omit,
+                                    omit,
+                                    crs_SSC_Mode(-, '001'B),        // @sic R5s210518 sic@
+                                    -,
+                                    f_BuildDefaultQoSRules("2"),
+                                    -, -, -, -, -, -,
+                                    crs_SSC_Mode('A'H, '001'B),        // @sic R5s210518, R5s210771 sic@
+                                    -, -, -, -, -, -, -,
+                                    cr_NG_Request_Type('011'B),
+                                    -, -, -, -, -, -, -, -,
+                                    "2",
+                                    -,
+                                    false,        // @sic R5s210515, R5s220807 sic@ don't need the extra delay here as there's further IMS signalling
+                                    p_PDUEstAlreadyRxd,          // @sic R5-217286 sic@
+                                    p_NormalService);    // @sic R5-223987 sic@ DNN should be set to omit for 4.9.11
+
+    // Get the Info for the PDU Session just created
+    v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Emergency_PDN);
+    
+    // Wait until need to add voice QoS
+    f_IMS_IPCAN_WaitForTrigger(IMS[tsc_Index_IMS2], "Add Voice Bearer"); // @sic R5-225362 sic@
+    f_NR5GC_ModifyPDUSession_AddVoice(p_NR_CellId, valueof(v_GSM_MobilityInfo));
+    f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Voice Bearer Added")); // @sic R5s210518, R5s220821, R5-225362 sic@
+  }
+
+  type enumerated EmergencyCallRelease_PDUSession {Release_PDUSession, Keep_PDUSession};  /* @status    APPROVED (IMS, NR5GC) */
+
+  /*
+   * @desc      TS 38.508-1 table 4.9.12A MO Emergency Call Release
+   *            The UE may send a PDU Release Req after triggering the call release
+   * @param     p_NR_CellId
+   * @param     p_MOTriggerRequired (default value: true)
+   * @param     p_IMSMsgsNotYetSent (default value: true)
+   * @param     p_Release_Keep      (default value: Release_PDUSession)
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_EmergencyCallRelease(NR_CellId_Type p_NR_CellId,
+                                        boolean p_MOTriggerRequired := true, // set to false if MT or if UT command already sent
+                                        boolean p_IMSMsgsNotYetSent:= true,  // set to false in IPCAN as IMS msgs will have already been sent before f_IMS_CC_ReleaseConnection is called
+                                        EmergencyCallRelease_PDUSession p_Release_Keep := Release_PDUSession) runs on NR5GC_PTC //  set to Keep_PDUSession if you only want to modify the emergency PDU session to remove the voice Qos
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Emergency_PDN); // @sic R5s210363 sic@
+    var GSM_MobilityInfo_Type v_PDUSession := valueof(v_GSM_MobilityInfo); // Must be there as previously established it
+    var O1_Type v_PDUSessionId := v_PDUSession.SessionId;
+    var PDN_Index_Type v_PdnIndex := v_PDUSession.PdnIndex; // @sic R5s220829 sic@
+    var boolean v_IMSMsgsNotYetSent := p_IMSMsgsNotYetSent;
+    timer t_Wait := 5.0;
+    
+    if (p_MOTriggerRequired) { // @sic R5s220531 sic@
+      f_IMS_IPCAN_SendCoOrdMsg(IMS[tsc_Index_IMS2], cms_IMS_IPCAN_Trigger("Trigger MO Call Release")); // @sic R5s220039, R5-225362 sic@
+    }
+    // Step 3A1
+    t_Wait.start;
+    alt {         // @sic R5-216829 sic@
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB2, cr_NG_NAS_IndWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered))) -> value v_ReceivedAsp  // @sic R5s211524 sic@
+      { // Step 3Ba1
+        t_Wait.stop; // Step 3Ba2
+        if (not f_Check_NG_PDUSessionReleaseReq (v_PDUSession, f_NR5GC_MobileInfo_GetSessionInfoList(), v_ReceivedAsp.Signalling.Nas[0].Pdu, v_PDUSessionId)) {
+          f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Release Request failed");
+        }
+        if (v_IMSMsgsNotYetSent) { // @sic R5s220789 sic@
+          // Even though NAS PDU Release Req is received, IMS Msgs might not have been processed
+          IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Trigger ("IMS Call Release Msgs Sent"));  // @sic R5s220039, R5-225362 sic@ sic@
+        }
+        // Step 3Ba3
+        f_NR5GC_PDUSessionRelease (p_NR_CellId,
+                                   v_PDUSessionId,
+                                   cs_GMM_GSM_Cause (omit, '00100100'B));
+        // PDU session released, so finish function
+        f_IP_RtpRtcpLoopback(IP, v_PdnIndex, tsc_IMS_MediaPort_M1, omit);  // @sic R5s210363, R5s220829 sic@
+        f_NR_PreliminaryPass(__FILE__, __LINE__, "Emergency Call Release");
+      }
+      [v_IMSMsgsNotYetSent] IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Trigger ("IMS Call Release Msgs Sent"))  // @sic R5s220039, R5-225362 sic@ sic@
+         { // this may be received at anytime
+           v_IMSMsgsNotYetSent := false;
+           repeat;
+         }
+      [] t_Wait.timeout   // @sic R5s220039 sic@
+         { // Step 3Bb1
+           // Steps 3Bb2a1 - 3Bb2b3 are the same as MT procedure in 4.9.12B
+           f_NR5GC_EmergencyCallReleaseMT (p_NR_CellId, v_IMSMsgsNotYetSent, p_Release_Keep); // @sic R5s210363, R5s220829, R5-225362 sic@
+         }
+    }
+
+  }
+
+  /*
+   * @desc      38.508-1 table 4.9.12A and 4.9.12B MO/MT Emergency Call Release
+   *            This part is the same for MO & MT:
+   *            Just need to wait for IMS Msgs then release either the voice QoS or whole PDU session
+   * @param     p_NR_CellId
+   * @param     p_IMSMsgsNotYetSent (default value: true)
+   * @param     p_Release_Keep      (default value: Release_PDUSession)
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_EmergencyCallReleaseMT(NR_CellId_Type p_NR_CellId,
+                                        boolean p_IMSMsgsNotYetSent:= true,
+                                        EmergencyCallRelease_PDUSession p_Release_Keep := Release_PDUSession) runs on NR5GC_PTC
+  {
+
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Emergency_PDN); // @sic R5s210363 sic@
+    var GSM_MobilityInfo_Type v_PDUSession := valueof(v_GSM_MobilityInfo); // Must be there as previously established it
+    var O1_Type v_PDUSessionId := v_PDUSession.SessionId;
+    var PDN_Index_Type v_PdnIndex := v_PDUSession.PdnIndex; // @sic R5s220829 sic@
+    
+    if ( p_IMSMsgsNotYetSent) { // @sic R5s220789, R5s221103 sic@
+      IMS[tsc_Index_IMS2].receive(cmr_IMS_IPCAN_Trigger ("IMS Call Release Msgs Sent"));  // @sic R5s220039, R5-225362 sic@ sic@
+    }
+    
+    if (p_Release_Keep == Release_PDUSession) { // @sic R5-225362 sic@
+      f_NR5GC_PDUSessionRelease (p_NR_CellId,
+                                 v_PDUSessionId,
+                                 cs_GMM_GSM_Cause (omit, '00100100'B));
+      f_IP_RtpRtcpLoopback(IP, v_PdnIndex, tsc_IMS_MediaPort_M1, omit);  // @sic R5s210363, R5s220829 sic@
+    } else {
+      f_NR5GC_ModifyPDUSession_RemoveEmergency(p_NR_CellId);
+    }
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Emergency Call Release");
+  }
+
+  /*
+   * @desc      PDU modification for establishing a voice Call
+   *            Used in 38.508-1 tables 4.9.11, 4.9.12, 4.9.15, 4.9.16
+   * @param     p_NR_CellId
+   * @param     p_GSM_MobilityInfo
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_ModifyPDUSession_AddVoice(NR_CellId_Type p_NR_CellId,
+                                             GSM_MobilityInfo_Type p_GSM_MobilityInfo) runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo();
+    var boolean v_InterworkWithEPS := false;
+    var O1_Type v_EPS_BearerId := '00'O;
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) NR_RadioBearerList_Type v_SS_Config;
+    var integer v_NewDRBId;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_NR_CellId);
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+
+    if (isvalue(p_GSM_MobilityInfo.EPS_Bearer)) {  // This is only set if the UE supports EPS
+      v_InterworkWithEPS := true;
+      v_EPS_BearerId := hex2oct(int2hex(valueof(f_GetNextEPSBearerId (p_GSM_MobilityInfo, v_GMM_MobilityInfo, IPCAN_SpeechCall)), 1) & '0'H); // @sic R5-216161, R5s211486 sic@
+    }
+
+    // build components of Reconfiguration message
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionModificationCommand(p_GSM_MobilityInfo.SessionId,
+                                                                     omit,
+                                                                     -, -, -, -,
+                                                                     f_BuildDefaultQoSRules("7_Voice", '7A'O), // @sic R5s210073 sic@
+                                                                     cs_QoSFlowDescr({cs_QoS_Flow5(v_InterworkWithEPS, v_EPS_BearerId)})); // @sic R5-216161 sic@
+
+    v_NewDRBId := f_NR_GetNextDRBId(p_GSM_MobilityInfo, false);
+    // @sic R5-211171 sic@
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(-,
+                                                          {cs_NR_DRB_ToAddMod(cs_NR_DRB_SDAP(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {7})), // QFI of 7 in flow 5
+                                                                              v_NewDRBId,
+                                                                              -, -,
+                                                                              cs_38508_PDCP_Config (-, ms80, omit))}); // UM as per 38.508-1 Table 4.6.3-99: PDCP-Config  @sic R5-213445 sic@
+    v_SS_Config := {f_NR_GetRadioBearerConfig_FullUM(p_NR_CellId, v_NewDRBId, -, -, f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {7}))))}; // @sic R5-211371, R5s210330 sic@
+    v_CellGroupConfig := f_NR_GetCellgroupConfig_DRB(p_NR_CellId, {v_NewDRBId}, false);
+    v_CellGroupConfig.rlc_BearerToAddModList := {cs_38508_RLC_BearerConfig_DRB(v_NewDRBId,
+                                                                             cs_38508_RLC_Config_UM_DRB(f_NR_UL_UM_RLC(), f_NR_DL_UM_RLC(v_IsFR1)),
+                                                                             cs_38508_LogicalChannelConfig_DRB)};
+
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(p_GSM_MobilityInfo.SessionId), 7); // @sic R5s210363 sic@
+    f_IP_RtpRtcpLoopback(IP, p_GSM_MobilityInfo.PdnIndex, tsc_IMS_MediaPort_M1, cs_DrbInfo_NR(p_NR_CellId, v_QosFlowId));  // @sic R5s210363 sic@
+
+    // then send RRC Reconfiguration message
+    f_NR_RRCReconfigNewDRBWithSSConfig(p_NR_CellId,
+                                       v_RadioBearerConfig,
+                                       v_SS_Config,
+                                       v_CellGroupConfig,
+                                       { cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend) }, -, -, false); // @sic R5-217286 sic@
+    alt { // @sic R5-217286, R5-224689 sic@
+      [] SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete))
+         { // RRC then NAS
+           SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                      tsc_NR_RbId_SRB2,
+                                      cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp;
+
+         }
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                      tsc_NR_RbId_SRB2,
+                                      cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp
+         { // NAS then RRC
+           SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete));
+         }
+    }
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, p_GSM_MobilityInfo.SessionId)) {
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Modification Complete failed");
+    } else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Speech Call Establishment");
+    }
+  }
+
+   /*
+   * @desc      Steps 2 - 8 of TS 38.508-1 table 4.9.15 IMS MO Speech Call and 38.508-1 table 4.9.15 IMS MT Speech Call
+   *            Steps 2 - 8 of TS 38.508-1 table 4.9.24 IMS MO Video Call
+   * @param     p_NR_CellId
+   * @param     p_EstCause
+   * @param     p_ServiceType
+   * @return    template (omit) GSM_MobilityInfo_Type
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_SpeechCall_Steps2_8(NR_CellId_Type p_NR_CellId,
+                                       EstablishmentCause p_EstCause,
+                                       template (present) B4_Type p_ServiceType) runs on NR5GC_PTC return template (omit) GSM_MobilityInfo_Type
+  {
+    var NG_NAS_MSG_Indication_Type v_ReceivedMsg;
+    
+    // Steps 2-4 RRC connection Setup
+    v_ReceivedMsg := f_NR5GC_RRCIdleToConnected_Steps2_4(p_NR_CellId, p_ServiceType, p_EstCause); // @sic R5s210037 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "IMS Voice Call Establishment: Service Request");
+    
+    // Steps 5-8 Configure SRB2 & DRB
+    f_NR5GC_RRC_ConnectedState3N_Steps5_8(p_NR_CellId, v_ReceivedMsg);
+    
+    // Get the Info for the IMS PDU Session already created
+    return f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+  }
+
+  /*
+   * @desc      PDU modification for establishing a video Call
+   *            Used in TS 38.508-1 table 4.9.24
+   * @param     p_NR_CellId
+   * @param     p_GSM_MobilityInfo
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_ModifyPDUSession_AddVideo(NR_CellId_Type p_NR_CellId, GSM_MobilityInfo_Type p_GSM_MobilityInfo) runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo();
+    var boolean v_InterworkWithEPS := false;
+    var HalfOctet_Type v_EPS_BearerIdVoice := '0'H;
+    var HalfOctet_Type v_EPS_BearerIdVideo := '0'H;
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) NR_RadioBearerList_Type v_SS_Config;
+    var IntegerList_Type v_DRBList;
+    var integer v_NewDRBIdVoice;
+    var integer v_NewDRBIdVideo;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_NR_CellId);
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var O1_Type v_SessionId := p_GSM_MobilityInfo.SessionId;
+    var template (value) MappedEPSContext v_MappedEPSContextVoice;
+    var template (value) MappedEPSContext v_MappedEPSContextVideo;
+    var template (omit) MappedEPSBearerContexts v_MappedEPSBearerContexts := omit;  // @sic R5s211336 sic@
+    var bitstring v_EPSParam; // If used
+    var octetstring v_QoSParamOctetsVoice;
+    var octetstring v_QoSParamOctetsVideo;
+    var octetstring v_TFTParamOctetsVoice;
+    var octetstring v_TFTParamOctetsVideo;
+
+    if (isvalue(p_GSM_MobilityInfo.EPS_Bearer)) {  // This is only set if the UE supports EPS  @sic R5-216153 sic@
+      v_InterworkWithEPS := true;
+      // we're effectively creating 2 new dedicated bearers to carry voice and video
+      v_EPS_BearerIdVoice := int2hex(valueof(f_GetNextEPSBearerId (p_GSM_MobilityInfo, v_GMM_MobilityInfo, IPCAN_SpeechCall)), 1); // @sic R5s211486 sic@
+      v_EPS_BearerIdVideo := int2hex(valueof(f_GetNextEPSBearerId (p_GSM_MobilityInfo, v_GMM_MobilityInfo, IPCAN_VideoCall)), 1); // @sic R5s211486 sic@
+
+      v_EPSParam := encvalue(f_Get_508_EPSQoS(DED_4));
+      v_QoSParamOctetsVoice := bit2oct(v_EPSParam);
+      v_EPSParam := encvalue(f_Get_508_EPSQoS(DED_3));
+      v_QoSParamOctetsVideo := bit2oct(v_EPSParam);
+
+      // @sic R5-217797 sic@
+      v_EPSParam := encvalue( f_EUTRA_NB_Get_508_TrafficFlowTemplate(4, v_EPS_BearerIdVoice, tsc_PdnType_IPv4v6, PDN_1));
+      v_TFTParamOctetsVoice := bit2oct(v_EPSParam);
+      v_EPSParam := encvalue(f_EUTRA_NB_Get_508_TrafficFlowTemplate(3, v_EPS_BearerIdVideo, tsc_PdnType_IPv4v6, PDN_1));
+      v_TFTParamOctetsVideo := bit2oct(v_EPSParam);
+
+      v_MappedEPSContextVoice := cs_OneMappedEPSContextTwoParams(hex2oct(v_EPS_BearerIdVoice & '0'H), lengthof(v_QoSParamOctetsVoice) + lengthof(v_TFTParamOctetsVoice), cs_EPSParameter_QoS(v_QoSParamOctetsVoice), cs_EPSParameter_TFT(v_TFTParamOctetsVoice));
+      v_MappedEPSContextVideo := cs_OneMappedEPSContextTwoParams(hex2oct(v_EPS_BearerIdVideo & '0'H), lengthof(v_QoSParamOctetsVideo) + lengthof(v_TFTParamOctetsVideo), cs_EPSParameter_QoS(v_QoSParamOctetsVideo), cs_EPSParameter_TFT(v_TFTParamOctetsVideo));
+      v_MappedEPSBearerContexts := cs_TwoMappedEPSBearerContextList (v_MappedEPSContextVoice, v_MappedEPSContextVideo); // @sic R5-216153 sic@
+    }
+
+    // build components of Reconfiguration message
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionModificationCommand(v_SessionId,
+                                                                     omit,
+                                                                     -, -, -, -,
+                                                                     f_BuildDefaultQoSRules("7_VoiceVideo", '7A'O),
+                                                                     cs_QoSFlowDescr({cs_QoS_Flow5(v_InterworkWithEPS, hex2oct(v_EPS_BearerIdVoice & '0'H)),         // @sic R5-213155 sic@
+                                                                                      cs_QoS_Flow6(v_InterworkWithEPS, hex2oct(v_EPS_BearerIdVideo & '0'H))}),       // @sic R5-213155 sic@
+                                                                     v_MappedEPSBearerContexts);                                                // @sic R5-216153 sic@
+
+    v_DRBList := f_NR_GetNextDRBIds(p_GSM_MobilityInfo, false, 2); // @sic R5s210877 sic@
+    v_NewDRBIdVoice := v_DRBList[0];
+    v_NewDRBIdVideo := v_DRBList[1];
+
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(-,
+                                                          {cs_NR_DRB_ToAddMod(cs_NR_DRB_SDAP(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {7})), // QFI of 7 in flow 5
+                                                                              v_NewDRBIdVoice,
+                                                                              -, -,
+                                                                              cs_38508_PDCP_Config ( -, ms80, omit)), // UM as per 38.508-1 Table 4.6.3-99: PDCP-Config  @sic R5-213445 sic@
+                                                           cs_NR_DRB_ToAddMod(cs_NR_DRB_SDAP(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {8})), // QFI of 8 in flow 6
+                                                                              v_NewDRBIdVideo,
+                                                                              -, -,
+                                                                              cs_38508_PDCP_Config ( -, ms80, omit))}); // UM as per 38.508-1 Table 4.6.3-99: PDCP-Config  @sic R5-213445 sic@
+    v_SS_Config := {f_NR_GetRadioBearerConfig_FullUM(p_NR_CellId, v_NewDRBIdVoice, -, -, f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {7})))),
+                    f_NR_GetRadioBearerConfig_FullUM(p_NR_CellId, v_NewDRBIdVideo, -, -, f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(cs_SDAP_Config(oct2int(p_GSM_MobilityInfo.SessionId), false, {8}))))};
+    v_CellGroupConfig := f_NR_GetCellgroupConfig_DRB(p_NR_CellId, {v_NewDRBIdVoice, v_NewDRBIdVideo}, false);
+    v_CellGroupConfig.rlc_BearerToAddModList := {cs_38508_RLC_BearerConfig_DRB(v_NewDRBIdVoice,
+                                                                             cs_38508_RLC_Config_UM_DRB(f_NR_UL_UM_RLC(), f_NR_DL_UM_RLC(v_IsFR1)),
+                                                                             cs_38508_LogicalChannelConfig_DRB),
+                                                 cs_38508_RLC_BearerConfig_DRB(v_NewDRBIdVideo,
+                                                                             cs_38508_RLC_Config_UM_DRB(f_NR_UL_UM_RLC(), f_NR_DL_UM_RLC(v_IsFR1)),
+                                                                             cs_38508_LogicalChannelConfig_DRB)};
+
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(v_SessionId), 7);
+    f_IP_RtpRtcpLoopback(IP, p_GSM_MobilityInfo.PdnIndex, tsc_IMS_MediaPort_M1, cs_DrbInfo_NR(p_NR_CellId, v_QosFlowId));
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(v_SessionId), 8);
+    f_IP_RtpRtcpLoopback(IP, p_GSM_MobilityInfo.PdnIndex, tsc_IMS_MediaPort_M2, cs_DrbInfo_NR(p_NR_CellId, v_QosFlowId));
+
+    // then send RRC Reconfiguration message
+    f_NR_RRCReconfigNewDRBWithSSConfig(p_NR_CellId,
+                                       v_RadioBearerConfig,
+                                       v_SS_Config,
+                                       v_CellGroupConfig,
+                                       { cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend) }, -, -, false); // @sic R5-224685 sic@
+    alt { // @sic R5-224685 sic@
+      [] SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete))
+         { // RRC then NAS
+           SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                      tsc_NR_RbId_SRB2,
+                                      cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp;
+
+         }
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                      tsc_NR_RbId_SRB2,
+                                      cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp
+         { // NAS then RRC
+           SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete));
+         }
+    }
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_SessionId)) {
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Modification Complete failed");
+    } else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Video Call Establishment");
+    }
+  }
+
+  /*
+   * @desc      PDU modification for adding video to an existing speech Call
+   *            Used in TS 38.508-1 table 4.9.27
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_ModifyPDUSession_AddVideoToSpeech(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var GMM_MobilityInfo_Type v_GMM_MobilityInfo := f_NR5GC_MobileInfo_GetGMM_MobilityInfo();
+    var boolean v_InterworkWithEPS := false;
+    var HalfOctet_Type v_EPS_BearerIdVideo := '0'H;
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var template (value) RadioBearerConfig v_RadioBearerConfig;
+    var template (value) CellGroupConfig v_CellGroupConfig;
+    var template (value) NR_RadioBearerList_Type v_SS_Config;
+    var IntegerList_Type v_DRBList;
+    var integer v_NewDRBIdVideo;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_NR_CellId);
+    var template (value) QosFlow_Identification_Type v_QosFlowId;
+    var PDUSessionInfoList_Type v_PDUSessionInfo := f_NR5GC_MobileInfo_GetSessionInfoList();
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfoTemplate := f_Get_PDUSessionForDNNType(v_PDUSessionInfo, IMS_DNN);
+    var GSM_MobilityInfo_Type v_GSM_MobilityInfo := valueof(v_GSM_MobilityInfoTemplate);
+    var O1_Type v_SessionId := v_GSM_MobilityInfo.SessionId;
+    var template (value) MappedEPSContext v_MappedEPSContextVideo;
+    var template (omit) MappedEPSBearerContexts v_MappedEPSBearerContexts := omit;  // @sic R5s211336 sic@
+    var bitstring v_EPSParam; // If used
+    var octetstring v_QoSParamOctetsVideo;
+    var octetstring v_TFTParamOctetsVideo;
+
+    if (isvalue(v_GSM_MobilityInfo.EPS_Bearer)) {  // This is only set if the UE supports EPS  @sic R5-216153 sic@
+      v_InterworkWithEPS := true;
+      v_EPS_BearerIdVideo := int2hex(valueof(f_GetNextEPSBearerId (v_GSM_MobilityInfo, v_GMM_MobilityInfo, IPCAN_VideoCall)), 1); // @sic R5s211486 sic@
+      v_EPSParam := encvalue(f_Get_508_EPSQoS(DED_3)); // @sic R5-220774 sic@
+      v_QoSParamOctetsVideo := bit2oct(v_EPSParam);
+
+      v_EPSParam := encvalue(f_EUTRA_NB_Get_508_TrafficFlowTemplate(3, v_EPS_BearerIdVideo, tsc_PdnType_IPv4v6, PDN_1));
+      v_TFTParamOctetsVideo := bit2oct(v_EPSParam);
+
+      v_MappedEPSContextVideo := cs_OneMappedEPSContextTwoParams(hex2oct(v_EPS_BearerIdVideo & '0'H), lengthof(v_QoSParamOctetsVideo) + lengthof(v_TFTParamOctetsVideo), cs_EPSParameter_QoS(v_QoSParamOctetsVideo), cs_EPSParameter_TFT(v_TFTParamOctetsVideo));
+      v_MappedEPSBearerContexts := cs_OneMappedEPSBearerContextList (v_MappedEPSContextVideo);
+    }
+
+    // build components of Reconfiguration message
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionModificationCommand(v_SessionId,
+                                                                     omit,
+                                                                     -, -, -, -,
+                                                                     f_BuildDefaultQoSRules("7_Video", '7A'O),
+                                                                     cs_QoSFlowDescr({cs_QoS_Flow6(v_InterworkWithEPS, hex2oct(v_EPS_BearerIdVideo & '0'H))}),
+                                                                     v_MappedEPSBearerContexts);
+
+    v_DRBList := f_NR_GetNextDRBIds(v_GSM_MobilityInfo, false, 1);
+    v_NewDRBIdVideo := v_DRBList[0]; // @sic R5s220336 sic@
+
+    v_RadioBearerConfig := cs_38508_RadioBearerConfigDef(-,
+                                                          {cs_NR_DRB_ToAddMod(cs_NR_DRB_SDAP(cs_SDAP_Config(oct2int(v_GSM_MobilityInfo.SessionId), false, {8})), // QFI of 8 in flow 6
+                                                                              v_NewDRBIdVideo,
+                                                                              -, -,
+                                                                              cs_38508_PDCP_Config ( -, ms80, omit))}); // UM as per 38.508-1 Table 4.6.3-99: PDCP-Config  @sic R5-213445 sic@
+    v_SS_Config := {f_NR_GetRadioBearerConfig_FullUM(p_NR_CellId, v_NewDRBIdVideo, -, -, f_ReturnNR_SDAP_Configuration_FromSDAP_Config(valueof(cs_SDAP_Config(oct2int(v_GSM_MobilityInfo.SessionId), false, {8}))))};
+    v_CellGroupConfig := f_NR_GetCellgroupConfig_DRB(p_NR_CellId, {v_NewDRBIdVideo}, false);
+    v_CellGroupConfig.rlc_BearerToAddModList := {cs_38508_RLC_BearerConfig_DRB(v_NewDRBIdVideo,
+                                                                             cs_38508_RLC_Config_UM_DRB(f_NR_UL_UM_RLC(), f_NR_DL_UM_RLC(v_IsFR1)),
+                                                                             cs_38508_LogicalChannelConfig_DRB)};
+
+    v_QosFlowId := cs_IP_QosFlowId(oct2int(v_SessionId), 8);
+    f_IP_RtpRtcpLoopback(IP, v_GSM_MobilityInfo.PdnIndex, tsc_IMS_MediaPort_M2, cs_DrbInfo_NR(p_NR_CellId, v_QosFlowId));
+
+    // then send RRC Reconfiguration message
+    f_NR_RRCReconfigNewDRBWithSSConfig(p_NR_CellId,
+                                       v_RadioBearerConfig,
+                                       v_SS_Config,
+                                       v_CellGroupConfig,
+                                       { cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend)}, -, -, false);
+    interleave {
+      [] SRB.receive(car_NR_SRB_NasPdu_IND(p_NR_CellId,
+                                      tsc_NR_RbId_SRB2,
+                                      cr_NG_NAS_IndWithPiggybacking((tsc_SHT_IntegrityProtected_Ciphered,tsc_SHT_IntegrityProtected)))) -> value v_ReceivedAsp {}
+      [] SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, tsc_NR_RbId_SRB1, cr_38508_RRCReconfigurationComplete)) {}
+    }
+    
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, v_SessionId)) {
+    f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Modification Complete failed");
+    } else {
+      f_NR_PreliminaryPass(__FILE__, __LINE__, "Video Added");
+    }
+  }
+
+  /*
+   * @desc      PDU modification for releasing a voice Call
+   *            Used in TS 38.508-1 tables 4.9.17/18
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_ModifyPDUSession_RemoveIMSVoice(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+    fl_NR5GC_ModifyPDUSession_RemoveIMS_Media(p_NR_CellId, {IPCAN_SpeechCall}, valueof(v_GSM_MobilityInfo)); // @sic R5-225426 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Speech Call Release");
+  }
+
+  /*
+   * @desc      PDU modification for releasing a voice Call
+   *            Used in TS 38.508-1 tables 4.9.28
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_ModifyPDUSession_RemoveVideoFromSpeech(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+    fl_NR5GC_ModifyPDUSession_RemoveIMS_Media(p_NR_CellId, {IPCAN_VideoCall}, valueof(v_GSM_MobilityInfo)); // @sic R5-225426 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Video Removed");
+  }
+
+  /*
+   * @desc      PDU modification for releasing a voice or video Call
+   *            Used in TS 38.508-1 tables 4.9.17/18
+   * @param     p_NR_CellId
+   * @param     p_MediaType
+   * @param     p_GSM_MobilityInfo
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function fl_NR5GC_ModifyPDUSession_RemoveIMS_Media(NR_CellId_Type p_NR_CellId,
+                                                     ListOfMedia_Type p_MediaType,
+                                                     GSM_MobilityInfo_Type p_GSM_MobilityInfo) runs on NR5GC_PTC
+  {
+    var NR_SRB_COMMON_IND v_ReceivedAsp;
+    var template (value) NG_NAS_DL_Pdu_Type v_PiggyBackedMsgToSend;
+    var IntegerList_Type v_DRBIdList := f_NR_GetDRBList_ForGivenPDUSession(oct2int(p_GSM_MobilityInfo.SessionId));  // @sic R5s221134 sic@
+    var NR_DRBInfo_Type v_DRBInfo;
+    var IntegerList_Type v_DRB_ToReleaseList;
+    var template (value) QoS_RuleList v_QoS_Rules;
+    var template (value) QoS_FlowList v_QoS_Flows;
+    var boolean v_RemoveVoice := false;
+    var boolean v_RemoveVideo := false;
+    var integer i;
+    var integer j := 0;
+    
+    for (i := 0; i < lengthof(p_MediaType); i := i+1) { // @sic R5-217798 sic@
+      select (p_MediaType[i]) {
+        case(IPCAN_SpeechCall, IPCAN_EmergencyCall) { // @sic R5-225426 sic@
+          v_RemoveVoice := true;
+        }
+        case(IPCAN_VideoCall) {
+          v_RemoveVideo := true;
+        }
+      }
+    }
+    
+    // @sic R5-216150 sic@
+    if (v_RemoveVoice) { // @sic R5-217798 sic@
+      v_QoS_Rules[j] := cs_QoS_DeleteRule('03'O); // @sic R5s210073, R5-213439 sic@
+      v_QoS_Flows[j] := cs_QoS_DeleteFlow('000111'B); // @sic R5-213439 sic@
+      j := j+1;
+    }
+    if (v_RemoveVideo) {
+        v_QoS_Rules[j] := cs_QoS_DeleteRule('04'O); // @sic R5s220500 sic@
+
+        v_QoS_Flows[j] := cs_QoS_DeleteFlow('001000'B);
+    }
+
+    // build components of Reconfiguration message
+    v_PiggyBackedMsgToSend := f_Get_NG_PDUSessionModificationCommand(p_GSM_MobilityInfo.SessionId,
+                                                                         omit,
+                                                                         -, -, -, -,
+                                                                         cs_QoS_Rules(v_QoS_Rules, '7A'O),
+                                                                         cs_QoSFlowDescr(v_QoS_Flows));
+
+    j := 0;  // reset index
+    // @sic R5-211171 sic@
+    for (i := 0; i < lengthof(v_DRBIdList); i := i+1) {
+      v_DRBInfo := valueof(f_NR_GetDRBInfo_FromId(v_DRBIdList[i]));
+      if (not (v_DRBInfo.DefaultDRB)) {
+        if ((v_RemoveVoice and (v_DRBInfo.SDAP_Config.mappedQoS_FlowsToAdd[0] == 7)) or
+             v_RemoveVideo and (v_DRBInfo.SDAP_Config.mappedQoS_FlowsToAdd[0] == 8)) { // @sic R5-217798 sic@
+          v_DRB_ToReleaseList[j] := v_DRBInfo.DRB_Id;
+          j := j+1;
+        }
+      }
+    }
+
+    v_ReceivedAsp := f_NR_RRCReconfigReleaseDRBs(p_NR_CellId, v_DRB_ToReleaseList, cs_NG_NAS_RequestWithPiggybacking(tsc_SHT_IntegrityProtected_Ciphered, v_PiggyBackedMsgToSend)); // @sic R5s220595 sic@
+    if (not f_Check_NG_PDUSessionModificationComplete (v_ReceivedAsp.Signalling.Nas[0].Pdu, p_GSM_MobilityInfo.SessionId)) {
+      f_NR_SetVerdictFailOrInconc(__FILE__, __LINE__, "PDU Session Modification Complete failed");
+    }
+    if (v_RemoveVoice) { // @sic R5-217798 sic@
+      f_IP_RtpRtcpLoopback(IP, valueof(p_GSM_MobilityInfo.PdnIndex), tsc_IMS_MediaPort_M1, omit);  // @sic R5s210363 sic@
+    }
+    if (v_RemoveVideo) { // @sic R5-217798 sic@
+      f_IP_RtpRtcpLoopback(IP, valueof(p_GSM_MobilityInfo.PdnIndex), tsc_IMS_MediaPort_M2, omit);  // @sic R5s210363 sic@
+    }
+  }
+
+  /*
+   * @desc      PDU modification for releasing a video Call
+   *            Used in TS 38.508-1 tables 4.9.17/18
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS)
+   */
+  function f_NR5GC_ModifyPDUSession_RemoveIMSVideo(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), IMS_DNN);
+    fl_NR5GC_ModifyPDUSession_RemoveIMS_Media(p_NR_CellId, {IPCAN_SpeechCall, IPCAN_VideoCall}, valueof(v_GSM_MobilityInfo)); // @sic R5-225426 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Video Call Release");
+  }
+
+  /*
+   * @desc      PDU modification for releasing an emergency Call (but keeping PDU session)
+   *            Used in TS 38.508-1 tables 4.9.12A/B
+   * @param     p_NR_CellId
+   * @status    APPROVED (IMS, NR5GC)
+   */
+  function f_NR5GC_ModifyPDUSession_RemoveEmergency(NR_CellId_Type p_NR_CellId) runs on NR5GC_PTC
+  {
+    var template (omit) GSM_MobilityInfo_Type v_GSM_MobilityInfo := f_Get_PDUSessionForDNNType(f_NR5GC_MobileInfo_GetSessionInfoList(), Emergency_PDN);
+    
+    fl_NR5GC_ModifyPDUSession_RemoveIMS_Media(p_NR_CellId, {IPCAN_EmergencyCall}, valueof(v_GSM_MobilityInfo)); // @sic R5-225426 sic@
+    f_NR_PreliminaryPass(__FILE__, __LINE__, "Emergency Call Release");
+  }
+
+}

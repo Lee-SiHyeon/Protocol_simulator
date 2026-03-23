@@ -1,0 +1,191 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2025-12-10 10:32:45 +0100 (Wed, 10 Dec 2025) $
+// $Rev: 42613 $
+/******************************************************************************/
+
+module EUTRA_NASCommonFunctions {
+
+  import from EUTRA_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from CommonDefs all;
+  import from EPS_NAS_Constants all;
+  import from EPS_NAS_MsgContainers all;
+  import from EPS_NAS_Templates all;
+  import from EPS_NAS_TypeDefs all;
+  import from EUTRA_CellInfo all;
+  import from EUTRA_Component all;
+  import from EUTRA_ConfigurationSteps all;
+  import from EUTRA_DRB_Templates all;
+  import from EUTRA_InitialRegistration all;
+  import from EUTRA_NASSteps all;
+  import from EUTRA_NB_ASP_L2DataDefs all;
+  import from EUTRA_NB_CommonDefs all;
+  import from EUTRA_NB_NASSteps all;
+  import from EUTRA_RRCSteps all;
+  import from EUTRA_RRC_Templates all;
+  import from EUTRA_SRB_Templates all;
+  import from EUTRA_SecurityFunctions all;
+  import from NAS_CommonTemplates all;
+  import from NAS_CommonTypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Generic test step to reject a registration attempt by the UE.
+   *            This is based on the Preamble function and should be run as an alternative.
+   *            This results in the UE being switched off, and  with no valid GUTI
+   * @param     p_CellId
+   * @param     p_RejectCause
+   * @param     p_ForcedAttach
+   * @status    APPROVED (LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_Preamble_Reject(EUTRA_CellId_Type p_CellId,
+                                   NAS_CauseValue_Type p_RejectCause,
+                                   EUTRA_ATTACH_Type p_ForcedAttach
+                                   ) runs on EUTRA_PTC
+  {
+    //@sic R5S160376 deleted parameter p_SelectedPlmnId @sic
+    // First switch cell back on
+    f_EUTRA_SetCellPower(p_CellId, tsc_ServingCellRS_EPRE);
+    f_EUTRA_AttachReject (p_CellId, p_RejectCause, p_ForcedAttach); // @sic R5s110176, R5s110695 sic@
+    
+    // And then just need to switch UE off
+    f_UT_SwitchOffUE (UT, false, CNF_REQUIRED); // @sic R5s1100395 sic@
+  }
+
+  /*
+   * @desc      Generic test step to reject a registration attempt by the UE.
+   *            This expects the UE to be switched off before calling this function, and leaves the UE switched on at the end
+   * @param     p_CellId
+   * @param     p_RejectCause
+   * @param     p_ForcedAttach
+   * @status    APPROVED (LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_AttachReject(EUTRA_CellId_Type p_CellId,
+                                NAS_CauseValue_Type p_RejectCause,
+                                EUTRA_ATTACH_Type p_ForcedAttach
+                                ) runs on EUTRA_PTC
+  {
+    //@sic R5s160376: deleted p_SelectedPlmnId sic@
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var NAS_AttDetValue_Type v_AttachType;
+    var PdnTypeValue v_PDNValue;
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    var EUTRA_SecurityParams_Type v_AuthParams := f_EUTRA_Security_Get();
+    var template AdditionalUpdateType v_AdditionalUpdateType := f_GetAdditionalUpdateType (p_ForcedAttach); // @sic R5s110176 sic@
+    var SecurityHeaderType v_SentSecurityHeader := tsc_SHT_NoSecurityProtection;
+
+    // Switch on UE
+    f_EUTRA_SwitchOnUEandStartIP(p_CellId); // @sic R5s120065 sic@
+
+    v_AttachType := f_GetEAttachType(p_ForcedAttach); // @sic R5s110176 sic@
+    
+    v_PDNValue := f_GetPdnType();
+    
+    // RRC Connection Establishment, with Attach Request and PDN Connectivity
+    v_NAS_Ind := f_EUTRA_RRC_ConnEst_DefWithNas(p_CellId,
+                                                v_RRC_TI,
+                                                cr_EstablishmentCause_Any,
+                                                cr_NAS_IndicationWithPiggybacking((tsc_SHT_NoSecurityProtection, tsc_SHT_IntegrityProtected),
+                                                                                  cr_508_ATTACH_REQUEST(v_AttachType, v_AdditionalUpdateType), // @sic R5-103681 sic@
+                                                                                  cr_508_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach,
+                                                                                                                  v_PDNValue))); // @sic R5s110695 R5s160376 sic@
+    
+    // Set UE network capabilities as sent by the UE to be used later in the test case(see TS 24.301 clause 5.4.3.3)
+    v_AuthParams.NAS_SecurityCap := f_EUTRA_NB_FillNAS_SecurityCapability(v_NAS_Ind.Pdu.Msg.aTTACH_REQUEST);  // @sic R5s100135 sic@
+    f_EUTRA_Security_Set(v_AuthParams);
+    
+    if (match (p_RejectCause, (int2bit(3, 8), int2bit(6, 8), int2bit(7, 8), int2bit(8, 8), int2bit(11, 8), int2bit(12, 8), int2bit(13, 8), int2bit(14, 8), int2bit(15, 8), int2bit(25, 8), int2bit(35, 8)))) { // @sic R5w170202 sic@
+      // Have to send the Reject integrity protected
+      f_EUTRA_InitialRegistration_Step5_8 (p_CellId, v_NAS_Ind);
+      v_SentSecurityHeader := tsc_SHT_IntegrityProtected_Ciphered;
+    }
+    // Now send Attach Reject, to get UE to delete GUTI
+    SRB.send(cas_SRB1_NasPdu_REQ(p_CellId,
+                                 cs_TimingInfo_Now,
+                                 cs_NAS_Request(v_SentSecurityHeader, // @sic R5-175224 sic@
+                                                cs_508_AttachReject(cs_EMM_Cause_v(p_RejectCause)))));
+    
+    f_EUTRA_RRC_ConnectionRelease(p_CellId);
+  }
+
+  /*
+   * @desc      Send RRCConnectionReconfiguration with piggy-backed MODIFY EPS BEARER CONTEXT REQUEST
+   * @param     p_CellId
+   * @param     p_RRC_TI
+   * @param     p_Id
+   * @param     p_ProcTi
+   * @param     p_QoS
+   * @param     p_Tft
+   * @param     p_RLC_Mode_Type     (default value: AM_Mode)
+   * @status    APPROVED (LTE, LTE_A_R10_R11, LTE_IRAT)
+   */
+  function f_EUTRA_TxModifyEpsBearerCtxtReq(EUTRA_CellId_Type p_CellId,
+                                            RRC_TransactionIdentifier p_RRC_TI,
+                                            EPS_BearerIdentity p_Id,
+                                            ProcedureTransactionIdentifier p_ProcTi, // octet
+                                            template (value) EPS_QualityOfService p_QoS,
+                                            template (omit) TrafficFlowTemplate p_Tft,
+                                            RLC_Mode_Type p_RLC_Mode_Type := AM_Mode)
+    runs on EUTRA_PTC
+  {
+    // send RRCConnectionReconfiguration with piggy-backed MODIFY EPS BEARER CONTEXT REQUEST
+    var template (value) NAS_DL_Message_Type v_ModifyEPSBearerCxtReq := cs_508_ModifyEPSBearerCxtReq(p_Id,
+                                                                                                     p_ProcTi,
+                                                                                                     p_QoS,
+                                                                                                     p_Tft); // @sic R5-103625 sic@
+    
+    if (p_RLC_Mode_Type == AM_Mode) {
+      SRB.send(cas_SRB1_RrcNasPdu_REQ(p_CellId,
+                                      cs_TimingInfo_Now,
+                                      cs_RRCConnectionReconfiguration_RadioResConfig(p_RRC_TI, cs_RadioResourceConfig_DRB_RECONFIG),
+                                      cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_ModifyEPSBearerCxtReq)));   // @sic R5-103626 sic@
+    }
+    else {
+      SRB.send(cas_SRB1_RrcNasPdu_REQ(p_CellId,
+                                      cs_TimingInfo_Now,
+                                      cs_RRCConnectionReconfiguration_RadioResConfig(p_RRC_TI, cs_RadioResourceConfig_DRB_RECONFIG(cs_508_DRB_ToAddModList_RECONFIG_UM)),
+                                      cs_NAS_Request(tsc_SHT_IntegrityProtected_Ciphered,
+                                                     v_ModifyEPSBearerCxtReq)));   // @sic R5-103626 sic@
+    }
+  }
+
+  /*
+   * @desc      UE Registration acc. to 36.508 cl. 4.5.2
+   * @param     p_CellId
+   * @param     p_VerdictComment
+   * @param     p_ForcedAttach
+   * @status    APPROVED (LTE, LTE_A_R10_R11)
+   */
+  function f_EUTRA_AttachProcedure(EUTRA_CellId_Type p_CellId,
+                                   charstring p_VerdictComment,
+                                   EUTRA_ATTACH_Type p_ForcedAttach) runs on EUTRA_PTC
+  {
+    var RRC_TransactionIdentifier v_RRC_TI := tsc_RRC_TI_Def;
+    var NAS_AttDetValue_Type v_AttachType := f_GetEAttachType(p_ForcedAttach); // @sic R5s110176 sic@
+    var B3_Type v_PDNType := f_GetPdnType();
+    var template AdditionalUpdateType v_AdditionalUpdateType := f_GetAdditionalUpdateType (p_ForcedAttach); // @sic R5s110176 sic@
+    var NAS_MSG_Indication_Type v_NAS_Ind;
+    
+    // Receive RRC Connection Setup Complete with
+    v_NAS_Ind := f_EUTRA_RRC_ConnEst_DefWithNas(p_CellId,
+                                                v_RRC_TI,
+                                                cr_EstablishmentCause_Any,
+                                                cr_NAS_IndicationWithPiggybacking(tsc_SHT_IntegrityProtected,
+                                                                                  cr_508_ATTACH_REQUEST(v_AttachType, v_AdditionalUpdateType),
+                                                                                  cr_508_PDN_CONNECTIVITY_REQUEST(tsc_PdnRequest_InitialAttach, v_PDNType)));
+    if (p_VerdictComment != "No Verdict") {
+      f_EUTRA_PreliminaryPass(__FILE__, __LINE__, p_VerdictComment);
+    }
+    
+    f_EUTRA_InitialRegistration_Step5_18b1 (p_CellId, STATE2_IDLEUPDATE, p_ForcedAttach, v_NAS_Ind);  // @sic R5-160947 sic@
+    
+  } // f_EUTRA_AttachProcedure
+
+}

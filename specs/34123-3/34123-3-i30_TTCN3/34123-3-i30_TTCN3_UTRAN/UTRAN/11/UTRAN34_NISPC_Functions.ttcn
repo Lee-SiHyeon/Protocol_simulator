@@ -1,0 +1,687 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 34.123-3 v18.3.0
+// $Date: 2024-02-11 19:51:43 +0100 (Sun, 11 Feb 2024) $
+// $Rev: 37838 $
+/******************************************************************************/
+module UTRAN34_NISPC_Functions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from LoopbackIP_PacketFilterTest all;
+  import from NAS_24008Templates_IRAT all;
+  import from NAS_24008TypeDefs all;
+  import from NAS_CommonTypeDefs all;
+  import from Parameters all;
+  import from UTRAN34_ASN1_ASP_Templates all;
+  import from UTRAN34_NISPC_Templates all;
+  import from UTRAN34_PDP_Functions all;
+  import from UTRAN34_RAB_Functions all;
+  import from UTRAN34_RAB_Templates all;
+  import from UTRAN34_RRC_Templates all;
+  import from UTRAN_ASN1_ASP_RAB_Templates all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_CommonTemplates all;
+  import from UTRAN_RRC_RAB_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+
+  /*
+   * @desc      Return LLC SAPI depending on PICS
+   * @return    template (value) LLC_SAPI
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_LLC_SAPI_TX() return template (value) LLC_SAPI
+  {
+    var template (value) LLC_SAPI v_LLC_SAPI;
+    
+    if (pc_GERAN){
+      v_LLC_SAPI := cs_LLC_SAPI_UMTS_GSM;
+    } else {
+      v_LLC_SAPI := cs_LLC_SAPI_UMTS;
+    }
+    return v_LLC_SAPI;
+  }
+
+  /*
+   * @desc      This function will establish secondary PDP Context initiated by network
+   *            It will take care of establishing the RAB as per the received NSAPI
+   *            returns PDPContextParameters which can be required later by other functions
+   * @param     p_CellId
+   * @param     p_TrafficFlowTemplate
+   * @param     p_FirstPDPContextParameters
+   * @param     p_QualityOfService
+   * @param     p_Msg
+   * @param     p_NumberOfPDPContext (default value: 2)
+   * @return    PDPContextParameters
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SecPDP_Context_MT_r7(UTRAN_CellId_Type p_CellId,
+                                          template (value) TrafficFlowTemplate p_TrafficFlowTemplate,
+                                          PDPContextParameters p_FirstPDPContextParameters,
+                                          template (value) QualityOfService p_QualityOfService,
+                                          charstring p_Msg,
+                                          integer p_NumberOfPDPContext := 2)  //@sic R5s150283 sic@
+    runs on UTRAN_PTC return PDPContextParameters
+  {
+    var template (value) LLC_SAPI v_LLC_SAPI := f_UTRAN34_LLC_SAPI_TX();
+    var TI v_TI_S := p_FirstPDPContextParameters.send_TI;
+    var TI v_TI_R := p_FirstPDPContextParameters.received_TI;
+    var IP_VersionType v_IP_VersionType := p_FirstPDPContextParameters.ip_VersionType;
+    var NSAPI v_RecdNSAPI_2d;
+    var NSAPI v_NSAPI := p_FirstPDPContextParameters.recdNSAPI;
+    var RRC_DATA_IND v_RRC_DATA_IND;
+    var TI v_TI_2_S;
+    var TI v_TI_2_R;
+    var template (value) QualityOfService  v_Recd_QoS := p_QualityOfService;  //@sic R5s140558 sic@
+    timer t_T3885 := 8800.0;
+
+    v_Recd_QoS.precedenceClass := '011'B; //Acc to 34.123-3 cl 8.10 @sic R5s140558 sic@
+   
+    //Set the value for TI for a secondary PDP context
+    v_TI_2_S.tiFlag := '0'B;
+    v_TI_2_S.tiVal := int2bit(bit2int(v_TI_S.tiVal) + 1, 3);
+    if (p_NumberOfPDPContext == 3){ //@sic R5s150531 sic@
+     v_TI_2_S.tiVal := '010'B;
+    }
+
+    
+    //Request Secondary PDP Context activation
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_SecPDPCOntextActReq(cs_ReqSecPDP_ContextActivation_MT(v_TI_2_S,
+                                                                                        v_Recd_QoS,  //@sic R5s140558 sic@
+                                                                                        cr_LinkedTI(v_TI_S),  //@sic R5s140387 sic@
+                                                                                        p_TrafficFlowTemplate))));
+    
+    //Activate PDP Context Accept
+    v_TI_2_R := v_TI_2_S;
+    v_TI_2_R.tiFlag :='1'B;
+    
+    t_T3885.start;
+    alt {
+      [] t_T3885.timeout
+        {
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, p_Msg);
+        }
+      [] U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated, tsc_RB3, cr_U_ActSecPDPContReq( cr_ActSecPDP_ContextRequest(
+                                                                                                            v_TI_2_R,
+                                                                                                            cdr_QoS_InteractiveOrBackground_PrecedenceClass(p_QualityOfService.delayClass, p_QualityOfService.trafficClass), //@sic R5s140558 sic@
+                                                                                                            cr_LinkedTI(v_TI_R)))))
+                                                                                                     -> value v_RRC_DATA_IND
+        {
+          t_T3885.stop;
+          v_RecdNSAPI_2d := v_RRC_DATA_IND.msg.activateSecondaryPDPContextRequestul.requestedNSAPI;
+          if (v_RecdNSAPI_2d != v_NSAPI) {
+            f_UTRAN_PreliminaryPass(__FILE__, __LINE__, p_Msg);
+          } else{
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, p_Msg);
+          }
+        }
+    }
+    if ((p_NumberOfPDPContext < 2) or (p_NumberOfPDPContext > 3)) {//@sic R5s150283 sic@
+      FatalError (__FILE__, __LINE__, "Function f_UTRAN34_SecPDP_Context_MT_r7 - programming error, invalid parameter p_NumberOfPDPContext");
+    }
+    else {//@sic R5s150283 sic@
+      select(p_NumberOfPDPContext){
+        case (2) { //Second PDP context activation
+          f_UTRAN34_RB_SetUpDCH_64k_2AM_PS_RAB_r7(p_CellId, int2bit(bit2int(v_RecdNSAPI_2d.nSAPI_Value), 8));
+        }
+        case (3) { //Third PDP context activation
+          f_UTRAN34_RB_SetUpDCH_64k_3AM_PS_RAB_r7(p_CellId, int2bit(bit2int(v_RecdNSAPI_2d.nSAPI_Value), 8));
+        }
+      }
+    }
+    
+    //Secondary PDP Context Accept
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_SecPDPCOntextActAcpt(cs_ActSecPDP_ContextAcp_MT(v_TI_2_S,
+                                                                                  v_LLC_SAPI,
+                                                                                  p_QualityOfService.delayClass,
+                                                                                  p_QualityOfService.trafficClass))));
+    return valueof(cs_PDPContextParameters(v_TI_2_R, v_TI_2_S, v_IP_VersionType, -, v_RecdNSAPI_2d, v_Recd_QoS));  //@sic R5s150015 sic@
+  }
+
+  /*
+   * @desc      To set up a Radio Bearer cell_DCH_2AM_PS and to reconfigure SS accordingly.
+   * @desc      This step is used to set up a second RS RAB. See TS 34.108, cl 6.10.2.4.1.57
+   * @param     p_CellId
+   * @param     p_RAB_Id
+   * @param     p_LoopbackRLC_PDU   (default value: false)
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_RB_SetUpDCH_64k_2AM_PS_RAB_r7(UTRAN_CellId_Type   p_CellId,
+                                                   bitstring           p_RAB_Id,
+                                                   boolean             p_LoopbackRLC_PDU := false) runs on UTRAN_PTC
+  {
+    var UTRAN_CFN_Info_Type v_CFN_Info;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var UL_ScramblingCode v_UL_ScramblingCode := f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId);
+    
+    v_CFN_Info := f_CalculateActTime(p_CellId);
+    
+    if (f_UTRAN_CellInfo_GetFDD_TDD(p_CellId) == UTRAN_FDD) {
+      // Send RB_Set Up for DCH 64k PS for FDD
+      f_UTRAN_RB_SetUp_Send(cs_RB_SetUp64k_2AM_PS_FDD_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                         v_CFN_Info.actTime,
+                                                         p_RAB_Id,
+                                                         f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId),
+                                                         f_UTRAN_CellInfo_GetPriScrmCode_FDD(p_CellId)));
+      //Modify physical channel
+      f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                      cs_CphyTrchConfigReq_UL_DCH_340_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_CphyTrchConfigReq_DL_DCH_340_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_TrCHInfo_UL_TrCh_FDD(cs_TrChInfoTrCHListUL_340_148_FDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Rx),
+                                      cs_TrCHInfo_DL_TrCh_FDD(cs_TrChInfoTrCHListDL_340_148_FDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Tx(cs_PowerOffsetInfoHigher64k)),
+                                      cs_TrLogMappingUL_2_Multiplex_PS,
+                                      cs_TrLogMappingDL_2_Multiplex_PS,
+                                      v_CFN_Info.actTime,
+                                      cs_DL_DPCH_64k_PS_FDDr7(cs_DL_CommonInformationRB_SetUp_FDD_r7(tsc_DL_DPCH1_SFP_64k_PS), -),
+                                      cs_UL_DPCH_Info_FDDr7(tsc_UL_DPDCH_SF_64k_PS, pl0_92, v_UL_ScramblingCode));
+      // Configure RLC RB22
+      f_UTRAN_SS_RB22_AM_PS_Cfg(p_CellId,
+                                cs_OctetModeRLC_Size336,
+                                tsc_UL_DTCH2, tsc_DL_DTCH2);
+      // Configure PDCP when there is no loopback of RLC PDU
+      if (not(p_LoopbackRLC_PDU)) {
+        f_SS_RB_ConfigurePDCP(p_CellId, tsc_RB22);
+      }
+    } else {
+      // Send RB_Set Up for DCH 64k PS for TDD
+      f_UTRAN_RB_SetUp_Send(cs_RB_SetUp64k_2AM_PS_TDD_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                         v_CFN_Info.actTime,
+                                                         p_RAB_Id,
+                                                         f_UTRAN_CellInfo_GetCellParametersID_TDD(p_CellId)));
+      //Modify physical channel
+      f_UTRAN34_SS_2DCH_Modify_TDD_r7(p_CellId,
+                                      cs_CphyTrchConfigReq_UL_DCH_340_148_TDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_CphyTrchConfigReq_DL_DCH_340_148_TDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_TrCHInfo_UL_TrCh_TDD(cs_TrChInfoTrCHListUL_340_148_TDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Rx),
+                                      cs_TrCHInfo_DL_TrCh_TDD(cs_TrChInfoTrCHListDL_340_148_TDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Tx(cs_PowerOffsetInfo_TDD)),
+                                      cs_TrLogMappingUL_2_Multiplex_PS_TDD,
+                                      cs_TrLogMappingDL_2_Multiplex_PS_TDD,
+                                      v_CFN_Info.actTime,
+                                      cs_DL_DPCH_64k_PS_TDDr7,
+                                      cs_UL_DPCH_64k_PS_TDD);
+      // Configure RLC RB22
+      f_UTRAN_SS_RB22_AM_PS_Cfg(p_CellId,
+                                cs_OctetModeRLC_Size336,
+                                tsc_UL_DTCH2, tsc_DL_DTCH2);
+      // Configure PDCP when there is no loopback of RLC PDU
+      if (not(p_LoopbackRLC_PDU)) {
+        f_SS_RB_ConfigurePDCP(p_CellId, tsc_RB22);
+      }
+    }
+    
+    f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_2AM_PS);
+    f_UTRAN34_RRC_ReceiveRB_SetupCmpl_PS_RAB(p_CellId, cell_DCH_2AM_PS);
+  }
+
+    /*
+   * @desc      To set up a Radio Bearer cell_DCH_3AM_PS and to reconfigure SS accordingly.
+   * @desc      This step is used to set up the third RS RAB.
+   * @param     p_CellId
+   * @param     p_RAB_Id
+   * @param     p_LoopbackRLC_PDU   (default value: false)
+   * @status    APPROVED (UTRAN)
+   */
+    function f_UTRAN34_RB_SetUpDCH_64k_3AM_PS_RAB_r7(UTRAN_CellId_Type   p_CellId,
+                                                   bitstring           p_RAB_Id,
+                                                   boolean             p_LoopbackRLC_PDU := false) runs on UTRAN_PTC
+  {
+    var UTRAN_CFN_Info_Type v_CFN_Info;
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var UL_ScramblingCode v_UL_ScramblingCode := f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId);
+    
+    v_CFN_Info := f_CalculateActTime(p_CellId);
+    
+    if (f_UTRAN_CellInfo_GetFDD_TDD(p_CellId) == UTRAN_FDD) {
+      // Send RB_Set Up for DCH 64k PS for FDD
+      f_UTRAN_RB_SetUp_Send(cs_RB_SetUp64k_3AM_PS_FDD_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                         v_CFN_Info.actTime,
+                                                         p_RAB_Id,
+                                                         f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId),
+                                                         f_UTRAN_CellInfo_GetPriScrmCode_FDD(p_CellId)));
+      //Modify physical channel
+      f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                      cs_CphyTrchConfigReq_UL_DCH_340_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_CphyTrchConfigReq_DL_DCH_340_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_TrCHInfo_UL_TrCh_FDD(cs_TrChInfoTrCHListUL_340_148_FDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Rx),
+                                      cs_TrCHInfo_DL_TrCh_FDD(cs_TrChInfoTrCHListDL_340_148_FDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Tx(cs_PowerOffsetInfoHigher64k)),
+                                      cs_TrLogMappingUL_3_Multiplex_PS,
+                                      cs_TrLogMappingDL_3_Multiplex_PS,
+                                      v_CFN_Info.actTime,
+                                      cs_DL_DPCH_64k_PS_FDDr7(cs_DL_CommonInformationRB_SetUp_FDD_r7(tsc_DL_DPCH1_SFP_64k_PS), -),
+                                      cs_UL_DPCH_Info_FDDr7(tsc_UL_DPDCH_SF_64k_PS, pl0_92, v_UL_ScramblingCode));
+      // Configure RLC RB24
+      f_UTRAN_SS_RB24_AM_PS_Cfg(p_CellId,
+                                cs_OctetModeRLC_Size336,
+                                tsc_UL_DTCH3, tsc_DL_DTCH3);
+      // Configure PDCP when there is no loopback of RLC PDU
+      if (not(p_LoopbackRLC_PDU)) {
+        f_SS_RB_ConfigurePDCP(p_CellId, tsc_RB24);
+      }
+    } else {
+      // Send RB_Set Up for DCH 64k PS for TDD
+      f_UTRAN_RB_SetUp_Send(cs_RB_SetUp64k_3AM_PS_TDD_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                         v_CFN_Info.actTime,
+                                                         p_RAB_Id,
+                                                         f_UTRAN_CellInfo_GetCellParametersID_TDD(p_CellId)));
+      //Modify physical channel
+      f_UTRAN34_SS_2DCH_Modify_TDD_r7(p_CellId,
+                                      cs_CphyTrchConfigReq_UL_DCH_340_148_TDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_CphyTrchConfigReq_DL_DCH_340_148_TDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                      cs_TrCHInfo_UL_TrCh_TDD(cs_TrChInfoTrCHListUL_340_148_TDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Rx),
+                                      cs_TrCHInfo_DL_TrCh_TDD(cs_TrChInfoTrCHListDL_340_148_TDD, cs_TFCS_Cmpl0_1_2_3_4_5_6_7_8_9_Tx(cs_PowerOffsetInfo_TDD)),
+                                      cs_TrLogMappingUL_3_Multiplex_PS_TDD,
+                                      cs_TrLogMappingDL_3_Multiplex_PS_TDD,
+                                      v_CFN_Info.actTime,
+                                      cs_DL_DPCH_64k_PS_TDDr7,
+                                      cs_UL_DPCH_64k_PS_TDD);
+      // Configure RLC RB24
+      f_UTRAN_SS_RB24_AM_PS_Cfg(p_CellId,
+                                cs_OctetModeRLC_Size336,
+                                tsc_UL_DTCH3, tsc_DL_DTCH3);
+      // Configure PDCP when there is no loopback of RLC PDU
+      if (not(p_LoopbackRLC_PDU)) {
+        f_SS_RB_ConfigurePDCP(p_CellId, tsc_RB24);
+      }
+    }
+    
+    f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_3AM_PS);
+    f_UTRAN34_RRC_ReceiveRB_SetupCmpl_PS_RAB(p_CellId, cell_DCH_3AM_PS);
+  }
+
+  /*
+   * @desc      To modify physical channel PDCH1 and connect DCH1 and DCH5 to the physical channel,
+   *            then map DCCH1-4 on to the DCH5 transport channel and map DTCH1 to DCH1 transport channel.
+   *            SS is in TM mode different from the mode of UE. Transport channel configuration is parameter (of type CphyTrchConfigReq);
+   *            DPCH is 64 kbps physical channel
+   * @param     p_CellId
+   * @param     p_UL_TrChConfig
+   * @param     p_DL_TrChConfig
+   * @param     p_UL_TrCHInfo
+   * @param     p_DL_TrCHInfo
+   * @param     p_UL_TrLogMapping
+   * @param     p_DL_TrLogMapping
+   * @param     p_ActivationTime
+   * @param     p_DL_DPCHInfo
+   * @param     p_UL_DPCH_Info
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SS_2DCH_Modify_FDD_r7(UTRAN_CellId_Type p_CellId,
+                                           template (value) CphyTrchConfigReq p_UL_TrChConfig,
+                                           template (value) CphyTrchConfigReq p_DL_TrChConfig,
+                                           template (value) TrCHInfo p_UL_TrCHInfo,
+                                           template (value) TrCHInfo p_DL_TrCHInfo,
+                                           template (value) TrCH_LogCHMappingList1 p_UL_TrLogMapping,
+                                           template (value) TrCH_LogCHMappingList1 p_DL_TrLogMapping,
+                                           ActivationTime p_ActivationTime,
+                                           template (value) DL_DPCHInfo_r7_FDD p_DL_DPCHInfo,
+                                           template (value) UL_DPCH_Info_r7 p_UL_DPCH_Info) runs on UTRAN_PTC
+  {
+    var template (value) SS_ActivationTime v_SS_ActivationTime := cs_ActivateCFN(p_ActivationTime);
+    var template (value) CPHY_RL_Modify_FDD_REQ v_RL_Modify_Req;
+    
+    //Configre DPCH1 supporting 64kbps data rate
+    v_RL_Modify_Req := cas_108_DL_DPCH_ModifyInfo_r7_FDD(p_CellId, tsc_DL_DPCH1, p_DL_DPCHInfo, p_ActivationTime);
+    f_UTRAN_CPHY_RL_Modify(cas_108_CPHY_RL_ModifyReq_FDD(v_RL_Modify_Req));
+    
+    //Connect downlink DCH1 and DCH5 to DPCH1
+    f_UTRAN_CPHY_TrCH_Config(cas_TrChCfgInfo_FDD(p_CellId, tsc_DL_DPCH1, cs_TrChConfigTypeDCH_NoSHO, p_DL_TrChConfig));
+    
+    //Map logical channels: DCCH1-4 to DCH5, DTCH1 to DCH1 for downlink and send relevant transport channel configuration info to MAC
+    f_UTRAN_CMAC_Config(cas_CMAC_ReconfigInfo_FDD(utran_CellDedicated, tsc_DL_DPCH1, cs_UE_Info, p_DL_TrCHInfo, p_DL_TrLogMapping, v_SS_ActivationTime));
+    
+    //Configre DPCH1 supporting 64kbps data rate
+    v_RL_Modify_Req := cas_108_UL_DPCH_ModifyInfo_r7_FDD(p_CellId, tsc_UL_DPCH1, p_UL_DPCH_Info, p_ActivationTime);
+    f_UTRAN_CPHY_RL_Modify(cas_108_CPHY_RL_ModifyReq_FDD(v_RL_Modify_Req));
+    
+    //Connect uplink DCH1 and DCH5 to DPCH1
+    f_UTRAN_CPHY_TrCH_Config(cas_TrChCfgInfo_FDD(p_CellId, tsc_UL_DPCH1, cs_TrChConfigTypeDCH_NoSHO, p_UL_TrChConfig));
+    
+    //Map logical channels: DCCH1-4 to DCH5, DTCH1 to DCH1 for uplink and send relevant transport channel configuration info to MAC
+    f_UTRAN_CMAC_Config(cas_CMAC_ReconfigInfo_FDD(utran_CellDedicated, tsc_UL_DPCH1, cs_UE_Info, p_UL_TrCHInfo, p_UL_TrLogMapping, v_SS_ActivationTime));
+  }
+
+  /*
+   * @desc      To modify physical channel PDCH1 and connect DCH1 and DCH5 to the physical channel,
+   *            then map DCCH1-4 on to the DCH5 transport channel and map DTCH1 to DCH1 transport channel.
+   *            SS is in TM mode different from the mode of UE. Transport channel configuration is parameter (of type CphyTrchConfigReq);
+   *            DPCH is 64 kbps physical channel
+   * @param     p_CellId
+   * @param     p_UL_TrChConfig
+   * @param     p_DL_TrChConfig
+   * @param     p_UL_TrCHInfo
+   * @param     p_DL_TrCHInfo
+   * @param     p_UL_TrLogMapping
+   * @param     p_DL_TrLogMapping
+   * @param     p_ActivationTime
+   * @param     p_DL_DPCHInfo
+   * @param     p_UL_DPCH_Info
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SS_2DCH_Modify_TDD_r7(UTRAN_CellId_Type p_CellId,
+                                           template (value) CphyTrchConfigReq_TDD p_UL_TrChConfig,
+                                           template (value) CphyTrchConfigReq_TDD p_DL_TrChConfig,
+                                           template (value) TrCHInfo_TDD p_UL_TrCHInfo,
+                                           template (value) TrCHInfo_TDD p_DL_TrCHInfo,
+                                           template (value) TrCH_LogCHMappingList1_TDD p_UL_TrLogMapping,
+                                           template (value) TrCH_LogCHMappingList1_TDD p_DL_TrLogMapping,
+                                           ActivationTime p_ActivationTime,
+                                           template (value) DL_DPCHInfo_r7_TDD p_DL_DPCHInfo,
+                                           template (value) UL_DPCH_Info_r7 p_UL_DPCH_Info) runs on UTRAN_PTC
+  {
+    var template (value) SS_ActivationTime v_SS_ActivationTime := cs_ActivateCFN(p_ActivationTime);
+    var template (value) CPHY_RL_Modify_TDD_REQ v_RL_Modify_Req; //
+    
+    //Configre DPCH1 supporting 64kbps data rate
+    v_RL_Modify_Req :=  cas_108_DL_DPCH_ModifyInfo_r7_TDD(p_CellId, tsc_DL_DPCH1, p_DL_DPCHInfo, p_ActivationTime);
+    f_UTRAN_CPHY_RL_Modify(cas_108_CPHY_RL_ModifyReq_TDD(v_RL_Modify_Req));
+    
+      //Connect downlink DCH1 and DCH5 to DPCH1
+    f_UTRAN_CPHY_TrCH_Config(cas_TrChCfgInfo_TDD(p_CellId, tsc_DL_DPCH1, cs_TrChConfigTypeDCH_NoSHO, p_DL_TrChConfig));
+    
+    //Map logical channels: DCCH1-4 to DCH5, DTCH1 to DCH1 for downlink and send relevant transport channel configuration info to MAC
+    f_UTRAN_CMAC_Config(cas_CMAC_ReconfigInfo_TDD(utran_CellDedicated, tsc_DL_DPCH1, cs_UE_Info, p_DL_TrCHInfo, p_DL_TrLogMapping, v_SS_ActivationTime));
+    
+    //Configre DPCH1 supporting 64kbps data rate
+    v_RL_Modify_Req := cas_108_UL_DPCH_ModifyInfo_r7_TDD(p_CellId, tsc_UL_DPCH1, p_UL_DPCH_Info, p_ActivationTime);
+    f_UTRAN_CPHY_RL_Modify(cas_108_CPHY_RL_ModifyReq_TDD(v_RL_Modify_Req));
+    
+    //Connect uplink DCH1 and DCH5 to DPCH1
+    f_UTRAN_CPHY_TrCH_Config(cas_TrChCfgInfo_TDD(p_CellId, tsc_UL_DPCH1, cs_TrChConfigTypeDCH_NoSHO, p_UL_TrChConfig));
+    
+    //Map logical channels: DCCH1-4 to DCH5, DTCH1 to DCH1 for uplink and send relevant transport channel configuration info to MAC
+    f_UTRAN_CMAC_Config(cas_CMAC_ReconfigInfo_TDD(utran_CellDedicated, tsc_UL_DPCH1, cs_UE_Info, p_UL_TrCHInfo, p_UL_TrLogMapping, v_SS_ActivationTime));
+  }
+
+  /*
+   * @desc      This function will semd Modify PDP Context from network to UE. UE will send Modify PDP Context accept to the network
+   * @param     p_SecondaryPDPContextParameters
+   * @param     p_TFT
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_ModifyPDP_ContextMT_Accept(PDPContextParameters p_SecondaryPDPContextParameters,
+                                                template (omit) TrafficFlowTemplate p_TFT) runs on UTRAN_PTC
+  {
+    var template (value) LLC_SAPI v_LLC_SAPI := f_UTRAN34_LLC_SAPI_TX(); //@sic R5s140387 sic@
+    var PDPContextParameters v_SecPDPContextParameters := p_SecondaryPDPContextParameters;
+
+    v_SecPDPContextParameters.qOS.precedenceClass := '011'B; // Acc to 34.123-3 cl 8.10 @sic R5s140558 sic@
+
+    //Send Modify PDP Context Request message
+    U_Dc.send(cas_DataReq_PS(utran_CellDedicated,
+                             tsc_RB3,
+                             cs_U_ModPDPContReq(cs_ModifyPDP_ContextReq(v_SecPDPContextParameters.send_TI,
+                                                                        v_LLC_SAPI,
+                                                                        v_SecPDPContextParameters.qOS, // @sic R5s140558 sic@
+                                                                        p_TFT))));
+    U_Dc.receive(car_PS_UplinkDirectTransfer(utran_CellDedicated,
+                                             tsc_RB3,
+                                             cr_U_ModPDPContAcpt(cr_ModifyPDP_ContextAcpt(v_SecPDPContextParameters.received_TI))));
+  }
+
+  /*
+   * @desc      Gets IP packet to send depending of the IP Version type and Packet Index and forwards it for sending/receiving procedure
+   * @param     p_IP_VersionType
+   * @param     p_PacketIndex
+   * @param     p_SendRB
+   * @param     p_ReceiveRB
+   * @param     p_Loopback          (default value: true)
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SendReceiveIP_PDU(IP_VersionType p_IP_VersionType,
+                                       integer p_PacketIndex,
+                                       SS_RB_Identity p_SendRB,
+                                       SS_RB_Identity p_ReceiveRB,
+                                       boolean p_Loopback := true) runs on UTRAN_PTC
+  {
+    var octetstring v_IP_Packet;
+    if (p_IP_VersionType == iPv4) {
+      v_IP_Packet := f_PacketFilterTest_CreateDatagram_10_9_1(true, p_PacketIndex);
+    }
+    else{
+      v_IP_Packet := f_PacketFilterTest_CreateDatagram_10_9_1(false, p_PacketIndex);
+    }
+    f_UTRAN34_SendReceiveData(p_SendRB, p_ReceiveRB, oct2bit(v_IP_Packet), p_Loopback);
+  }
+
+  /*
+   * @desc      Sends and receives data on defined RBs
+   * @param     p_SendRB
+   * @param     p_ReceiveRB
+   * @param     p_Data
+   * @param     p_Loopback          (default value: true)
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_SendReceiveData(SS_RB_Identity p_SendRB,
+                                     SS_RB_Identity p_ReceiveRB,
+                                     bitstring p_Data,
+                                     boolean p_Loopback := true) runs on UTRAN_PTC
+  {
+    timer t_Dly := 1.0; //1s
+    
+    U_PDCP.send(cas_PDCP_Test_Data_Req (utran_CellDedicated,  //@sic R5s150015 sic@
+                                     p_SendRB,
+                                     p_Data));
+
+    t_Dly.start; //@sic R5s150015 sic@
+    alt {
+      [] U_PDCP.receive(car_PDCP_Test_Data_Ind (utran_CellDedicated,  //@sic R5s150015 sic@
+                                        p_ReceiveRB,
+                                        p_Data))
+        {
+          t_Dly.stop;
+        }
+      [] t_Dly.timeout
+        {
+          if (p_Loopback) {
+            f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Timeout");
+          } else {
+            f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "PDU was not looped back");
+          }
+        }
+    }
+  }
+
+  /*
+   * @desc      Releases RAB22. Bring configuration from Cell_DCH_2AM_PS to cell_DCH_64kPS_RAB_SRB, or from cell_DCH_64kPS_RAB_SR to cell_DCH_StandAloneSRB, depending on current configuration
+   *            Deactivate the secondary PDP context
+   * @param     p_CellId
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_ReleaseAM_RAB22_r7(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC
+  {
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var RRC_TransactionIdentifier v_RRC_Ti := tsc_RRC_TI;
+    var UTRAN_CFN_Info_Type v_CFN_Info;
+    
+    var UL_ScramblingCode v_UL_ScrCode := f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId);
+    var PrimaryScramblingCode v_PrimScrCode := f_UTRAN_CellInfo_GetPriScrmCode_FDD(p_CellId);
+    var FrequencyInfo v_FreqInfo := f_UTRAN_CellInfo_GetFrequencyInfo(p_CellId);
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);
+    
+    v_CFN_Info := f_CalculateActTime(p_CellId);
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    
+        
+    if(v_CellConfig==cell_DCH_2AM_PS){ // @sic R5s150241, R5s150321 sic@
+    //@sic R5s140400 sic@
+    U_AM.send(cas_RLC_Data_Req_Cnf(utran_CellDedicated, tsc_RB2, tsc_Mui, cs_RB_Rel_AM22_PS_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                                               v_CFN_Info.actTime,
+                                                                                               v_FreqInfo,
+                                                                                               v_PrimScrCode,
+                                                                                               v_UL_ScrCode)));
+    
+    U_AM.receive(car_AM_DataMuiCnf(utran_CellDedicated,tsc_RB2, tsc_Mui));  //@sic R5s140400 sic@
+    
+    //Reconfig Stand Alone SRB
+    f_UTRAN_CRLC_Rel(utran_CellDedicated, tsc_RB22, UTRAN_FDD);   //@sic R5s140400 sic@
+    
+    f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                    cs_CphyTrchConfigReq_UL_DCH_336_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                    cs_CphyTrchConfigReq_DL_DCH_336_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                    cs_TrChInfoUL_336_148_FDD_NISPC, //@sic R5s150002 sic@
+                                    cs_TrChInfoDL_336_148_FDD_NISPC, //@sic R5s150002 sic@
+                                    cs_TrLogMappingUL_4DCCH_1DTCH(tsc_RB20),
+                                    cs_TrLogMappingDL_4DCCH_1DTCH_PS,
+                                    v_CFN_Info.actTime,
+                                    cs_DL_DPCH_64k_PS_FDDr7(cs_DL_CommonInformationRB_SetUp_FDD_r7(tsc_DL_DPCH1_SFP_64k_PS),
+                                                            tsc_DL_DPCH1_2ndScrC), //@sic R5s150002 sic@
+                                    cs_UL_DPCH_Info_FDDr7(tsc_UL_DPDCH_SF_64k_PS, pl0_92, v_UL_ScrCode)); // @sic R5s150241 sic@
+
+        f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_64kPS_AM_RAB);
+    }
+    else if(v_CellConfig ==cell_DCH_64kPS_AM_RAB)
+    {
+    //@sic R5s150321 sic@
+    U_AM.send(cas_RLC_Data_Req_Cnf(utran_CellDedicated, tsc_RB2, tsc_Mui, cs_RB_Rel_AM22_PS_WithTrChRelease_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                                               v_CFN_Info.actTime,
+                                                                                               v_FreqInfo,
+                                                                                               v_PrimScrCode,
+                                                                                               v_UL_ScrCode)));
+    
+    U_AM.receive(car_AM_DataMuiCnf(utran_CellDedicated,tsc_RB2, tsc_Mui));
+    
+    //Reconfig Stand Alone SRB
+    f_UTRAN_CRLC_Rel(utran_CellDedicated, tsc_RB22, UTRAN_FDD);
+    
+    f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                    cs_CphyTrchConfigReq_UL_TrCh_FDD(cs_ActivateCFN(v_CFN_Info.actTime),{cs_CphyUlConnectedTrCH_FDD_DCH(tsc_UL_DCH5, cs_DCH_148_TTI_10_TFS_FDD)},cs_TFCS_Cmpl0_1_Rx),
+                                    cs_CphyTrchConfigReq_DL_TrCh_FDD(cs_ActivateCFN(v_CFN_Info.actTime),{cs_CphyDlConnectedTrCH_FDD_DCH(tsc_DL_DCH5, cs_DCH_148_TTI_10_TFS_FDD)},cs_TFCS_Cmpl0_1_Tx_FDD(cs_PowerOffsetInfoBelow64k)),
+                                    cs_TrChInfoUL_13_6_StandAlone_FDD,
+                                    cs_TrChInfoDL_13_6_StandAlone_FDD,
+                                    cs_TrLogMappingUL_4DCCH,
+                                    cs_TrLogMappingDL_4DCCH,
+                                    v_CFN_Info.actTime,
+                                    cs_DL_DPCH_SRB_StandAloneDPCH_FDDr7(tsc_DL_DPCH1_2ndScrC),
+                                    cs_UL_DPCH_13_6_StandAlone_FDDr7(v_UL_ScrCode));
+
+
+        f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_StandAloneSRB);
+    }
+    else{
+        FatalError(__FILE__, __LINE__, "Configuration is not supported");
+    }
+    
+    //Receive RB Release Complete message
+    U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated, tsc_RB2, cr_108_radioBearerReleaseComplete(v_RRC_Ti)));
+  }
+
+  /* @desc      Releases RAB20. Bring configuration from Cell_DCH_2AM_PS to cell_DCH_64kPS_AM_RAB, or from cell_DCH_64kPS_RAB_SR to cell_DCH_StandAloneSRB, depending on current configuration
+   *            Deactivate the primary PDP context
+   * @param     p_CellId
+   * @status    APPROVED (UTRAN)
+   */
+  function f_UTRAN34_ReleaseAM_RAB20_NISPC(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC
+  { // @sic R5s140400 sic@
+    var UTRAN_SecurityInfo_Type v_SecurityInfo;
+    var RRC_TransactionIdentifier v_RRC_Ti := tsc_RRC_TI;
+    var UTRAN_CFN_Info_Type v_CFN_Info;
+    
+    var UL_ScramblingCode v_UL_ScrCode := f_UTRAN_CellInfo_GetULScrmCode_FDD(p_CellId);
+    var PrimaryScramblingCode v_PrimScrCode := f_UTRAN_CellInfo_GetPriScrmCode_FDD(p_CellId);
+    var FrequencyInfo v_FreqInfo := f_UTRAN_CellInfo_GetFrequencyInfo(p_CellId);
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType(p_CellId);     //@sic R5s150241 sic@
+
+    v_CFN_Info := f_CalculateActTime(p_CellId);
+    v_SecurityInfo := f_UTRAN_Security_Get();
+    
+    if(v_CellConfig==cell_DCH_2AM_PS){// @sic R5s150241, R5s150321 sic@
+        //@sic R5s140400 sic@
+        U_AM.send(cas_RLC_Data_Req_Cnf(utran_CellDedicated, tsc_RB2, tsc_Mui, cs_RB_Rel_AM20_PS_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                                                   v_CFN_Info.actTime,
+                                                                                                   v_FreqInfo,
+                                                                                                   v_PrimScrCode,
+                                                                                                   v_UL_ScrCode)));
+        U_AM.receive(car_AM_DataMuiCnf(utran_CellDedicated,tsc_RB2, tsc_Mui));  //@sic R5s140400 sic@
+
+        //Reconfig Stand Alone SRB
+        f_UTRAN_CPDCP_Rel(p_CellId, tsc_RB20); //@sic R5s140558 sic@
+        f_UTRAN_CRLC_Rel(utran_CellDedicated, tsc_RB20, UTRAN_FDD);  //@sic R5s140400 sic@
+
+        f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                        cs_CphyTrchConfigReq_UL_DCH_336_148_FDD(cs_ActivateCFN(v_CFN_Info.actTime)),
+                                        cs_DCH_336_148_DL_Info_NISPC(cs_ActivateCFN(v_CFN_Info.actTime)), //@sic R5s140400 sic@
+                                        cs_TrChInfoUL_336_148_FDD_NISPC, //@sic R5s140400 sic@
+                                        cs_TrChInfoDL_336_148_FDD_NISPC, //@sic R5s140400 sic@
+                                        cs_TrLogMappingUL_4DCCH_1DTCH(tsc_RB20),
+                                        cs_TrLogMappingDL_4DCCH_1DTCH_PS,
+                                        v_CFN_Info.actTime,
+                                        cs_DL_DPCH_64k_PS_FDDr7(cs_DL_CommonInformationRB_SetUp_FDD_r7(tsc_DL_DPCH1_SFP_64k_PS), // @sic R5s140400 sic@
+                                                                tsc_DL_DPCH1_2ndScrC),
+                                        cs_UL_DPCH_Info_FDDr7(tsc_UL_DPDCH_SF_64k_PS, pl0_96, v_UL_ScrCode));
+
+            f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_64kPS_AM_RAB); // @sic R5s140400 sic@
+    }
+    else if(v_CellConfig ==cell_DCH_64kPS_AM_RAB)
+    {
+        //@sic R5s150321 sic@
+        U_AM.send(cas_RLC_Data_Req_Cnf(utran_CellDedicated, tsc_RB2, tsc_Mui, cs_RB_Rel_AM20_PS_WithTrChRelease_r7(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                                                                                                   v_CFN_Info.actTime,
+                                                                                                                   v_FreqInfo,
+                                                                                                                   v_PrimScrCode,
+                                                                                                                   v_UL_ScrCode)));
+        U_AM.receive(car_AM_DataMuiCnf(utran_CellDedicated,tsc_RB2, tsc_Mui));
+
+        //Reconfig Stand Alone SRB
+        f_UTRAN_CRLC_Rel(utran_CellDedicated, tsc_RB20, UTRAN_FDD);
+
+        f_UTRAN34_SS_2DCH_Modify_FDD_r7(p_CellId,
+                                    cs_CphyTrchConfigReq_UL_TrCh_FDD(cs_ActivateCFN(v_CFN_Info.actTime),{cs_CphyUlConnectedTrCH_FDD_DCH(tsc_UL_DCH5, cs_DCH_148_TTI_10_TFS_FDD)},cs_TFCS_Cmpl0_1_Rx),
+                                    cs_CphyTrchConfigReq_DL_TrCh_FDD(cs_ActivateCFN(v_CFN_Info.actTime),{cs_CphyDlConnectedTrCH_FDD_DCH(tsc_DL_DCH5, cs_DCH_148_TTI_10_TFS_FDD)},cs_TFCS_Cmpl0_1_Tx_FDD(cs_PowerOffsetInfoBelow64k)),
+                                    cs_TrChInfoUL_13_6_StandAlone_FDD,
+                                    cs_TrChInfoDL_13_6_StandAlone_FDD,
+                                    cs_TrLogMappingUL_4DCCH,
+                                    cs_TrLogMappingDL_4DCCH,
+                                    v_CFN_Info.actTime,
+                                    cs_DL_DPCH_SRB_StandAloneDPCH_FDDr7(tsc_DL_DPCH1_2ndScrC),
+                                    cs_UL_DPCH_13_6_StandAlone_FDDr7(v_UL_ScrCode));
+
+        f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_StandAloneSRB);
+    }
+    else{
+        FatalError(__FILE__, __LINE__, "Configuration is not supported");
+    }
+    
+    //Receive RB Release Complete message
+    U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated, tsc_RB2, cr_108_radioBearerReleaseComplete(v_RRC_Ti)));
+  }
+
+    /*
+   * @desc      Setup radio bearers :  RB24. default values from 34.108  cl. 6.10.2.4.4 and 6.10.2.4.3.3
+   * @param     p_CellId
+   * @param     p_RLC_Size
+   * @param     p_LogChUL           (default value: tsc_UL_DTCH1)
+   * @param     p_LogChDL           (default value: tsc_DL_DTCH1)
+   * @status    APPROVED (UTRAN)
+   */
+    function f_UTRAN_SS_RB24_AM_PS_Cfg(UTRAN_CellId_Type p_CellId,
+                                     template (value) OctetModeRLC_SizeInfoType1 p_RLC_Size,
+                                     template (value) LogicalChannelIdentity p_LogChUL := tsc_UL_DTCH1,
+                                     template (value) LogicalChannelIdentity p_LogChDL := tsc_DL_DTCH1) runs on UTRAN_PTC
+  {
+    var template (value) RB_LogCH_Mapping v_RB_LogCH_Mapping_RB24 := cs_RB_LogCH_Mapping(p_LogChUL, p_LogChDL);
+    
+    if (f_UTRAN_CellInfo_GetFDD_TDD(p_CellId) == UTRAN_FDD) {
+      f_UTRAN_CRLC_Config(cas_RB_AM_Info_RAB_FDD(utran_CellDedicated, tsc_RB24, v_RB_LogCH_Mapping_RB24, p_RLC_Size));
+    }
+    else {
+      f_UTRAN_CRLC_Config(cas_RB_AM_Info_RAB_TDD(utran_CellDedicated, tsc_RB24, v_RB_LogCH_Mapping_RB24, p_RLC_Size));
+    }
+  }
+
+}

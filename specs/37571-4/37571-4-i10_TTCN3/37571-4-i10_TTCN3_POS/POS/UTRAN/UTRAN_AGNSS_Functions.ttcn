@@ -1,0 +1,870 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2021-03-25 10:29:46 +0100 (Thu, 25 Mar 2021) $
+// $Rev: 30391 $
+/******************************************************************************/
+
+module UTRAN_AGNSS_Functions {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from LCS_Definitions_Arguments language "ASN.1:2002" all with {encode "BER_EncRule"};
+  import from TCAP_Definitions language "ASN.1:2002" all with {encode "BER_EncRule"}; 
+  import from TCAP_Definitions_Para language "ASN.1:2002" all with {encode "DIRECT_EncRule"};
+  import from CommonDefs all;
+  import from NAS_24008Templates_IRAT all;
+  import from POS_Parameters all;
+  import from Parameters all;
+  import from PosSystem_ASP_TypeDefs all;
+  import from PosSystem_CommonUTRAN all;
+  import from PosSystem_Control all;
+  import from UTRAN_AGNSS_Templates all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_NAS_PDU_Templates all;
+  import from UTRAN_POS_Component all;
+  import from UTRAN_RAB_Functions all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TTCN_ASP_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      Objective: To load the required pre-defined A-GNSS test scenario
+   *            and start generating satellite signals in the satellite simulator
+   * @param     p_PosSystemListId
+   * @param     p_Scenario
+   * @status    APPROVED (POS)
+   */
+  function f_StartSatelliteSimulatorAGNSS(PositioningSystemList_Type p_PosSystemListId,
+                                          ScenarioNumber_Type p_Scenario) runs on UTRAN_POS_PTC
+  {
+    f_PosSystem_LoadScenario (POSSYS,
+                              p_PosSystemListId,
+                              cs_SatelliteScenario_AGNSS (p_Scenario));
+    f_PosSystem_Start (POSSYS,
+                       p_PosSystemListId);
+  }
+
+  /*
+   * @desc      Objective: To stop generating satellite signals in the satellite simulator
+   * @param     p_PosSystemListId
+   * @status    APPROVED (POS)
+   */
+  function f_StopSatelliteSimulatorAGNSS (PositioningSystemList_Type p_PosSystemListId) runs on UTRAN_POS_PTC
+  {
+    f_PosSystem_Stop(POSSYS, p_PosSystemListId);
+  }
+
+  /*
+   * @desc      Objective: To establish an emergency call
+   * @param     p_CellId
+   * @param     p_Subtest
+   * @param     p_GPSMode
+   * @param     p_GANSSMode
+   * @status    APPROVED (POS)
+   */
+  function f_CheckCallEstAGNSS (UTRAN_CellId_Type p_CellId,
+                                integer p_Subtest,
+                                template NetworkAssistedGPS_Supported p_GPSMode,
+                                GANSS_Mode p_GANSSMode) runs on UTRAN_PTC {
+    
+    var RRC_DATA_IND v_RRC_DataInd;
+    var START_Value v_START_Value := '00000000000000000000'B;
+    
+    f_UT_RequestCSCall (UT, px_EmergencyCallNumber);
+    f_UTRAN_RRC_ConnEst_AGNSS_CapCheck (p_CellId, p_Subtest, emergencyCall, p_GPSMode, p_GANSSMode); //@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+    U_Dc.receive (car_InitDirectTransfer (utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ServReq_MO_TMSI_Emergency (?)))-> value v_RRC_DataInd;
+    v_START_Value := v_RRC_DataInd.ttcn_start;
+    f_UTRAN_SS_SecurityDownloadStart(cs_domain, v_START_Value);
+    //MM Authentication
+    f_UTRAN_MM_Authentication ();
+    //Security Mode procedure
+    f_UTRAN_RRC_Security(p_CellId, true, cs_domain);
+    //Receive Emergency Set Up
+    U_Dc.receive(car_UplinkDirectTransfer(utran_CellDedicated,
+                                          tsc_RB3,
+                                          cr_U_ESetup ( cr_BcapSpeechMO )));
+    //Transmit Call Proceeding message
+    U_Dc.send (cas_DataReq_CS (utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_CallProc (cs_TI_MO))); // @sic R5s150343 sic@
+    //Transmit Alerting message
+    U_Dc.send (cas_DataReq_CS (utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_Alert (cs_TI_MO))); // @sic R5s150343 sic@
+    //Setup Radio Bearer
+    f_UTRAN_RB_SetUp_Speech (p_CellId);
+    //Transmit Connect message
+    U_Dc.send (cas_DataReq_CS (utran_CellDedicated,
+                               tsc_RB3,
+                               cs_U_Connect (cs_TI_MO))); // @sic R5s150343 sic@
+    
+    //Receive Connect Acknowledge message
+    U_Dc.receive (car_UplinkDirectTransfer (utran_CellDedicated,
+                                            tsc_RB3,
+                                            cr_U_ConnAck (?)));
+  }
+
+  /*
+   * @desc      Receives RRC CONNECTION REQUEST, sends RRC CONNECTION SETUP, receives RRC CONNECTION SETUP COMPLETE and check positioning capabilities
+   * @param     p_CellId
+   * @param     p_Subtest
+   * @param     p_EstCause
+   * @param     p_GPSMode
+   * @param     p_GANSSMode
+   * @status    APPROVED (POS)
+   */
+  function f_UTRAN_RRC_ConnEst_AGNSS_CapCheck (UTRAN_CellId_Type p_CellId,
+                                               integer p_Subtest,
+                                               EstablishmentCause p_EstCause,
+                                               template NetworkAssistedGPS_Supported p_GPSMode,
+                                               GANSS_Mode p_GANSSMode) runs on UTRAN_PTC
+  { //@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+  // This function assumes that DCH is already configured and is ready for an RRC connection to be established
+    
+    var InitialUE_Identity v_InitialUE_Id;
+    var U_RLC_TM_IND v_RLC_TR_DATA_IND; //@sic R5-150124 sic@
+    
+    alt {
+      [] U_TM.receive(car_RRC_ConnReq(p_CellId,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8(p_EstCause))) -> value v_RLC_TR_DATA_IND
+        {
+          v_InitialUE_Id := v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity;
+        }
+    }
+    //@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+    f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq_CapCheck (p_CellId,
+                                                          v_InitialUE_Id,
+                                                          p_Subtest,
+                                                          p_GPSMode,
+                                                          p_GANSSMode);
+  }
+
+  /*
+   * @desc      Sends RRC CONNECTION SETUP, receives RRC CONNECTION SETUP COMPLETE and check positioning capabilities
+   * @param     p_CellId
+   * @param     p_InitialUE_Id
+   * @param     p_Subtest
+   * @param     p_GPSMode
+   * @param     p_GANSSMode
+   * @status    APPROVED (POS)
+   */
+  function f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq_CapCheck(UTRAN_CellId_Type p_CellId,
+                                                                template (value) InitialUE_Identity p_InitialUE_Id,
+                                                                integer p_Subtest,
+                                                                template NetworkAssistedGPS_Supported p_GPSMode,
+                                                                GANSS_Mode p_GANSSMode) runs on UTRAN_PTC
+  { //@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+  // This function assumes that DCH is already configured and is ready for an RRC connection to be established
+    var RB_ConfigType v_CellConfig := f_UTRAN_CellInfo_GetConfigType (p_CellId);
+    var template (value) DL_CCCH_Message v_RRC_ConnSetup;
+       
+    select (v_CellConfig) {
+      //@sic R5-145737 sic@: BDS inclusion. Removed cell_FACH configuration as it is not used in positioning.
+      case (cell_DCH_StandAloneSRB_NoConn) {
+        v_RRC_ConnSetup := f_Get_cs_108_RRC_ConnSetupDCH(p_CellId, p_InitialUE_Id);
+        f_UTRAN_CellInfo_SetConfigType(p_CellId, cell_DCH_StandAloneSRB); //@sic R5s160258 sic@
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid configuration");
+      }
+    }
+    U_UM.send(cas_RRC_ConnSetup(p_CellId, tsc_RB0, v_RRC_ConnSetup));
+    f_UTRAN_RRC_ReceiveConnSetupCmpl_CapCheck(p_Subtest, p_GPSMode, p_GANSSMode); //@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+  }
+
+  /*
+   * @desc      Receives CONNECTION SETUP COMPLETE and checks the positioning capabilities
+   * @param     p_Subtest
+   * @param     p_GPSMode
+   * @param     p_GANSSMode
+   * @status    APPROVED (POS)
+   */
+  function f_UTRAN_RRC_ReceiveConnSetupCmpl_CapCheck(integer p_Subtest,
+                                                     template NetworkAssistedGPS_Supported p_GPSMode,
+                                                     GANSS_Mode p_GANSSMode) runs on UTRAN_PTC
+  {//@sic R5-145737 sic@: BDS inclusion. Renamed function to make it release independent
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var RRCConnectionSetupComplete v_RRCConnectionSetupComplete;
+    var U_RLC_AM_IND v_RLC_AM_DATA_IND;
+    var STARTList v_STARTList;
+    var integer v_Result;
+    var bitstring v_UE_CapabilityContainer;
+    var UE_CapabilityContainer_IEs v_UE_Capability_ASN;
+    
+    //@sic R5-145737 sic@: BDS inclusion. Clean-up: removed not needed FACH configuration
+    alt {
+      [] U_AM.receive(car_RLC_Data_Ind(utran_CellDedicated,
+                                       tsc_RB2,
+                                       cr_108_RRC_ConnSetupCmpl(tsc_RRC_TI, ?))) // TTCN2 checks all UE capabilities at this point
+        -> value v_RLC_AM_DATA_IND
+        {
+          v_RRCConnectionSetupComplete := v_RLC_AM_DATA_IND.data.aM_message.uL_DCCH_Message.message_.rrcConnectionSetupComplete;
+        }
+      // swallow any excess ConnReq messages that haven't been processed yet
+      [] U_TM.receive(car_RRC_ConnReq(?, tsc_RB0, cr_RRC_RrcConnReqAny))
+        {
+          repeat;
+        }
+    }
+    // Checking A-GPS capabilities (if relevant for the subtest)
+    if ((p_Subtest == 3) or (p_Subtest == 4) or (p_Subtest == 8) or (p_Subtest == 10)) {     //@sic R5-145737 sic@: BDS inclusion. @sic R5-165993 sic@: A-GPS+A-Galileo
+      if (match (v_RRCConnectionSetupComplete.ue_RadioAccessCapability.ue_positioning_Capability.networkAssistedGPS_Supported,
+                 (p_GPSMode, bothNetworkAndUE_Based))) {
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+      } else {
+        f_UTRAN_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 2"); // Capability does not match
+      }
+    }
+    
+    // A-GNSS capabilities are included in the capability container (bitstring)
+    // First we have to decode it into ASN.1 types
+    v_UE_CapabilityContainer := v_RRCConnectionSetupComplete.v370NonCriticalExtensions.v380NonCriticalExtensions.v3a0NonCriticalExtensions.laterNonCriticalExtensions.v3g0NonCriticalExtensions.v4b0NonCriticalExtensions.v590NonCriticalExtensions.v5c0NonCriticalExtensions.v690NonCriticalExtensions.rrcConnectionSetupComplete_v690ext.ueCapabilityContainer;
+    v_Result := decvalue (v_UE_CapabilityContainer, v_UE_Capability_ASN);
+    
+    if (v_Result != 0) {
+      FatalError(__FILE__, __LINE__, "UE Capability cannot be decoded");
+    }
+    // Checking A-GNSS capabilities
+    if (ispresent (v_UE_Capability_ASN.v6b0NonCriticalExtensions.v6e0NonCriticalExtensions.v770NonCriticalExtensions.ue_RadioAccessCapability_v770ext.ue_PositioningCapability.ue_GANSSPositioning_Capability.networkAssistedGANSS_supportedList)) {
+      if (match (v_UE_Capability_ASN.v6b0NonCriticalExtensions.v6e0NonCriticalExtensions.v770NonCriticalExtensions.ue_RadioAccessCapability_v770ext.ue_PositioningCapability.ue_GANSSPositioning_Capability.networkAssistedGANSS_supportedList[0].gANSS_Mode,
+                 (p_GANSSMode, both))) {
+        f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Step 2");
+      } else {
+        f_UTRAN_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 2"); // Capability does not match
+      }
+    } else {
+      f_UTRAN_SetVerdictFailOrInconc (__FILE__, __LINE__, "Step 2"); // Capability not present
+    }
+    
+    // get start list
+    v_STARTList := v_RRCConnectionSetupComplete.startList;
+    
+    v_SecurityInfo.cipheringAlgorithmCapability := v_RRCConnectionSetupComplete.ue_RadioAccessCapability.securityCapability.cipheringAlgorithmCap;
+    v_SecurityInfo.integrProtAlgCap := v_RRCConnectionSetupComplete.ue_RadioAccessCapability.securityCapability.integrityProtectionAlgorithmCap;
+    f_UTRAN_Security_Set(v_SecurityInfo);
+    // Set start value in Security info
+    f_UTRAN_SetSecurityInfo_StartValue (v_STARTList);
+  }
+
+  /*
+   * @desc      Objective: To send MEASUREMENT CONTROL messages with Adequate assistance data for UE-based A-GNSS,
+   *            and to receive MEASUREMENT REPORT message with Position Estimate
+   * @param     p_Subtest
+   * @return    PositionEstimate
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBased(integer p_Subtest)
+    runs on UTRAN_POS_PTC return PositionEstimate
+  {
+    var UTRAN_AGNSS_RetrieveData_Type v_UTRAN_AGNSS_RetrieveData;
+    var PositionEstimate v_PositionEstimate;
+    
+    v_UTRAN_AGNSS_RetrieveData := f_RetrieveUTRAN_DataSubtest(p_Subtest,
+                                                              true); // Retrieve data for UE based.
+    f_SendMeasurementControl_UeBased(p_Subtest,
+                                     v_UTRAN_AGNSS_RetrieveData.GPSAssistanceData,
+                                     v_UTRAN_AGNSS_RetrieveData.GANSSAssistanceData);
+    v_PositionEstimate := f_ReceiveMeasurementReport_PositionEstimate();
+    
+    return v_PositionEstimate;
+  }
+
+  /*
+   * @desc      Objective: To send MEASUREMENT CONTROL messages with Adequate assistance data for UE-based A-GNSS,
+   *            and to receive MEASUREMENT REPORT message with Position Estimate based on Release 12
+   * @param     p_Subtest
+   * @return    PositionEstimate
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBased_r12(integer p_Subtest)
+    runs on UTRAN_POS_PTC return PositionEstimate
+  { //@sic R5-145737 sic@: BDS inclusion.
+    var UTRAN_AGNSS_RetrieveData_r12_Type v_RetrieveData;
+    var PositionEstimate v_PositionEstimate;
+    
+    v_RetrieveData := f_RetrieveUTRAN_DataSubtest_r12(p_Subtest,
+                                                      true); // Retrieve data for UE based.
+    f_SendMeasurementControl_UeBased_r12(p_Subtest,
+                                         v_RetrieveData.GPSAssistanceData,
+                                         v_RetrieveData.GANSSAssistanceData);
+    v_PositionEstimate := f_ReceiveMeasurementReport_PositionEstimate();
+    
+    return v_PositionEstimate;
+  }
+
+  /*
+   * @desc      Objective: To select correct release depending on the subtest
+   * @param     p_Subtest
+   * @return    PositionEstimate
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBased_r8Or12(integer p_Subtest)
+    runs on UTRAN_POS_PTC return PositionEstimate
+  {  //@sic R5-145737 sic@: BDS inclusion.
+    var PositionEstimate v_PositionEstimate;
+    
+    select (p_Subtest) {
+      case (1, 3, 4) {
+        v_PositionEstimate:= f_AGNSS_MeasControlAndReport_UeBased(p_Subtest);
+      }
+      case (2, 8, 9, 10){ //@sic R5-151985 Moved Galileo to Rel-12 sic@ @sic R5-165993 sic@: A-GPS+A-Galileo
+        v_PositionEstimate:= f_AGNSS_MeasControlAndReport_UeBased_r12(p_Subtest);
+      }
+    }
+    return v_PositionEstimate;
+  }
+
+  /*
+   * @desc      Objective: To send MEASUREMENT CONTROL messages with Adequate assistance data for UE-based A-GNSS, and to receive MEASUREMENT REPORT message with Error report.
+   *            Once the assistance data is retrieved, the Satellite Simulators is switched off so that the UE does not receive enought satellite signals.
+   * @param     p_Subtest
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBasedFailure (integer p_Subtest) runs on UTRAN_POS_PTC
+  {
+    var UTRAN_AGNSS_RetrieveData_Type v_UTRAN_AGNSS_RetrieveData;
+
+    v_UTRAN_AGNSS_RetrieveData := f_RetrieveUTRAN_DataSubtest(p_Subtest,
+                                                              true); // Retrieve data for UE based.
+
+    f_StopSatelliteSimulatorAGNSS(f_SetSatelliteList(p_Subtest));
+    
+    f_SendMeasurementControl_UeBased(p_Subtest,
+                                     v_UTRAN_AGNSS_RetrieveData.GPSAssistanceData,
+                                     v_UTRAN_AGNSS_RetrieveData.GANSSAssistanceData);
+
+    f_ReceiveMeasurementReport_NotEnoughSatellites (p_Subtest);
+  }
+
+  /*
+   * @desc      Objective: To send MEASUREMENT CONTROL messages with Adequate assistance data for UE-based A-GNSS, and to receive MEASUREMENT REPORT message with Error report.
+   *            Once the assistance data is retrieved, the Satellite Simulators is switched off so that the UE does not receive enought satellite signals.
+   * @param     p_Subtest
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBasedFailure_r12 (integer p_Subtest) runs on UTRAN_POS_PTC
+  { //@sic R5-145737: BDS inclusion sic@
+
+    var UTRAN_AGNSS_RetrieveData_r12_Type v_RetrieveData;
+
+    v_RetrieveData := f_RetrieveUTRAN_DataSubtest_r12(p_Subtest,
+                                                      true); // Retrieve data for UE based.
+
+    f_StopSatelliteSimulatorAGNSS(f_SetSatelliteList(p_Subtest));
+    
+    f_SendMeasurementControl_UeBased_r12(p_Subtest,
+                                         v_RetrieveData.GPSAssistanceData,
+                                         v_RetrieveData.GANSSAssistanceData);
+    
+    f_ReceiveMeasurementReport_NotEnoughSatellites(p_Subtest);
+  }
+
+  /*
+   * @desc      Objective: To select correct release depending on the subtest
+   * @param     p_Subtest
+   * @status    APPROVED (POS)
+   */
+  function f_AGNSS_MeasControlAndReport_UeBasedFailure_r8Or12(integer p_Subtest)
+    runs on UTRAN_POS_PTC
+  {
+    //@sic R5-145737 sic@: BDS inclusion.
+    select (p_Subtest) {
+      case (1, 3, 4) {
+        f_AGNSS_MeasControlAndReport_UeBasedFailure(p_Subtest);
+      }
+      case (2, 8, 9, 10){ //@sic R5-151985 Moved Galileo to Rel-12 sic@  @sic R5-165993 sic@: A-GPS+A-Galileo
+        f_AGNSS_MeasControlAndReport_UeBasedFailure_r12(p_Subtest);
+      }
+    }
+  }
+
+  /*
+   * @desc      Retrieves data from positioning simulator. The requested data depends on the subtest.
+   * @param     p_Subtest
+   * @param     p_UeBased
+   * @return    UTRAN_AGNSS_RetrieveData_Type
+   * @status    APPROVED (POS)
+   */
+  function f_RetrieveUTRAN_DataSubtest(integer p_Subtest,
+                                       boolean p_UeBased)
+    runs on UTRAN_POS_PTC return UTRAN_AGNSS_RetrieveData_Type
+  {
+    var UTRAN_AGNSS_RetrieveData_Type v_UTRAN_AGNSS_RetrieveData;
+
+    select (p_Subtest) {
+      case (1) { // GLONASS
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({glonass},
+                                                                   cs_UeBasedAdecuateAssistDataReqGANSS_SubTest1,
+                                                                   cds_UeBasedAdecuateAssistDataReqV860extGANSS_Glonass,
+                                                                   omit);
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({glonass},
+                                                                   cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest1,
+                                                                   cds_UeAssistedAdecuateAssistDataReqV860extGANSS_Glonass,
+                                                                   omit);
+        }
+      }
+    //@sic R5-151985 sic@: Galileo is moved to Rel-12
+      case (3) { // A-GPS + Modernized GPS
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({modernizedGPS, gps},
+                                                                   cs_UeBasedAdecuateAssistDataReqGANSS_SubTest3,
+                                                                   cds_UeBasedAdecuateAssistDataReqV860extGANSS_ModernizedGPS,
+                                                                   cs_UeBasedAdecuateAssistDataReqGPS(false)); // UTCModel not requested
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({modernizedGPS, gps},
+                                                                   cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest3,
+                                                                   cds_UeAssistedAdecuateAssistDataReqV860extGANSS_ModernizedGPS,
+                                                                   cs_UeAssistedAdecuateAssistDataReqGPS (false)); //@sic R5-131326 sic@
+        }
+      }
+      case (4) { // A-GPS + GLONASS
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({glonass, gps},
+                                                                   cs_UeBasedAdecuateAssistDataReqGANSS_SubTest4,
+                                                                   cds_UeBasedAdecuateAssistDataReqV860extGANSS_Glonass,
+                                                                   cs_UeBasedAdecuateAssistDataReqGPS(true)); // UTCModel requested
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_UTRAN_AGNSS_RetrieveData := f_UTRAN_AGNSS_RetrieveData({glonass, gps},
+                                                                   cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest4,
+                                                                   cds_UeAssistedAdecuateAssistDataReqV860extGANSS_Glonass,
+                                                                   cs_UeAssistedAdecuateAssistDataReqGPS(true)); //@sic R5-131326 sic@
+        }
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid configuration");
+      }
+    }
+    return v_UTRAN_AGNSS_RetrieveData;
+  }
+
+  /*
+   * @desc      Retrieves data from positioning simulator. The requested data depends on the subtest. Only valid for Release 12.
+   * @param     p_Subtest
+   * @param     p_UeBased
+   * @return    UTRAN_AGNSS_RetrieveData_r12_Type
+   * @status    APPROVED (POS)
+   */
+  function f_RetrieveUTRAN_DataSubtest_r12(integer p_Subtest,
+                                           boolean p_UeBased)
+    runs on UTRAN_POS_PTC return UTRAN_AGNSS_RetrieveData_r12_Type
+  { //@sic R5-145737 sic@: BDS inclusion.
+    //@sic R5-165993 sic@: A-GPS+A-Galileo
+    var PositioningSystemList_Type v_PosSystemListId;
+    var template (value) UE_Positioning_GANSS_AdditionalAssistanceDataRequest v_GANSSAdditionalAssistanceDataRequest;
+    var template (omit) UE_Positioning_GANSS_AdditionalAssistanceDataRequest_v860ext v_GANSSAdditionalAssistanceDataRequest_v860ext := omit;
+    var template (omit) UE_Positioning_GANSS_AdditionalAssistanceDataRequest_vc50ext v_GANSSAdditionalAssistanceDataRequest_vc50ext := omit;
+    var template (omit) UE_Positioning_GPS_AdditionalAssistanceDataRequest v_GPSAdditionalAssistanceDataRequest := omit;
+
+
+    select (p_Subtest) {
+      case (2) {
+        //@sic R5-151985 sic@: Galileo is moved to Rel-12
+        v_PosSystemListId := {galileo};
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGANSS_SubTest2;
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest2;
+        }
+      }
+      case (8) {
+        //@sic R5-165993 sic@: A-GPS+A-Galileo
+        v_PosSystemListId := {galileo, gps};
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGANSS_SubTest8;
+          v_GANSSAdditionalAssistanceDataRequest_v860ext := cds_UeBasedAdecuateAssistDataReqV860extGANSS_GpsGalileo;
+          v_GPSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGPS(true); //"true" as according to 37.571-2, 4.4.1.4A UTC model is required
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest8;
+          v_GPSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGPS(true); //"true" as according to 37.571-2, 4.4.3.4A UTC model is required
+        }
+      }
+      case (9) { // BDS
+        v_PosSystemListId := {bds};
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGANSS_SubTest9;
+          v_GANSSAdditionalAssistanceDataRequest_v860ext := cds_UeBasedAdecuateAssistDataReqV860extGANSS_Bds;
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest9;
+        }
+      }
+      case (10) { // A-GPS + A-BDS
+        v_PosSystemListId := {bds, gps};
+        if (p_UeBased) { // Retrieve data for UE Based UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGANSS_SubTest10;
+          v_GANSSAdditionalAssistanceDataRequest_v860ext := cds_UeBasedAdecuateAssistDataReqV860extGANSS_Bds;
+          v_GPSAdditionalAssistanceDataRequest := cs_UeBasedAdecuateAssistDataReqGPS(true); //Changed "false" to "true" as according to 37.571-2, 4.4.1.6 UTC model is required
+        }
+        else { // Retrieve data for UE Assisted UE
+          v_GANSSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGANSS_SubTest10;
+          v_GPSAdditionalAssistanceDataRequest := cs_UeAssistedAdecuateAssistDataReqGPS(true); //Changed "false" to "true" as according to 37.571-2, 4.4.1.6 UTC model is required
+        }
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid configuration");
+      }
+    }
+    return f_UTRAN_AGNSS_RetrieveData_r12(v_PosSystemListId,
+                                          v_GANSSAdditionalAssistanceDataRequest,
+                                          v_GANSSAdditionalAssistanceDataRequest_v860ext,
+                                          v_GANSSAdditionalAssistanceDataRequest_vc50ext,
+                                          v_GPSAdditionalAssistanceDataRequest);
+  }
+
+  /*
+   * @desc      Auxiliary function to send one MEASUREMENT CONTROL message with GANSS positioning information.
+   * @param     p_Integrityinfo
+   * @param     p_MeasurementCommand
+   * @status    APPROVED (POS)
+   */
+  function f_POS_MeasControl_Send(IntegrityCheckInfo p_Integrityinfo,
+                                  template (value) MeasurementCommand_r8  p_MeasurementCommand) runs on UTRAN_PTC
+  { // @sic R5s150706 sic@
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated,
+                                     tsc_RB2,
+                                     cs_MeasurementControl_PositioningGANSS_r8(p_Integrityinfo, tsc_RRC_TI, p_MeasurementCommand)));
+  }
+
+  /*
+   * @desc      Auxiliary function to send one MEASUREMENT CONTROL message with GANSS positioning information. Release 12.
+   * @param     p_Integrityinfo
+   * @param     p_MeasurementCommand
+   * @status    APPROVED (POS)
+   */
+  function f_POS_MeasControl_Send_r12(IntegrityCheckInfo p_Integrityinfo,
+                                      template (value) MeasurementCommand_r12  p_MeasurementCommand) runs on UTRAN_PTC
+  { //@sic R5s150706 sic@
+    U_AM.send(cas_RLC_Data_Req_NoCnf(utran_CellDedicated,
+                                     tsc_RB2,
+                                     cs_MeasurementControl_PositioningGANSS_r12(p_Integrityinfo, tsc_RRC_TI, p_MeasurementCommand)));
+  }
+
+  /*
+   * @desc      Sends MEASUREMENT CONTROL messages including addecuate assistance data depenting on the subtest. UE-based case.
+   * @param     p_Subtest
+   * @param     p_AssistanceDataGPS
+   * @param     p_AssistanceData_r8
+   * @status    APPROVED (POS)
+   */
+   //@sic R5s150706 sic@
+  function f_SendMeasurementControl_UeBased(integer  p_Subtest,
+                                            template (omit) UE_Positioning_GPS_AssistanceData_r7 p_AssistanceDataGPS,
+                                            template (omit) UE_Positioning_GANSS_AssistanceData_r8 p_AssistanceData_r8) runs on UTRAN_PTC{
+    
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var template (value) MeasurementCommand_r8 v_MeasCommand_Setup_r8;
+    var template (value) MeasurementCommand_r8 v_MeasCommand_Modify1_r8;
+    var template (value) MeasurementCommand_r8 v_MeasCommand_Modify2_r8;
+    var template (omit) UE_Positioning_GANSS_AssistanceData_r8 v_GANSS_AssistanceData_1st := omit;
+    var template (omit) UE_Positioning_GANSS_AssistanceData_r8 v_GANSS_AssistanceData_2nd := omit;
+    
+    select (p_Subtest) {
+      case (1) { // GLONASS
+        v_MeasCommand_Setup_r8 := cs_MeasurementCommand_Setup_r8 (cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                                 false, // Additional Assistance Data Request
+                                                                                                 tsc_GLONASSPositioningMethod,
+                                                                                                 omit, //@sic R5-153110 sic@
+                                                                                                 cs_PeriodicalReportingCriteria,
+                                                                                                 omit,
+                                                                                                 cds_UeBasedAdecuateGANSS_AssitanceData_SubTest1_r8(valueof(p_AssistanceData_r8))));
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Setup_r8);
+      }
+      // Galileo @sic R5-151985 Moved Galileo to Rel-12 sic@
+      case (3) { // A-GPS + Modernized GPS
+        v_MeasCommand_Setup_r8 := cs_MeasurementCommand_Setup_r8(cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                               false, // Additional Assistance Data Request
+                                                                                               tsc_GPSAndModernizedGPSPositioningMethod,
+                                                                                               omit, //@sic R5-153110 sic@
+                                                                                               cs_NoReporting,
+                                                                                               cds_UEBasedAdecuate_GPS_AssistanceData1_r7(valueof(p_AssistanceDataGPS)),
+                                                                                               cds_UeBasedAdecuateGANSS_AssitanceData_SubTest3_1st_r8(valueof(p_AssistanceData_r8))));
+        
+        v_MeasCommand_Modify1_r8 := cs_MeasurementCommand_Modify_r8(cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                                  false, // Additional Assistance Data Request
+                                                                                                  tsc_GPSAndModernizedGPSPositioningMethod,
+                                                                                                  omit, //@sic R5-153110 sic@
+                                                                                                  cs_PeriodicalReportingCriteria,
+                                                                                                  cds_UEBasedAdecuate_GPS_AssistanceData2_r7(valueof(p_AssistanceDataGPS)),
+                                                                                                  cds_UeBasedAdecuateGANSS_AssitanceData_SubTest3_2nd_r8(valueof(p_AssistanceData_r8))));
+
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Setup_r8);
+
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Modify1_r8);
+      }
+      case (4) { // A-GPS + GLONASS
+        if (pc_MGPS) { //Multiple GPS signals supported
+        //@sic R5-211516, R5-2101298 sic@
+          v_GANSS_AssistanceData_1st := cds_UeBasedAdecuateGANSS_AssitanceData_SubTest3_1st_r8(valueof(p_AssistanceData_r8));
+          v_GANSS_AssistanceData_2nd := cds_UeBasedAdecuateGANSS_AssitanceData_SubTest3_2nd_r8(valueof(p_AssistanceData_r8));
+        }
+         
+        v_MeasCommand_Setup_r8 := cs_MeasurementCommand_Setup_r8(cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                                false, // Additional Assistance Data Request
+                                                                                                tsc_GPSAndGLONASSPositioningMethod,
+                                                                                                omit, //@sic R5-153110 sic@
+                                                                                                cs_NoReporting,
+                                                                                                cds_UEBasedAdecuate_GPS_AssistanceData1_r7(valueof(p_AssistanceDataGPS)),
+                                                                                                v_GANSS_AssistanceData_1st)); //@sic R5-211516, R5-2101298 sic@
+
+        v_MeasCommand_Modify1_r8 := cs_MeasurementCommand_Modify_r8(cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                                   false, // Additional Assistance Data Request
+                                                                                                   tsc_GPSAndGLONASSPositioningMethod,
+                                                                                                   omit, //@sic R5-153110 sic@
+                                                                                                   cs_NoReporting,
+                                                                                                   cds_UEBasedAdecuate_GPS_AssistanceData2_r7(valueof(p_AssistanceDataGPS), valueof(p_AssistanceDataGPS.ue_positioning_GPS_UTC_Model)),
+                                                                                                   v_GANSS_AssistanceData_2nd)); //@sic R5-211516, R5-2101298 sic@
+
+       v_MeasCommand_Modify2_r8 := cs_MeasurementCommand_Modify_r8(cs_UePositioningMeasurement_r8(ue_Based,
+                                                                                                  false, // Additional Assistance Data Request
+                                                                                                  tsc_GPSAndGLONASSPositioningMethod,
+                                                                                                  omit, //@sic R5-153110 sic@
+                                                                                                  cs_PeriodicalReportingCriteria,
+                                                                                                  omit,
+                                                                                                  cds_UeBasedAdecuateGANSS_AssitanceData_SubTest4_r8(valueof(p_AssistanceData_r8))));
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Setup_r8);
+
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Modify1_r8);
+
+        f_POS_MeasControl_Send(v_SecurityInfo.dl_IntegrityCheckInfo,
+                               v_MeasCommand_Modify2_r8);
+      }
+    }
+  }
+
+  /*
+   * @desc      Sends MEASUREMENT CONTROL messages including addecuate assistance data depenting on the subtest based on Release 12. UE-based case.
+   * @param     p_Subtest
+   * @param     p_AssistanceDataGPS_r12
+   * @param     p_AssistanceData_r12
+   * @status    APPROVED (POS)
+   */
+  //@sic R5-145737 sic@: BDS inclusion.
+  function f_SendMeasurementControl_UeBased_r12(integer  p_Subtest,
+                                                template (omit) UE_Positioning_GPS_AssistanceData_r12 p_AssistanceDataGPS_r12,
+                                                template (omit) UE_Positioning_GANSS_AssistanceData_r12 p_AssistanceData_r12) runs on UTRAN_PTC{
+    
+    var UTRAN_SecurityInfo_Type v_SecurityInfo := f_UTRAN_Security_Get();
+    var template (value) MeasurementCommand_r12 v_MeasCommand_Setup_r12;
+    var template (value) MeasurementCommand_r12 v_MeasCommand_Modify1_r12;
+    var template (value) MeasurementCommand_r12 v_MeasCommand_Modify2_r12;
+    var template (omit) UE_Positioning_GANSS_AssistanceData_r12 v_GANSS_AssistanceData_1st := omit;
+    var template (omit) UE_Positioning_GANSS_AssistanceData_r12 v_GANSS_AssistanceData_2nd := omit;
+
+    if (pc_MGPS) { //Multiple GPS signals supported
+    //@sic R5-211516, R5-2101298 sic@
+      v_GANSS_AssistanceData_1st := cds_UeBasedAdecuateGANSS_AssitanceData_SubTest8And10_1st_r12(valueof(p_AssistanceData_r12));
+      v_GANSS_AssistanceData_2nd := cds_UeBasedAdecuateGANSS_AssitanceData_SubTest8And10_2nd_r12(valueof(p_AssistanceData_r12));
+    }
+
+    select (p_Subtest) {
+      case (2) { // Galileo @sic R5-151985 Moved Galileo to Rel-12 sic@
+        v_MeasCommand_Setup_r12 := cs_MeasurementCommand_Setup_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                   false, // Additional Assistance Data Request
+                                                                                                   tsc_GalileoPositioningMethod,
+                                                                                                   omit,
+                                                                                                   cs_NoReporting,
+                                                                                                   omit,
+                                                                                                   cds_UeBasedAdecuateGANSS_AssitanceData_SubTest2_1st_r12(valueof(p_AssistanceData_r12))));
+
+        v_MeasCommand_Modify1_r12 := cs_MeasurementCommand_Modify_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                     false, // Additional Assistance Data Request
+                                                                                                     tsc_GalileoPositioningMethod,
+                                                                                                     omit,
+                                                                                                     cs_PeriodicalReportingCriteria,
+                                                                                                     omit,
+                                                                                                     cds_UeBasedAdecuateGANSS_AssitanceData_SubTest2_2nd_r12(valueof(p_AssistanceData_r12))));
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Setup_r12);
+
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Modify1_r12);
+      }
+      case (8) { //@sic R5-165993 sic@: A-GPS+A-Galileo
+        v_MeasCommand_Setup_r12 := cs_MeasurementCommand_Setup_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                   false, // Additional Assistance Data Request
+                                                                                                   tsc_GPSAndGalileoPositioningMethod,
+                                                                                                   omit,
+                                                                                                   cs_NoReporting,
+                                                                                                   cds_UEBasedAdecuate_GPS_AssistanceData1_r12(valueof(p_AssistanceDataGPS_r12)),
+                                                                                                   v_GANSS_AssistanceData_1st)); //@sic R5-211516, R5-2101298 sic@
+        v_MeasCommand_Modify1_r12 := cs_MeasurementCommand_Modify_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                      false, // Additional Assistance Data Request
+                                                                                                      tsc_GPSAndGalileoPositioningMethod,
+                                                                                                      omit,
+                                                                                                      cs_NoReporting,
+                                                                                                      cds_UEBasedAdecuate_GPS_AssistanceData2_r12(valueof(p_AssistanceDataGPS_r12),
+                                                                                                      valueof(p_AssistanceDataGPS_r12.ue_positioning_GPS_UTC_Model)),
+                                                                                                      v_GANSS_AssistanceData_2nd)); //@sic R5-211516, R5-2101298 sic@
+        v_MeasCommand_Modify2_r12 := cs_MeasurementCommand_Modify_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                      false, // Additional Assistance Data Request
+                                                                                                      tsc_GPSAndGalileoPositioningMethod,
+                                                                                                      omit,
+                                                                                                      cs_PeriodicalReportingCriteria,
+                                                                                                      omit,
+                                                                                                      cds_UeBasedAdecuateGANSS_AssitanceData_SubTest8_r12(valueof(p_AssistanceData_r12))));
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Setup_r12);
+
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Modify1_r12);
+
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Modify2_r12);
+      }
+      case (9) { // A-Beidou
+        v_MeasCommand_Setup_r12 := cs_MeasurementCommand_Setup_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                   false, // Additional Assistance Data Request
+                                                                                                   tsc_BDSPositioningMethod,
+                                                                                                   omit,
+                                                                                                   cs_PeriodicalReportingCriteria, //Changed from cs_NoReporting
+                                                                                                   omit,
+                                                                                                   cds_UeBasedAdecuateGANSS_AssitanceData_SubTest9_r12(valueof(p_AssistanceData_r12)))); //Changed name to remove "1st"
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Setup_r12);
+
+      }
+      case (10) { // A-GPS + A-Beidou
+        v_MeasCommand_Setup_r12 := cs_MeasurementCommand_Setup_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                   false, // Additional Assistance Data Request
+                                                                                                   tsc_GPSAndBDSPositioningMethod,
+                                                                                                   omit,
+                                                                                                   cs_NoReporting,
+                                                                                                   cds_UEBasedAdecuate_GPS_AssistanceData1_r12(valueof(p_AssistanceDataGPS_r12)),
+                                                                                                   v_GANSS_AssistanceData_1st)); //@sic R5-211516, R5-2101298 sic@
+        v_MeasCommand_Modify1_r12 := cs_MeasurementCommand_Modify_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                      false, // Additional Assistance Data Request
+                                                                                                      tsc_GPSAndBDSPositioningMethod,
+                                                                                                      omit,
+                                                                                                      cs_NoReporting,
+                                                                                                      cds_UEBasedAdecuate_GPS_AssistanceData2_r12(valueof(p_AssistanceDataGPS_r12),
+                                                                                                      valueof(p_AssistanceDataGPS_r12.ue_positioning_GPS_UTC_Model)),
+                                                                                                      v_GANSS_AssistanceData_2nd)); //@sic R5-211516, R5-2101298 sic@
+        v_MeasCommand_Modify2_r12 := cs_MeasurementCommand_Modify_r12(cs_UePositioningMeasurement_r12(ue_Based,
+                                                                                                      false, // Additional Assistance Data Request
+                                                                                                      tsc_GPSAndBDSPositioningMethod,
+                                                                                                      omit,
+                                                                                                      cs_PeriodicalReportingCriteria,
+                                                                                                      omit,
+                                                                                                      cds_UeBasedAdecuateGANSS_AssitanceData_SubTest10_r12(valueof(p_AssistanceData_r12))));
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Setup_r12);
+
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Modify1_r12);
+
+        f_POS_MeasControl_Send_r12(v_SecurityInfo.dl_IntegrityCheckInfo,
+                                   v_MeasCommand_Modify2_r12);
+      }
+    }
+  }
+
+  /*
+   * @desc      Receives a MEASUREMENT REPORT including a Position Estimate
+   * @return    PositionEstimate
+   * @status    APPROVED (POS)
+   */
+  function f_ReceiveMeasurementReport_PositionEstimate () runs on UTRAN_PTC return PositionEstimate
+  {
+    var U_RLC_AM_IND v_RLC_AM_DATA_IND;
+    var PositionEstimate v_PositionEstimate;
+    
+    alt {
+      [] U_AM.receive (car_RLC_Data_Ind (utran_CellDedicated, tsc_RB2, cr_MeasurementReportPositionEstimate)) //GPS reference time only
+        -> value  v_RLC_AM_DATA_IND {}
+      [] U_AM.receive (car_RLC_Data_Ind (utran_CellDedicated, tsc_RB2, cr_MeasurementReportPositionEstimate_GANSS)) //GANSS reference time only
+        -> value  v_RLC_AM_DATA_IND {}
+    }
+    v_PositionEstimate :=  v_RLC_AM_DATA_IND.data.aM_message.uL_DCCH_Message.message_.measurementReport.measuredResults.ue_positioning_MeasuredResults.ue_positioning_PositionEstimateInfo.positionEstimate;
+    
+    return v_PositionEstimate;
+  }
+
+  /*
+   * @desc      Received MEASUREMENT REPORT with Error cause: Not enough satellites
+   * @param     p_Subtest
+   * @status    APPROVED (POS)
+   */
+  function f_ReceiveMeasurementReport_NotEnoughSatellites (integer p_Subtest) runs on UTRAN_PTC
+  {
+  //@sic R5-145737 sic@: BDS inclusion.
+    select (p_Subtest) {
+      case (1, 2, 9) { // Only GANSS, no A-GPS
+        U_AM.receive (car_RLC_Data_Ind(utran_CellDedicated,
+                                       tsc_RB2,
+                                       cr_MeasurementReportError_r7(notEnoughGANSS_Satellites))); //@sic R5s150013 sic@
+      }
+      case (3, 4, 8, 10) { // GANSS and A-GPS     @sic R5-165993 sic@: A-GPS+A-Galileo
+        U_AM.receive (car_RLC_Data_Ind (utran_CellDedicated,
+                                        tsc_RB2,
+                                        (cr_MeasurementReportError_r7 ((notEnoughGPS_Satellites, notEnoughGANSS_Satellites)), //@sic R5s150013 sic@
+                                         cr_MeasurementReportError (notEnoughGPS_Satellites))));
+      }
+    }
+  }
+
+  /*
+   * @desc      Set the satellite list corresponding to the subtest index
+   * @param     p_Subtest
+   * @return    PositioningSystemList_Type
+   * @status    APPROVED (POS)
+   */
+  function f_SetSatelliteList(integer p_Subtest) return PositioningSystemList_Type
+  {
+    var PositioningSystemList_Type v_SatSystemList;
+    
+    select (p_Subtest) {
+      case (1) {
+        v_SatSystemList := {glonass};
+      }
+      case (2) {
+        v_SatSystemList := {galileo};
+      }
+      case (3) {
+        v_SatSystemList := {modernizedGPS, gps};
+      }
+      case (4) {
+        v_SatSystemList := {glonass, gps};
+      }
+      case (8) {     //@sic R5-165993 sic@: A-GPS+A-Galileo
+        v_SatSystemList := {galileo, gps};
+      }
+      case (9) {
+        v_SatSystemList := {bds};   //@sic R5-145737 sic@: BDS inclusion.
+      }
+      case (10) {
+        v_SatSystemList := {bds, gps};   //@sic R5-145737 sic@: BDS inclusion.
+      }
+      case else {
+        FatalError(__FILE__, __LINE__, "invalid configuration")
+      }
+    }
+    return v_SatSystemList;
+  }
+
+}

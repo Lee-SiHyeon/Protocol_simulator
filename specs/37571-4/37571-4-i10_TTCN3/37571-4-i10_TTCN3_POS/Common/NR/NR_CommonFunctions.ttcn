@@ -1,0 +1,191 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2025, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 37.571-4 v18.1.0
+// $Date: 2025-03-10 16:52:32 +0100 (Mon, 10 Mar 2025) $
+// $Rev: 40784 $
+/******************************************************************************/
+
+module NR_CommonFunctions {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NG_NAS_MsgContainers all;
+  import from NR_ASP_Templates_SRB all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_ConfigurationSteps all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+
+  /*
+   * @desc      Get Default CellgroupConfig to send in RRC Reconfiguration message to establish one DRB and SRB2 (if p_ConfigSRB2)
+   *            Acc to 38.508-1 Table 4.6.3-19: CellGroupConfig with Condition SRB2_DRB1 or DRB1
+   * @param     p_NR_CellId
+   * @param     p_DRB_List
+   * @param     p_ConfigSRB2
+   * @return    template (value) CellGroupConfig
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_GetCellgroupConfig_DRB(NR_CellId_Type             p_NR_CellId,
+                                       NR_DRB_IdentityList_Type   p_DRB_List,
+                                       boolean                    p_ConfigSRB2)  runs on NR_BASE_PTC return template (value) CellGroupConfig
+  {
+    var template (value) NR_RLC_BearerToAddModList_Type v_NR_RLC_BearerToAddModList;
+    var boolean v_IsFR1 := f_NR_CellInfo_GetIsFR1(p_NR_CellId);
+    var template (value) UL_AM_RLC v_ParametersTX := f_NR_UL_AM_RLC(v_IsFR1);
+    var template (value) DL_AM_RLC v_ParametersRX := f_NR_DL_AM_RLC(v_IsFR1);
+    var integer i;
+    var CellGroupId v_CellGroupId := f_NR_CellInfo_Get_CellGroupId(p_NR_CellId); //@sic R5s201387 sic@
+    var template (omit) integer v_ChAccPriority := f_NR_SharedAccessChAccPriority(p_NR_CellId); //SharedAccess @sic R5-243536 sic@
+ 
+    for (i:=0; i<lengthof(p_DRB_List); i:=i+1){
+      v_NR_RLC_BearerToAddModList[i] := cs_38508_RLC_BearerConfig_DRB(p_DRB_List[i],
+                                                                      cs_38508_RLC_Config_AM_DRB (v_ParametersTX,v_ParametersRX),
+                                                                      cs_38508_LogicalChannelConfig_DRB(-,-,-,-,-,v_ChAccPriority)); //SharedAccess: @sic R5-243536 sic@
+    }
+    if (p_ConfigSRB2) {
+      v_NR_RLC_BearerToAddModList[i] := cs_38508_RLC_BearerConfig_SRB(tsc_SRB2, -, v_ChAccPriority); //@sic R5-190360, R5-243536 sic@
+    }
+    return cs_38508_CellGroupConfig(v_CellGroupId, v_NR_RLC_BearerToAddModList); //@sic R5-190261 sic@
+  }
+
+  /*
+   * @desc      Send RRC Reconfiguration message with an optional piggybacked NAS message
+   *            and receive RRC Reconfiguration Complete
+   * @param     p_NR_CellId
+   * @param     p_SRB               (default value: tsc_NR_RbId_SRB1)
+   * @param     p_RadioBearerConfig (default value: omit)
+   * @param     p_V1530Ext          (default value: omit)
+   * @param     p_NASMsg            (default value: omit)
+   * @param     p_MeasConfig        (default value: omit)
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_ReceiveForRRCreconfigurationComplete (default value: true)
+   * @param     p_NR_RoutingInfoSUL (default value: omit)
+   * @param     p_MacBearerRoutingCA (default value: omit)
+   * @status    APPROVED (ENDC, IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_SendRRCReconfiguration(NR_CellId_Type p_NR_CellId,
+                                       NR_RadioBearerId_Type p_SRB := tsc_NR_RbId_SRB1,
+                                       template (omit) RadioBearerConfig p_RadioBearerConfig := omit,
+                                       template (omit) RRCReconfiguration_v1530_IEs p_V1530Ext := omit,
+                                       template (omit) NG_NAS_MSG_RequestList_Type p_NASMsg := omit,
+                                       template (omit) MeasConfig p_MeasConfig := omit,
+                                       template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                       boolean p_ReceiveForRRCreconfigurationComplete := true,
+                                       template (omit) NR_RoutingInfoSUL_Type p_NR_RoutingInfoSUL := omit,
+                                       template (omit) MacBearerRouting_Type p_MacBearerRoutingCA := omit
+                                       )runs on NR_BASE_PTC
+  { // @sic R5-213516: added p_MacBearerRoutingCA sic@
+    var SubFrameTiming_Type v_Timing; // @sic R5-197256 sic@
+    var template (value) NR_RRC_MSG_Request_Type v_RrcMsg := cs_NR_RRC_MSG_Request_DCCH(cs_38508_RRCReconfiguration(tsc_NR_RRC_TI_Def, p_RadioBearerConfig, -, p_MeasConfig, p_V1530Ext));
+
+    if (isvalue(p_MeasConfig.measGapConfig)) { // @sic R5-197256 sic@
+      //If MeasGap is to be configured send RRCReconfiguration with activation time and 5ms later configure the MeasGap in the SS
+      v_Timing := f_NR_GetNextSendOccasion_DL(p_NR_CellId);
+      SRB.send(cas_NR_RrcNasPduList_REQ(p_NR_CellId, p_SRB, cs_TimingInfo_NR(v_Timing), v_RrcMsg, p_NASMsg, -, p_MacBearerRoutingCA, cs_RlcBearerRouting_NR(p_NR_CellId)));
+      
+      v_Timing := f_SubFrameTiming_AddMilliSeconds(v_Timing, 5);   // add 5ms
+      f_NR_SS_MeasGapCtrlConfig(p_NR_CellId, cs_NR_MeasGapCtrl_Config(p_MeasConfig.measGapConfig), cs_TimingInfo_NR(v_Timing)); //compiler warning may be ignored due to isvalue check
+    }
+    else {
+      SRB.send(cas_NR_RrcNasPduList_REQ(p_NR_CellId, p_SRB, p_TimingInfo, v_RrcMsg, p_NASMsg, -, p_MacBearerRoutingCA, cs_RlcBearerRouting_NR(p_NR_CellId)));
+    }
+
+    if (p_ReceiveForRRCreconfigurationComplete){
+        SRB.receive(car_NR_SRB_RrcPdu_IND(p_NR_CellId, p_SRB, cr_38508_RRCReconfigurationComplete, p_NR_RoutingInfoSUL, p_MacBearerRoutingCA)); //@sic R5s190109 change 10 sic@
+    }
+  }
+
+  /*
+   * @desc      Performs calculation of Q_OffsetRange with an applied Delta as per 38.508-1 Table 4.6.2-3: SIB4
+   * @param     p_Q_OffsetRange     (default value: 0)
+   * @param     p_DeltaNRfs
+   * @param     p_DeltaNRfn
+   * @return    Q_OffsetRange
+   * @status    APPROVED (ENDC, IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_CalculateQ_OffsetRangeWithDelta ( integer p_Q_OffsetRange := 0,
+                                                integer p_DeltaNRfs,
+                                                integer p_DeltaNRfn) return Q_OffsetRange
+  { //Q-OffsetRange 0dB + Delta(NRfn) Delta(NRfs)
+    //@sic R5-198851 sic@
+    var integer v_IntegerValue := p_Q_OffsetRange + p_DeltaNRfn - p_DeltaNRfs;
+    
+    if ( v_IntegerValue >= 5 or v_IntegerValue <= -5) {
+        v_IntegerValue := ((v_IntegerValue/2)*2);
+    }
+    return f_ConvertQ_OffsetRange( v_IntegerValue );
+  }
+
+  /*
+   * @desc      Convert Q_OffsetRange from integer to Q-OffsetRange type
+   * @param     p_IntegerValue
+   * @return    Q_OffsetRange
+   * @status    APPROVED (ENDC, IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_ConvertQ_OffsetRange ( integer p_IntegerValue) return Q_OffsetRange
+  {
+    var Q_OffsetRange v_Q_OffsetRange;
+    select(p_IntegerValue){
+        case(-24) { v_Q_OffsetRange := dB_24;}
+        case(-22) { v_Q_OffsetRange := dB_22;}
+        case(-20) { v_Q_OffsetRange := dB_20;}
+        case(-18) { v_Q_OffsetRange := dB_18;}
+        case(-16) { v_Q_OffsetRange := dB_16;}
+        case(-14) { v_Q_OffsetRange := dB_14;}
+        case(-12) { v_Q_OffsetRange := dB_12;}
+        case(-10) { v_Q_OffsetRange := dB_10;}
+        case(-8) { v_Q_OffsetRange := dB_8;}
+        case(-6) { v_Q_OffsetRange := dB_6;}
+        case(-5) { v_Q_OffsetRange := dB_5;}
+        case(-4) { v_Q_OffsetRange := dB_4;}
+        case(-3) { v_Q_OffsetRange := dB_3;}
+        case(-2) { v_Q_OffsetRange := dB_2;}
+        case(-1) { v_Q_OffsetRange := dB_1;}
+        case(0) { v_Q_OffsetRange := dB0;}
+        case(1) { v_Q_OffsetRange := dB1;}
+        case(2) { v_Q_OffsetRange := dB2;}
+        case(3) { v_Q_OffsetRange := dB3;}
+        case(4) { v_Q_OffsetRange := dB4;}
+        case(5) { v_Q_OffsetRange := dB5;}
+        case(6) { v_Q_OffsetRange := dB6;}
+        case(8) { v_Q_OffsetRange := dB8;}
+        case(10) { v_Q_OffsetRange := dB10;}
+        case(12) { v_Q_OffsetRange := dB12;}
+        case(14) { v_Q_OffsetRange := dB14;}
+        case(16) { v_Q_OffsetRange := dB16;}
+        case(18) { v_Q_OffsetRange := dB18;}
+        case(20) { v_Q_OffsetRange := dB20;}
+        case(22) { v_Q_OffsetRange := dB22;}
+        case(24) { v_Q_OffsetRange := dB24;}
+        case else {FatalError(__FILE__, __LINE__, "Invalid Q_OffsetRange value");}
+    }
+    return v_Q_OffsetRange;
+  }
+
+   /*
+   * @desc      SharedSpectrum: Configures value of channelAccessPriority-r16 IE in LogicalChannelConfig
+   * @param     p_NR_CellId
+   * @return    template
+   * @status    APPROVED (ENDC, IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_NR_SharedAccessChAccPriority (NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC return template (omit) integer
+  {
+    var template (omit) integer v_ChAccPriority := omit;
+    
+    if (f_NR_CellInfo_GetIsSharedSpectrum(p_NR_CellId)) {
+      v_ChAccPriority := 3; // Acc. 38.508-1 Table 4.6.3-66 @sic R5-243536 sic@
+    }
+    return v_ChAccPriority;
+  }
+
+}

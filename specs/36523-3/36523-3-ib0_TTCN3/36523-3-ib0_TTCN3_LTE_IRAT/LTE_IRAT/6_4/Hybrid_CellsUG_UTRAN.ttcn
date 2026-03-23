@@ -1,0 +1,630 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 36.523-3 v18.11.0
+// $Date: 2018-06-05 17:54:43 +0200 (ma., 05 jun. 2018) $
+// $Rev: 21406 $
+/******************************************************************************/
+module Hybrid_CellsUG_UTRAN {
+
+  import from UTRAN_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "PER_Unaligned"};
+  import from UTRAN_ASP_Definitions language "ASN.1:2002" all;
+  import from CommonDefs all;
+  import from CommonIratDefs all;
+  import from EUTRA_CapabilityFunctions all;
+  import from NAS_24008Templates_IRAT all;
+  import from Parameters all;
+  import from UTRANGERAN_CommonFunctions all;
+  import from UTRAN_ASN1_ASP_Templates all;
+  import from UTRAN_CSG_Functions all;
+  import from UTRAN_CellInfo all;
+  import from UTRAN_CommonDefs all;
+  import from UTRAN_CommonFunctions all;
+  import from UTRAN_Component all;
+  import from UTRAN_ConfigurationSteps all;
+  import from UTRAN_IRAT_CommonFunctions all;
+  import from UTRAN_IRAT_CommonProcedures all;
+  import from UTRAN_IRAT_Component all;
+  import from UTRAN_RRC_SysInfo_Templates all;
+  import from UTRAN_RRC_Templates all;
+  import from UTRAN_TypeDefs all;
+  import from UpperTesterFunctions all;
+
+  /*
+   * @desc      To send a new version of SIB 3 and the MIB, then page the UE about the SIB change
+   * @param     p_CellId
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_UTRAN_SysInfoModifyMIB(UTRAN_CellId_Type p_CellId) runs on UTRAN_PTC
+  {
+    var UTRAN_CellSysInfo_Type v_CellSysInfo := f_UTRAN_SysInfo_Get(p_CellId);
+    var UTRAN_FDD_TDD_Type v_FDD_TDD_Mode := f_UTRAN_CellInfo_GetFDD_TDD(p_CellId);
+    var RatType v_RatType;
+    
+    if (v_FDD_TDD_Mode == UTRAN_TDD) {
+      v_RatType := tdd128;
+    } else {
+      v_RatType := fdd;
+    }
+    
+    v_CellSysInfo := fl_UTRAN_MIB_ChangeValueTag(v_CellSysInfo);
+    
+    f_UTRAN_SysInfo_Set(p_CellId, v_CellSysInfo);
+    f_UTRAN_SendMIB(p_CellId, tsc_Now, v_RatType);
+    f_UTRAN_SendPage1_ModifySI(p_CellId, v_CellSysInfo.MIB.mib_ValueTag);
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.4.3
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_6_4_3_UTRAN() runs on UTRAN_IRAT_PTC
+  { // Inter-RAT cell reselection / From E-UTRA RRC_IDLE non-CSG cell to UTRA_Idle member hybrid cell
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var integer v_CPICH_Minus60;
+    var integer v_PCCPCH_Minus62;
+    var integer v_CPICH_Minus64;
+    var integer v_PCCPCH_Minus66;
+    var UtraServingCellPriorityValue_Type v_UtraPriorityValue := 3;
+    var EUTRA_MeasurementBandwidth v_EUTRA_MeasurementBandwidth := f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(f_ConvertDL_BandwidthPIXITToInteger());
+    var B28_Type v_CellIdentity := f_UTRAN_GetCellIndentity(utran_Cell5);
+    var CSG_Identity v_CSG_Identity_Cell5 :='000000000000000000000000010'B;
+    var octetstring v_PLMN;   //@sic R5s140374 sic@
+    var InitialUE_Identity v_InitialUE_Id;
+    var U_RLC_TM_IND v_RLC_TR_DATA_IND; //@sic R5-150124 sic@
+    
+    timer t_WaitTimer := 360.0;
+    timer t_WaitForOptional_IMS_Dereg := 6.0;
+
+    v_CPICH_Minus60 := -60;
+    v_PCCPCH_Minus62 := -62;
+    v_CPICH_Minus64 := -64;
+    v_PCCPCH_Minus66 := -66;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    v_PLMN := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(utran_Cell5));  //@sic R5s140374 sic@
+    
+    // Send the cell info to the EUTRA component
+    f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5);
+    // Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo(EUTRA);
+    
+    // Update SIB3 of cell 5 according to Table 6.4.3.3.3-3
+    f_UTRAN_SysInfo_SetSIB3(utran_Cell5,
+                            cds_SIB3_Csg(v_CellIdentity, v_CSG_Identity_Cell5, cs_CSG_PSCSplitInfo(13, psc5)));
+    
+    // Update SIB19 of cell 5 and cell 7 according to Table 6.4.3.3.3-4
+    if (v_EUTRASysInfo.Eutra[0].Arfcn < tsc_EUTRA_MaxEARFCN) { //@sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+    } else {
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+    }
+    // Create and configure Cell 5 and cell 7
+    f_UTRAN_SS_CreateCellFACH(utran_Cell5);
+    f_UTRAN_SS_CreateCellFACH(utran_Cell7);
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    f_UTRAN_SendDefSysInfo(utran_Cell7);
+    
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA); //@sic R5s140450 sic@
+    // The UE's Allowed CSG list contains the CSG ID of Cell 5. This is realized by using manual CSG selection. @sic R5-172141 sic@
+    // Insert a USIM
+    f_UT_USIM_Insert(UT, "USIM with service n86 available");
+    // Empty UE Allowed CSG list in USIM
+    //Update MIB of cell 5 to set it to CSG cell
+    f_UTRAN_SysInfo_SetMIB_SetSIB5bisType (utran_Cell5, cds_MIB_Csg(cs_UTRAN_HPLMN_Def));  //@sic R5s150943 sic@
+    f_UTRAN_EmptyACSGL(utran_Cell5, {v_CSG_Identity_Cell5}); //@sic R5s150987 sic@
+    // Broadcast correct CSG id
+    f_UTRAN_SysInfo_SetSIB3_CSG_Identity(utran_Cell5, v_CSG_Identity_Cell5);
+    f_UTRAN_SysInfoModifySIB3(utran_Cell5, f_UTRAN_SysInfo_GetSIB3(utran_Cell5));
+      
+    // The UE's Allowed CSG list contains the CSG ID of Cell 5.
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationServingCell);  //@sic R5s140474 sic@
+    f_UT_SwitchOnUE(UT, false);
+    f_UT_ManualPLMN_CSG(UT ,v_PLMN, v_CSG_Identity_Cell5, "UTRAN"); //@sic R5s150982 change 2.5 sic@
+    f_UTRAN_IdleUpdated(utran_Cell5);
+    f_UTRAN_SwitchPower_Off(utran_Cell5, U1_IDLE, NotSpecified);
+    // Set cell 5 to Hybrid cell
+    f_UTRAN_SysInfo_SetMIB_SetSIB5bisType (utran_Cell5, cs_MIB_Def(cs_UTRAN_HPLMN_Def));  //@sic R5s150943 sic@
+    f_UTRAN_SysInfoModifyMIB(utran_Cell5);
+
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationCellOFF);
+    
+    //@sic R5s140374 sic@
+    // Coordination with LTE to start preamble in LTE
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);  //@sic R5s140450 sic@
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    f_UTRAN_InterRAT_InitialiseAuthParams();
+    // @siclog "Step 1" siclog@
+    // The SS changes Cell 5 and Cell 7 levels according to the row "T1" in table 6.4.3.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus64, v_PCCPCH_Minus66);
+    
+    // @siclog "Step 2" siclog@
+    // UE performs manual CSG ID selection and select Cell 5.
+    f_UT_ManualPLMN_CSG(UT,v_PLMN, v_CSG_Identity_Cell5, "UTRAN"); //@sic R5s150982 change 2.5 sic@
+    
+    // @siclog "Step 3-12" siclog@
+    // Steps 1 to 10 of the generic test procedure described in TS 36.508 subclause 6.4.2.8 are performed on Cell 5.
+    // NOTE: The UE performs a RAU procedure and the RRC connection is released.
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5);
+    
+    //@siclog "Step 12Aa1" siclog@
+    if (pc_IMS) { // @sic R5-182996 sic@
+      t_WaitForOptional_IMS_Dereg.start; // @sic R5-182996 sic@
+      alt { // @sic R5-182996 sic@
+        [] a_UTRAN_Optional_IMS_Reg (utran_Cell5, t_WaitForOptional_IMS_Dereg, false)
+          {
+            f_UTRAN_RRC_ConnRel (utran_Cell5, cell_Dch);
+          }
+        [] t_WaitForOptional_IMS_Dereg.timeout {}
+      }
+    }
+
+    // @siclog "Step 13" siclog@
+    // The SS changes Cell 1, Cell 2, Cell 5 and Cell 7 levels according to the row "T2" in table 6.4.3.3.2-1 and table 6.4.3.3.2-2.
+    f_UTRAN_SendAuthCoOrdParameters(EUTRA); //@sic R5s140450 sic@
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationCellOFF);
+    f_UTRAN_SetCellPower(utran_Cell7, tsc_AttenuationCellOFF);
+    //@sic R5s140374 sic@
+    
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    // @siclog "Step 22" siclog@
+    // The SS changes Cell 1, Cell 2 and Cell 7 levels according to the row "T3" in table 6.4.3.3.2-1 and table 6.4.3.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus64, v_PCCPCH_Minus66);
+    
+    f_UTRAN_InterRAT_InitialiseAuthParams();
+    // @siclog "Step 29" siclog@
+    // The SS changes Cell 2 and Cell 5 levels according to the row "T4" in table 6.4.3.3.2-1 and table 6.4.3.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    
+    // @siclog "Step 30-37" siclog@
+    // Check: Does the test result of steps 1 to 8 of generic test procedure in TS 36.508 subclause 6.4.2.8 indicate that the UE is camped on Cell 5 within 6 mins from "T4" to the time RRC CONNECTION REQUEST received by SS?
+    // NOTE: The UE performs a RAU procedure
+    t_WaitTimer.start;
+    alt {
+      [] U_TM.receive(car_RRC_ConnReq(utran_Cell5,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8(?))) -> value v_RLC_TR_DATA_IND //@sic R5s140374 sic@
+        {
+          t_WaitTimer.stop;
+          v_InitialUE_Id := v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity;
+          f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq(utran_Cell5, v_InitialUE_Id);
+          f_UTRAN_GMM_RAU(utran_Cell5);
+          f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Fach_Dcch);
+          f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.4.3 Step 30-37");
+        }
+      [] t_WaitTimer.timeout{
+        f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.4.3 Step 30-37");
+      }
+    }
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    // Test case body finished, so let the other PTCs know
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    // Removal of CSG ID from allowed CSG ID list @sic R5s150987 sic@
+    f_UTRAN_SwitchPower_Off(utran_Cell5, U1_IDLE, NotSpecified);
+    f_UTRAN_SetCellPower(utran_Cell7, tsc_AttenuationNonSuitableCell); //@sic R5s170089 sic@
+    
+    //Change cell5 to CSG cell  @sic R5s170089 sic@
+    f_UTRAN_SysInfo_SetMIB_SetSIB5bisType (utran_Cell5, cds_MIB_Csg(cs_UTRAN_HPLMN_Def));
+    f_UTRAN_SysInfoModifyMIB(utran_Cell5);
+          
+    f_UT_SwitchOnUE (UT, false);
+    f_UTRAN_RRC_ConnEst(utran_Cell5);
+    f_UTRAN_AttachRejectCSG (utran_Cell5);
+    f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Fach_Dcch);
+    
+    f_UTRAN_Postamble(utran_Cell5, U6_DEREGISTERED);
+    f_UTRAN_ReleaseCell(utran_Cell7, f_UTRAN_CellInfo_GetConfigType(utran_Cell7));
+    
+  } // end of f_TC_6_4_3_UTRAN
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.4.4
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_6_4_4_UTRAN() runs on UTRAN_IRAT_PTC
+  { // Inter-RAT cell reselection / From E-UTRA RRC_IDLE non-member hybrid cell to UTRA_Idle member hybrid cell
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var integer v_CPICH_Minus60;
+    var integer v_PCCPCH_Minus62;
+    var integer v_CPICH_Minus64;
+    var integer v_PCCPCH_Minus66;
+    var UtraServingCellPriorityValue_Type v_UtraPriorityValue := 3;
+    var EUTRA_MeasurementBandwidth v_EUTRA_MeasurementBandwidth := f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(f_ConvertDL_BandwidthPIXITToInteger());
+    var B28_Type v_CellIdentity := f_UTRAN_GetCellIndentity(utran_Cell5);
+    var CSG_Identity v_CSG_Identity_Cell5 :='000000000000000000000000010'B;
+    var CSG_Identity v_CSG_Identity_eutra_Cell2 :='000000000000000000000000011'B; //@sic R5s150988 sic@
+    var octetstring v_PLMN; //@sic R5s140745 sic@
+    var InitialUE_Identity v_InitialUE_Id;
+    var U_RLC_TM_IND v_RLC_TR_DATA_IND; //@sic R5-150124 sic@
+    
+    timer t_WaitForOptional_IMS_Dereg := 6.0;
+    timer t_WaitTimer := 360.0;
+    
+    v_CPICH_Minus60 := -60;
+    v_PCCPCH_Minus62 := -62;
+    v_CPICH_Minus64 := -64;
+    v_PCCPCH_Minus66 := -66;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    v_PLMN := f_U_Asn2Nas_PlmnId(f_UTRAN_CellInfo_GetPLMNIdentity(utran_Cell5));
+    
+    // Send the cell info to the EUTRA component
+    f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5);
+    // Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo(EUTRA);
+    
+    // Set SysInfo for Cell 5 and Cell 7
+    f_UTRAN_SysInfo_SetSIB3(utran_Cell5,
+                            cds_SIB3_Csg(v_CellIdentity, v_CSG_Identity_Cell5, cs_CSG_PSCSplitInfo(13, psc5)));
+    if (v_EUTRASysInfo.Eutra[0].Arfcn < tsc_EUTRA_MaxEARFCN) { //@sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                  v_EUTRA_MeasurementBandwidth)));
+    } else {
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+    }
+    
+    // Create and configure Cell 5 and cell 7
+    f_UTRAN_SS_CreateCellFACH(utran_Cell5);
+    f_UTRAN_SS_CreateCellFACH(utran_Cell7);
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    f_UTRAN_SendDefSysInfo(utran_Cell7);
+    
+    // Add the CSG ID of Cell 5 in USIM
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    
+    // The UE's Allowed CSG list contains the CSG ID of Cell 5. This is realized by using manual CSG selection. @sic R5-172141 sic@
+    // Insert a USIM
+    f_UT_USIM_Insert(UT, "USIM with service n86 available");
+    // Empty UE Allowed CSG list in USIM
+    //Update MIB of cell 5 to set it to CSG cell
+    f_UTRAN_SysInfo_SetMIB_SetSIB5bisType (utran_Cell5, cds_MIB_Csg(cs_UTRAN_HPLMN_Def));  //@sic R5s150943 sic@
+    f_UTRAN_EmptyACSGL(utran_Cell5, {v_CSG_Identity_Cell5, v_CSG_Identity_eutra_Cell2}); //@sic R5s150988 sic@
+    // @sic R5s140745 sic@
+    f_UTRAN_SysInfo_SetSIB3_CSG_Identity(utran_Cell5, v_CSG_Identity_Cell5);
+    f_UTRAN_SysInfoModifySIB3(utran_Cell5, f_UTRAN_SysInfo_GetSIB3(utran_Cell5));
+      
+    // The UE's Allowed CSG list contains the CSG ID of Cell 5.
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationServingCell);  //@sic R5s140745 sic@
+    f_UT_SwitchOnUE(UT, false);
+    f_UT_ManualPLMN_CSG(UT ,v_PLMN, v_CSG_Identity_Cell5, "UTRAN"); //@sic R5s150982 change 2.5 sic@
+    f_UTRAN_IdleUpdated(utran_Cell5);
+    f_UTRAN_SwitchPower_Off(utran_Cell5, U1_IDLE, NotSpecified);
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationCellOFF);
+    // Set cell 5 to Hybrid cell
+    f_UTRAN_SysInfo_SetMIB_SetSIB5bisType (utran_Cell5, cs_MIB_Def(cs_UTRAN_HPLMN_Def));  //@sic R5s150943 sic@
+    f_UTRAN_SysInfoModifyMIB(utran_Cell5);
+
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    f_UTRAN_InterRAT_InitialiseAuthParams();
+    // @siclog "Step 9" siclog@
+    // The SS changes Cell 1, Cell 5 and Cell 7 levels according to the row "T2" in table 6.4.4.3.2-1 and table 6.4.4.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus64, v_PCCPCH_Minus66);
+    
+    // @siclog "Step 10" siclog@
+    // UE performs manual CSG ID selection and select Cell 5.
+    f_UT_ManualPLMN_CSG(UT, v_PLMN, '000000000000000000000000010'B, "UTRAN");  //@sic R5s150982 change 2.5 sic@
+    
+    // @siclog "Step 11-20" siclog@
+    // Steps 1 to 10 of the generic test procedure described in TS 36.508 subclause 6.4.2.8 are performed on Cell 5.
+    // NOTE: The UE performs a RAU procedure and the RRC connection is released.
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5);
+    
+    //@siclog "Step 12Aa1" siclog@
+    if (pc_IMS) { // @sic R5-182996 sic@
+      t_WaitForOptional_IMS_Dereg.start; // @sic R5-182996 sic@
+      alt { // @sic R5-182996 sic@
+        [] a_UTRAN_Optional_IMS_Reg (utran_Cell5, t_WaitForOptional_IMS_Dereg, false)
+          {
+            f_UTRAN_RRC_ConnRel (utran_Cell5, cell_Dch);
+          }
+        [] t_WaitForOptional_IMS_Dereg.timeout {}
+      }
+    }
+
+    f_UTRAN_SendAuthCoOrdParameters(EUTRA);  //@sic R5s140745 sic@
+    // @siclog "Step 21" siclog@
+    // The SS changes Cell 1, Cell 2, Cell 5 and Cell 7 levels according to the row "T3" in table 6.4.4.3.2-1 and table 6.4.4.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationCellOFF);
+    f_UTRAN_SetCellPower(utran_Cell7, tsc_AttenuationCellOFF);
+    
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    // @siclog "Step 30" siclog@
+    // The SS changes Cell 1, Cell 2 and Cell 7 levels according to the row "T4" in table 6.4.4.3.2-1 and table 6.4.4.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus64, v_PCCPCH_Minus66);
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    f_UTRAN_InterRAT_InitialiseAuthParams();
+    // @siclog "Step 37" siclog@
+    // The SS changes Cell 1 and Cell 5 levels according to the row "T5" in table 6.4.4.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    
+    // @siclog "Step 38-45" siclog@
+    // Check: Does the test result of steps 1 to 8 of generic test procedure in TS 36.508 subclause 6.4.2.8 indicate that the UE is camped on Cell 5 within 6 mins from "T5" to the time RRC CONNECTION REQUEST received by SS?
+    // NOTE: The UE performs a RAU procedure
+    t_WaitTimer.start;
+    alt {
+      [] U_TM.receive(car_RRC_ConnReq(utran_Cell5,
+                                      tsc_RB0,
+                                      cr_108_RRC_ConnReq_r8)) -> value v_RLC_TR_DATA_IND  //@sic R5s140745 sic@
+        {
+          t_WaitTimer.stop;
+          v_InitialUE_Id := v_RLC_TR_DATA_IND.data.tM_message.uL_CCCH_Message.message_.rrcConnectionRequest.initialUE_Identity;
+          f_UTRAN_RRC_ConnEst_WithoutRRCConnectionReq(utran_Cell5, v_InitialUE_Id);
+          f_UTRAN_GMM_RAU(utran_Cell5);
+          f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Fach_Dcch);
+          f_UTRAN_PreliminaryPass(__FILE__, __LINE__, "Test Case 6.4.4 Step 30-37");          }
+      [] t_WaitTimer.timeout
+        {
+          f_UTRAN_SetVerdictFailOrInconc(__FILE__, __LINE__, "Test Case 6.4.4 Step 30-37"); //@sic R5s140745 sic@
+        }
+    }
+    
+    f_UTRAN_TestBody_Set(false);
+    
+    // Test case body finished, so let the other PTCs know
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    // Release the UTRA cells @sic R5s150988 sic@
+    f_UTRAN_SwitchPower_Off(utran_Cell5, U1_IDLE, NotSpecified);
+    f_UT_SwitchOnUE (UT, false);
+    f_UTRAN_RRC_ConnEst(utran_Cell5);
+    f_UTRAN_AttachRejectCSG (utran_Cell5);
+    f_UTRAN_RRC_ConnRel(utran_Cell5, cell_Fach_Dcch);
+    
+    f_UTRAN_Postamble(utran_Cell5, U6_DEREGISTERED );
+    f_UTRAN_ReleaseCell(utran_Cell7, f_UTRAN_CellInfo_GetConfigType(utran_Cell7));
+
+    
+  } // end of f_TC_6_4_4_UTRAN
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.4.5
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_6_4_5_UTRAN() runs on UTRAN_IRAT_PTC
+  { // Inter-RAT cell reselection / From UTRA_Idle to E-UTRA RRC_IDLE member hybrid cell
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var integer v_CPICH_Minus60;
+    var integer v_PCCPCH_Minus62;
+    var integer v_CPICH_Minus64;
+    var integer v_PCCPCH_Minus66;
+    var UtraServingCellPriorityValue_Type v_UtraPriorityValue := 5;
+    var EUTRA_MeasurementBandwidth v_EUTRA_MeasurementBandwidth := f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(f_ConvertDL_BandwidthPIXITToInteger());
+    
+    v_CPICH_Minus60 := -60;
+    v_PCCPCH_Minus62 := -62;
+    v_CPICH_Minus64 := -64;
+    v_PCCPCH_Minus66 := -66;
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    // Cell 5 and Cell 7 are UTRAN cells and have different routing areas.
+    //Set RAC of cell 7 to tsc_RAC_2 @sic R5s130858 R5s130922 sic@
+    f_UTRAN_CellInfo_SetRAC(utran_Cell7, tsc_RAC_2);
+    
+    // Send the cell info to the EUTRA component
+    f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5);
+    // Get Cell Parameters for EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo(EUTRA);
+    
+    // Set SysInfo for Cell 5 and Cell 7
+    if (v_EUTRASysInfo.Eutra[0].Arfcn < tsc_EUTRA_MaxEARFCN) { //@sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+    } else {
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell7,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+    }
+    // Create and configure Cell 5 and cell 7
+    f_UTRAN_SS_CreateCellFACH(utran_Cell5);
+    f_UTRAN_SS_CreateCellFACH(utran_Cell7);
+    // Start sending System Information
+    f_UTRAN_SendDefSysInfo(utran_Cell5);
+    f_UTRAN_SendDefSysInfo(utran_Cell7);
+    
+    // Preamble
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);  // Insert USIM and add CSG of cell 2 in USIM
+    f_UTRAN_Preamble(utran_Cell5, true); //@sic R5s160621 sic@
+    
+    f_UTRAN_TestBody_Set(true);
+    
+    // @siclog "Step 1" siclog@
+    // The SS changes Cell 1 and Cell 2 levels according to the row "T1" in table 6.4.5.3.2-1.
+    // @sic R5S130858 sic@
+    f_UTRAN_InterRAT_InitialiseAuthParams();
+    
+    // @siclog "Step 25" siclog@
+    // The SS changes Cell 1, Cell 2, Cell 5 and Cell 7 levels according to the row "T2" in table 6.4.5.3.2-1 and table 6.4.5.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, tsc_AttenuationCellOFF);
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    
+    f_UTRAN_PrepareCellRRC_ConnEst(utran_Cell7, utran_Cell5);  //@sic R5S130858 sic@
+    // @siclog "Step 26 - 35" siclog@
+    // Steps 1 to 10 of the procedure described in TS 36.508 subclause 6.4.2.8 is performed on Cell 7.
+    // NOTE: The UE performs a RAU procedure and the RRC connection is released.
+    f_UTRAN_IdleMode_RAU(utran_Cell7);
+    
+    // @siclog "Step 36" siclog@
+    // The SS changes Cell 1, Cell 5 and Cell 7 levels according to the row "T3" in table 6.4.5.3.2-1 and table 6.4.5.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell5, v_CPICH_Minus60, v_PCCPCH_Minus62);
+    f_UTRAN_SetCellPower(utran_Cell7, v_CPICH_Minus64, v_PCCPCH_Minus66);
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_Trigger);
+    
+    f_UTRAN_PrepareCellRRC_ConnEst(utran_Cell5, utran_Cell7); //@sic R5s130858 sic@
+    // @siclog "Step 37 - 46 siclog@
+    // Steps 1 to 10 of the procedure described in TS 36.508 subclause 6.4.2.8 is performed on Cell 5.
+    // NOTE: The UE performs a RAU procedure and the RRC connection is released.
+    f_UTRAN_508CheckCampOnNewUtranCell(utran_Cell5);
+    
+    // @siclog "Step 47" siclog@
+    // The SS changes Cell 2 and Cell 7 levels according to the row "T4" in table 6.4.5.3.2-1 and table 6.4.5.3.2-2.
+    f_UTRAN_SetCellPower(utran_Cell7, tsc_AttenuationCellOFF);
+    f_UTRAN_SendAuthCoOrdParameters(EUTRA);
+    
+    f_UTRAN_TestBody_Set(false);
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    
+    // Postamble
+    f_UTRAN_ReleaseCell(utran_Cell5, f_UTRAN_CellInfo_GetConfigType(utran_Cell5));
+    f_UTRAN_ReleaseCell(utran_Cell7, f_UTRAN_CellInfo_GetConfigType(utran_Cell7));
+  }
+
+  /*
+   * @desc      REFERENCE TS 36.523-1 clause 6.4.6
+   * @status    APPROVED (LTE_IRAT)
+   */
+  function f_TC_6_4_6_UTRAN() runs on UTRAN_IRAT_PTC
+  { // Inter-RAT cell reselection / From UTRA CELL_PCH to E-UTRA RRC_IDLE member hybrid cell
+    var IRAT_CoOrd_SysInfo_Type v_EUTRASysInfo;
+    var UtraServingCellPriorityValue_Type v_UtraPriorityValue := 5;
+    var EUTRA_MeasurementBandwidth v_EUTRA_MeasurementBandwidth := f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(f_ConvertDL_BandwidthPIXITToInteger());
+    
+    // Initialise all cells
+    f_UTRAN_Init(EUTRA_UTRAN);
+    
+    // Send System Information of UTRAN cell to EUTRA component
+    f_UTRAN_Send_IR_SysInfoToEUTRA(utran_Cell5);
+    
+    // Receive the system information of EUTRA cell
+    v_EUTRASysInfo := f_IRAT_WaitForCoOrd_SysInfo(EUTRA);
+    
+    // Set SysInfo
+    if (v_EUTRASysInfo.Eutra[0].Arfcn < tsc_EUTRA_MaxEARFCN) { //@sic R5-174500 sic@
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_UtraAndOneEutraEntry(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                                           cs_Eutra_FreqAndPriList_OneEntry_Def(v_EUTRASysInfo.Eutra[0].Arfcn,
+                                                                                                v_EUTRA_MeasurementBandwidth)));
+     } else {
+        f_UTRAN_SysInfo_SetSIB19(utran_Cell5,
+                             cs_SIB19_Common(cs_Utra_PriorityInfoList_Def(v_UtraPriorityValue),
+                                             omit, omit,
+                                             cs_SIB19_v920_FrequencyAndPriorityInfoExtension(
+                                                {cs_EUTRA_FrequencyAndPriorityInfoExtension_Def(v_EUTRASysInfo.Eutra[0].Arfcn, f_UTRAN_ConvertIntegerToEUTRA_MeasurementBandwidth(v_EUTRASysInfo.Eutra[0].DL_Bandwidth))}
+                                             )));
+    }
+    
+    //Create and configure Cell 5
+    // @sic R5-155980 sic@
+    //Cell started switched on with default power level, -60 and max attenuation
+    f_UTRAN_SS_CreateCellFACH (utran_Cell5);
+    //Start sending System Information
+    f_UTRAN_SendDefSysInfo (utran_Cell5);
+
+    // Wait for CSG list to be emptied in LTE side
+    // @sic R5-155980 sic@
+    f_IRAT_WaitForCoOrd_Trigger(EUTRA);
+    //Set power levels according to T0
+    // @sic R5-155980 sic@
+    f_UTRAN_SetCellPower(utran_Cell5, -60, -62);
+     
+    // @sic R5-155980 R5-168729 sic@
+    //The UE is switched on.
+    f_UT_SwitchOnUE (UT, false);
+    
+    // @sic R5-155980 sic@
+    //Perform registration procedure
+    f_UTRAN_GMMOnly_Attach (utran_Cell5, true); // @sic R5s160622 sic@
+    //Since Authentication parameters have been updated in the registration process, send them to EUTRA PTC
+
+    f_UTRAN_TestBody_Set(true); //@sic R5-168729 sic@
+
+    // @sic R5-155980 sic@
+    f_UTRAN_SendAuthCoOrdParameters(EUTRA);
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_OctetData(valueof(f_UTRAN_MobileInfo_EUTRACapability_Get()))); // @sic R5s160394 sic@
+
+    f_UTRAN_InterRAT_InitialiseAuthParams();// @sic R5-155980 sic@
+
+    //@siclog "Step 0G" siclog@
+    // @sic R5-155980 sic@
+    //Steps 1 to 8 of the Routing Area Update procedure described in TS 36.508 subclause 6.4.2.8 are performed on Cell 5.
+    f_UTRAN_RRC_ConnEst(utran_Cell5);
+    f_UTRAN_GMM_RAU_MappedContext(utran_Cell5);
+    f_UTRAN_RRC_ConnRel (utran_Cell5, cell_Fach_Dcch); //@sic R5s160067 sic@
+
+    //@siclog "Step 0H" siclog@
+    //The Procedure for bringing the UE to cell_PCH state defined in TS34.108 clause 7.4.2.7 takes place and the UE is moved to CELL-PCH state
+    f_UTRAN_UE_FACH_PS_Rb_Est(utran_Cell5, waitForIMS); //@sic R5s160067 R5-160746 sic@
+    f_UTRAN_TransitToCellPCH (utran_Cell5, 8); //@sic R5s160067 R5-160746 sic@
+   
+    f_IRAT_SendCoOrd(EUTRA, cms_IRAT_OctetData(valueof(f_UTRAN_MobileInfo_EUTRACapability_Get()))); // @sic R5s160394 sic@
+
+    f_UTRAN_TestBody_Set(false);
+    //Wait for confirmation that test case has ended
+    f_IRAT_WaitForCoOrd_Trigger (EUTRA);
+    
+    // Release the UTRA cells
+    f_UTRAN_ReleaseCell(utran_Cell5, f_UTRAN_CellInfo_GetConfigType(utran_Cell5));
+    
+  }// end of 6.4.6
+
+}

@@ -1,0 +1,752 @@
+/******************************************************************************/
+// @copyright   Copyright Notification
+//   No part may be reproduced except as authorized by written permission.
+//   The copyright and the foregoing restriction extend to reproduction in all media.
+//   (c) 2026, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).
+//   All rights reserved.
+// @version: 38.523-3 v18.6.0
+// $Date: 2025-09-26 10:48:35 +0200 (Fri, 26 Sep 2025) $
+// $Rev: 42082 $
+/******************************************************************************/
+
+module NR5GC_SysinfoPaging {
+
+  import from NR_RRC_ASN1_Definitions language "ASN.1:2002" all with {encode "UNALIGNED_PER_OctetAligned"};
+  import from Common4G5G_Templates all;
+  import from Common4G5G_Timing all;
+  import from CommonAspDefs all;
+  import from CommonDefs all;
+  import from NG_NAS_Common all;
+  import from NR5GC_CommonFunctions all;
+  import from NR5GC_RRC_Templates all;
+  import from NR_ASP_Templates_CommonPart all;
+  import from NR_ASP_TypeDefs all;
+  import from NR_CellCfg_Templates all;
+  import from NR_CellInfo all;
+  import from NR_CommonDefs all;
+  import from NR_Component_Base all;
+  import from NR_Component_NR5GC all;
+  import from NR_ConfigurationSteps all;
+  import from NR_DCI_Configuration all;
+  import from NR_NTN_Configuration all;
+  import from NR_Parameters all;
+  import from NR_RRC_Templates all;
+  import from NR_Timing all;
+
+  const float tsc_NR_DelayForCellSelection := 1.0;                          /* delay to allow the UE to perform cell selection e.g. before paging or change of power level
+                                                                               @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_NR_SfnDelay := 13;                                      /* tsc_NR_SfnDelay: Delay for calculation of the next paging frame.
+                                                                             * Value set to 10+3 to give a minimum of 100ms (Ref: 36-523-3 cl. 7.3) to allow SS to configure the PAGING
+                                                                             * and also to calculate for possible delay in SS & TTCN (30ms).
+                                                                             * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+
+  const integer tsc_NR_SfnDelayConnected := 256;                            /* tsc_SfnDelayConnected: Delay for calculation of the next paging frame when UE is in connected mode.
+                                                                             *       Value set to 256 to give a minimum of 2560ms (2*PagingCycle) to allow SS to configure the PAGING
+                                                                             *       and also to calculate for possible delay in SS & TTCN.
+                                                                             @status    APPROVED (NR5GC, NR5GC_IRAT) */
+
+  const B2_Type tsc_NR_DCI_OnlyShortMessageIndicator := '10'B;              /* Acc to 38.212 Table 7.3.1.2.1-1 10=Only short message is present in the DCI @status    APPROVED (NR5GC, NR5GC_IRAT) */
+
+  const B8_Type tsc_NR_ShortMessage_SystemInfoModification := '10000000'B;         /* Acc to 38.331 Table 6.5-1: Bit   1 systemInfoModification @sic R5s190390 sic@ @status    APPROVED (NR5GC, NR5GC_IRAT) */
+
+  template (value) NR_SYSTEM_CTRL_REQ cas_NR_CellConfig_Paging_REQ_Common(NR_CellId_Type                       p_NR_CellId,
+                                                                          template (value) SubFrameTiming_Type p_PagingOcassion,
+                                                                          template (value) PCCH_Message        p_PCCH_Message,
+                                                                          template (omit)  NR_SlotOffsetList_Type p_SlotOffsetList := omit) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    Common := {
+      CellId := p_NR_CellId,
+      RoutingInfo := { None := true },
+      RlcBearerRouting := crs_RlcBearerRouting_None,
+      MacBearerRouting := omit,
+      TimingInfo := {
+        SubFrame := p_PagingOcassion
+      },
+      ControlInfo := {
+        CnfFlag := false,
+        FollowOnFlag := false
+      }
+    },
+    Request := {
+      Paging := {
+        Paging := p_PCCH_Message,
+        SlotOffsetList := p_SlotOffsetList
+      }
+    }
+  };
+
+  template (value) NR_SYSTEM_CTRL_REQ cas_NR_CellConfig_Paging_REQ(NR_CellId_Type p_NR_CellId,
+                                                                   template (value) SubFrameTiming_Type p_PagingOcassion,
+                                                                   template (value) PagingRecordList    p_PagingRecordList,
+                                                                   template (omit) Paging_v1700_IEs p_Paging_v1700 := omit) :=
+  /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    cas_NR_CellConfig_Paging_REQ_Common(p_NR_CellId, p_PagingOcassion, cs_NR_RRC_Paging(p_PagingRecordList,p_Paging_v1700), omit);
+
+  template (value) NR_SYSTEM_CTRL_REQ cads_NR_ModifySysinfo_Def_REQ(NR_CellId_Type  p_NR_CellId,
+                                                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                                                    template (value) NR_BcchInfo_Type p_BcchInfo_Type,
+                                                                    template (omit) NR_BcchToPdschConfig_Type p_NR_BcchToPdschConfig)
+    modifies cas_NR_CellConfigAllOmit_REQ :=
+  { /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+    Common := cs_NR_ReqAspCommonPart_CellCfg(p_NR_CellId, p_TimingInfo, tsc_NoCnfReq),
+    Request := {
+      Cell := {
+        AddOrReconfigure := {
+          BcchConfig := {                                      /* Configuration of system information scheduling and content at the SS */
+            Pbch := omit, //keep as it is
+            Pdsch := p_NR_BcchToPdschConfig,
+            BcchInfo  := p_BcchInfo_Type
+          }
+        }
+      }
+    }
+  };
+
+  template (value) TimingInfo_Type cs_TimingInfo_SFNOnly(SystemFrameNumber_Type p_SFN) :=
+  { //TimingInfo template used for NR sysinfo modification
+    /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+    SubFrame := {
+      SFN := { Number := p_SFN },
+      Subframe := { Any := true },
+      HSFN := { Any := true },
+      Slot := { Any := true },
+      Symbol := { Any := true }
+    }
+  };
+
+  template (value) NR_SYSTEM_CTRL_REQ cads_NR_DciTriggerShortMessage_REQ(NR_CellId_Type  p_NR_CellId,
+                                                                        template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                                                        template (value) NR_DciWithShortMessageOnly_Type p_DciWithShortMessageOnly,
+                                                                        template (value) NR_AssignedBWPs_Type p_NR_AssignedBWPs_Type := cs_NR_AssignedBWPs_InitialBWP)
+    modifies cas_NR_CellConfigAllOmit_REQ :=
+  { /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+    Common := cs_NR_ReqAspCommonPart_CellCfg(p_NR_CellId, p_TimingInfo, tsc_NoCnfReq),
+    Request := {
+      DciTrigger := {
+        AssignedBWPs := p_NR_AssignedBWPs_Type,
+        SearchSpaceType := cssType2,
+        DciFormat := {
+          ShortMessage := p_DciWithShortMessageOnly
+        }
+      }
+    }
+  };
+
+  template (value) NR_DciWithShortMessageOnly_Type cs_DciWithShortMessage_Def(B2_Type p_ShortMessageIndicator,
+                                                                             B8_Type p_ShortMessages,
+                                                                             template (omit) NR_SlotOffsetList_Type p_SlotOffsetList := omit) :=
+  { /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+    ShortMessageIndicator := p_ShortMessageIndicator,
+    ShortMessages := p_ShortMessages,
+    SlotOffsetList := p_SlotOffsetList
+  };
+
+  template (value) NR_DciWithShortMessageOnly_Type cs_DciWithShortMessageOnly(template (omit) NR_SlotOffsetList_Type p_SlotOffsetList := omit,
+                                                                             B8_Type p_ShortMessages) :=
+   /* @status    APPROVED (NR5GC, NR5GC_IRAT) */
+   cs_DciWithShortMessage_Def(tsc_NR_DCI_OnlyShortMessageIndicator, p_ShortMessages, p_SlotOffsetList);
+
+  template (value) PCCH_Message cs_NR_RRC_Paging(template (omit) PagingRecordList p_PagingRecordList,
+                                                 template (omit) Paging_v1700_IEs p_Paging_v1700 := omit) :=
+  { // As per 38.508-1 Table 4.6.1-2B: Paging
+    /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    message_ := {
+      c1 := {
+        paging := {
+          pagingRecordList := p_PagingRecordList,
+          lateNonCriticalExtension := omit,
+          nonCriticalExtension := p_Paging_v1700
+        }
+      }
+    }
+  };
+
+  template (value) PagingUE_Identity cs_PagingUE_Identity_5G_S_TMSI(NG_5G_S_TMSI p_NG_5G_S_TMSI) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    ng_5G_S_TMSI := p_NG_5G_S_TMSI
+  };
+
+  template (value) PagingUE_Identity cs_PagingUE_Identity_FullI_RNTI(I_RNTI_Value p_I_RNTI_r15) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    fullI_RNTI := p_I_RNTI_r15
+  };
+
+  template (value) PagingRecord cs_PagingRecord (template (value) PagingUE_Identity p_PagingUE_Identity) :=
+  { /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    // As per 38.508-1 Table 4.6.1-2B: Paging
+    ue_Identity := p_PagingUE_Identity,
+    accessType := omit
+  };
+
+  template (value) PagingRecordList cs_PagingRecordList_OneRecord (template (value) PagingUE_Identity p_PagingUE_Identity) :=
+  {  /* @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS) */
+    cs_PagingRecord(p_PagingUE_Identity)
+  };
+
+  /*
+   * @desc      Wrapper function to page UE with default parameters - Acc to 38.523-3 cl 7.3.4.2
+   *            in RRC_IDLE page with GUTI and paging parameters of the cell when UE is in RRC_IDLE
+   *            in RRC_INACTIVE page with default RAN paging cycle and fullI_RNTI
+   * @param     p_NR_CellId
+   * @param     p_UE_State
+   * @param     p_MO_Index          (default value: 0)
+   * @param     p_Paging_v1700      (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_Paging_Def(NR_CellId_Type     p_NR_CellId,
+                           NR_RRC_STATE_Type  p_UE_State,
+                           integer p_MO_Index := 0,
+                           template (omit) Paging_v1700_IEs p_Paging_v1700 := omit) runs on NR5GC_PTC
+  { //@sic R5-253169: added p_Paging_v1700 sic@
+    var NG_NAS_GutiParameters_Type v_GutiParameters := f_NR5GC_CellInfo_GetGutiParameters(p_NR_CellId);
+    var NG_5G_S_TMSI v_NG_5G_S_TMSI := f_NR_Get5G_S_TMSI_FromGuti(v_GutiParameters);
+    var PCCH_Config v_PcchConfig := f_NR_GetSIB1_PcchConfig(p_NR_CellId);
+    var PagingCycle v_PagingCycle;
+    var template (value) PagingRecordList v_PagingRecordList;
+
+    select(p_UE_State){
+      case(RRC_IDLE){
+        v_PagingCycle := v_PcchConfig.defaultPagingCycle;
+        v_PagingRecordList := cs_PagingRecordList_OneRecord(cs_PagingUE_Identity_5G_S_TMSI(v_NG_5G_S_TMSI));
+      }
+      case(RRC_INACTIVE) { //@sic R5-191364 sic@
+        v_PagingCycle := tsc_NR_RAN_PagingCycle_Def;
+        v_PagingRecordList := cs_PagingRecordList_OneRecord(cs_PagingUE_Identity_FullI_RNTI(tsc_NR_I_RNTI_Value1));
+      }
+      case else {FatalError(__FILE__, __LINE__, "No paging in other states");}
+    }
+    f_NR_Paging(p_NR_CellId,
+                v_PagingRecordList,
+                v_PagingCycle,-, //@sic R5s240421 sic@
+                p_MO_Index,
+                p_Paging_v1700);
+   }
+
+  /*
+   * @desc      Convert GUTI parameters to NG_5G_S_TMSI acc tu 23.003 cl 2.10.1
+   * @param     p_GutiParameters
+   * @return    NG_5G_S_TMSI
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_Get5G_S_TMSI_FromGuti(NG_NAS_GutiParameters_Type p_GutiParameters) return NG_5G_S_TMSI
+  {
+    // Acc tu 23.003 cl 2.10.1 :
+    // For paging purposes, the mobile is paged with the 5G-S-TMSI.
+    // The 5G-S-TMSI shall be constructed from the AMF Set ID, the AMF Pointer and the 5G-TMSI.
+    var NG_5G_S_TMSI v_NG_5G_S_TMSI := p_GutiParameters.AMF_SetId & p_GutiParameters.AMF_Pointer & p_GutiParameters.NG_TMSI;
+    return v_NG_5G_S_TMSI;
+  }
+
+  /*
+   * @desc      Trigger SS to send paging request to UE
+   * @param     p_NR_CellId
+   * @param     p_PagingRecordList
+   * @param     p_PagingCycle
+   * @param     p_SlotOffsetPaging  (default value: omit)
+   * @param     p_Index             (default value: 0)
+   * @param     p_Paging_v1700      (default value: omit)
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function f_NR_Paging(NR_CellId_Type p_NR_CellId,
+                       template (value) PagingRecordList p_PagingRecordList,
+                       PagingCycle p_PagingCycle,
+                       template (omit) integer p_SlotOffsetPaging := omit,
+                       integer p_Index := 0,
+                       template (omit) Paging_v1700_IEs p_Paging_v1700 := omit) runs on NR5GC_PTC
+  { //@sic R5-231530: added p_SlotOffsetPaging sic@
+    var SubFrameTiming_Type  v_CurrentTiming;
+    var PCCH_Config v_PcchConfig := f_NR_GetSIB1_PcchConfig(p_NR_CellId);
+    var B32_Type v_NG_TMSI := f_NR5GC_CellInfo_GetNG_TMSI(p_NR_CellId);
+    var integer v_SlotsNumberPerSubframe := f_NR_CellInfo_GetSlotsNumberPerSubframe(p_NR_CellId);
+    var SubcarrierSpacing v_SCS := f_NR_CellInfo_GetSCS(p_NR_CellId);
+    var SubFrameTiming_Type v_PagingOccasion;
+    var integer v_SlotOffsetPaging := f_NR_GetSlotOffsetForPaging(p_NR_CellId);
+
+    if (isvalue(p_SlotOffsetPaging)) { v_SlotOffsetPaging := valueof(p_SlotOffsetPaging); }
+
+    f_Delay(tsc_NR_DelayForCellSelection);
+
+    //Get current SFN and subframe
+    v_CurrentTiming := f_NR_GetCurrentTiming(p_NR_CellId);
+
+    //Calculate next Paging Occasion
+    v_PagingOccasion := f_NR_Calculate_PF_PO(v_CurrentTiming,  //@sic R5s190291 sic@
+                                             p_PagingCycle,
+                                             v_PcchConfig,
+                                             v_NG_TMSI,
+                                             v_SlotsNumberPerSubframe,
+                                             v_SCS,
+                                             v_SlotOffsetPaging,-,-,//@sic R5s240421 sic@
+                                             p_Index);
+    SYS.send(cas_NR_CellConfig_Paging_REQ(p_NR_CellId, v_PagingOccasion, p_PagingRecordList, p_Paging_v1700));
+  }
+
+  /*
+   * @desc      Calculate the Paging occasion - Note: RRC_IDLE/INACTIVE states are handled
+   * @param     p_CurrentTiming
+   * @param     p_T
+   * @param     p_PCCH_Config
+   * @param     p_NG_TMSI
+   * @param     p_SlotsNumberPerSubframe
+   * @param     p_SCS
+   * @param     p_SlotOffset
+   * @param     p_UE_ID_Mod_Value   (default value: 1024)
+   * @param     p_EDRX_Value        (default value: omit)
+   * @param     p_Index             (default value: 0)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_NR_Calculate_PF_PO (SubFrameTiming_Type    p_CurrentTiming,
+                                 PagingCycle             p_T,
+                                 PCCH_Config             p_PCCH_Config,
+                                 B32_Type                p_NG_TMSI,
+                                 integer                 p_SlotsNumberPerSubframe,
+                                 SubcarrierSpacing       p_SCS,
+                                 integer                 p_SlotOffset,
+                                 integer                 p_UE_ID_Mod_Value := 1024,
+                                 template (omit) float   p_EDRX_Value := omit,
+                                 integer p_Index := 0) return SubFrameTiming_Type
+  {
+    //@sic R5s190291 change 1: change first parameter p_Sfn -> p_CurrentTiming (type SubFrameTiming_Type) R5s240061 R5s230896 sic@
+    var integer v_UE_ID := bit2int(p_NG_TMSI) mod p_UE_ID_Mod_Value;                         // 5G-S-TMSI mod 1024 or 4096
+    var integer v_PF_Offset := fl_NR_ConvertPF_Offset(p_PCCH_Config.nAndPagingFrameOffset);
+    var integer v_NextSfn := p_CurrentTiming.SFN.Number + tsc_NR_SfnDelay; //Absolute value - no mod 1024
+    var integer v_SfnPlusOffsetModT;
+    var integer v_FirstPagingFrame;
+    var integer v_T := fl_NR_ConvertPagingCycle(p_T);
+    var integer v_N;     // N: number of total paging frames in T @sic R5s190150 change 4 sic@
+    //var integer v_Ns := fl_NR_ConvertNs(p_PCCH_Config.ns);  //number of paging occasions for a PF => 1 / (2 if PEI)
+    //var v_I_s; //* Calculate i_s = floor (UE_ID/N) mod Ns
+    var SubFrameTiming_Type v_PagingOccasion;
+
+    var float v_Tmin;
+
+    if (isvalue(p_EDRX_Value)) {
+      v_Tmin := valueof(p_EDRX_Value);  //v_Tmin set in the call of the function - T = min{TeDRX,RAN, TeDRX,CN} - check with ispresent allows this line
+      v_T := float2int(v_Tmin * 100.00);
+    }
+
+    // p_Index = 0 fits with first monitoring occasion. TS 38.304, clause 7.1: The PDCCH monitoring occasions for paging which do not overlap with UL symbols ".." are sequentially numbered from zero starting from the first PDCCH monitoring occasion for paging in the PF.
+    v_N := fl_NR_GetN(p_PCCH_Config.nAndPagingFrameOffset, v_T);
+
+    //Calculate the first paging Frame
+    //SFN for the PF is determined by: (SFN + PF_offset) mod T = (T div N)*(UE_ID mod N)
+    //Absolute value - no mod 1024 @sic R5-211417 sic@
+    v_SfnPlusOffsetModT := (v_T / v_N) * (v_UE_ID mod v_N);
+    if ((v_NextSfn mod v_T) < v_SfnPlusOffsetModT) {
+      v_FirstPagingFrame := ((v_NextSfn - v_NextSfn mod v_T) + v_SfnPlusOffsetModT) - v_PF_Offset + p_Index;
+    } else {
+      v_FirstPagingFrame := (v_NextSfn - v_NextSfn mod v_T) + v_SfnPlusOffsetModT + v_T - v_PF_Offset + p_Index;
+    }
+
+    //PDCCH monitoring occasions according to paging-SearchSpace and firstPDCCH-MonitoringOccasionOfPO
+    //PDCCH monitoring occasions according to the default association: PDCCH monitoring occasions for paging are same as for RMSI as defined in Section 13 in TS 38.213
+    // Ns = 1, there is only one PO which starts in the PF.
+    // PEI -> Ns = 2, PO is either in the first half frame (i_s = 0) or the second half frame (i_s = 1) of the PF.
+    //v_I_s := (v_UE_ID mod v_N) mod v_Ns;
+    v_PagingOccasion.HSFN.Number := (p_CurrentTiming.HSFN.Number + (v_FirstPagingFrame)/1024 ) mod 1024;  //@sic R5-211417 sic@
+    v_PagingOccasion.SFN.Number := v_FirstPagingFrame mod 1024;                                           //@sic R5-211417 sic@
+    v_PagingOccasion.Subframe.Number := p_SlotOffset / p_SlotsNumberPerSubframe;
+    v_PagingOccasion.Symbol := valueof(cs_SymbolTimingInfo_FirstSlot); //@sic R5s221246 sic@
+    v_PagingOccasion := f_NR_SubFrameTiming_SetSlot(v_PagingOccasion,
+                                                    p_SlotOffset mod p_SlotsNumberPerSubframe,
+                                                    p_SCS);
+    return v_PagingOccasion;
+  }
+
+  /*
+   * @desc     Get N in integer
+   * @param     p_NAndPagingFrameOffset
+   * @param     p_T
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function fl_NR_GetN ( PCCH_Config.nAndPagingFrameOffset p_NAndPagingFrameOffset,
+                         integer p_T) return integer
+  {
+    var integer v_NthT := fl_NR_ConvertN(p_NAndPagingFrameOffset);
+    var integer v_N := p_T / v_NthT;
+    return v_N;
+  }
+
+  /*
+   * @desc     Convert paging cycle in integer
+   * @param     p_T
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_NR_ConvertPagingCycle(PagingCycle p_T) return integer
+  {
+    var integer v_T;
+    select (p_T) {
+      case(rf32)  { v_T := 32; }
+      case(rf64)  { v_T := 64; }
+      case(rf128) { v_T := 128; }
+      case(rf256) { v_T := 256; }
+    }
+    return v_T;
+  }
+
+  /*
+   * @desc     Convert N in integer
+   * @param     p_NAndPagingFrameOffset
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_NR_ConvertN(PCCH_Config.nAndPagingFrameOffset p_NAndPagingFrameOffset) return integer
+  {
+    var integer v_N;
+    select union (p_NAndPagingFrameOffset){
+      case(oneT)          { v_N := 1; }
+      case(halfT)         { v_N := 2; }
+      case(quarterT)      { v_N := 4; }
+      case(oneEighthT)    { v_N := 8; }
+      case(oneSixteenthT) { v_N := 16; }
+    }
+    return v_N;
+  }
+
+  /*
+   * @desc     Convert PF_Offset cycle in integer
+   * @param     p_NAndPagingFrameOffset
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+  function fl_NR_ConvertPF_Offset(PCCH_Config.nAndPagingFrameOffset p_NAndPagingFrameOffset) return integer
+  {
+    var integer v_PF_Offset;
+    select union (p_NAndPagingFrameOffset){
+      case(oneT)          { v_PF_Offset := 0; }
+      case(halfT)         { v_PF_Offset := p_NAndPagingFrameOffset.halfT; }
+      case(quarterT)      { v_PF_Offset := p_NAndPagingFrameOffset.quarterT; }
+      case(oneEighthT)    { v_PF_Offset := p_NAndPagingFrameOffset.oneEighthT; }
+      case(oneSixteenthT) { v_PF_Offset := p_NAndPagingFrameOffset.oneSixteenthT; }
+    }
+
+    return v_PF_Offset;
+  }
+
+  /*
+   * @desc  Send Short Message indication (depending on p_ShortMessageFlag)
+   *        Send the modified SYSINFO to SS at v_Timing
+   *        Return v_Timing time at which the modified sysinfo starts to be broadcasted
+   *        p_BroadcastAllSI = TRUE implies All SI are broadcasted even if their status is set to notBroadcasting
+   * @param     p_NR_CellId
+   * @param     p_ShortMessageFlag  (default value: true)
+   * @param     p_UE_State          (default value: RRC_IDLE)
+   * @param     p_BroadcastAllSI    (default value: false)
+   * @param     p_ShortMessages     (default value: tsc_NR_ShortMessage_SystemInfoModification)
+   * @param     p_EDRXValue_Index   (default value: 0)
+   * @return    SubFrameTiming_Type
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_ModifySysinfo( NR_CellId_Type p_NR_CellId,
+                               boolean p_ShortMessageFlag := true,
+                               NR_RRC_STATE_Type p_UE_State := RRC_IDLE,
+                               boolean p_BroadcastAllSI := false,
+                               B8_Type p_ShortMessages := tsc_NR_ShortMessage_SystemInfoModification,
+                               integer p_EDRXValue_Index := 0
+                              )
+    runs on NR5GC_PTC return SubFrameTiming_Type
+  {
+    //Note: in INACTIVE state UE may have a different DRX cycle - that is not needed so far
+    //@sic R5-235343: added p_ShortMessages sic@
+    var SubFrameTiming_Type     v_Timing;
+    var SubFrameTiming_Type     v_TimeOfShortMessage;
+    var SubFrameTiming_Type     v_TimeOfSysinfoModification;
+    var integer                 v_Timing_SFN;
+    var SubFrameTiming_Type     v_StartNextModPeriod;
+    var integer v_ModificationPeriodFrames := f_NR_CalculateModificationPeriod (p_NR_CellId);
+    var integer v_ProcessingDelay := tsc_NR_SfnDelay; //For IDLE and INACTIVE state
+    var SubcarrierSpacing v_SCS := f_NR_CellInfo_GetSCS(p_NR_CellId);
+    var template (omit) NR_BcchToPdschConfig_Type v_NR_BcchToPdschConfig := f_NR_InitialiseBcchToPdschConfig(p_NR_CellId,p_BroadcastAllSI); //@sic R5s200703 sic@
+    var integer v_StartNextModPeriod_SFN;
+
+    var integer v_H_UE_ID; //@sic R5s250068 sic@
+    var NG_5G_S_TMSI v_NG_5G_S_TMSI;
+    var NG_NAS_GutiParameters_Type v_GutiParameters := f_NR5GC_CellInfo_GetGutiParameters(p_NR_CellId);
+    var integer v_HSFN_Gap := 0;
+    var float v_HSFN_Gap_delay;
+
+    v_NG_5G_S_TMSI := f_NR_Get5G_S_TMSI_FromGuti(v_GutiParameters); // Extract the bits b31, b30..., b0 of 5G-S-TMSI
+    v_H_UE_ID := bit2int(substr((fx_CalculateFCS32(substr(v_NG_5G_S_TMSI,16,32))),0, 13)); // UE_ID_H: 13 most significant bits of the Hashed ID.
+
+    //When UE is in connected mode, short message will be sent during a complete modification period
+    //Add a longer processing delay to current SFN
+    if (p_UE_State == RRC_CONNECTED and not(pc_ETWS_NR or pc_CMAS_NR)) {v_ProcessingDelay := tsc_NR_SfnDelayConnected}
+
+    //Get the current SFN and subframe
+    v_Timing := f_NR_GetCurrentTiming(p_NR_CellId);
+
+    // HSFN calculation calculated as per TS38.304 "7.4 Paging in extended DRX"
+    if(p_EDRXValue_Index > 2) //@sic R5s250068 sic@
+    {
+        if (v_Timing.HSFN.Number mod p_EDRXValue_Index != v_H_UE_ID mod p_EDRXValue_Index)
+        {
+            // Find the HSFN Gap to reach the HSFN which matches the condition
+            v_HSFN_Gap := (v_H_UE_ID mod p_EDRXValue_Index) - (v_Timing.HSFN.Number mod p_EDRXValue_Index);
+
+            if(v_HSFN_Gap < 0)
+            {
+                v_HSFN_Gap := v_HSFN_Gap + p_EDRXValue_Index;
+            }
+            v_HSFN_Gap_delay := (int2float(v_HSFN_Gap) * 10.24) - (int2float(v_Timing.SFN.Number + 1) * 0.01);
+
+            f_Delay(v_HSFN_Gap_delay);
+
+            // Re-fetch the current timing to apply for short Message Transmission
+            v_Timing := f_NR_GetCurrentTiming(p_NR_CellId);
+        }
+    }
+
+    //Add processing delay to current SFN
+    v_Timing_SFN := v_Timing.SFN.Number + v_ProcessingDelay;
+    // Calculate the SFN of the next Modification Period
+    //@sic R5-211417 R5s210404 sic@
+    v_StartNextModPeriod_SFN := v_Timing_SFN + (v_ModificationPeriodFrames -(v_Timing_SFN mod v_ModificationPeriodFrames));
+    v_StartNextModPeriod.HSFN.Number := (v_Timing.HSFN.Number + (v_StartNextModPeriod_SFN/1024) ) mod 1024;
+    v_StartNextModPeriod.SFN.Number :=  v_StartNextModPeriod_SFN mod 1024;
+    //Set Subframe and slot to 0, i.e. start of the modification period
+    v_StartNextModPeriod.Subframe.Number := 0;
+    v_StartNextModPeriod.Symbol := valueof(cs_SymbolTimingInfo_FirstSlot);  //@sic R5s221246 sic@
+    v_StartNextModPeriod := f_NR_SubFrameTiming_SetSlot(v_StartNextModPeriod, 0, v_SCS);
+
+    if (not p_ShortMessageFlag) { //Short Msg Indication not to be sent
+      v_TimeOfSysinfoModification := v_StartNextModPeriod;
+    } else {
+      //@sic R5-211417 sic@
+      v_TimeOfShortMessage := v_StartNextModPeriod;
+      v_StartNextModPeriod.HSFN.Number := (v_StartNextModPeriod.HSFN.Number + (v_StartNextModPeriod.SFN.Number + v_ModificationPeriodFrames)/1024) mod 1024;
+      v_StartNextModPeriod.SFN.Number := (v_StartNextModPeriod.SFN.Number + v_ModificationPeriodFrames) mod 1024;
+      v_TimeOfSysinfoModification := v_StartNextModPeriod;
+      f_NR_ShortMessageIndication(p_NR_CellId, v_TimeOfShortMessage, p_UE_State, p_ShortMessages);
+    }
+    f_NR_SS_ConfigureSysinfo (p_NR_CellId, cs_TimingInfo_SFNOnly(v_TimeOfSysinfoModification.SFN.Number), v_NR_BcchToPdschConfig, p_BroadcastAllSI); //@sic R5s220880 sic@
+
+    //Wait for the Short Message to be broadcasted  @sic R5s210404 sic@
+    if (p_ShortMessageFlag){
+       // wait until the short message is to be sent
+       f_Delay(int2float(f_SubFrameTiming_Duration(v_Timing, v_TimeOfShortMessage) - 100 )/ 1000.0);
+    }
+
+    return v_TimeOfSysinfoModification;
+  }
+
+  /*
+   * @desc      Calculate the BCCH modification period length in radio frames as per 38.331 cl 6.3.2
+   * @param     p_NR_CellId
+   * @return    integer
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_CalculateModificationPeriod(NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC return integer
+  {
+    var integer v_ModificationPeriodFrames;
+    var BCCH_Config.modificationPeriodCoeff  v_ModificationPeriodCoeff := f_NR_GetSIB1_ModificationPeriodCoeff (p_NR_CellId);
+    var integer v_ModificationPeriodCoeff_Integer := fl_NR_ConvertModificationPeriodCoeff(v_ModificationPeriodCoeff);
+    var PagingCycle v_PagingCycle := f_NR_GetSIB1_PagingCycle(p_NR_CellId);
+    var integer v_PagingCycle_Integer := fl_NR_ConvertPagingCycle(v_PagingCycle);
+
+    // As per 38.331: Actual modification period, expressed in number of radio frames= modificationPeriodCoeff * defaultPagingCycle. n2 corresponds to value 2, n4 corresponds to value 4, and so on.
+    v_ModificationPeriodFrames := v_ModificationPeriodCoeff_Integer * v_PagingCycle_Integer;
+
+    return v_ModificationPeriodFrames;
+  }
+
+  /*
+   * @desc      Convert ModifcationPeriodCoeff type from ASN.1 type BCCH_Config.modificationPeriodCoeff to integer
+   * @param     p_ModificationPeriodCoeff
+   * @return    integer
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function fl_NR_ConvertModificationPeriodCoeff (BCCH_Config.modificationPeriodCoeff p_ModificationPeriodCoeff) return integer
+  {
+    var integer v_ModificationPeriodCoeff_Integer;
+    select (p_ModificationPeriodCoeff){
+      case(n2) { v_ModificationPeriodCoeff_Integer := 2; }
+      case(n4) { v_ModificationPeriodCoeff_Integer := 4; }
+      case(n8) { v_ModificationPeriodCoeff_Integer := 8; }
+      case(n16) { v_ModificationPeriodCoeff_Integer := 16; }
+      //No other values possible in the type - no case else needed
+    }
+    return v_ModificationPeriodCoeff_Integer;
+  }
+
+  /*
+   * @desc      Modify sysinfo without activation time or with a specific activationTime
+   *            No Short message indication
+   *            To be used when the cell is switched off or when sysinfo shall be modified immediately (e.g. ETWS) and without short message indication
+   *            p_ResetAllValueTag = TRUE implies no ValueTag needs to be incremented
+   *            p_ResetAllValueTag = FALSE implies ValueTag to be incremented as stored in the record
+   *            p_BroadcastAllSI = TRUE implies all SI are broadcasted even if the SI status is set to notBroadcasted - to be set to TRUE in specific test cases testing broadacastStatus
+   * @param     p_NR_CellId
+   * @param     p_TimingInfo        (default value: cs_TimingInfo_Now)
+   * @param     p_NR_BcchToPdschConfig
+   * @param     p_BroadcastAllSI    (default value: false)
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_SS_ConfigureSysinfo(NR_CellId_Type p_NR_CellId,
+                                    template (value) TimingInfo_Type p_TimingInfo := cs_TimingInfo_Now,
+                                    template (omit) NR_BcchToPdschConfig_Type p_NR_BcchToPdschConfig,
+                                    boolean p_BroadcastAllSI := false
+                                    ) runs on NR_BASE_PTC
+  { //@sic R5s220880 : added p_BroadcastAllSI sic@
+    var NR_CellSysInfo_Type v_CellSysInfo := f_NR_CellInfo_GetSysinfo(p_NR_CellId);
+    var SI_SchedulingInfo v_SI_SchedulingInfo;
+    var template (omit) SI_SchedulingInfo_v1700 v_SI_SchedulingInfo_v1700 :=omit;  //@sic R5s250193 change 4 sic@
+    var NR_SI_List_Type v_SIs := {}; //@sic R5s221131 sic@
+    var integer i := 0;
+    var integer j := 0;
+    var integer k := 0;
+
+    if (not(p_BroadcastAllSI) and v_CellSysInfo.NR_SysinfoCombination != MibOnly and v_CellSysInfo.NR_SysinfoCombination != NR_1 ) {  //@sic R5s220880 sic@
+        v_SI_SchedulingInfo := f_NR_GetSIB1_SiSchedulingInfo(p_NR_CellId);
+        v_SI_SchedulingInfo_v1700 := f_NR_GetSIB1_SiSchedulingInfo_v1700(p_NR_CellId);
+        for (i := 0; i < lengthof(v_SI_SchedulingInfo.schedulingInfoList); i:=i+1) {
+            if ( v_SI_SchedulingInfo.schedulingInfoList[i].si_BroadcastStatus == broadcasting and (ispresent(v_CellSysInfo.BcchInfo.SIs[i]))) { //@sic R5s221131 sic@
+                v_SIs[j] := v_CellSysInfo.BcchInfo.SIs[i];
+                j := j+1;
+            }
+        }
+        if (isvalue(v_SI_SchedulingInfo_v1700)) {
+          for (k := 0 ; k < lengthof(v_SI_SchedulingInfo_v1700.schedulingInfoList2_r17); k:=k+1) {
+            if ( valueof(v_SI_SchedulingInfo_v1700.schedulingInfoList2_r17[k].si_BroadcastStatus_r17) == broadcasting and (ispresent(v_CellSysInfo.BcchInfo.SIs[i]))) { //@sic R5s221131 sic@
+                v_SIs[j] := v_CellSysInfo.BcchInfo.SIs[i];
+                j := j+1;
+                i := i+1;
+            }
+          }
+        }
+        v_CellSysInfo.BcchInfo.SIs := v_SIs;
+    }
+    f_NR_SS_CommonCellConfig(p_NR_CellId,
+                             cads_NR_ModifySysinfo_Def_REQ(p_NR_CellId,
+                                                           p_TimingInfo,
+                                                           v_CellSysInfo.BcchInfo,   /* system information to be scheduled */
+                                                           p_NR_BcchToPdschConfig)); /* scheduling of SIs */
+  }
+
+  /*
+   * @desc     Increment valueTag of the SIB of type p_NR_SIB_TypeInfo
+   * @param     p_NR_CellId
+   * @param     p_NR_SIB_TypeInfo
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_IncrementValueTag(NR_CellId_Type  p_NR_CellId,
+                                  NR_SIB_TypeInfo_Type p_NR_SIB_TypeInfo) runs on NR_BASE_PTC
+  {
+    var SI_SchedulingInfo v_SI_SchedulingInfo := f_NR_GetSIB1_SiSchedulingInfo(p_NR_CellId);
+    var integer i;
+    var integer j;
+
+    for (i:=0; i< lengthof (v_SI_SchedulingInfo.schedulingInfoList); i:=i+1){
+      for (j:=0; j< lengthof(v_SI_SchedulingInfo.schedulingInfoList[i].sib_MappingInfo ); j:=j+1) {
+        if (v_SI_SchedulingInfo.schedulingInfoList[i].sib_MappingInfo[j].type_ == p_NR_SIB_TypeInfo) {
+          v_SI_SchedulingInfo.schedulingInfoList[i].sib_MappingInfo[j].valueTag := (v_SI_SchedulingInfo.schedulingInfoList[i].sib_MappingInfo[j].valueTag + 1)mod 32;
+        }
+      }
+    }
+    f_NR_CellInfo_SetSIB1_SiSchedulingInfo(p_NR_CellId, v_SI_SchedulingInfo);
+  }
+
+  /*
+   * @desc      Trigger SS to send Short Message indication with selection of ShortMessage type acc. to TS 38.331 Table 6.5-1
+   * @param     p_NR_CellId
+   * @param     p_TimeOfShortMessage
+   * @param     p_UE_State          (default value: RRC_IDLE)
+   * @param     p_ShortMessages     (default value: tsc_NR_ShortMessage_SystemInfoModification)
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_ShortMessageIndication(NR_CellId_Type  p_NR_CellId,
+                                       SubFrameTiming_Type  p_TimeOfShortMessage,
+                                       NR_RRC_STATE_Type p_UE_State := RRC_IDLE,
+                                       B8_Type p_ShortMessages := tsc_NR_ShortMessage_SystemInfoModification) runs on NR5GC_PTC
+  {
+    var template (value) NR_AssignedBWPs_Type v_AssignedBWPs;
+    var template (omit) NR_SlotOffsetList_Type v_NR_SlotOffsetList := omit;
+    var PCCH_Config v_PcchConfig := f_NR_GetSIB1_PcchConfig(p_NR_CellId);
+    var B32_Type v_NG_TMSI := f_NR5GC_CellInfo_GetNG_TMSI(p_NR_CellId);
+    var integer v_SlotsNumberPerSubframe := f_NR_CellInfo_GetSlotsNumberPerSubframe(p_NR_CellId);
+    var SubcarrierSpacing v_SCS := f_NR_CellInfo_GetSCS(p_NR_CellId);
+    var SubFrameTiming_Type v_PagingOccasion;
+    var BCCH_Config.modificationPeriodCoeff  v_ModificationPeriodCoeff := f_NR_GetSIB1_ModificationPeriodCoeff (p_NR_CellId);
+    var integer v_ModificationPeriodCoeff_Integer := fl_NR_ConvertModificationPeriodCoeff(v_ModificationPeriodCoeff);
+    var PagingCycle v_PagingCycle := f_NR_GetSIB1_PagingCycle(p_NR_CellId);
+    var integer v_PagingCycle_Integer := fl_NR_ConvertPagingCycle(v_PagingCycle);
+    var integer i;
+    var integer v_NumberOfShortMsg;
+    var integer v_SSB_Index := f_NR_CellInfo_GetSSB_Index(p_NR_CellId);
+    var integer v_SlotOffsetPaging := f_NR_GetSlotOffsetForPaging(p_NR_CellId);
+
+    select(p_UE_State) {
+      case(RRC_IDLE, RRC_INACTIVE){
+        v_AssignedBWPs := cs_NR_AssignedBWPs_InitialBWP;
+        // Calculate next Paging Occasion
+        v_PagingOccasion := f_NR_Calculate_PF_PO(p_TimeOfShortMessage, //@sic R5s190291 sic@
+                                                 v_PagingCycle,
+                                                 v_PcchConfig,
+                                                 v_NG_TMSI,
+                                                 v_SlotsNumberPerSubframe,
+                                                 v_SCS,
+                                                 v_SlotOffsetPaging);
+        // Calculate the subframe offset list - Page UE in each pagingCycle
+        for (i := 0; i < v_ModificationPeriodCoeff_Integer; i := i + 1) {
+          v_NR_SlotOffsetList[i] := i * v_PagingCycle_Integer * 10 * v_SlotsNumberPerSubframe;
+        }
+      }
+      case(RRC_CONNECTED) {
+        v_PagingOccasion := p_TimeOfShortMessage;
+        v_AssignedBWPs := cs_NR_AssignedBWPs_InitialBWP; // PagingSearchSpace being set to 0 in 38.508-1
+        // When UE iWhen UE is in RRC_CONNECTED, Short Message indications are transmitted in every paging occasions of each even frame throughout the modification period.
+        //@sic R5-198993 R5s210145 sic@
+        v_NumberOfShortMsg := v_PagingCycle_Integer * v_ModificationPeriodCoeff_Integer;  // 2 Short messages in every 2 SFN in the modification period acc to 38.523-3 cl 7.3.3.3
+        for (i := 0; i<v_NumberOfShortMsg; i:=i+2) { //@sic R5s200545 sic@
+          v_NR_SlotOffsetList[i] := i*10* v_SlotsNumberPerSubframe + v_SSB_Index;
+          v_NR_SlotOffsetList[i+1] := i*10* v_SlotsNumberPerSubframe + v_SSB_Index + 1;
+        }
+      }
+      case else{ FatalError(__FILE__, __LINE__, "Unknown NR RRC state");}
+    }
+    f_NR_SS_CommonCellConfig(p_NR_CellId,
+                             cads_NR_DciTriggerShortMessage_REQ(p_NR_CellId,
+                                                                cs_TimingInfo_NR(v_PagingOccasion),
+                                                                cs_DciWithShortMessageOnly(v_NR_SlotOffsetList, p_ShortMessages),
+                                                                v_AssignedBWPs ));
+  }
+
+  /*
+   * @desc      To get the slot used for paging Acc to 38.523-3 cl 7.3.4
+   * @param     p_NR_CellId
+   * @return    integer
+   * @status    APPROVED (IMS, NR5GC, NR5GC_IRAT, POS)
+   */
+   function f_NR_GetSlotOffsetForPaging (NR_CellId_Type p_NR_CellId) runs on NR_BASE_PTC return integer
+   {
+     var integer v_SSB_Index := f_NR_CellInfo_GetSSB_Index(p_NR_CellId);
+     var integer v_SlotOffsetPaging;
+
+     select (v_SSB_Index) { // set the SlotOffset acc. to 38.523-3 cl 7.3.4 //@sic R5-201150 sic@
+        case(tsc_NR_SSB_Index1) {v_SlotOffsetPaging:= 2;}
+        case(tsc_NR_SSB_Index0) {v_SlotOffsetPaging:= 1;} //@sic R5s200512 R5-202677 sic@
+        case else {FatalError(__FILE__, __LINE__, "SSB Index value not handled");}
+     }
+     return v_SlotOffsetPaging
+   }
+
+  /*
+   * @desc      To wait a parameterized number of BCCH modification period
+   * @param     p_NR_CellId
+   * @param     p_NumberOfModificationPeriod (default value: 2.1)
+   * @status    APPROVED (NR5GC, NR5GC_IRAT)
+   */
+  function f_NR_WaitModificationPeriods( NR_CellId_Type p_NR_CellId,
+                                         float p_NumberOfModificationPeriod := 2.1
+                                       ) runs on NR_BASE_PTC
+  { //@sic R5s200145 sic@
+    var integer v_ModificationPeriodFrames:= f_NR_CalculateModificationPeriod (p_NR_CellId);
+    var float v_ModificationPeriod_s := int2float( v_ModificationPeriodFrames)/100.0; //Modification period in seconds;
+    var float v_UE_RTT := int2float(f_NR_CellInfo_GetNTN_UE_gNB_RTT(p_NR_CellId)); //@sic R5-242757 sic@
+    f_Delay(p_NumberOfModificationPeriod * v_ModificationPeriod_s + v_UE_RTT);
+  }
+
+}

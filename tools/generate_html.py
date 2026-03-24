@@ -1,708 +1,2383 @@
 """
-generate_html.py - tc.db → index.html 교육용 시뮬레이터 생성기
+generate_html.py - tc.db → index.html Stitch-style static shell generator
 
-DB에서 TC 데이터를 읽어 인터랙티브 HTML 페이지를 생성합니다.
+정적 생성 파이프라인은 유지하되, 실제 데이터 로드는 브라우저에서 tc.db를 직접 읽는다.
+우선 fetch('./tc.db')를 시도하고, 실패하면 파일 업로드 fallback으로 동작한다.
 """
-import sqlite3
-import os
+from __future__ import annotations
+
 import json
-import re
+import os
+import sqlite3
+from datetime import datetime, timezone
 
-BASE = os.path.join(os.path.dirname(__file__), '..')
-DB_PATH = os.path.join(BASE, 'tc.db')
-OUT_PATH = os.path.join(BASE, 'index.html')
+BASE = os.path.join(os.path.dirname(__file__), "..")
+DB_PATH = os.path.join(BASE, "tc.db")
+OUT_PATH = os.path.join(BASE, "index.html")
 
-# 세대별 색상
+TABLE_ORDER = [
+    "tcs",
+    "tc_steps",
+    "tc_ies",
+    "ies",
+    "ie_fields",
+    "bands",
+    "band_combos",
+    "tc_bands",
+    "specs",
+]
+
+TABLE_DESCRIPTIONS = {
+    "tcs": "TC 마스터. 스펙/세대/카테고리/인증 메타데이터의 원본 테이블.",
+    "tc_steps": "각 TC의 메시지 시퀀스. 중앙 Call Flow와 DB Source 패널의 핵심 입력.",
+    "tc_ies": "TC ↔ IE 연결 테이블. 현재 0건이어도 Inspector에서 schema/empty-state를 노출.",
+    "ies": "ASN.1 기반 IE 글로벌 라이브러리. 메시지와 1:1 완전 매핑을 가정하지 않는다.",
+    "ie_fields": "IE 필드 트리. 선택된 IE 구조와 테이블 브라우저에서 확인 가능.",
+    "bands": "밴드 메타데이터. 현재 비어 있어도 row count와 schema를 보여준다.",
+    "band_combos": "CA / EN-DC / NR-DC 조합 테이블. 현재 비어 있어도 숨기지 않는다.",
+    "tc_bands": "TC ↔ band combo 연결 테이블. 현재 비어 있어도 empty-state를 제공.",
+    "specs": "스펙 메타데이터. TS 번호, 제목, 로컬 디렉터리, 다운로드 상태를 포함.",
+}
+
 GEN_COLORS = {
-    '2G':         '#6b7280',
-    '3G':         '#7c3aed',
-    '4G':         '#2563eb',
-    '5G':         '#059669',
-    '5G-NSA':     '#0891b2',
-    'NTN':        '#dc2626',
-    'USIM':       '#d97706',
-    'IMS-LTE':    '#e11d48',   # VoLTE (LTE 기반 IMS)
-    'IMS-NR':     '#c026d3',   # VoNR (NR 기반 IMS)
-    'IMS-IRAT':   '#9333ea',   # IMS IRAT
-    'IMS-WLAN':   '#0ea5e9',   # IMS over WLAN
-    'MCPTT':      '#b45309',   # 공공안전 PTT
-    'Positioning':'#16a34a',   # GPS/LTE Positioning
+    "2G": "#64748b",
+    "3G": "#8b5cf6",
+    "4G": "#3b82f6",
+    "5G": "#00e5ff",
+    "5G-NSA": "#06b6d4",
+    "NTN": "#ef4444",
+    "USIM": "#f59e0b",
+    "Unknown": "#475569",
 }
 
-# 카테고리 한국어
-CAT_KO = {
-    'RRC':        'RRC',
-    'NAS':        'NAS',
-    'Security':   '보안/인증',
-    'MAC':        'MAC',
-    'RLC':        'RLC',
-    'PDCP':       'PDCP',
-    'SDAP':       'SDAP',
-    'L2':         'L2 (MAC/RLC/PDCP)',
-    'IdleMode':   '아이들 모드',
-    'IMS':        'IMS/음성',
-    'Service':    '서비스',
-    'CA':         'CA/밴드',
-    'Barring':    '접속 제어',
-    'UAC':        'UAC',
-    'NTN':        'NTN (위성)',
-    'SupService': '보충서비스',
-    'Emergency':  '긴급통화',
-    'eCall':      'eCall',
-    'eDRX':       'eDRX',
-    'UECap':      'UE 능력',
-    'IMS':        'IMS/VoLTE/VoNR',
-    'MCPTT':      'MCPTT (공공안전)',
-    'Positioning':'Positioning (측위)',
-    'Other':      '기타',
-    'Unknown':    '미분류',
+CATEGORY_LABELS = {
+    "RRC": "RRC",
+    "NAS": "NAS",
+    "Security": "Security",
+    "MAC": "MAC",
+    "RLC": "RLC",
+    "PDCP": "PDCP",
+    "SDAP": "SDAP",
+    "L2": "L2",
+    "IdleMode": "Idle Mode",
+    "IMS": "IMS / Voice",
+    "Service": "Service",
+    "CA": "CA / Band",
+    "Barring": "Barring",
+    "UAC": "UAC",
+    "NTN": "NTN",
+    "SupService": "Supplementary Service",
+    "Emergency": "Emergency",
+    "eCall": "eCall",
+    "eDRX": "eDRX",
+    "UECap": "UE Capability",
+    "MCPTT": "MCPTT",
+    "Positioning": "Positioning",
+    "Other": "Other",
+    "Unknown": "Unknown",
 }
 
 
-def load_tcs(conn):
+def load_summary(conn: sqlite3.Connection) -> dict[str, object]:
     cur = conn.cursor()
-    cur.execute("""
-        SELECT id, short_name, generation, category, conf_spec, core_specs,
-               is_error_case, ie_status, usim_interface, auth_algo, raw_ttcn3_id
-        FROM tcs
-        ORDER BY generation, category, id
-    """)
-    cols = [d[0] for d in cur.description]
-    rows = cur.fetchall()
-    return [dict(zip(cols, r)) for r in rows]
+    counts = {
+        table: cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in TABLE_ORDER
+    }
+    generated_at = datetime.fromtimestamp(os.path.getmtime(DB_PATH), tz=timezone.utc).isoformat()
+    return {
+        "generatedAt": generated_at,
+        "tableCounts": counts,
+    }
 
 
-def load_steps(conn):
-    """tc_steps 테이블 → tc_id별 딕셔너리 {tc_id: [steps]}"""
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT tc_id, step_no, from_entity, to_entity, message, direction, layer,
-               timer_start, timer_stop, note
-        FROM tc_steps
-        ORDER BY tc_id, step_no
-    """)
-    steps = {}
-    for row in cur.fetchall():
-        tc_id = row[0]
-        step = {
-            'no': row[1],
-            'from': row[2],
-            'to': row[3],
-            'msg': row[4],
-            'dir': row[5],
-            'layer': row[6],
-            'timerStart': row[7],
-            'timerStop': row[8],
-            'note': row[9],
-        }
-        steps.setdefault(tc_id, []).append(step)
-    return steps
-
-
-def build_html(tcs, steps=None):
-    # 세대/카테고리 집계
-    gen_counts = {}
-    cat_counts = {}
-    error_count = sum(1 for t in tcs if t['is_error_case'])
-
-    for t in tcs:
-        g = t['generation'] or 'Unknown'
-        c = t['category'] or 'Unknown'
-        gen_counts[g] = gen_counts.get(g, 0) + 1
-        cat_counts[c] = cat_counts.get(c, 0) + 1
-
-    if steps is None:
-        steps = {}
-
-    # TC 데이터 JSON (검색/필터용)
-    tc_json = json.dumps([
-        {
-            'id': t['id'],
-            'name': t['short_name'] or t['raw_ttcn3_id'] or t['id'],
-            'gen': t['generation'],
-            'cat': t['category'],
-            'spec': t['conf_spec'],
-            'err': bool(t['is_error_case']),
-            'auth': t['usim_interface'],
-            'steps': steps.get(t['id'], []),
-        }
-        for t in tcs
-    ], ensure_ascii=False)
-
-    # 세대 필터 옵션 HTML
-    gen_opts = ''.join(
-        f'<button class="filter-btn" data-gen="{g}" style="--c:{GEN_COLORS.get(g,"#6b7280")}">'
-        f'{g} <span class="badge">{n}</span></button>'
-        for g, n in sorted(gen_counts.items())
-    )
-
-    # 카테고리 필터 옵션 HTML
-    cat_opts = ''.join(
-        f'<option value="{c}">{CAT_KO.get(c, c)} ({n})</option>'
-        for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])
-    )
-
-    # TC 카드 HTML (처음 200개만 초기 렌더링, 나머지는 JS로 동적 생성)
-    tc_cards = ''
-    for t in tcs[:200]:
-        color = GEN_COLORS.get(t['generation'], '#6b7280')
-        name = t['short_name'] or t['raw_ttcn3_id'] or t['id']
-        err_badge = '<span class="err-badge">ERROR</span>' if t['is_error_case'] else ''
-        auth_badge = f'<span class="auth-badge">{t["usim_interface"]}</span>' if t['usim_interface'] else ''
-        cat_ko = CAT_KO.get(t['category'], t['category'] or '')
-        tc_cards += f'''
-        <div class="tc-card" data-gen="{t['generation']}" data-cat="{t['category']}"
-             data-err="{int(bool(t['is_error_case']))}" data-id="{t['id']}"
-             onclick="showTcDetail('{t['id']}')">
-          <div class="tc-header" style="border-left: 4px solid {color}">
-            <div class="tc-meta">
-              <span class="gen-tag" style="background:{color}">{t['generation']}</span>
-              <span class="cat-tag">{cat_ko}</span>
-              {err_badge}{auth_badge}
-            </div>
-            <div class="tc-id">{t['id']}</div>
-            <div class="tc-name">{name}</div>
-          </div>
-        </div>'''
-
-    total = len(tcs)
-    with_title = sum(1 for t in tcs if t['short_name'])
-    total_steps = sum(len(v) for v in steps.values())
-    tc_with_steps = len(steps)
-
-    return f'''<!DOCTYPE html>
+def build_html(summary: dict[str, object]) -> str:
+    template = """<!DOCTYPE html>
 <html lang="ko">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>3GPP Protocol Simulator — 신입 모뎀 개발자 교육</title>
-<style>
-:root {{
-  --bg: #0f172a;
-  --bg2: #1e293b;
-  --bg3: #334155;
-  --text: #f1f5f9;
-  --text2: #94a3b8;
-  --border: #334155;
-  --accent: #3b82f6;
-}}
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; }}
-
-/* Header */
-.header {{ background: var(--bg2); border-bottom: 1px solid var(--border); padding: 16px 24px; }}
-.header h1 {{ font-size: 1.25rem; font-weight: 700; }}
-.header p {{ color: var(--text2); font-size: 0.875rem; margin-top: 4px; }}
-
-/* Stats bar */
-.stats-bar {{ display: flex; gap: 24px; padding: 12px 24px; background: var(--bg2); border-bottom: 1px solid var(--border); overflow-x: auto; }}
-.stat {{ text-align: center; min-width: 80px; }}
-.stat-num {{ font-size: 1.5rem; font-weight: 700; color: var(--accent); }}
-.stat-label {{ font-size: 0.75rem; color: var(--text2); }}
-
-/* Filters */
-.filters {{ padding: 16px 24px; background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }}
-.filter-group {{ display: flex; gap: 8px; flex-wrap: wrap; }}
-.filter-btn {{ padding: 6px 14px; border-radius: 20px; border: 2px solid var(--c, #6b7280); background: transparent; color: var(--text); cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }}
-.filter-btn:hover, .filter-btn.active {{ background: var(--c, #6b7280); }}
-.badge {{ background: rgba(255,255,255,0.2); border-radius: 10px; padding: 1px 6px; font-size: 0.7rem; margin-left: 4px; }}
-.filter-btn.all {{ --c: #64748b; }}
-select {{ background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 0.8rem; }}
-input[type=text] {{ background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 0.875rem; width: 260px; }}
-input[type=text]::placeholder {{ color: var(--text2); }}
-.toggle-btn {{ padding: 6px 14px; border-radius: 6px; border: 1px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer; font-size: 0.8rem; }}
-.toggle-btn.active {{ background: #ef4444; color: white; }}
-
-/* Grid */
-.grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; padding: 20px 24px; }}
-
-/* TC Card */
-.tc-card {{ background: var(--bg2); border-radius: 8px; cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; overflow: hidden; }}
-.tc-card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 20px rgba(0,0,0,0.4); }}
-.tc-header {{ padding: 14px 16px; }}
-.tc-meta {{ display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }}
-.gen-tag {{ padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; color: white; }}
-.cat-tag {{ padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; background: var(--bg3); color: var(--text2); }}
-.err-badge {{ padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; background: #dc2626; color: white; font-weight: 700; }}
-.auth-badge {{ padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; background: #d97706; color: white; }}
-.tc-id {{ font-family: 'Courier New', monospace; font-size: 0.75rem; color: var(--accent); margin-bottom: 4px; }}
-.tc-name {{ font-size: 0.875rem; font-weight: 600; line-height: 1.4; }}
-
-/* Count display */
-.result-count {{ padding: 8px 24px; color: var(--text2); font-size: 0.875rem; }}
-
-/* Modal */
-.modal-overlay {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }}
-.modal-overlay.open {{ display: flex; }}
-.modal {{ background: var(--bg2); border-radius: 12px; width: 90%; max-width: 700px; max-height: 85vh; overflow-y: auto; padding: 28px; border: 1px solid var(--border); }}
-.modal-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }}
-.modal-title {{ font-size: 1.1rem; font-weight: 700; line-height: 1.4; }}
-.modal-close {{ background: none; border: none; color: var(--text2); font-size: 1.5rem; cursor: pointer; padding: 0 4px; }}
-.modal-spec {{ font-family: monospace; font-size: 0.8rem; color: var(--accent); margin-bottom: 16px; padding: 8px 12px; background: var(--bg); border-radius: 6px; }}
-.info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
-.info-item label {{ font-size: 0.75rem; color: var(--text2); display: block; margin-bottom: 4px; }}
-.info-item span {{ font-size: 0.875rem; }}
-/* Steps sequence */
-.seq-diagram-wrap {{
-  overflow-x: auto;
-  background: #0a0f1e;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  padding: 0;
-  margin-top: 4px;
-}}
-.seq-svg {{ display: block; }}
-.steps-title {{ font-weight: 700; margin-bottom: 12px; color: var(--text2); font-size: 0.875rem; display: flex; justify-content: space-between; align-items: center; }}
-.steps-badge {{ font-size: 0.7rem; background: var(--bg3); padding: 2px 8px; border-radius: 10px; }}
-.step-placeholder {{ color: var(--text2); font-size: 0.875rem; padding: 16px; background: var(--bg); border-radius: 6px; text-align: center; }}
-.no-steps {{ color: var(--text2); font-size: 0.8rem; padding: 12px; text-align: center; background: var(--bg); border-radius: 6px; }}
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3GPP Protocol Simulator — Stitch-style DB Shell</title>
+  <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+  <style>
+    :root {
+      --bg: #0a0d14;
+      --panel: #131824;
+      --panel-2: #102022;
+      --panel-3: #0f1624;
+      --console: #0d1117;
+      --border: #1e293b;
+      --border-strong: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --subtle: #64748b;
+      --accent: #00e5ff;
+      --accent-2: #0ddbf2;
+      --good: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      background-image:
+        radial-gradient(circle at top left, rgba(13, 219, 242, 0.10), transparent 20%),
+        radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.10), transparent 26%);
+    }
+    button, input, select {
+      font: inherit;
+      color: inherit;
+    }
+    button {
+      background: none;
+      border: none;
+      cursor: pointer;
+    }
+    a { color: inherit; }
+    code, .mono {
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 450px;
+      height: 100vh;
+    }
+    .sidebar, .inspector, .topbar, .workspace-card, .table-card {
+      backdrop-filter: blur(12px);
+    }
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      border-right: 1px solid var(--border);
+      background: rgba(19, 24, 36, 0.94);
+    }
+    .sidebar-header {
+      padding: 22px 20px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .eyebrow {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .brand-title {
+      margin: 0;
+      font-size: 21px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+    .brand-subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .launcher {
+      width: 100%;
+      margin-top: 16px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .launcher:hover {
+      border-color: rgba(0, 229, 255, 0.45);
+    }
+    .kbd {
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .sidebar-toolbar {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      gap: 10px;
+      background: rgba(15, 22, 36, 0.90);
+    }
+    .field, .select {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 11px 12px;
+      outline: none;
+    }
+    .field:focus, .select:focus {
+      border-color: rgba(0, 229, 255, 0.6);
+      box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.08);
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .summary-card {
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 12px;
+    }
+    .summary-card .label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.10em;
+      font-size: 11px;
+    }
+    .summary-card .value {
+      margin-top: 8px;
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--accent);
+    }
+    .summary-card .note {
+      margin-top: 6px;
+      color: var(--subtle);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .tree-container {
+      flex: 1;
+      overflow: auto;
+      padding: 12px 10px 22px;
+    }
+    details.tree-node {
+      margin-bottom: 8px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+    }
+    details.tree-node[open] {
+      border-color: rgba(255, 255, 255, 0.04);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    summary.tree-summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-radius: 12px;
+    }
+    summary.tree-summary::-webkit-details-marker {
+      display: none;
+    }
+    .tree-summary:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .tree-chevron {
+      width: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      transition: transform 0.15s ease;
+    }
+    details[open] > summary .tree-chevron {
+      transform: rotate(90deg);
+    }
+    .tree-count, .badge {
+      margin-left: auto;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      padding: 3px 9px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .tree-children {
+      margin-left: 12px;
+      padding-left: 12px;
+      border-left: 1px solid rgba(148, 163, 184, 0.16);
+      margin-bottom: 8px;
+    }
+    .tree-leaf {
+      width: 100%;
+      text-align: left;
+      padding: 10px 12px;
+      margin: 5px 0;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      color: var(--muted);
+      background: transparent;
+    }
+    .tree-leaf:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.06);
+    }
+    .tree-leaf.active {
+      color: var(--accent);
+      background: rgba(0, 229, 255, 0.10);
+      border-color: rgba(0, 229, 255, 0.30);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .leaf-id {
+      display: block;
+      font-size: 11px;
+    }
+    .leaf-name {
+      display: block;
+      margin-top: 4px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .content {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .topbar {
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(16, 32, 34, 0.86);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 18px;
+      min-width: 0;
+    }
+    .topbar-title {
+      min-width: 0;
+    }
+    .topbar-title h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.35;
+      letter-spacing: -0.02em;
+    }
+    .topbar-subtitle {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 5px 10px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .pill.tc-id {
+      color: var(--accent);
+      border-color: rgba(0, 229, 255, 0.25);
+    }
+    .pill.error {
+      color: #fecaca;
+      border-color: rgba(239, 68, 68, 0.35);
+      background: rgba(239, 68, 68, 0.10);
+    }
+    .topbar-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    .btn, .tab-btn {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .btn:hover, .tab-btn:hover {
+      border-color: rgba(0, 229, 255, 0.35);
+    }
+    .btn.primary {
+      color: #03141b;
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .workspace {
+      display: grid;
+      grid-template-rows: 112px minmax(0, 1fr) 280px;
+      gap: 16px;
+      padding: 16px;
+      overflow: hidden;
+    }
+    .workspace-card, .table-card, .panel {
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: rgba(19, 24, 36, 0.86);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-width: 0;
+    }
+    .card-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .card-title {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }
+    .card-subtitle {
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--subtle);
+      line-height: 1.45;
+    }
+    .status-strip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 16px;
+    }
+    .status-main {
+      min-width: 0;
+    }
+    .status-title {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+    .status-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+    .status-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+    .callflow-body, .table-body, .inspector-body {
+      overflow: auto;
+      min-width: 0;
+      min-height: 0;
+    }
+    .callflow-body {
+      padding: 18px 18px 22px;
+      background:
+        linear-gradient(to bottom, rgba(255,255,255,0.03), transparent 18%),
+        radial-gradient(circle at top center, rgba(13, 219, 242, 0.08), transparent 25%);
+    }
+    .callflow-caption {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .sticky-note {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-left: 3px solid rgba(0, 229, 255, 0.55);
+      border-radius: 12px;
+      background: rgba(0, 229, 255, 0.08);
+      color: #cffafe;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .empty-state {
+      border: 1px dashed rgba(148, 163, 184, 0.30);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.02);
+      padding: 18px;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+    table {
+      width: 100%;
+      min-width: 720px;
+      border-collapse: collapse;
+    }
+    th, td {
+      border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 12px;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: rgba(15, 22, 36, 0.95);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }
+    tr.clickable:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    tr.selected {
+      background: rgba(0, 229, 255, 0.08);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .badge.good {
+      color: #bbf7d0;
+      border-color: rgba(34, 197, 94, 0.28);
+      background: rgba(34, 197, 94, 0.10);
+    }
+    .badge.warn {
+      color: #fde68a;
+      border-color: rgba(245, 158, 11, 0.28);
+      background: rgba(245, 158, 11, 0.10);
+    }
+    .badge.danger {
+      color: #fecaca;
+      border-color: rgba(239, 68, 68, 0.28);
+      background: rgba(239, 68, 68, 0.10);
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .inspector {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      border-left: 1px solid var(--border);
+      background: rgba(13, 17, 23, 0.95);
+    }
+    .inspector-header {
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(22, 27, 34, 0.95);
+    }
+    .inspector-title {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 13px;
+      font-weight: 800;
+      margin-bottom: 12px;
+    }
+    .inspector-target {
+      font-size: 19px;
+      font-weight: 700;
+      line-height: 1.35;
+      letter-spacing: -0.02em;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      overflow: auto;
+      padding-top: 12px;
+    }
+    .tab-btn.active {
+      color: #06131b;
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .inspector-body {
+      flex: 1;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .panel {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .panel-title {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .record-grid {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 8px 12px;
+    }
+    .record-key {
+      color: var(--muted);
+      font-size: 12px;
+      word-break: break-word;
+    }
+    .record-value {
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .count-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .count-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 12px;
+    }
+    .count-card .name {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }
+    .count-card .value {
+      margin-top: 8px;
+      font-size: 20px;
+      font-weight: 800;
+    }
+    .count-card .desc {
+      margin-top: 6px;
+      color: var(--subtle);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .list-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .list-item {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 12px;
+    }
+    .list-item-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .list-item-title {
+      font-weight: 700;
+      line-height: 1.45;
+    }
+    .list-item-meta {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    pre.data-block {
+      margin: 0;
+      max-height: 240px;
+      overflow: auto;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      background: rgba(0, 0, 0, 0.25);
+      color: #cbd5e1;
+      font-size: 11px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .table-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto auto;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .schema-list {
+      display: grid;
+      gap: 8px;
+    }
+    .schema-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 12px;
+    }
+    .schema-item strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 80px 24px 24px;
+      background: rgba(0, 0, 0, 0.72);
+      backdrop-filter: blur(14px);
+      z-index: 1000;
+    }
+    .overlay.open {
+      display: flex;
+    }
+    .overlay-panel {
+      width: min(1040px, 100%);
+      max-height: calc(100vh - 120px);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      border-radius: 22px;
+      border: 1px solid var(--border);
+      background: rgba(19, 24, 36, 0.97);
+      box-shadow: 0 24px 90px rgba(0,0,0,0.55);
+    }
+    .overlay-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .overlay-input {
+      width: 100%;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 14px 16px;
+      font-size: 18px;
+      outline: none;
+    }
+    .overlay-input:focus {
+      border-color: rgba(0, 229, 255, 0.5);
+      box-shadow: 0 0 0 4px rgba(0, 229, 255, 0.08);
+    }
+    .overlay-body {
+      overflow: auto;
+      padding: 14px 16px 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .overlay-section {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .overlay-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .overlay-section-title {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .overlay-list {
+      display: grid;
+      gap: 1px;
+      background: rgba(148, 163, 184, 0.08);
+    }
+    .overlay-row {
+      width: 100%;
+      text-align: left;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 13px 14px;
+      background: rgba(19, 24, 36, 0.99);
+    }
+    .overlay-row:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .overlay-row-title {
+      font-weight: 700;
+      line-height: 1.45;
+      margin-bottom: 4px;
+    }
+    .overlay-row-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .overlay-footer {
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      background: rgba(15, 22, 36, 0.96);
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .hidden {
+      display: none !important;
+    }
+    @media (max-width: 1500px) {
+      .app {
+        grid-template-columns: 280px minmax(0, 1fr) 390px;
+      }
+    }
+    @media (max-width: 1200px) {
+      html, body {
+        overflow: auto;
+        height: auto;
+      }
+      .app {
+        display: block;
+        height: auto;
+      }
+      .workspace {
+        min-height: 880px;
+      }
+      .sidebar, .inspector {
+        min-height: 320px;
+      }
+    }
+  </style>
 </head>
 <body>
-
-<div class="header">
-  <h1>3GPP Protocol Simulator</h1>
-  <p>신입 모뎀 개발자를 위한 인터랙티브 프로토콜 시뮬레이터 — 3GPP 공식 TTCN-3 스펙에서 직접 추출</p>
-</div>
-
-<div class="stats-bar">
-  <div class="stat"><div class="stat-num">{total}</div><div class="stat-label">전체 TC</div></div>
-  <div class="stat"><div class="stat-num">{with_title}</div><div class="stat-label">제목 확보</div></div>
-  <div class="stat"><div class="stat-num">{error_count}</div><div class="stat-label">에러 케이스</div></div>
-  <div class="stat"><div class="stat-num">{tc_with_steps}</div><div class="stat-label">시퀀스 있는 TC</div></div>
-  <div class="stat"><div class="stat-num">{total_steps}</div><div class="stat-label">총 스텝 수</div></div>
-  <div class="stat"><div class="stat-num">{gen_counts.get('4G', 0)}</div><div class="stat-label">4G LTE</div></div>
-  <div class="stat"><div class="stat-num">{gen_counts.get('5G', 0)}</div><div class="stat-label">5G NR SA</div></div>
-  <div class="stat"><div class="stat-num">{gen_counts.get('5G-NSA', 0)}</div><div class="stat-label">5G EN-DC</div></div>
-  <div class="stat"><div class="stat-num">{gen_counts.get('3G', 0)}</div><div class="stat-label">3G UMTS</div></div>
-</div>
-
-<div class="filters">
-  <div class="filter-group">
-    <button class="filter-btn all active" data-gen="all">전체 <span class="badge">{total}</span></button>
-    {gen_opts}
-  </div>
-  <select id="catFilter" onchange="applyFilters()">
-    <option value="">모든 카테고리</option>
-    {cat_opts}
-  </select>
-  <button class="toggle-btn" id="errToggle" onclick="toggleError()">⚠️ 에러 케이스만</button>
-  <input type="text" id="searchInput" placeholder="TC 검색... (ID, 제목)" oninput="applyFilters()">
-</div>
-
-<div class="result-count" id="resultCount">전체 {total}개 표시 중</div>
-
-<div class="grid" id="tcGrid">
-  {tc_cards}
-  <div id="loadMore" style="grid-column:1/-1;text-align:center;padding:20px">
-    <button onclick="loadMoreCards()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:10px 24px;border-radius:6px;cursor:pointer">
-      더 보기 ({total - 200}개 추가)
-    </button>
-  </div>
-</div>
-
-<!-- 상세 모달 -->
-<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
-  <div class="modal" id="modalContent">
-    <div class="modal-header">
-      <div class="modal-title" id="modalTitle"></div>
-      <button class="modal-close" onclick="closeModalBtn()">×</button>
-    </div>
-    <div class="modal-spec" id="modalSpec"></div>
-    <div class="info-grid" id="modalInfo"></div>
-    <div class="steps-title">
-      메시지 시퀀스
-      <span class="steps-badge" id="stepsCountBadge"></span>
-    </div>
-    <div id="modalSteps"></div>
-  </div>
-</div>
-
-<script>
-const TC_DATA = {tc_json};
-const GEN_COLORS = {json.dumps(GEN_COLORS)};
-const CAT_KO = {json.dumps(CAT_KO, ensure_ascii=False)};
-
-let activeGen = 'all';
-let showErrorOnly = false;
-let renderedCount = 200;
-
-// 필터링된 TC 목록
-function getFiltered() {{
-  const cat = document.getElementById('catFilter').value;
-  const q = document.getElementById('searchInput').value.toLowerCase();
-  return TC_DATA.filter(t => {{
-    if (activeGen !== 'all' && t.gen !== activeGen) return false;
-    if (cat && t.cat !== cat) return false;
-    if (showErrorOnly && !t.err) return false;
-    if (q && !t.id.toLowerCase().includes(q) && !(t.name||'').toLowerCase().includes(q)) return false;
-    return true;
-  }});
-}}
-
-function renderCards(tcs, limit) {{
-  const grid = document.getElementById('tcGrid');
-  const loadMore = document.getElementById('loadMore');
-  grid.innerHTML = '';
-  
-  const visible = tcs.slice(0, limit);
-  visible.forEach(t => {{
-    const color = GEN_COLORS[t.gen] || '#6b7280';
-    const catKo = CAT_KO[t.cat] || t.cat || '';
-    const errBadge = t.err ? '<span class="err-badge">ERROR</span>' : '';
-    const authBadge = t.auth ? `<span class="auth-badge">${{t.auth}}</span>` : '';
-    const div = document.createElement('div');
-    div.className = 'tc-card';
-    div.dataset.id = t.id;
-    div.onclick = () => showTcDetail(t.id);
-    div.innerHTML = `
-      <div class="tc-header" style="border-left:4px solid ${{color}}">
-        <div class="tc-meta">
-          <span class="gen-tag" style="background:${{color}}">${{t.gen}}</span>
-          <span class="cat-tag">${{catKo}}</span>
-          ${{errBadge}}${{authBadge}}
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="eyebrow">Stitch-style Explorer</div>
+        <h1 class="brand-title">3GPP Protocol Simulator</h1>
+        <div class="brand-subtitle">
+          계층형 TC 탐색 + Global Search Overlay + Call Flow with DB Source + DB-First Inspector
         </div>
-        <div class="tc-id">${{t.id}}</div>
-        <div class="tc-name">${{t.name || t.id}}</div>
+        <button class="launcher" id="openSearchBtn" type="button">
+          <span>전역 검색 열기 — specs / TCs / messages / IE library</span>
+          <span class="kbd">Ctrl/⌘ + K</span>
+        </button>
+      </div>
+
+      <div class="sidebar-toolbar">
+        <input class="field" id="treeSearchInput" type="text" placeholder="사이드바 필터 (TC ID / 제목 / 섹션)">
+        <select class="select" id="generationFilter"></select>
+        <select class="select" id="categoryFilter"></select>
+        <div class="summary-grid" id="summaryGrid"></div>
+      </div>
+
+      <div class="tree-container" id="treeContainer">
+        <div class="empty-state">tc.db 로딩 전입니다. 먼저 HTTP에서 <code>fetch('./tc.db')</code>를 시도합니다.</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div class="topbar-title">
+          <div class="eyebrow">Call Flow with DB Source</div>
+          <h1 id="selectedTitle">Database loading…</h1>
+          <div class="topbar-subtitle" id="selectedSubtitle"></div>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" type="button" id="openFilePickerBtn">.db 업로드</button>
+          <button class="btn" type="button" id="openTablesBtn">전체 테이블</button>
+          <button class="btn" type="button" id="openSearchTopBtn">검색</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <section class="workspace-card">
+          <div class="status-strip" id="dbStatusStrip">
+            <div class="status-main">
+              <div class="status-title" id="dbStatusTitle">DB 로더 준비 중…</div>
+              <div class="status-note" id="dbStatusNote">
+                sql.js 초기화 후 <code>fetch('./tc.db')</code>로 자동 로드합니다. 실패하면 file input fallback을 활성화합니다.
+              </div>
+            </div>
+            <div class="status-actions">
+              <button class="btn primary" type="button" id="retryFetchBtn">fetch 재시도</button>
+              <label class="btn" for="dbFileInput">file:// fallback 업로드</label>
+              <input id="dbFileInput" type="file" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="hidden">
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">중앙 Call Flow</div>
+              <div class="card-subtitle" id="callFlowMeta">DB 연결 전</div>
+            </div>
+            <div class="legend" id="entityLegend"></div>
+          </div>
+          <div class="callflow-body" id="callFlowContainer">
+            <div class="empty-state">
+              tc.db가 로드되면 선택된 TC의 <code>tc_steps</code>를 call flow로 렌더링합니다.
+            </div>
+          </div>
+        </section>
+
+        <section class="table-card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Database Source: tc_steps</div>
+              <div class="card-subtitle" id="stepsQuery">SELECT * FROM tc_steps WHERE tc_id = ? ORDER BY step_no, id;</div>
+            </div>
+            <div class="badge good">DB-first</div>
+          </div>
+          <div class="table-body" id="stepsTableWrap">
+            <div class="empty-state" style="margin:16px">선택된 TC가 없어서 tc_steps row를 표시할 수 없습니다.</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <aside class="inspector">
+      <div class="inspector-header">
+        <div class="inspector-title">DB-First Inspector</div>
+        <div class="inspector-target" id="inspectorTarget">No TC selected</div>
+        <div class="chip-row" id="inspectorMeta"></div>
+        <div class="tabs">
+          <button class="tab-btn active" type="button" data-tab="overview">Overview</button>
+          <button class="tab-btn" type="button" data-tab="ies">IE Structure</button>
+          <button class="tab-btn" type="button" data-tab="tables">Tables</button>
+        </div>
+      </div>
+      <div class="inspector-body" id="inspectorBody">
+        <div class="empty-state">브라우저에서 SQLite DB가 로드되면 Inspector가 활성화됩니다.</div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="overlay" id="searchOverlay">
+    <div class="overlay-panel" role="dialog" aria-modal="true" aria-labelledby="overlayTitle">
+      <div class="overlay-head">
+        <div class="eyebrow" id="overlayTitle">Global TC Search Overlay</div>
+        <input class="overlay-input" id="overlaySearchInput" type="text" placeholder="Search specifications, TCs, messages, IE names…">
+      </div>
+      <div class="overlay-body" id="overlayResults"></div>
+      <div class="overlay-footer">
+        <span>Esc 로 닫기 · 결과 클릭 시 해당 TC / table browser로 이동</span>
+        <span>검색 범위: tcs / tc_steps / tc_ies / ies / ie_fields / bands / band_combos / tc_bands / specs</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TABLE_ORDER = __TABLE_ORDER_JSON__;
+    const TABLE_DESCRIPTIONS = __TABLE_DESCRIPTIONS_JSON__;
+    const INITIAL_SUMMARY = __INITIAL_SUMMARY_JSON__;
+    const GEN_COLORS = __GEN_COLORS_JSON__;
+    const CATEGORY_LABELS = __CATEGORY_LABELS_JSON__;
+    const GENERATED_AT = "__GENERATED_AT__";
+
+    const SQL_JS_BASE = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";
+
+    const state = {
+      SQL: null,
+      db: null,
+      dbReady: false,
+      tcs: [],
+      tableCounts: { ...(INITIAL_SUMMARY.tableCounts || {}) },
+      selectedTcId: null,
+      selectedStepId: null,
+      treeQuery: "",
+      generationFilter: "all",
+      categoryFilter: "all",
+      inspectorTab: "overview",
+      overlayOpen: false,
+      overlayQuery: "",
+      tableBrowser: {
+        table: "tcs",
+        query: "",
+        page: 0,
+        selectedKey: null,
+      },
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function compact(value) {
+      return value === null || value === undefined || value === "" ? "—" : value;
+    }
+
+    function truncate(value, max = 160) {
+      const text = String(value ?? "");
+      return text.length > max ? text.slice(0, max) + "…" : text;
+    }
+
+    function normalizeKey(value) {
+      return String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+
+    function quoteIdent(value) {
+      return '"' + String(value).replace(/"/g, '""') + '"';
+    }
+
+    function setDbStatus(kind, title, note) {
+      const titleEl = document.getElementById("dbStatusTitle");
+      const noteEl = document.getElementById("dbStatusNote");
+      titleEl.textContent = title;
+      noteEl.innerHTML = note;
+      titleEl.style.color = kind === "error" ? "#fecaca" : kind === "ready" ? "#bbf7d0" : "var(--text)";
+    }
+
+    async function initSqlModule() {
+      if (state.SQL) return state.SQL;
+      if (typeof initSqlJs !== "function") {
+        throw new Error("sql.js loader not available. CDN 접근 또는 스크립트 로드 상태를 확인하세요.");
+      }
+      state.SQL = await initSqlJs({
+        locateFile: (file) => SQL_JS_BASE + file,
+      });
+      return state.SQL;
+    }
+
+    function queryRows(sql, params = []) {
+      if (!state.db) throw new Error("DB is not loaded");
+      const stmt = state.db.prepare(sql);
+      stmt.bind(params);
+      const rows = [];
+      while (stmt.step()) rows.push(stmt.getAsObject());
+      stmt.free();
+      return rows;
+    }
+
+    function queryOne(sql, params = []) {
+      return queryRows(sql, params)[0] || null;
+    }
+
+    function queryValue(sql, params = []) {
+      const row = queryOne(sql, params);
+      if (!row) return null;
+      return Object.values(row)[0];
+    }
+
+    function extractSpecRefs(tc) {
+      const text = [tc.conf_spec, tc.core_specs, tc.id].filter(Boolean).join(" ");
+      const raw = text.match(/(?:TS\\s*)?(\\d{2}\\.\\d{3}(?:-\\d)?|\\d{5}(?:-\\d)?)/g) || [];
+      const refs = [];
+      raw.forEach((value) => {
+        let cleaned = value.replace(/^TS\\s*/i, "");
+        if (/^\\d{5}(?:-\\d)?$/.test(cleaned)) {
+          cleaned = cleaned.slice(0, 2) + "." + cleaned.slice(2);
+        }
+        if (!refs.includes(cleaned)) refs.push(cleaned);
+      });
+      return refs;
+    }
+
+    function parseTcMeta(tc) {
+      const parts = String(tc.id || "").split("-");
+      const specRoot = parts.length >= 2 ? parts.slice(0, 2).join("-") : String(tc.id || "");
+      const section = parts.length >= 3 ? parts.slice(2).join("-") : "";
+      const sectionGroup = section.split(".").filter(Boolean).slice(0, 2).join(".") || section || "misc";
+      return {
+        specRoot,
+        section,
+        sectionGroup,
+      };
+    }
+
+    function getGenerationColor(generation) {
+      return GEN_COLORS[generation] || GEN_COLORS.Unknown;
+    }
+
+    function renderSummaryCards() {
+      const cards = [
+        {
+          label: "TC",
+          value: state.tableCounts.tcs ?? INITIAL_SUMMARY.tableCounts.tcs ?? "—",
+          note: "tcs full browse",
+        },
+        {
+          label: "Steps",
+          value: state.tableCounts.tc_steps ?? INITIAL_SUMMARY.tableCounts.tc_steps ?? "—",
+          note: "tc_steps call flow",
+        },
+        {
+          label: "IE",
+          value: state.tableCounts.ies ?? INITIAL_SUMMARY.tableCounts.ies ?? "—",
+          note: "ies / ie_fields",
+        },
+        {
+          label: "Tables",
+          value: TABLE_ORDER.length,
+          note: "all DB tables visible",
+        },
+      ];
+      document.getElementById("summaryGrid").innerHTML = cards.map((card) => `
+        <div class="summary-card">
+          <div class="label">${escapeHtml(card.label)}</div>
+          <div class="value">${escapeHtml(card.value)}</div>
+          <div class="note">${escapeHtml(card.note)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderFilterOptions() {
+      const generations = ["all", ...Array.from(new Set(state.tcs.map((tc) => tc.generation || "Unknown"))).sort((a, b) => a.localeCompare(b))];
+      const categories = ["all", ...Array.from(new Set(state.tcs.map((tc) => tc.category || "Unknown"))).sort((a, b) => a.localeCompare(b))];
+      document.getElementById("generationFilter").innerHTML = generations.map((value) => `
+        <option value="${escapeHtml(value)}"${value === state.generationFilter ? " selected" : ""}>
+          ${value === "all" ? "모든 세대" : escapeHtml(value)}
+        </option>
+      `).join("");
+      document.getElementById("categoryFilter").innerHTML = categories.map((value) => `
+        <option value="${escapeHtml(value)}"${value === state.categoryFilter ? " selected" : ""}>
+          ${value === "all" ? "모든 카테고리" : escapeHtml(CATEGORY_LABELS[value] || value)}
+        </option>
+      `).join("");
+    }
+
+    function getFilteredTcs() {
+      const q = state.treeQuery.trim().toLowerCase();
+      return state.tcs.filter((tc) => {
+        if (state.generationFilter !== "all" && (tc.generation || "Unknown") !== state.generationFilter) return false;
+        const category = tc.category || "Unknown";
+        if (state.categoryFilter !== "all" && category !== state.categoryFilter) return false;
+        if (!q) return true;
+        const meta = parseTcMeta(tc);
+        const haystack = [
+          tc.id,
+          tc.short_name,
+          tc.raw_ttcn3_id,
+          tc.conf_spec,
+          tc.core_specs,
+          meta.specRoot,
+          meta.section,
+          meta.sectionGroup,
+        ].join(" ").toLowerCase();
+        return haystack.includes(q);
+      });
+    }
+
+    function buildHierarchy() {
+      const root = new Map();
+      getFilteredTcs().forEach((tc) => {
+        const meta = parseTcMeta(tc);
+        const generation = tc.generation || "Unknown";
+        const category = tc.category || "Unknown";
+        if (!root.has(generation)) root.set(generation, new Map());
+        const categories = root.get(generation);
+        if (!categories.has(category)) categories.set(category, new Map());
+        const specs = categories.get(category);
+        if (!specs.has(meta.specRoot)) specs.set(meta.specRoot, new Map());
+        const sections = specs.get(meta.specRoot);
+        if (!sections.has(meta.sectionGroup)) sections.set(meta.sectionGroup, []);
+        sections.get(meta.sectionGroup).push(tc);
+      });
+      return root;
+    }
+
+    function ensureSelectedTc() {
+      if (!state.tcs.length) {
+        state.selectedTcId = null;
+        return null;
+      }
+      const existing = state.tcs.find((tc) => tc.id === state.selectedTcId);
+      if (existing) return existing;
+      const firstWithSteps = queryOne(`
+        SELECT t.id
+        FROM tcs t
+        WHERE EXISTS (SELECT 1 FROM tc_steps s WHERE s.tc_id = t.id)
+        ORDER BY t.generation, t.category, t.id
+        LIMIT 1
+      `);
+      state.selectedTcId = (firstWithSteps && firstWithSteps.id) || state.tcs[0].id;
+      return state.tcs.find((tc) => tc.id === state.selectedTcId) || state.tcs[0];
+    }
+
+    function loadSelectedSteps() {
+      if (!state.selectedTcId) return [];
+      return queryRows(`
+        SELECT *
+        FROM tc_steps
+        WHERE tc_id = ?
+        ORDER BY step_no, id
+      `, [state.selectedTcId]);
+    }
+
+    function ensureSelectedStep(steps) {
+      if (!steps.length) {
+        state.selectedStepId = null;
+        return null;
+      }
+      const current = steps.find((step) => Number(step.id) === Number(state.selectedStepId));
+      if (current) return current;
+      state.selectedStepId = Number(steps[0].id);
+      return steps[0];
+    }
+
+    function renderTree() {
+      const container = document.getElementById("treeContainer");
+      if (!state.dbReady) {
+        container.innerHTML = `<div class="empty-state">DB 연결 전입니다. <code>fetch('./tc.db')</code> 또는 file input fallback으로 로드하세요.</div>`;
+        return;
+      }
+      const hierarchy = buildHierarchy();
+      let html = "";
+      hierarchy.forEach((categories, generation) => {
+        const generationCount = Array.from(categories.values()).reduce((sum, specs) => {
+          return sum + Array.from(specs.values()).reduce((a, sections) => a + Array.from(sections.values()).reduce((b, items) => b + items.length, 0), 0);
+        }, 0);
+        html += `<details class="tree-node" open>
+          <summary class="tree-summary">
+            <span class="tree-chevron">▶</span>
+            <span class="dot" style="background:${escapeHtml(getGenerationColor(generation))}"></span>
+            <span>${escapeHtml(generation)}</span>
+            <span class="tree-count">${escapeHtml(generationCount)}</span>
+          </summary>
+          <div class="tree-children">`;
+        categories.forEach((specs, category) => {
+          const categoryCount = Array.from(specs.values()).reduce((sum, sections) => sum + Array.from(sections.values()).reduce((a, items) => a + items.length, 0), 0);
+          html += `<details class="tree-node" open>
+            <summary class="tree-summary">
+              <span class="tree-chevron">▶</span>
+              <span>${escapeHtml(CATEGORY_LABELS[category] || category)}</span>
+              <span class="tree-count">${escapeHtml(categoryCount)}</span>
+            </summary>
+            <div class="tree-children">`;
+          specs.forEach((sections, specRoot) => {
+            const specCount = Array.from(sections.values()).reduce((sum, items) => sum + items.length, 0);
+            html += `<details class="tree-node" open>
+              <summary class="tree-summary">
+                <span class="tree-chevron">▶</span>
+                <span class="mono">${escapeHtml(specRoot)}</span>
+                <span class="tree-count">${escapeHtml(specCount)}</span>
+              </summary>
+              <div class="tree-children">`;
+            sections.forEach((items, sectionGroup) => {
+              html += `<details class="tree-node" open>
+                <summary class="tree-summary">
+                  <span class="tree-chevron">▶</span>
+                  <span>Section ${escapeHtml(sectionGroup || "misc")}</span>
+                  <span class="tree-count">${escapeHtml(items.length)}</span>
+                </summary>
+                <div class="tree-children">`;
+              items.forEach((tc) => {
+                const active = tc.id === state.selectedTcId ? "active" : "";
+                const title = tc.short_name || tc.raw_ttcn3_id || tc.id;
+                html += `<button class="tree-leaf ${active}" type="button" data-tc-id="${escapeHtml(encodeURIComponent(tc.id))}">
+                  <span class="leaf-id mono">${escapeHtml(tc.id)}</span>
+                  <span class="leaf-name">${escapeHtml(title)}</span>
+                </button>`;
+              });
+              html += `</div></details>`;
+            });
+            html += `</div></details>`;
+          });
+          html += `</div></details>`;
+        });
+        html += `</div></details>`;
+      });
+      if (!html) {
+        html = `<div class="empty-state">현재 필터 조건에 맞는 TC가 없습니다.</div>`;
+      }
+      container.innerHTML = html;
+    }
+
+    function renderTopbar(tc, steps) {
+      const titleEl = document.getElementById("selectedTitle");
+      const subtitleEl = document.getElementById("selectedSubtitle");
+      const callFlowMetaEl = document.getElementById("callFlowMeta");
+      if (!tc) {
+        titleEl.textContent = "No TC selected";
+        subtitleEl.innerHTML = "";
+        callFlowMetaEl.textContent = "DB 연결 후 선택된 TC를 렌더링합니다.";
+        return;
+      }
+      const meta = parseTcMeta(tc);
+      const pills = [
+        `<span class="pill tc-id">${escapeHtml(tc.id)}</span>`,
+        `<span class="pill">${escapeHtml(tc.generation || "Unknown")}</span>`,
+        `<span class="pill">${escapeHtml(CATEGORY_LABELS[tc.category] || tc.category || "Unknown")}</span>`,
+        `<span class="pill">${escapeHtml(steps.length)} steps</span>`,
+      ];
+      if (Number(tc.is_error_case || 0)) {
+        pills.push(`<span class="pill error">Error / Reject / Failure</span>`);
+      }
+      if (tc.usim_interface) {
+        pills.push(`<span class="pill">${escapeHtml(tc.usim_interface)}</span>`);
+      }
+      titleEl.textContent = tc.short_name || tc.raw_ttcn3_id || tc.id;
+      subtitleEl.innerHTML = pills.join("");
+      callFlowMetaEl.textContent = `${meta.specRoot} · Section ${meta.section || "—"} · ${steps.length ? "tc_steps available" : "tc_steps empty"}`;
+    }
+
+    function buildEntityPalette(steps) {
+      const palette = ["#00e5ff", "#34d399", "#60a5fa", "#f59e0b", "#f472b6", "#a78bfa", "#fb7185", "#facc15"];
+      const names = [];
+      steps.forEach((step) => {
+        [step.from_entity, step.to_entity].forEach((name) => {
+          if (name && !names.includes(name)) names.push(name);
+        });
+      });
+      if (!names.length) names.push("UE", "Network");
+      return names.map((name, index) => ({ name, color: palette[index % palette.length], index }));
+    }
+
+    function renderEntityLegend(entityDefs) {
+      document.getElementById("entityLegend").innerHTML = entityDefs.map((entity) => `
+        <span class="badge">
+          <span class="dot" style="background:${escapeHtml(entity.color)}"></span>
+          ${escapeHtml(entity.name)}
+        </span>
+      `).join("");
+    }
+
+    function buildCallFlowSvg(steps, selectedStepId) {
+      const entityDefs = buildEntityPalette(steps);
+      const entityMap = new Map(entityDefs.map((entity) => [entity.name, entity]));
+      const colWidth = 220;
+      const leftPad = 40;
+      const rightPad = 40;
+      const topPad = 68;
+      const rowHeight = 72;
+      const noteHeight = 20;
+      const width = leftPad + rightPad + entityDefs.length * colWidth;
+      const height = topPad + steps.reduce((sum, step) => sum + rowHeight + (step.note ? noteHeight : 0), 40);
+      const xFor = (entityName) => leftPad + entityMap.get(entityName).index * colWidth + colWidth / 2;
+
+      let svg = `
+        <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arrow-right" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+              <polygon points="0 0, 10 4, 0 8" fill="#0ddbf2"></polygon>
+            </marker>
+            <marker id="arrow-left" markerWidth="10" markerHeight="8" refX="1" refY="4" orient="auto">
+              <polygon points="10 0, 0 4, 10 8" fill="#34d399"></polygon>
+            </marker>
+            <filter id="glow">
+              <feGaussianBlur stdDeviation="2.5" result="blur"></feGaussianBlur>
+              <feMerge><feMergeNode in="blur"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+            </filter>
+          </defs>
+          <rect width="${width}" height="${height}" fill="#0a0d14"></rect>
+      `;
+
+      entityDefs.forEach((entity, index) => {
+        const x = leftPad + index * colWidth + colWidth / 2;
+        const boxX = x - 68;
+        svg += `
+          <line x1="${x}" y1="50" x2="${x}" y2="${height - 24}" stroke="${entity.color}" stroke-opacity="0.28" stroke-dasharray="6 6"></line>
+          <rect x="${boxX}" y="12" width="136" height="32" rx="8" fill="#131824" stroke="${entity.color}" stroke-opacity="0.65"></rect>
+          <text x="${x}" y="32" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="700">${escapeHtml(entity.name)}</text>
+        `;
+      });
+
+      let currentY = topPad;
+      steps.forEach((step) => {
+        const fromName = entityMap.has(step.from_entity) ? step.from_entity : entityDefs[0].name;
+        const toName = entityMap.has(step.to_entity) ? step.to_entity : entityDefs[entityDefs.length - 1].name;
+        const fromX = xFor(fromName);
+        const toX = xFor(toName);
+        const arrowY = currentY + 26;
+        const textY = currentY + 16;
+        const badgeY = currentY + 46;
+        const selected = Number(step.id) === Number(selectedStepId);
+        const sameLane = fromName === toName || step.direction === "int";
+        const stroke = selected ? "#00e5ff" : (step.direction === "ul" ? "#34d399" : step.direction === "dl" ? "#60a5fa" : "#94a3b8");
+        const marker = sameLane ? "" : (fromX < toX ? "url(#arrow-right)" : "url(#arrow-left)");
+        const rowLocal = rowHeight + (step.note ? noteHeight : 0);
+
+        svg += `<g data-step-id="${step.id}" style="cursor:pointer">`;
+        if (selected) {
+          svg += `<rect x="10" y="${currentY - 2}" width="${width - 20}" height="${rowLocal - 6}" rx="14" fill="rgba(0,229,255,0.08)" stroke="rgba(0,229,255,0.35)"></rect>`;
+        }
+        svg += `<text x="24" y="${arrowY + 4}" fill="#475569" font-size="10" font-family="JetBrains Mono, monospace">${escapeHtml(step.step_no)}</text>`;
+        if (sameLane) {
+          svg += `<line x1="${leftPad}" y1="${arrowY}" x2="${width - rightPad}" y2="${arrowY}" stroke="${stroke}" stroke-dasharray="4 4" stroke-width="${selected ? 2 : 1.2}"></line>`;
+          svg += `<text x="${leftPad + 8}" y="${textY}" fill="${stroke}" font-size="11" font-weight="700">${escapeHtml(truncate(step.message || "(internal / empty)", 58))}</text>`;
+        } else {
+          const lineEnd = fromX < toX ? toX - 10 : toX + 10;
+          svg += `<line x1="${fromX}" y1="${arrowY}" x2="${lineEnd}" y2="${arrowY}" stroke="${stroke}" stroke-width="${selected ? 2.6 : 1.8}" marker-end="${marker}" ${selected ? 'filter="url(#glow)"' : ""}></line>`;
+          svg += `<text x="${(fromX + toX) / 2}" y="${textY}" text-anchor="middle" fill="${stroke}" font-size="11" font-weight="700">${escapeHtml(truncate(step.message || "(empty)", 34))}</text>`;
+        }
+        if (step.layer && step.layer !== "internal") {
+          svg += `<rect x="${width - 104}" y="${badgeY - 12}" width="70" height="16" rx="8" fill="rgba(255,255,255,0.05)" stroke="${stroke}" stroke-opacity="0.45"></rect>`;
+          svg += `<text x="${width - 69}" y="${badgeY}" text-anchor="middle" fill="${stroke}" font-size="10" font-family="JetBrains Mono, monospace">${escapeHtml(step.layer)}</text>`;
+        }
+        if (step.note) {
+          svg += `<text x="${leftPad + 8}" y="${currentY + 66}" fill="#94a3b8" font-size="10" font-style="italic">${escapeHtml(truncate(step.note, 110))}</text>`;
+        }
+        svg += `</g>`;
+        currentY += rowLocal;
+      });
+
+      svg += `</svg>`;
+      return { svg, entityDefs };
+    }
+
+    function renderCallFlow(tc, steps, selectedStep) {
+      const container = document.getElementById("callFlowContainer");
+      if (!state.dbReady) {
+        container.innerHTML = `<div class="empty-state">먼저 tc.db를 로드하세요.</div>`;
+        return;
+      }
+      if (!tc) {
+        container.innerHTML = `<div class="empty-state">선택된 TC가 없습니다.</div>`;
+        return;
+      }
+      if (!steps.length) {
+        renderEntityLegend([]);
+        container.innerHTML = `
+          <div class="empty-state">
+            <strong>${escapeHtml(tc.id)}</strong> 에는 현재 <code>tc_steps</code> row가 없습니다.<br>
+            데이터 부재는 숨기지 않고 empty-state로 드러냅니다.
+          </div>
+        `;
+        return;
+      }
+      const built = buildCallFlowSvg(steps, selectedStep ? selectedStep.id : null);
+      renderEntityLegend(built.entityDefs);
+      container.innerHTML = `
+        <div style="overflow:auto">${built.svg}</div>
+        <div class="callflow-caption">
+          메시지 또는 아래 <code>tc_steps</code> row를 클릭하면 우측 DB-First Inspector가 선택된 row, 매칭 가능한 IE 구조,
+          관련 spec 및 전체 table browser를 갱신합니다.
+        </div>
+        ${selectedStep && selectedStep.note ? `<div class="sticky-note">${escapeHtml(selectedStep.note)}</div>` : ""}
+      `;
+      container.querySelectorAll("[data-step-id]").forEach((node) => {
+        node.addEventListener("click", () => {
+          state.selectedStepId = Number(node.getAttribute("data-step-id"));
+          renderSelectedViews();
+        });
+      });
+    }
+
+    function renderStepsTable(tc, steps, selectedStep) {
+      const wrap = document.getElementById("stepsTableWrap");
+      if (!tc) {
+        wrap.innerHTML = `<div class="empty-state" style="margin:16px">선택된 TC가 없습니다.</div>`;
+        return;
+      }
+      document.getElementById("stepsQuery").textContent = `SELECT * FROM tc_steps WHERE tc_id = '${tc.id}' ORDER BY step_no, id;`;
+      if (!steps.length) {
+        wrap.innerHTML = `<div class="empty-state" style="margin:16px">관련 tc_steps row가 없습니다.</div>`;
+        return;
+      }
+      wrap.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>id</th>
+              <th>step_no</th>
+              <th>from_entity</th>
+              <th>to_entity</th>
+              <th>message</th>
+              <th>direction</th>
+              <th>layer</th>
+              <th>note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${steps.map((step) => `
+              <tr class="clickable ${selectedStep && Number(step.id) === Number(selectedStep.id) ? "selected" : ""}" data-step-row="${step.id}">
+                <td class="mono">${escapeHtml(compact(step.id))}</td>
+                <td>${escapeHtml(compact(step.step_no))}</td>
+                <td>${escapeHtml(compact(step.from_entity))}</td>
+                <td>${escapeHtml(compact(step.to_entity))}</td>
+                <td class="mono">${escapeHtml(compact(step.message))}</td>
+                <td>${escapeHtml(compact(step.direction))}</td>
+                <td>${escapeHtml(compact(step.layer))}</td>
+                <td>${escapeHtml(truncate(compact(step.note), 100))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      wrap.querySelectorAll("[data-step-row]").forEach((row) => {
+        row.addEventListener("click", () => {
+          state.selectedStepId = Number(row.getAttribute("data-step-row"));
+          renderSelectedViews();
+        });
+      });
+    }
+
+    function renderRecordGrid(record) {
+      if (!record) return `<div class="empty-state">표시할 row 데이터가 없습니다.</div>`;
+      return `<div class="record-grid">
+        ${Object.entries(record).map(([key, value]) => `
+          <div class="record-key">${escapeHtml(key)}</div>
+          <div class="record-value"><code>${escapeHtml(compact(value))}</code></div>
+        `).join("")}
       </div>`;
-    grid.appendChild(div);
-  }});
-  
-  if (tcs.length > limit) {{
-    const btn = document.createElement('div');
-    btn.style.cssText = 'grid-column:1/-1;text-align:center;padding:20px';
-    btn.innerHTML = `<button onclick="loadMoreCards()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:10px 24px;border-radius:6px;cursor:pointer">더 보기 (${{tcs.length - limit}}개 추가)</button>`;
-    grid.appendChild(btn);
-  }}
-  
-  document.getElementById('resultCount').textContent = `${{tcs.length}}개 중 ${{Math.min(limit, tcs.length)}}개 표시 중`;
-}}
+    }
 
-window._currentFiltered = TC_DATA;
+    function getMatchedIes(step) {
+      if (!step || !step.message) {
+        return { exact: [], heuristic: [] };
+      }
+      const exact = queryRows(`SELECT * FROM ies WHERE name = ? ORDER BY spec_origin, name LIMIT 12`, [step.message]);
+      if (exact.length) return { exact, heuristic: [] };
+      const normalized = normalizeKey(step.message);
+      const heuristic = queryRows(`
+        SELECT *
+        FROM ies
+        WHERE lower(replace(replace(replace(name, '-', ''), '_', ''), ' ', '')) = ?
+        ORDER BY spec_origin, name
+        LIMIT 12
+      `, [normalized]);
+      return { exact: [], heuristic };
+    }
 
-function applyFilters() {{
-  const filtered = getFiltered();
-  window._currentFiltered = filtered;
-  renderedCount = 100;
-  renderCards(filtered, renderedCount);
-}}
+    function renderInspectorMeta(tc, steps, selectedStep) {
+      const metaEl = document.getElementById("inspectorMeta");
+      const targetEl = document.getElementById("inspectorTarget");
+      if (!tc) {
+        targetEl.textContent = "No TC selected";
+        metaEl.innerHTML = "";
+        return;
+      }
+      const match = getMatchedIes(selectedStep);
+      targetEl.textContent = tc.short_name || tc.raw_ttcn3_id || tc.id;
+      metaEl.innerHTML = [
+        `<span class="badge">${escapeHtml(tc.id)}</span>`,
+        `<span class="badge">${escapeHtml(steps.length)} tc_steps</span>`,
+        `<span class="badge">${escapeHtml(queryValue("SELECT COUNT(*) FROM tc_ies WHERE tc_id = ?", [tc.id]) || 0)} tc_ies</span>`,
+        `<span class="badge">${escapeHtml(match.exact.length ? match.exact.length + " exact IE" : match.heuristic.length ? match.heuristic.length + " heuristic IE" : "0 IE match")}</span>`,
+      ].join("");
+    }
 
-function loadMoreCards() {{
-  renderedCount += 100;
-  renderCards(window._currentFiltered, renderedCount);
-}}
+    function renderOverviewTab(tc, steps, selectedStep) {
+      const tableCountCards = TABLE_ORDER.map((tableName) => `
+        <div class="count-card">
+          <div class="name">${escapeHtml(tableName)}</div>
+          <div class="value">${escapeHtml(state.tableCounts[tableName] ?? 0)}</div>
+          <div class="desc">${escapeHtml(TABLE_DESCRIPTIONS[tableName])}</div>
+        </div>
+      `).join("");
 
-// 세대 필터
-document.querySelectorAll('.filter-btn').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeGen = btn.dataset.gen;
-    applyFilters();
-  }});
-}});
+      const tcRow = tc ? queryOne(`SELECT * FROM tcs WHERE id = ?`, [tc.id]) : null;
+      const tcIes = tc ? queryRows(`SELECT * FROM tc_ies WHERE tc_id = ? ORDER BY step_id, id`, [tc.id]) : [];
+      const bandBundle = tc ? queryRows(`
+        SELECT tb.tc_id, tb.band_combo_id, bc.combo_type, bc.generation, bc.bands_involved, bc.cert_type, bc.ref_spec
+        FROM tc_bands tb
+        LEFT JOIN band_combos bc ON bc.id = tb.band_combo_id
+        WHERE tb.tc_id = ?
+        ORDER BY tb.band_combo_id
+      `, [tc.id]) : [];
+      const specRefs = tc ? extractSpecRefs(tc) : [];
+      let specRows = [];
+      if (specRefs.length) {
+        const placeholders = specRefs.map(() => "?").join(", ");
+        specRows = queryRows(`SELECT * FROM specs WHERE ts_num IN (${placeholders}) ORDER BY ts_num`, specRefs);
+      }
 
-function toggleError() {{
-  showErrorOnly = !showErrorOnly;
-  document.getElementById('errToggle').classList.toggle('active', showErrorOnly);
-  applyFilters();
-}}
+      return `
+        <section class="panel">
+          <div class="panel-title">전체 테이블 카운트</div>
+          <div class="count-grid">${tableCountCards}</div>
+        </section>
 
-// TC 상세 모달
-function showTcDetail(id) {{
-  const tc = TC_DATA.find(t => t.id === id);
-  if (!tc) return;
-  const color = GEN_COLORS[tc.gen] || '#6b7280';
-  
-  document.getElementById('modalTitle').innerHTML =
-    `<span style="color:${{color}}">${{tc.gen}}</span> · ${{tc.name || id}}`;
-  document.getElementById('modalSpec').textContent = tc.spec || id;
-  
-  const info = [
-    ['TC ID', id],
-    ['세대', tc.gen],
-    ['카테고리', CAT_KO[tc.cat] || tc.cat || '—'],
-    ['에러 케이스', tc.err ? '⚠️ Yes' : 'No'],
-    ['인증 방식', tc.auth || '—'],
-    ['TTCN-3 ID', id.replace(/^[\\w-]+-([\\d].*)/, '$1').replace(/\\./g, '_')],
-  ];
-  
-  document.getElementById('modalInfo').innerHTML = info.map(([l, v]) =>
-    `<div class="info-item"><label>${{l}}</label><span>${{v}}</span></div>`
-  ).join('');
-  
-  // 메시지 시퀀스 렌더링
-  const stepsEl = document.getElementById('modalSteps');
-  const badgeEl = document.getElementById('stepsCountBadge');
-  const steps = tc.steps || [];
-  
-  if (steps.length === 0) {{
-    badgeEl.textContent = '0 steps';
-    stepsEl.innerHTML = '<div class="no-steps">이 TC의 시퀀스 데이터가 없습니다.<br><small>공통 절차 참조 또는 파싱 불가 케이스일 수 있습니다.</small></div>';
-  }} else {{
-    badgeEl.textContent = `${{steps.length}} steps`;
-    stepsEl.innerHTML = renderSteps(steps);
-  }}
-  
-  document.getElementById('modalOverlay').classList.add('open');
-}}
+        <section class="panel">
+          <div class="panel-title">선택된 tcs 원본 row</div>
+          ${renderRecordGrid(tcRow)}
+        </section>
 
-function renderSteps(steps) {{
-  // ── 엔티티 정규화 ──────────────────────────────────
-  const ENTITY_ORDER = ['UE', 'eNB/gNB', 'SS', 'MME/AMF', 'P-CSCF', 'Server'];
-  const ENTITY_STYLE = {{
-    'UE':      {{ fill: '#1e3a5f', stroke: '#3b82f6', text: '#93c5fd', label: 'UE' }},
-    'eNB/gNB': {{ fill: '#1a3a1a', stroke: '#22c55e', text: '#86efac', label: 'eNB/gNB' }},
-    'SS':      {{ fill: '#2a2a1a', stroke: '#eab308', text: '#fde047', label: 'SS' }},
-    'MME/AMF': {{ fill: '#3a1a1a', stroke: '#ef4444', text: '#fca5a5', label: 'MME/AMF' }},
-    'P-CSCF':  {{ fill: '#2a1a3a', stroke: '#a855f7', text: '#d8b4fe', label: 'P-CSCF' }},
-    'Server':  {{ fill: '#1a2a3a', stroke: '#06b6d4', text: '#67e8f9', label: 'Server'  }},
-  }};
-  const DEFAULT_STYLE = {{ fill: '#1e293b', stroke: '#64748b', text: '#94a3b8', label: '?' }};
+        <section class="panel">
+          <div class="panel-title">선택된 tc_steps row</div>
+          ${selectedStep ? renderRecordGrid(selectedStep) : `<div class="empty-state">선택된 step이 없습니다. 이 TC는 tc_steps가 비어 있거나 아직 선택되지 않았습니다.</div>`}
+        </section>
 
-  // 참여 엔티티 수집 (순서 고정)
-  const usedSet = new Set();
-  steps.forEach(s => {{ usedSet.add(s.from); usedSet.add(s.to); }});
-  const entities = ENTITY_ORDER.filter(e => usedSet.has(e));
-  // 미등록 엔티티 뒤에 추가
-  usedSet.forEach(e => {{ if (!ENTITY_ORDER.includes(e)) entities.push(e); }});
+        <section class="panel">
+          <div class="panel-title">관련 specs</div>
+          ${specRows.length ? `
+            <div class="list-stack">
+              ${specRows.map((spec) => `
+                <div class="list-item">
+                  <div class="list-item-head">
+                    <div>
+                      <div class="list-item-title">${escapeHtml(spec.ts_num)} — ${escapeHtml(spec.title)}</div>
+                      <div class="list-item-meta">release ${escapeHtml(spec.release)} · zip ${escapeHtml(spec.zip_file)} · ${escapeHtml(spec.local_dir)}</div>
+                    </div>
+                    <div class="badge ${Number(spec.downloaded || 0) ? "good" : "warn"}">${Number(spec.downloaded || 0) ? "downloaded" : "not downloaded"}</div>
+                  </div>
+                  ${renderRecordGrid(spec)}
+                </div>
+              `).join("")}
+            </div>
+          ` : `<div class="empty-state">conf_spec / core_specs / TC ID 에서 연결 가능한 specs row를 찾지 못했습니다.</div>`}
+        </section>
 
-  // ── SVG 레이아웃 상수 ──────────────────────────────
-  const COL_W   = 220;   // 엔티티 열 폭
-  const PAD_L   = 44;    // 좌측 여백 (스텝 번호)
-  const PAD_R   = 20;    // 우측 여백
-  const BOX_H   = 48;    // 엔티티 박스 높이
-  const BOX_W   = 130;   // 엔티티 박스 너비
-  // 각 행 수직 레이아웃 (완전 분리):
-  //   +14 : 메시지 라벨 baseline  ← 화살표 위
-  //   +28 : 화살표 y
-  //   +40 : 레이어 뱃지 y baseline ← 화살표 아래
-  //   +52 : 행 끝
-  const ROW_H   = 56;    // 스텝 행 높이
-  const NOTE_H  = 16;    // 노트 줄 높이
-  const ARROW_Y = 28;    // 행 내 화살표 y
-  const MSG_Y   = 14;    // 행 내 메시지 baseline y (화살표 위)
-  const BADGE_Y = 40;    // 행 내 레이어 뱃지 baseline y (화살표 아래)
+        <section class="panel">
+          <div class="panel-title">TC ↔ IE / Band 상태</div>
+          <div class="list-stack">
+            <div class="list-item">
+              <div class="list-item-head">
+                <div>
+                  <div class="list-item-title">tc_ies</div>
+                  <div class="list-item-meta">선택된 TC에 연결된 raw mapping rows</div>
+                </div>
+                <div class="badge ${tcIes.length ? "good" : "warn"}">${escapeHtml(tcIes.length)} rows</div>
+              </div>
+              ${tcIes.length ? `<pre class="data-block">${escapeHtml(JSON.stringify(tcIes, null, 2))}</pre>` :
+                `<div class="empty-state">tc_ies는 현재 비어 있습니다. 숨기지 않고 empty-state로 유지합니다.</div>`}
+            </div>
+            <div class="list-item">
+              <div class="list-item-head">
+                <div>
+                  <div class="list-item-title">tc_bands / band_combos / bands</div>
+                  <div class="list-item-meta">선택된 TC의 band 연결 상태</div>
+                </div>
+                <div class="badge ${bandBundle.length ? "good" : "warn"}">${escapeHtml(bandBundle.length)} rows</div>
+              </div>
+              ${bandBundle.length ? `<pre class="data-block">${escapeHtml(JSON.stringify(bandBundle, null, 2))}</pre>` :
+                `<div class="empty-state">현재 선택된 TC에 대한 tc_bands / band_combos 연결이 없습니다. 전체 Tables 탭에서 schema는 계속 확인할 수 있습니다.</div>`}
+            </div>
+          </div>
+        </section>
+      `;
+    }
 
-  const N = entities.length;
-  const SVG_W = PAD_L + N * COL_W + PAD_R;
+    function renderIesTab(tc, selectedStep) {
+      const match = getMatchedIes(selectedStep);
+      const candidates = match.exact.length ? match.exact : match.heuristic;
+      let fields = [];
+      if (candidates.length) {
+        const names = candidates.map((ie) => ie.name);
+        const placeholders = names.map(() => "?").join(", ");
+        fields = queryRows(`
+          SELECT *
+          FROM ie_fields
+          WHERE ie_name IN (${placeholders})
+          ORDER BY ie_name, sort_order, id
+          LIMIT 240
+        `, names);
+      }
+      const tcIes = tc ? queryRows(`SELECT * FROM tc_ies WHERE tc_id = ? ORDER BY step_id, id`, [tc.id]) : [];
 
-  // 각 엔티티 중심 x
-  const cx = i => PAD_L + i * COL_W + COL_W / 2;
+      return `
+        <section class="panel">
+          <div class="panel-title">Message → IE 매칭</div>
+          ${selectedStep ? `
+            <div class="list-item">
+              <div class="list-item-head">
+                <div>
+                  <div class="list-item-title mono">${escapeHtml(selectedStep.message || "(empty message)")}</div>
+                  <div class="list-item-meta">tc_steps.message 와 ies.name 의 exact match를 우선 사용하고, 없으면 normalized heuristic match만 시도합니다.</div>
+                </div>
+                <div class="badge ${match.exact.length ? "good" : candidates.length ? "warn" : "danger"}">
+                  ${match.exact.length ? match.exact.length + " exact" : candidates.length ? candidates.length + " heuristic" : "0 match"}
+                </div>
+              </div>
+              ${candidates.length ? "" : `
+                <div class="empty-state">
+                  현재 이 message는 <code>ies.name</code>와 직접 연결되지 않습니다. 데이터 부재를 숨기지 않고 그대로 노출합니다.
+                </div>
+              `}
+            </div>
+          ` : `<div class="empty-state">선택된 step이 없어 message → IE 매칭을 수행할 수 없습니다.</div>`}
+        </section>
 
-  // int step인지 판별하는 함수
-  const isIntStep = s => {{
-    const fi = entities.indexOf(s.from);
-    const ti = entities.indexOf(s.to);
-    return (s.dir || 'int') === 'int' || fi === ti || fi < 0 || ti < 0;
-  }};
+        <section class="panel">
+          <div class="panel-title">매칭 가능한 ies / ie_fields</div>
+          ${candidates.length ? `
+            <div class="list-stack">
+              ${candidates.map((ie) => {
+                const ieFields = fields.filter((field) => field.ie_name === ie.name).slice(0, 80);
+                return `
+                  <div class="list-item">
+                    <div class="list-item-head">
+                      <div>
+                        <div class="list-item-title">${escapeHtml(ie.name)}</div>
+                        <div class="list-item-meta">${escapeHtml(ie.spec_origin || "Unknown spec")} · ${escapeHtml(ie.generation || "Unknown generation")} · ${escapeHtml(ie.asn1_type || "Unknown type")}</div>
+                      </div>
+                      <div class="badge ${match.exact.length ? "good" : "warn"}">${match.exact.length ? "exact" : "heuristic"}</div>
+                    </div>
+                    <div class="panel-title">ASN.1 definition</div>
+                    <pre class="data-block">${escapeHtml(truncate(ie.definition || "(definition 없음)", 2600))}</pre>
+                    <div class="panel-title" style="margin-top:12px">ie_fields (${ieFields.length})</div>
+                    ${ieFields.length ? `
+                      <div style="overflow:auto">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>id</th>
+                              <th>field_name</th>
+                              <th>field_type</th>
+                              <th>optional</th>
+                              <th>comment</th>
+                              <th>sort_order</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            ${ieFields.map((field) => `
+                              <tr>
+                                <td class="mono">${escapeHtml(compact(field.id))}</td>
+                                <td>${escapeHtml(compact(field.field_name))}</td>
+                                <td>${escapeHtml(compact(field.field_type))}</td>
+                                <td>${escapeHtml(Number(field.is_optional || 0))}</td>
+                                <td>${escapeHtml(truncate(compact(field.comment), 96))}</td>
+                                <td>${escapeHtml(compact(field.sort_order))}</td>
+                              </tr>
+                            `).join("")}
+                          </tbody>
+                        </table>
+                      </div>
+                    ` : `<div class="empty-state">해당 IE에 연결된 ie_fields row가 없습니다.</div>`}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          ` : `<div class="empty-state">표시할 IE 후보가 없습니다.</div>`}
+        </section>
 
-  // 각 스텝의 실제 높이 계산
-  // - 메시지/노트 없는 int step: 축소 (32px)
-  // - 노트 있는 step: ROW_H + NOTE_H
-  const rowHeights = steps.map(s => {{
-    const isInt = isIntStep(s);
-    const hasMsg = !!(s.msg || '').trim();
-    const hasNote = !!(s.note || '').trim();
-    // note가 msg와 동일하면 중복 표시 안 함
-    const showNote = hasNote && s.note !== s.msg;
-    if (isInt && !hasMsg && !showNote) return 32;   // 빈 int step
-    return ROW_H + (showNote ? NOTE_H : 0);
-  }});
-  const totalRows = rowHeights.reduce((a, b) => a + b, 0);
-  const SVG_H = BOX_H + totalRows + 20;
+        <section class="panel">
+          <div class="panel-title">tc_ies raw records</div>
+          ${tcIes.length ? `<pre class="data-block">${escapeHtml(JSON.stringify(tcIes, null, 2))}</pre>` :
+            `<div class="empty-state">tc_ies는 현재 0건입니다. Tables 탭에서 schema와 count를 확인하세요.</div>`}
+        </section>
+      `;
+    }
 
-  // ── SVG 생성 ──────────────────────────────────────
-  let svg = `<svg class="seq-svg" width="${{SVG_W}}" height="${{SVG_H}}" viewBox="0 0 ${{SVG_W}} ${{SVG_H}}" xmlns="http://www.w3.org/2000/svg">
-<defs>
-  <marker id="arr-dl" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-    <path d="M0,0 L0,6 L8,3 z" fill="#60a5fa"/>
-  </marker>
-  <marker id="arr-ul" markerWidth="8" markerHeight="8" refX="1" refY="3" orient="auto">
-    <path d="M8,0 L8,6 L0,3 z" fill="#34d399"/>
-  </marker>
-  <marker id="arr-int" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-    <path d="M0,0 L0,6 L6,3 z" fill="#64748b"/>
-  </marker>
-</defs>`;
+    function getSchema(tableName) {
+      return queryRows(`PRAGMA table_info(${quoteIdent(tableName)})`);
+    }
 
-  // 배경
-  svg += `<rect width="${{SVG_W}}" height="${{SVG_H}}" fill="#0a0f1e"/>`;
+    function buildTableSearch(tableName, schema, query) {
+      if (!query) return { where: "", params: [] };
+      const likeValue = "%" + query + "%";
+      const where = schema.map((column) => `CAST(${quoteIdent(column.name)} AS TEXT) LIKE ?`).join(" OR ");
+      return {
+        where,
+        params: schema.map(() => likeValue),
+      };
+    }
 
-  // 엔티티 박스 + 라이프라인
-  entities.forEach((e, i) => {{
-    const style = ENTITY_STYLE[e] || DEFAULT_STYLE;
-    const x = cx(i);
-    const boxX = x - BOX_W / 2;
+    function rowKey(tableName, row, index) {
+      if (tableName === "tcs") return row.id || "row-" + index;
+      if (tableName === "tc_steps") return String(row.id ?? index);
+      if (tableName === "ies") return row.name || "row-" + index;
+      if (tableName === "specs") return row.ts_num || "row-" + index;
+      if (tableName === "bands") return `${row.band_num}-${row.generation}`;
+      if (tableName === "tc_bands") return `${row.tc_id}-${row.band_combo_id}`;
+      return String(row.id ?? index);
+    }
 
-    // 라이프라인 (세로 점선)
-    svg += `<line x1="${{x}}" y1="${{BOX_H}}" x2="${{x}}" y2="${{SVG_H - 10}}"
-      stroke="${{style.stroke}}" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>`;
+    function renderTablesTab() {
+      const tableName = state.tableBrowser.table;
+      const query = state.tableBrowser.query.trim();
+      const schema = getSchema(tableName);
+      const pageSize = 25;
+      const search = buildTableSearch(tableName, schema, query);
+      const countSql = `SELECT COUNT(*) AS count FROM ${quoteIdent(tableName)}${search.where ? " WHERE " + search.where : ""}`;
+      const totalRows = queryValue(countSql, search.params) || 0;
+      const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+      if (state.tableBrowser.page >= totalPages) state.tableBrowser.page = totalPages - 1;
+      const offset = state.tableBrowser.page * pageSize;
+      const rowSql = `SELECT * FROM ${quoteIdent(tableName)}${search.where ? " WHERE " + search.where : ""} LIMIT ? OFFSET ?`;
+      const pageRows = queryRows(rowSql, [...search.params, pageSize, offset]);
+      const selectedRow = pageRows.find((row, index) => rowKey(tableName, row, offset + index) === state.tableBrowser.selectedKey) || pageRows[0] || null;
+      if (selectedRow) {
+        state.tableBrowser.selectedKey = rowKey(tableName, selectedRow, offset);
+      }
 
-    // 엔티티 박스
-    svg += `<rect x="${{boxX}}" y="4" width="${{BOX_W}}" height="${{BOX_H - 8}}"
-      rx="6" fill="${{style.fill}}" stroke="${{style.stroke}}" stroke-width="1.5"/>`;
+      return `
+        <section class="panel">
+          <div class="panel-title">전체 테이블 브라우저</div>
+          <div class="table-controls">
+            <select class="select" id="tableBrowserSelect">
+              ${TABLE_ORDER.map((name) => `
+                <option value="${escapeHtml(name)}"${name === tableName ? " selected" : ""}>
+                  ${escapeHtml(name)} (${escapeHtml(state.tableCounts[name] ?? 0)})
+                </option>
+              `).join("")}
+            </select>
+            <input class="field" id="tableBrowserSearch" type="text" value="${escapeHtml(state.tableBrowser.query)}" placeholder="선택 테이블 내 검색">
+            <button class="btn" type="button" id="tablePrevBtn"${state.tableBrowser.page <= 0 ? " disabled" : ""}>Prev</button>
+            <button class="btn" type="button" id="tableNextBtn"${state.tableBrowser.page >= totalPages - 1 ? " disabled" : ""}>Next</button>
+          </div>
+          <div class="chip-row" style="margin-bottom:12px">
+            <span class="badge">${escapeHtml(tableName)}</span>
+            <span class="badge">${escapeHtml(totalRows)} filtered rows</span>
+            <span class="badge">${escapeHtml(offset + 1)}-${escapeHtml(Math.min(offset + pageSize, totalRows || 0))} / ${escapeHtml(totalRows)}</span>
+          </div>
+          ${totalRows ? `
+            <div style="overflow:auto; max-height:320px">
+              <table>
+                <thead>
+                  <tr>${schema.map((column) => `<th>${escapeHtml(column.name)}</th>`).join("")}</tr>
+                </thead>
+                <tbody>
+                  ${pageRows.map((row, index) => {
+                    const key = rowKey(tableName, row, offset + index);
+                    return `
+                      <tr class="clickable ${state.tableBrowser.selectedKey === key ? "selected" : ""}" data-table-row="${escapeHtml(encodeURIComponent(key))}">
+                        ${schema.map((column) => `<td>${escapeHtml(truncate(compact(row[column.name]), 120))}</td>`).join("")}
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `<div class="empty-state">${escapeHtml(tableName)} 테이블은 현재 0건이거나 검색 결과가 없습니다. empty-state와 schema는 계속 노출합니다.</div>`}
+        </section>
 
-    // 엔티티 레이블
-    svg += `<text x="${{x}}" y="${{BOX_H / 2 + 2}}" text-anchor="middle" dominant-baseline="middle"
-      font-family="'Segoe UI',system-ui,sans-serif" font-size="12" font-weight="700"
-      fill="${{style.text}}">${{style.label}}</text>`;
-  }});
+        <section class="panel">
+          <div class="panel-title">선택 row 상세</div>
+          ${selectedRow ? renderRecordGrid(selectedRow) : `<div class="empty-state">선택된 row가 없습니다.</div>`}
+        </section>
 
-  // ── 스텝 행 ──────────────────────────────────────
-  let y = BOX_H;
-  steps.forEach((s, idx) => {{
-    const rh = rowHeights[idx];
-    const ay = y + ARROW_Y;    // 화살표 y
-    const my = y + MSG_Y;      // 메시지 baseline y (화살표 위)
-    const by = y + BADGE_Y;    // 레이어 뱃지 baseline y (화살표 아래)
+        <section class="panel">
+          <div class="panel-title">Schema</div>
+          <div class="schema-list">
+            ${schema.map((column) => `
+              <div class="schema-item">
+                <div>
+                  <strong>${escapeHtml(column.name)}</strong>
+                  <span>${escapeHtml(column.type || "TEXT")}</span>
+                </div>
+                <div style="color:var(--subtle)">
+                  ${column.pk ? "PK " : ""}${column.notnull ? "NOT NULL " : ""}${column.dflt_value !== null && column.dflt_value !== undefined ? `DEFAULT ${escapeHtml(column.dflt_value)}` : ""}
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </section>
+      `;
+    }
 
-    const fromIdx = entities.indexOf(s.from);
-    const toIdx   = entities.indexOf(s.to);
-    const dir     = s.dir || 'int';
-    const msg     = (s.msg || '').replace(/_/g, ' ');
+    function bindTableTabEvents() {
+      const select = document.getElementById("tableBrowserSelect");
+      const search = document.getElementById("tableBrowserSearch");
+      const prev = document.getElementById("tablePrevBtn");
+      const next = document.getElementById("tableNextBtn");
+      const body = document.getElementById("inspectorBody");
 
-    // 줄무늬 배경
-    const rowFill = idx % 2 === 0 ? 'rgba(255,255,255,0.025)' : 'transparent';
-    svg += `<rect x="0" y="${{y}}" width="${{SVG_W}}" height="${{rh}}" fill="${{rowFill}}"/>`;
+      if (select) {
+        select.addEventListener("change", (event) => {
+          state.tableBrowser.table = event.target.value;
+          state.tableBrowser.page = 0;
+          state.tableBrowser.selectedKey = null;
+          renderInspector();
+        });
+      }
+      if (search) {
+        search.addEventListener("input", (event) => {
+          state.tableBrowser.query = event.target.value;
+          state.tableBrowser.page = 0;
+          state.tableBrowser.selectedKey = null;
+          renderInspector();
+        });
+      }
+      if (prev) {
+        prev.addEventListener("click", () => {
+          if (state.tableBrowser.page > 0) {
+            state.tableBrowser.page -= 1;
+            renderInspector();
+          }
+        });
+      }
+      if (next) {
+        next.addEventListener("click", () => {
+          state.tableBrowser.page += 1;
+          renderInspector();
+        });
+      }
+      body.querySelectorAll("[data-table-row]").forEach((row) => {
+        row.addEventListener("click", () => {
+          state.tableBrowser.selectedKey = decodeURIComponent(row.getAttribute("data-table-row"));
+          renderInspector();
+        });
+      });
+    }
 
-    // 스텝 번호
-    svg += `<text x="38" y="${{ay + 4}}" text-anchor="end" font-family="monospace"
-      font-size="10" fill="#475569">${{s.no}}</text>`;
+    function renderInspector() {
+      const tc = ensureSelectedTc();
+      const steps = loadSelectedSteps();
+      const selectedStep = ensureSelectedStep(steps);
+      renderInspectorMeta(tc, steps, selectedStep);
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.tab === state.inspectorTab);
+      });
 
-    if (dir === 'int' || fromIdx === toIdx || fromIdx < 0 || toIdx < 0) {{
-      // 내부/unknown → 전폭 점선 (항상 왼쪽에서 오른쪽까지)
-      const lineX1 = PAD_L;
-      const lineX2 = SVG_W - PAD_R;
-      svg += `<line x1="${{lineX1}}" y1="${{ay}}" x2="${{lineX2}}" y2="${{ay}}"
-        stroke="#2d4a5e" stroke-width="1" stroke-dasharray="4,3"/>`;
-      if (msg) {{
-        // 메시지는 항상 왼쪽 정렬 — 오버플로우 방지
-        const maxIntChars = Math.max(10, Math.floor((SVG_W - PAD_L - PAD_R - 12) / 6.3));
-        svg += `<text x="${{lineX1 + 4}}" y="${{ay - 6}}"
-          font-family="'Segoe UI',system-ui,sans-serif"
-          font-size="10" fill="#94a3b8" font-style="italic">${{escXml(truncate(msg, maxIntChars))}}</text>`;
-      }}
-    }} else {{
-      const x1 = cx(fromIdx);
-      const x2 = cx(toIdx);
-      const arrowColor = dir === 'dl' ? '#60a5fa' : '#34d399';
-      const markerId   = dir === 'dl' ? 'arr-dl' : 'arr-ul';
-      const layerBg    = dir === 'dl' ? '#1e3a5f' : '#14532d';
-      const spanPx     = Math.abs(x2 - x1);
-      const midX       = (x1 + x2) / 2;
+      const body = document.getElementById("inspectorBody");
+      if (!state.dbReady) {
+        body.innerHTML = `<div class="empty-state">브라우저에서 SQLite DB가 로드되면 Inspector가 활성화됩니다.</div>`;
+        return;
+      }
+      if (state.inspectorTab === "overview") {
+        body.innerHTML = renderOverviewTab(tc, steps, selectedStep);
+      } else if (state.inspectorTab === "ies") {
+        body.innerHTML = renderIesTab(tc, selectedStep);
+      } else {
+        body.innerHTML = renderTablesTab();
+        bindTableTabEvents();
+      }
+    }
 
-      // ① 메시지 이름 — 화살표 위 전체 너비 사용
-      if (msg) {{
-        const maxChars = Math.max(6, Math.floor((spanPx - 16) / 6.8));
-        svg += `<text x="${{midX}}" y="${{my}}" text-anchor="middle"
-          font-family="'Segoe UI',system-ui,sans-serif" font-size="11" font-weight="600"
-          fill="${{arrowColor}}">${{escXml(truncate(msg, maxChars))}}</text>`;
-      }}
+    function renderSelectedViews() {
+      const tc = ensureSelectedTc();
+      const steps = loadSelectedSteps();
+      const selectedStep = ensureSelectedStep(steps);
+      renderTree();
+      renderTopbar(tc, steps);
+      renderCallFlow(tc, steps, selectedStep);
+      renderStepsTable(tc, steps, selectedStep);
+      renderInspector();
+    }
 
-      // ② 화살표 선
-      const MARKER_INSET = 8;
-      const [lx1, lx2] = x1 < x2
-        ? [x1, x2 - MARKER_INSET]
-        : [x1, x2 + MARKER_INSET];
-      svg += `<line x1="${{lx1}}" y1="${{ay}}" x2="${{lx2}}" y2="${{ay}}"
-        stroke="${{arrowColor}}" stroke-width="2" marker-end="url(#${{markerId}})"/>`;
+    function openOverlay() {
+      state.overlayOpen = true;
+      document.getElementById("searchOverlay").classList.add("open");
+      const input = document.getElementById("overlaySearchInput");
+      input.value = state.overlayQuery;
+      renderSearchOverlay();
+      setTimeout(() => input.focus(), 0);
+    }
 
-      // ③ 레이어 뱃지 — 화살표 아래, 화살촉 쪽에 배치
-      if (s.layer && s.layer !== 'internal') {{
-        const bw = 38; const bh = 12;
-        // 화살촉이 있는 쪽(x2) 근처에 배치
-        const badgeX = x1 < x2 ? x2 - bw - 4 : x2 + 4;
-        svg += `<rect x="${{badgeX}}" y="${{by - bh}}" width="${{bw}}" height="${{bh}}"
-          rx="3" fill="${{layerBg}}" stroke="${{arrowColor}}" stroke-width="0.5"/>`;
-        svg += `<text x="${{badgeX + bw/2}}" y="${{by - 2}}" text-anchor="middle"
-          dominant-baseline="auto"
-          font-family="monospace" font-size="9" font-weight="700" fill="${{arrowColor}}">${{s.layer}}</text>`;
-      }}
-    }}
+    function closeOverlay() {
+      state.overlayOpen = false;
+      document.getElementById("searchOverlay").classList.remove("open");
+    }
 
-    // 노트 (행 하단 별도 줄) — msg와 동일한 내용은 생략
-    const showNote = !!(s.note || '').trim() && s.note !== s.msg;
-    if (showNote) {{
-      const noteStartY = y + ROW_H + 2;
-      const noteBaseline = noteStartY + 11;
-      // 9.5px/char (font-size 10 기준) 으로 가용 너비 계산
-      const maxNoteChars = Math.max(20, Math.floor((SVG_W - PAD_L - PAD_R - 8) / 5.9));
-      svg += `<text x="${{PAD_L + 4}}" y="${{noteBaseline}}"
-        font-family="'Segoe UI',system-ui,sans-serif"
-        font-size="10" fill="#475569" font-style="italic">${{escXml(truncate(s.note, maxNoteChars))}}</text>`;
-    }}
+    function renderSearchOverlay() {
+      const resultsEl = document.getElementById("overlayResults");
+      if (!state.dbReady) {
+        resultsEl.innerHTML = `<div class="empty-state">DB가 로드된 뒤 검색 오버레이를 사용할 수 있습니다.</div>`;
+        return;
+      }
+      const q = state.overlayQuery.trim();
+      const like = "%" + q + "%";
 
-    // 타이머 표시 (우측 끝, 화살표 y)
-    if (s.timerStart) {{
-      const label = s.timerStart.split(',')[0];
-      svg += `<text x="${{SVG_W - PAD_R - 2}}" y="${{ay - 2}}" text-anchor="end"
-        font-family="monospace" font-size="9" fill="#fbbf24">⏱${{label}}</text>`;
-    }}
-    if (s.timerStop) {{
-      svg += `<text x="${{SVG_W - PAD_R - 2}}" y="${{ay + 10}}" text-anchor="end"
-        font-family="monospace" font-size="9" fill="#6b7280">⏹${{s.timerStop.split(',')[0]}}</text>`;
-    }}
+      const pinnedTcs = q ? queryRows(`
+        SELECT id, short_name, generation, category,
+               (SELECT COUNT(*) FROM tc_steps s WHERE s.tc_id = tcs.id) AS step_count
+        FROM tcs
+        WHERE id LIKE ? OR COALESCE(short_name, '') LIKE ? OR COALESCE(conf_spec, '') LIKE ?
+        ORDER BY id
+        LIMIT 12
+      `, [like, like, like]) : queryRows(`
+        SELECT id, short_name, generation, category,
+               is_error_case,
+               (SELECT COUNT(*) FROM tc_steps s WHERE s.tc_id = tcs.id) AS step_count
+        FROM tcs
+        ORDER BY is_error_case DESC, (step_count > 0) DESC, id
+        LIMIT 8
+      `);
 
-    y += rh;
-  }});
+      const specRows = q ? queryRows(`
+        SELECT *
+        FROM specs
+        WHERE ts_num LIKE ? OR COALESCE(title, '') LIKE ? OR COALESCE(local_dir, '') LIKE ?
+        ORDER BY ts_num
+        LIMIT 8
+      `, [like, like, like]) : queryRows(`SELECT * FROM specs ORDER BY ts_num LIMIT 8`);
 
-  svg += `</svg>`;
-  return `<div class="seq-diagram-wrap">${{svg}}</div>`;
-}}
+      const messageRows = q ? queryRows(`
+        SELECT message, COUNT(*) AS hit_count, MIN(tc_id) AS sample_tc, MIN(layer) AS sample_layer
+        FROM tc_steps
+        WHERE COALESCE(message, '') LIKE ?
+        GROUP BY message
+        ORDER BY hit_count DESC, message
+        LIMIT 12
+      `, [like]) : queryRows(`
+        SELECT message, COUNT(*) AS hit_count, MIN(tc_id) AS sample_tc, MIN(layer) AS sample_layer
+        FROM tc_steps
+        WHERE COALESCE(message, '') <> ''
+        GROUP BY message
+        ORDER BY hit_count DESC, message
+        LIMIT 12
+      `);
 
-// 유틸리티
-function escXml(s) {{
-  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}}
-function truncate(s, n) {{
-  return s.length > n ? s.slice(0, n) + '…' : s;
-}}
-function truncatePx(s, px) {{
-  // Segoe UI 11px: 평균 약 6.8px/char (대문자 많은 프로토콜 메시지 기준)
-  const maxChars = Math.max(4, Math.floor(px / 6.8));
-  return truncate(s, maxChars);
-}}
+      const ieRows = q ? queryRows(`
+        SELECT name, spec_origin, generation, asn1_type
+        FROM ies
+        WHERE name LIKE ? OR COALESCE(spec_origin, '') LIKE ? OR COALESCE(definition, '') LIKE ?
+        ORDER BY name
+        LIMIT 10
+      `, [like, like, like]) : [];
 
-function closeModal(e) {{
-  if (e.target === document.getElementById('modalOverlay'))
-    document.getElementById('modalOverlay').classList.remove('open');
-}}
+      const emptyTables = TABLE_ORDER.filter((tableName) => Number(state.tableCounts[tableName] || 0) === 0);
 
-function closeModalBtn() {{
-  document.getElementById('modalOverlay').classList.remove('open');
-}}
+      resultsEl.innerHTML = `
+        <section class="overlay-section">
+          <div class="overlay-section-head">
+            <div class="overlay-section-title">Pinned Test Cases</div>
+            <div class="badge">${escapeHtml(pinnedTcs.length)} results</div>
+          </div>
+          <div class="overlay-list">
+            ${pinnedTcs.length ? pinnedTcs.map((tc) => `
+              <button class="overlay-row" type="button" data-overlay-action="tc" data-tc-id="${escapeHtml(encodeURIComponent(tc.id))}">
+                <div>
+                  <div class="overlay-row-title mono">${escapeHtml(tc.id)}</div>
+                  <div class="overlay-row-subtitle">${escapeHtml(tc.short_name || tc.id)} · ${escapeHtml(tc.generation || "Unknown")} · ${escapeHtml(CATEGORY_LABELS[tc.category] || tc.category || "Unknown")}</div>
+                </div>
+                <div class="badge">${escapeHtml(tc.step_count || 0)} steps</div>
+              </button>
+            `).join("") : `<div class="overlay-row"><div class="overlay-row-subtitle">일치하는 TC가 없습니다.</div></div>`}
+          </div>
+        </section>
 
-document.addEventListener('keydown', e => {{
-  if (e.key === 'Escape') document.getElementById('modalOverlay').classList.remove('open');
-}});
-</script>
+        <section class="overlay-section">
+          <div class="overlay-section-head">
+            <div class="overlay-section-title">Specifications</div>
+            <div class="badge">${escapeHtml(specRows.length)} results</div>
+          </div>
+          <div class="overlay-list">
+            ${specRows.map((spec) => `
+              <button class="overlay-row" type="button" data-overlay-action="table" data-table="specs" data-table-query="${escapeHtml(encodeURIComponent(spec.ts_num))}">
+                <div>
+                  <div class="overlay-row-title">${escapeHtml(spec.ts_num)} — ${escapeHtml(spec.title)}</div>
+                  <div class="overlay-row-subtitle">${escapeHtml(spec.local_dir)} · release ${escapeHtml(spec.release)} · tc_count ${escapeHtml(spec.tc_count)}</div>
+                </div>
+                <div class="badge ${Number(spec.downloaded || 0) ? "good" : "warn"}">${Number(spec.downloaded || 0) ? "downloaded" : "not downloaded"}</div>
+              </button>
+            `).join("")}
+          </div>
+        </section>
+
+        <section class="overlay-section">
+          <div class="overlay-section-head">
+            <div class="overlay-section-title">Message Types</div>
+            <div class="badge">${escapeHtml(messageRows.length)} results</div>
+          </div>
+          <div class="overlay-list">
+            ${messageRows.map((row) => `
+              <button class="overlay-row" type="button" data-overlay-action="message" data-message="${escapeHtml(encodeURIComponent(row.message || ""))}">
+                <div>
+                  <div class="overlay-row-title mono">${escapeHtml(row.message || "(empty)")}</div>
+                  <div class="overlay-row-subtitle">layer ${escapeHtml(row.sample_layer || "—")} · sample TC ${escapeHtml(row.sample_tc || "—")} · ${escapeHtml(row.hit_count)} occurrences</div>
+                </div>
+                <div class="badge">${escapeHtml(row.hit_count)} hits</div>
+              </button>
+            `).join("")}
+          </div>
+        </section>
+
+        <section class="overlay-section">
+          <div class="overlay-section-head">
+            <div class="overlay-section-title">IE Library</div>
+            <div class="badge">${escapeHtml(ieRows.length)} results</div>
+          </div>
+          <div class="overlay-list">
+            ${ieRows.length ? ieRows.map((ie) => `
+              <button class="overlay-row" type="button" data-overlay-action="table" data-table="ies" data-table-query="${escapeHtml(encodeURIComponent(ie.name))}">
+                <div>
+                  <div class="overlay-row-title mono">${escapeHtml(ie.name)}</div>
+                  <div class="overlay-row-subtitle">${escapeHtml(ie.spec_origin || "Unknown spec")} · ${escapeHtml(ie.generation || "Unknown")} · ${escapeHtml(ie.asn1_type || "Unknown type")}</div>
+                </div>
+                <div class="badge">ies</div>
+              </button>
+            `).join("") : `<div class="overlay-row"><div class="overlay-row-subtitle">검색어를 입력하면 IE library를 조회합니다.</div></div>`}
+          </div>
+        </section>
+
+        <section class="overlay-section">
+          <div class="overlay-section-head">
+            <div class="overlay-section-title">Empty Tables / Schema Surface</div>
+            <div class="badge">${escapeHtml(emptyTables.length)} tables</div>
+          </div>
+          <div class="overlay-list">
+            ${emptyTables.map((tableName) => `
+              <button class="overlay-row" type="button" data-overlay-action="table" data-table="${escapeHtml(tableName)}" data-table-query="">
+                <div>
+                  <div class="overlay-row-title">${escapeHtml(tableName)}</div>
+                  <div class="overlay-row-subtitle">${escapeHtml(TABLE_DESCRIPTIONS[tableName])}</div>
+                </div>
+                <div class="badge warn">0 rows</div>
+              </button>
+            `).join("")}
+          </div>
+        </section>
+      `;
+    }
+
+    function openTableBrowser(tableName, query) {
+      state.inspectorTab = "tables";
+      state.tableBrowser.table = tableName;
+      state.tableBrowser.query = query || "";
+      state.tableBrowser.page = 0;
+      state.tableBrowser.selectedKey = null;
+      renderInspector();
+    }
+
+    function jumpToMessage(message) {
+      const step = queryOne(`
+        SELECT *
+        FROM tc_steps
+        WHERE message = ?
+        ORDER BY tc_id, step_no, id
+        LIMIT 1
+      `, [message]);
+      if (!step) return;
+      state.selectedTcId = step.tc_id;
+      state.selectedStepId = Number(step.id);
+      renderSelectedViews();
+    }
+
+    function bindOverlayEvents() {
+      document.getElementById("overlayResults").addEventListener("click", (event) => {
+        const target = event.target.closest("[data-overlay-action]");
+        if (!target) return;
+        const action = target.getAttribute("data-overlay-action");
+        if (action === "tc") {
+          state.selectedTcId = decodeURIComponent(target.getAttribute("data-tc-id"));
+          state.selectedStepId = null;
+          closeOverlay();
+          renderSelectedViews();
+        } else if (action === "table") {
+          openTableBrowser(target.getAttribute("data-table"), decodeURIComponent(target.getAttribute("data-table-query") || ""));
+          closeOverlay();
+        } else if (action === "message") {
+          jumpToMessage(decodeURIComponent(target.getAttribute("data-message") || ""));
+          closeOverlay();
+        }
+      });
+    }
+
+    async function refreshTableCounts() {
+      TABLE_ORDER.forEach((tableName) => {
+        state.tableCounts[tableName] = queryValue(`SELECT COUNT(*) FROM ${quoteIdent(tableName)}`) || 0;
+      });
+    }
+
+    async function loadCoreData() {
+      state.tcs = queryRows(`
+        SELECT id, short_name, generation, category, conf_spec, core_specs,
+               is_error_case, usim_interface, raw_ttcn3_id
+        FROM tcs
+        ORDER BY generation, category, id
+      `);
+      await refreshTableCounts();
+      renderSummaryCards();
+      renderFilterOptions();
+      ensureSelectedTc();
+    }
+
+    async function activateDatabase(db, sourceLabel) {
+      state.db = db;
+      state.dbReady = true;
+      await loadCoreData();
+      setDbStatus(
+        "ready",
+        "DB 로드 완료",
+        `현재 소스: <code>${escapeHtml(sourceLabel)}</code> · 모든 질의는 브라우저 내 SQLite 엔진(sql.js)에서 수행됩니다.`
+      );
+      renderSelectedViews();
+    }
+
+    async function loadDatabaseFromArrayBuffer(buffer, sourceLabel) {
+      await initSqlModule();
+      const db = new state.SQL.Database(new Uint8Array(buffer));
+      await activateDatabase(db, sourceLabel);
+    }
+
+    async function attemptFetchLoad() {
+      setDbStatus(
+        "loading",
+        "HTTP fetch로 tc.db 로딩 시도 중…",
+        `우선 <code>fetch('./tc.db')</code>를 시도합니다. 실패하면 file input fallback으로 전환하세요. 권장 실행: <code>python3 -m http.server</code>`
+      );
+      try {
+        await initSqlModule();
+        const response = await fetch("./tc.db", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const buffer = await response.arrayBuffer();
+        await loadDatabaseFromArrayBuffer(buffer, "./tc.db via fetch");
+      } catch (error) {
+        console.error(error);
+        state.dbReady = false;
+        setDbStatus(
+          "error",
+          "fetch('./tc.db') 로드 실패",
+          `이 환경에서는 상대경로 fetch가 차단되었거나 file:// 로 직접 열었을 수 있습니다.<br>
+          권장: <code>python3 -m http.server</code> 로 제공하거나, 오른쪽 버튼으로 <code>.db</code> 파일을 업로드하세요.`
+        );
+        renderSummaryCards();
+        renderTree();
+        renderInspector();
+      }
+    }
+
+    async function handleFileUpload(file) {
+      if (!file) return;
+      setDbStatus(
+        "loading",
+        "업로드된 DB 로드 중…",
+        `<code>${escapeHtml(file.name)}</code> 파일을 browser-side SQLite loader로 열고 있습니다.`
+      );
+      try {
+        const buffer = await file.arrayBuffer();
+        await loadDatabaseFromArrayBuffer(buffer, file.name + " via file input fallback");
+      } catch (error) {
+        console.error(error);
+        setDbStatus(
+          "error",
+          "업로드된 DB 로드 실패",
+          `선택한 파일을 SQLite로 해석하지 못했습니다: <code>${escapeHtml(error.message || String(error))}</code><br>올바른 <code>tc.db</code> 파일인지 확인하세요.`
+        );
+      } finally {
+        const input = document.getElementById("dbFileInput");
+        if (input) input.value = "";
+      }
+    }
+
+    function bindCoreEvents() {
+      document.getElementById("treeSearchInput").addEventListener("input", (event) => {
+        state.treeQuery = event.target.value;
+        renderTree();
+      });
+
+      document.getElementById("generationFilter").addEventListener("change", (event) => {
+        state.generationFilter = event.target.value;
+        renderTree();
+      });
+
+      document.getElementById("categoryFilter").addEventListener("change", (event) => {
+        state.categoryFilter = event.target.value;
+        renderTree();
+      });
+
+      document.getElementById("treeContainer").addEventListener("click", (event) => {
+        const leaf = event.target.closest("[data-tc-id]");
+        if (!leaf) return;
+        state.selectedTcId = decodeURIComponent(leaf.getAttribute("data-tc-id"));
+        state.selectedStepId = null;
+        renderSelectedViews();
+      });
+
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.inspectorTab = btn.dataset.tab;
+          renderInspector();
+        });
+      });
+
+      document.getElementById("openSearchBtn").addEventListener("click", openOverlay);
+      document.getElementById("openSearchTopBtn").addEventListener("click", openOverlay);
+      document.getElementById("openTablesBtn").addEventListener("click", () => {
+        openTableBrowser("tcs", state.selectedTcId || "");
+      });
+      document.getElementById("retryFetchBtn").addEventListener("click", attemptFetchLoad);
+      document.getElementById("openFilePickerBtn").addEventListener("click", () => {
+        document.getElementById("dbFileInput").click();
+      });
+      document.getElementById("dbFileInput").addEventListener("change", async (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (file) await handleFileUpload(file);
+      });
+
+      document.getElementById("overlaySearchInput").addEventListener("input", (event) => {
+        state.overlayQuery = event.target.value;
+        renderSearchOverlay();
+      });
+
+      document.getElementById("searchOverlay").addEventListener("click", (event) => {
+        if (event.target.id === "searchOverlay") closeOverlay();
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          openOverlay();
+        }
+        if (event.key === "Escape" && state.overlayOpen) {
+          closeOverlay();
+        }
+      });
+    }
+
+    async function bootstrap() {
+      renderSummaryCards();
+      document.getElementById("selectedSubtitle").innerHTML = `
+        <span class="pill">generated ${escapeHtml(GENERATED_AT)}</span>
+        <span class="pill">initial tables ${escapeHtml(TABLE_ORDER.length)}</span>
+      `;
+      bindCoreEvents();
+      bindOverlayEvents();
+      await attemptFetchLoad();
+    }
+
+    bootstrap().catch((error) => {
+      console.error(error);
+      setDbStatus(
+        "error",
+        "초기화 실패",
+        `sql.js 초기화 또는 페이지 부팅 과정에서 오류가 발생했습니다: <code>${escapeHtml(error.message)}</code>`
+      );
+    });
+  </script>
 </body>
-</html>'''
+</html>
+"""
+
+    return (
+        template
+        .replace("__TABLE_ORDER_JSON__", json.dumps(TABLE_ORDER, ensure_ascii=False, separators=(",", ":")))
+        .replace("__TABLE_DESCRIPTIONS_JSON__", json.dumps(TABLE_DESCRIPTIONS, ensure_ascii=False, separators=(",", ":")))
+        .replace("__INITIAL_SUMMARY_JSON__", json.dumps(summary, ensure_ascii=False, separators=(",", ":")))
+        .replace("__GEN_COLORS_JSON__", json.dumps(GEN_COLORS, ensure_ascii=False, separators=(",", ":")))
+        .replace("__CATEGORY_LABELS_JSON__", json.dumps(CATEGORY_LABELS, ensure_ascii=False, separators=(",", ":")))
+        .replace("__GENERATED_AT__", summary["generatedAt"])
+    )
 
 
-def main():
+def main() -> None:
     if not os.path.exists(DB_PATH):
         print("❌ tc.db 없음. 먼저 python tools/init_db.py 실행")
         return
 
     conn = sqlite3.connect(DB_PATH)
-    tcs = load_tcs(conn)
-    steps = load_steps(conn)
-    conn.close()
+    try:
+        summary = load_summary(conn)
+    finally:
+        conn.close()
 
-    html = build_html(tcs, steps)
+    html = build_html(summary)
+    with open(OUT_PATH, "w", encoding="utf-8") as handle:
+        handle.write(html)
 
-    with open(OUT_PATH, 'w', encoding='utf-8') as f:
-        f.write(html)
-
-    size_kb = os.path.getsize(OUT_PATH) // 1024
-    print(f"✅ index.html 생성 완료")
-    print(f"   TC 수: {len(tcs)}개")
-    print(f"   시퀀스 있는 TC: {len(steps)}개 ({sum(len(v) for v in steps.values())}개 스텝)")
-    print(f"   파일 크기: {size_kb}KB")
+    size_kb = os.path.getsize(OUT_PATH) / 1024
+    print("✅ index.html 생성 완료")
+    print(f"   테이블 수: {len(TABLE_ORDER)}")
+    print(f"   초기 row count: {summary['tableCounts']}")
+    print(f"   파일 크기: {size_kb:.1f}KB")
     print(f"   경로: {OUT_PATH}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

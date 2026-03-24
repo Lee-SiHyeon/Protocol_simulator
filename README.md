@@ -57,12 +57,12 @@ Protocol_simulator/
 │   └── core/             ← Core 스펙 DOCX (TS 36.331 LTE RRC 등)
 │
 └── tools/                 ← DB 구축 파이프라인
-    ├── init_db.py         ← DB 스키마 초기화 (8개 테이블)
+    ├── init_db.py         ← DB 스키마 초기화 (9개 테이블)
     ├── extract_from_ttcn3.py  ← TTCN-3 → tcs 전수 입력
     ├── extract_asn1_ies.py    ← ASN.1 → ies + ie_fields
     ├── extract_tc_title.py    ← Part 1 DOCX → short_name
     ├── extract_procedures.py  ← Core DOCX → tc_steps
-    └── generate_html.py       ← tc.db → index.html 재생성
+    └── generate_html.py       ← Stitch 스타일 단일 페이지 셸 재생성
 ```
 
 ---
@@ -77,8 +77,46 @@ ies          — IE 글로벌 라이브러리 (ASN.1 IE 정의)
 ie_fields    — IE 필드 트리 (SEQUENCE/CHOICE 재귀 구조)
 bands        — 밴드 정보 (주파수, FDD/TDD, 지역)
 band_combos  — 밴드 조합 (CA, EN-DC, NR-DC)
+tc_bands     — TC별 밴드 조합 연결
 specs        — 스펙 메타데이터
 ```
+
+### 현재 웹 노출 원칙
+
+- **정적 생성 파이프라인 유지**: `tc.db -> tools/generate_html.py -> index.html`
+- **프레임워크 마이그레이션 없음**: React/Next 없이 단일 정적 HTML 유지
+- **browser-side SQLite loader 사용**: 생성된 `index.html`은 브라우저에서 `tc.db`를 직접 읽음
+- **우선 로딩 방식**: `fetch('./tc.db')`
+- **fallback 로딩 방식**: fetch 실패 시 `.db` 파일 업로드(file input fallback)
+- **전체 9개 테이블 웹 노출**:
+  - `tcs`
+  - `tc_steps`
+  - `tc_ies`
+  - `ies`
+  - `ie_fields`
+  - `bands`
+  - `band_combos`
+  - `tc_bands`
+  - `specs`
+- **빈 테이블도 숨기지 않음**: row count, schema, empty-state 유지
+
+### Stitch-style UI 구성
+
+생성된 `index.html`은 다음 4개 프로토타입의 정보 구조를 반영합니다.
+
+1. **`refined_hierarchical_tc_explorer_cool_dark`**
+   - 좌측 계층형 TC Explorer
+   - generation → category → spec root → section group → TC leaf 탐색
+2. **`global_tc_search_overlay`**
+   - 전역 검색 오버레이 (`Ctrl/⌘ + K`)
+   - **Global TC Search Overlay** 대응
+   - specs / TCs / message types / IE library / empty tables 검색
+3. **`call_flow_with_db_source`**
+   - 중앙 Call Flow 중심 메인 뷰
+   - 하단 `tc_steps` DB source table
+4. **`db_centric_message_detail`**
+   - 우측 DB-First Inspector
+   - 선택된 TC와 step에 대해 `tcs`, `tc_steps`, `tc_ies`, `ies`, `ie_fields`, `bands`, `band_combos`, `tc_bands`, `specs` 및 전체 테이블 브라우저 제공
 
 ### `tcs` 주요 컬럼
 
@@ -117,10 +155,25 @@ python tools/extract_tc_title.py
 # 6. HTML 재생성
 python tools/generate_html.py
 
-# 7. 브라우저에서 열기
-start index.html  # Windows
-open index.html   # macOS
+# 7. 권장 실행 방식: HTTP로 서빙
+python3 -m http.server 8000
+# -> http://localhost:8000/index.html
+
+# file:// 로 직접 열 수도 있지만,
+# 이 경우 fetch('./tc.db')가 막힐 수 있으므로
+# 페이지 내 file input fallback으로 tc.db를 업로드해서 사용
 ```
+
+### 실행 메모
+
+- 생성기는 **Stitch 스타일 단일 페이지 셸**만 만듭니다.
+- 실제 데이터는 브라우저가 `tc.db`를 직접 읽습니다.
+- 로딩 순서:
+  1. `fetch('./tc.db')` 시도
+  2. 실패하면 UI에서 `.db` 파일 업로드 fallback 사용
+- 따라서 **권장 실행 방식은 `python3 -m http.server`** 입니다.
+- `file://`로 직접 열 경우에도 완전히 막히지 않도록 file input fallback을 제공합니다.
+- 현재 구현은 **browser-side SQLite loader(sql.js)** 를 사용합니다.
 
 ---
 
@@ -212,14 +265,24 @@ LTE+NR 동시 사용 (NSA 모드): `RRC_UECapability_ENDC_*.ttcn`, `RRC_CarrierA
 
 ## 주요 기능 (index.html)
 
-- **멀티 RAT**: 2G GSM / 3G WCDMA / 4G LTE / 5G NR SA / EN-DC / NTN / USIM
-- **시퀀스 다이어그램**: UE 기준 메시지 흐름 시각화
-- **IE 드릴다운**: ASN.1 기반 정확한 필드명·값·레퍼런스 (클릭 확장)
-- **UE 상태머신**: RRC/NAS 상태 실시간 표시
-- **타이머**: T300/T310/T3410/T3512 등 3GPP 정의 타이머
-- **QXDM 스타일 로그**: 실제 모뎀 디버깅 포맷과 동일
-- **에러 케이스**: Reject/Timeout/Failure TC 포함 (`is_error_case=1`)
-- **세대 비교**: 인증 발전사 (SIM A3A8 → UMTS-AKA → EPS-AKA → 5G-AKA/SUCI)
+- **멀티 RAT 탐색**: 2G GSM / 3G WCDMA / 4G LTE / 5G NR SA / EN-DC / NTN / USIM
+- **Stitch 스타일 계층형 TC Explorer**: generation / category / spec / section 기준 탐색
+- **전역 검색 오버레이**: specs / TCs / messages / IE library 를 한 번에 검색
+- **자동 DB 로딩**: `fetch('./tc.db')` 우선 시도
+- **file input fallback**: fetch 실패 시 브라우저에서 `.db` 업로드
+- **Call Flow 중심 메인 뷰**: 선택된 TC의 `tc_steps` 를 시퀀스 형태로 시각화
+- **DB Source 패널**: `SELECT * FROM tc_steps WHERE tc_id = ...` 관점의 row 확인
+- **DB-First Inspector**:
+  - 선택된 `tcs` 원본 row
+  - 선택된 `tc_steps` row
+  - 선택된 TC의 `tc_ies`
+  - 매칭 가능한 `ies / ie_fields`
+  - 관련 `bands / band_combos / tc_bands`
+  - 관련 `specs`
+  - 전체 9개 테이블 count / schema / row 브라우저
+- **빈 데이터도 가시화**: `tc_ies`, `bands`, `band_combos`, `tc_bands` 가 비어 있어도 empty-state와 schema 유지
+- **에러 케이스 표시**: Reject / Timeout / Failure TC 포함 (`is_error_case=1`)
+- **정적 배포 친화적**: 추가 빌드 체인 없이 `index.html`만 재생성하면 됨
 
 ---
 
@@ -244,7 +307,8 @@ LTE+NR 동시 사용 (NSA 모드): `RRC_UECapability_ENDC_*.ttcn`, `RRC_CarrierA
 
 1. `tc.db`에 SQL로 TC 추가/수정 (`INSERT INTO tcs ...`)
 2. `python tools/generate_html.py` 실행으로 index.html 재생성
-3. Pull Request
+3. 생성된 `index.html`에서 Explorer / Search Overlay / Inspector 동작 확인
+4. Pull Request
 
 ```sql
 -- 새 TC 추가 예시
